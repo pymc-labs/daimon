@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Open conversations keep their first responding agent when a channel default changes. Discord, Slack and Teams now store an `opened` thread binding, and a migration backfills live sessions. An explicit handoff still moves the conversation.
 - **Code in Slack answers shows `<`, `>` and `&` as written.** Inline code and fenced blocks in a final answer showed `&lt;` and `&gt;` where the answer had `<` and `>`. Code is now sent unescaped; prose around it is escaped as before, so Slack-style links in prose stay clickable and broadcast mentions stay inert.
 - **Answered Slack requests lose their ⌛.** Mentions queued behind a busy thread kept the hourglass after they were answered, so finished work looked pending. The hourglass now comes off every queued message once its request is answered, fails, is cancelled or is dropped unanswered. A failed removal is logged and never affects the turn.
 - **`add_skill` says why it could only preview.** When no confirmation card can show, the preview and the refused confirm say whether approval cards are off for the deployment (`tool_safety.enabled` is false) or why this conversation can't show one, and how to fix it where the person can. Each also points to Add skill in `/agent-setup`.

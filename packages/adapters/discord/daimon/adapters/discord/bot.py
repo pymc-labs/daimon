@@ -85,7 +85,7 @@ from daimon.core.stores.tenants import (
     list_tenants_by_platform,
     set_provision_status,
 )
-from daimon.core.stores.thread_agent_bindings import update_lifecycle
+from daimon.core.stores.thread_agent_bindings import bind_opened_thread, update_lifecycle
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
     clear_active_turn_if_message_id,
@@ -2561,6 +2561,17 @@ class DaimonBot(commands.Bot):
                 guild_id=guild_id,
                 after_s=discord_settings.thread_open_notice_after_s,
             )
+            async with self.runtime.sessionmaker.begin() as session:
+                await bind_opened_thread(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    parent_channel_id=parent_channel_id,
+                    thread_id=str(thread.id),
+                    responder_ma_agent_id=agent.id,
+                    responder_name=admission.config.agent_name or agent.name,
+                    creator_account_id=admission.account_id,
+                )
 
         # --- Wire lifecycle with send/edit callables ---
         # kwargs are forwarded verbatim to discord.py's overloaded send()/edit().

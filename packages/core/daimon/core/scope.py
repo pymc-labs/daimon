@@ -115,7 +115,7 @@ class ResolvedConfig(BaseModel):
     # their responder differently -- a setup thread must answer as the built-in
     # Daimon, a handoff thread answers as whatever agent received the task --
     # so the kind has to survive as far as admission.
-    thread_binding_kind: Literal["setup", "handoff"] | None = None
+    thread_binding_kind: Literal["setup", "handoff", "opened"] | None = None
 
 
 class PropagateOutcome(BaseModel):

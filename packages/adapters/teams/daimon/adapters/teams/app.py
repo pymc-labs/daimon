@@ -97,6 +97,7 @@ from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access
 from daimon.core.stores.domain import Role, TaskContinuationRow, TurnCardIntentRow
 from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.stores.tenants import get_tenant, get_turn_cap
+from daimon.core.stores.thread_agent_bindings import bind_opened_thread
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
     get_live_thread_session,
@@ -864,6 +865,18 @@ class TeamsApp:
             return
         if admission.is_external and not inbound.is_external:
             inbound = dataclasses.replace(inbound, is_external=True)
+        if inbound.kind == "channel" and inbound.setup_thread_id is None:
+            async with self.runtime.sessionmaker.begin() as session:
+                await bind_opened_thread(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="teams",
+                    parent_channel_id=inbound.channel_id,
+                    thread_id=inbound.thread_id,
+                    responder_ma_agent_id=admission.agent.id,
+                    responder_name=admission.config.agent_name or admission.agent.name,
+                    creator_account_id=admission.account_id,
+                )
         if continuation is not None:
             # A wake runs only as the agent it was queued for: refused before any card.
             check_wake_responder(

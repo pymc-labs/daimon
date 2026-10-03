@@ -133,6 +133,13 @@ config). The order is load-bearing and documented as such in the module:
    `packages/core/daimon/core/stores/scoped_config_read.py`. The tiers are
    named by `ConfigTier` in `packages/core/daimon/core/scope.py`; the bottom
    one comes from `defaults/config.yaml`, see [defaults.md](defaults.md).
+   A Discord channel mention opens a thread and records an `opened` binding
+   to the admitted responder. Slack records the binding on a root mention;
+   Teams records it when a channel conversation starts. Later turns use that
+   responder's concrete agent id even if the channel default changes. Setup
+   and explicit handoff bindings retain their distinct behavior. Migration
+   `0048_opened_thread_bindings` backfills live sessions before new routing
+   rules take effect.
 6. Raise `MissingTurnConfigError` if no agent or environment resolved — before
    any MA call, so a misconfigured tenant sees the config error rather than a
    billing one.

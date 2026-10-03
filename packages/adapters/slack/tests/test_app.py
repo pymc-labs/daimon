@@ -1592,6 +1592,11 @@ async def test_orchestrate_queue_coalesce_when_thread_in_flight_adds_hourglass_a
         patch("daimon.adapters.slack.app.update_watermark", new_callable=AsyncMock),
         patch("daimon.core.turn.admission.reconcile_tenant_defaults", new_callable=AsyncMock),
         patch(
+            "daimon.core.turn.admission.get_setup_agent",
+            new_callable=AsyncMock,
+            return_value=ma_agent(id="agent_coalesce_id"),
+        ),
+        patch(
             "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
         ) as mock_resolve_agent,
         patch(
@@ -1854,6 +1859,11 @@ async def test_drain_partitions_queued_mentions_by_author_when_two_users_queue_i
         ) as mock_create_ts,
         patch("daimon.adapters.slack.app.update_watermark", new_callable=AsyncMock),
         patch("daimon.core.turn.admission.reconcile_tenant_defaults", new_callable=AsyncMock),
+        patch(
+            "daimon.core.turn.admission.get_setup_agent",
+            new_callable=AsyncMock,
+            return_value=ma_agent(id="agent_partition_id"),
+        ),
         patch(
             "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
         ) as mock_resolve_agent,
@@ -2873,6 +2883,11 @@ async def test_run_thread_turn_two_turns_same_session_chain_sweeps_serially(
             "daimon.core.turn.prepare.create_thread_session", new_callable=AsyncMock
         ) as mock_create_ts,
         patch("daimon.adapters.slack.app.update_watermark", new_callable=AsyncMock),
+        patch(
+            "daimon.core.turn.admission.get_setup_agent",
+            new_callable=AsyncMock,
+            return_value=ma_agent(id="agent_sweep_id"),
+        ),
         patch(
             "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
         ) as mock_resolve_agent,
