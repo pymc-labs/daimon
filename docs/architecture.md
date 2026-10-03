@@ -526,8 +526,9 @@ names) under a name from the channel, made C's default and pinned; a copy the
 locked re-check refuses is archived. Ending isolation drops the marker and
 keeps the seal and pins, unless `drop_seal_and_pins` lifts them too.
 
-Enforcement is `authorize()`'s: it fills `AgentRef.confined_to` and
-`Place.isolated_channel` from the policy, so every check and re-check is
+Enforcement is `authorize()`'s: it fills `AgentRef.permissions` and
+`Place.permissions` from the policy ([permissions](permissions.md): the
+confidential preset), so every check and re-check is
 fresh. In C only C's own agents run, post, read, get routines or become the
 default (`channel_isolated` on `RUN_AGENT`, `POST`, `READ_CHANNEL`,
 `SAVE_ROUTINE` and `BIND_CHANNEL_DEFAULT`); a setup thread under C
@@ -871,6 +872,9 @@ without passing through daimon, so they carry no marker; the guidance
 paragraph covers them by name ("whatever a tool returns").
 
 ## Trust model
+
+[Permissions](permissions.md) has the rules as one model; this section has
+who is exempt and why.
 
 Admins are trusted; pins and seals protect members and channels. An agent pin
 (`agent_channel_pins`) and a sealed channel (`sealed_channel_ids`) exist to
