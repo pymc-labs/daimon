@@ -28,7 +28,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.core.authz import build_agent_ref
+from daimon.core.authz import Action, build_agent_ref
 from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.continuity.continuation import (
     MAX_REQUESTED_WORK,
@@ -44,6 +44,7 @@ from daimon.core.continuity.tool_messages import (
 )
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ChatPlatform
 from daimon.core.stores.task_continuations import record_continuation
@@ -288,6 +289,8 @@ async def _hand_off_task_impl(
                     requested_work=request.requested_work,
                 )
     except ThreadHandoffRefused as refused:
+        if refused.refusal.authz_reason is not None:
+            record_authz_denial(Action.HAND_OFF, refused.refusal.authz_reason)
         raise ToolError(
             _refusal_text(
                 refused.refusal, channel=_channel_mention(platform, origin.parent_channel_id)

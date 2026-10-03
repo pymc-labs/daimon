@@ -152,9 +152,11 @@ def test_decide_handoff_refuses_an_agent_pinned_to_other_channels() -> None:
         access=Decision(False, "agent_pinned_elsewhere"),
     )
 
-    assert decision == HandoffRefused(reason="pinned_elsewhere", destination_name="daimon-rx"), (
-        "a pinned agent is reachable in its own channels, which must not carry it here"
-    )
+    assert decision == HandoffRefused(
+        reason="pinned_elsewhere",
+        destination_name="daimon-rx",
+        authz_reason="agent_pinned_elsewhere",
+    ), "a pinned agent is reachable in its own channels, which must not carry it here"
 
 
 def test_decide_handoff_setup_thread_refusal_wins_over_the_pin() -> None:
@@ -192,7 +194,11 @@ def test_decide_handoff_refuses_what_authorize_denied(denied: str, reason: str) 
         access=Decision(False, denied),  # pyright: ignore[reportArgumentType]
     )
 
-    assert decision == HandoffRefused(reason=reason, destination_name="acme-project")  # pyright: ignore[reportArgumentType]
+    assert decision == HandoffRefused(
+        reason=reason,  # pyright: ignore[reportArgumentType]
+        destination_name="acme-project",
+        authz_reason=denied,
+    ), "the refusal keeps the policy's reason for the audit trail"
 
 
 def test_decide_handoff_says_same_agent_before_who_may_bring_it_in() -> None:

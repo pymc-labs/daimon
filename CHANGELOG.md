@@ -145,8 +145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allowed or refused. Rows carry no codes or token values.
 - **MCP access refusals are audited as denials.** MCP calls refused by an
   access decision (an agent pin, channel isolation or protection, the
-  invoker allowlist, a routine destination, a channel default binding or an
-  environment pick) are now recorded in `security_audit_events` as denials,
+  invoker allowlist, a routine destination, a channel default binding, a
+  thread handoff or an environment pick) are now recorded in `security_audit_events` as denials,
   with the action as the operation and `authz:<reason>` as the reason.
   Before, they were recorded as tool errors with no operation.
 - **Teams routines stay inside an isolated channel.** A Teams routine

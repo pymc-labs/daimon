@@ -23,6 +23,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.security_audit import capture_decision
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Platform, Role
@@ -1472,3 +1473,46 @@ async def test_queued_work_follows_the_carry_rule_for_the_callers_old_session(
     assert ("churn writeup" in result.confirmation) is queued, (
         "no continuation text reaches a destination outside the old session's seal"
     )
+
+
+async def test_a_policy_refused_handoff_is_audited_as_an_authz_denial(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A handoff the access policy refuses is recorded as an `authorize` denial."""
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={_DESTINATION_NAME: ("C_RX",)}),
+    )
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="42",
+    )
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+    ) as origin:
+        with capture_decision() as decision, pytest.raises(ToolError):
+            await _hand_off_task_impl(
+                runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+            )
+    assert (decision.operation, decision.denied, decision.reason) == (
+        "hand_off",
+        True,
+        "authz:agent_pinned_elsewhere",
+    ), "the refusal is audited as the policy's denial, not a tool error"

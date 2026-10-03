@@ -95,6 +95,8 @@ class HandoffRefused(BaseModel):
 
     reason: HandoffRefusalReason
     destination_name: str
+    # The `authorize(HAND_OFF)` reason behind a policy refusal, for the audit trail.
+    authz_reason: str | None = None
 
 
 HandoffDecision = HandoffAllowed | HandoffRefused
@@ -128,7 +130,9 @@ def decide_handoff(
         return HandoffRefused(reason="setup_thread", destination_name=destination_name)
     denied = None if access.allowed else access.reason
     if denied is not None and denied in _POLICY_REFUSALS:
-        return HandoffRefused(reason=_POLICY_REFUSALS[denied], destination_name=destination_name)
+        return HandoffRefused(
+            reason=_POLICY_REFUSALS[denied], destination_name=destination_name, authz_reason=denied
+        )
     if not destination_reachable:
         return HandoffRefused(reason="unreachable", destination_name=destination_name)
     if destination_ma_agent_id == origin_responder_ma_agent_id:
@@ -137,6 +141,7 @@ def decide_handoff(
         return HandoffRefused(
             reason="sealed" if denied == "sealed" else "admin_required",
             destination_name=destination_name,
+            authz_reason=denied,
         )
     return HandoffAllowed(
         destination_ma_agent_id=destination_ma_agent_id, destination_name=destination_name
