@@ -883,6 +883,12 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Repo authorization and grants belong to the tenant. Their nullable
             # creator references are erased by ON DELETE SET NULL.
             "tenant_github_repos",
+            # An invitation is single-use and disappears with its requesting
+            # account; its encrypted flow rows cascade from the invitation.
+            "github_connect_invitations",
+            # An org-wide authorization belongs to the tenant. Erasing the
+            # confirming admin severs nullable provenance, preserving access.
+            "tenant_github_org_scopes",
             "agent_github_grants",
             # The account link is removed by ON DELETE CASCADE. A token's
             # requester reference is erased by SET NULL; its recorded link

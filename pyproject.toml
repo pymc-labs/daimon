@@ -136,6 +136,7 @@ source_modules = [
     "daimon.core.github_installation_reconcile",
     "daimon.core.github_rate_limit",
     "daimon.core.github_repo_auth",
+    "daimon.core.github_requester_access",
     "daimon.core.github_visibility",
     "daimon.core.handoff_context",
     "daimon.core.headless_runner",

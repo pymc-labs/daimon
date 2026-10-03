@@ -59,8 +59,7 @@ def upgrade() -> None:
         sa.Column(
             "authorized_by_account_id",
             sa.UUID(),
-            sa.ForeignKey("accounts.id", ondelete="CASCADE"),
-            nullable=False,
+            sa.ForeignKey("accounts.id", ondelete="SET NULL"),
         ),
         sa.Column(
             "authorized_at",

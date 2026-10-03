@@ -2472,8 +2472,8 @@ class TenantGitHubOrgScope(Base):
     scope: Mapped[str] = mapped_column(Text, server_default="org_all")
     max_access: Mapped[str] = mapped_column(Text)
     authorized_by_github_user_id: Mapped[int] = mapped_column(BigInteger)
-    authorized_by_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE")
+    authorized_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
     )
     authorized_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
