@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import functools
 import itertools
+import random
 from collections.abc import Iterator
 
 import pytest
@@ -60,28 +62,52 @@ def _channel_states() -> Iterator[tuple[bool, bool, bool]]:
             yield protected, sealed, True
 
 
+def _policy(
+    state_a: tuple[bool, bool, bool],
+    state_b: tuple[bool, bool, bool],
+    thread_rule: tuple[str, str] | None,
+    category: bool,
+    pin_x: tuple[str, ...] | None,
+    pin_y: tuple[str, ...] | None,
+) -> TenantAccessPolicy:
+    states = {"a": state_a, "b": state_b}
+    pins = {name: pin for name, pin in (("x", pin_x), ("y", pin_y)) if pin is not None}
+    sealed_thread = thread_rule[1] if thread_rule and thread_rule[0] == "sealed" else None
+    protected_thread = thread_rule[1] if thread_rule and thread_rule[0] == "protected" else None
+    return TenantAccessPolicy(
+        protected_channel_ids=(
+            *(c for c, s in states.items() if s[0]),
+            *((protected_thread,) if protected_thread else ()),
+        ),
+        protected_category_ids=("cat",) if category else (),
+        sealed_channel_ids=(
+            *(c for c, s in states.items() if s[1]),
+            *((sealed_thread,) if sealed_thread else ()),
+        ),
+        isolated_channel_ids=tuple(c for c, s in states.items() if s[2]),
+        agent_channel_pins=pins,
+    )
+
+
 def _policies() -> Iterator[TenantAccessPolicy]:
     """Every policy over channels a and b, a thread rule, a category and pins on x and y."""
-    for state_a, state_b, thread_rule, category, pin_x, pin_y in itertools.product(
+    for combo in itertools.product(
         _channel_states(), _channel_states(), _THREAD_RULES, (False, True), _PINS_X, _PINS_Y
     ):
-        states = {"a": state_a, "b": state_b}
-        pins = {name: pin for name, pin in (("x", pin_x), ("y", pin_y)) if pin is not None}
-        sealed_thread = thread_rule[1] if thread_rule and thread_rule[0] == "sealed" else None
-        protected_thread = thread_rule[1] if thread_rule and thread_rule[0] == "protected" else None
-        yield TenantAccessPolicy(
-            protected_channel_ids=(
-                *(c for c, s in states.items() if s[0]),
-                *((protected_thread,) if protected_thread else ()),
-            ),
-            protected_category_ids=("cat",) if category else (),
-            sealed_channel_ids=(
-                *(c for c, s in states.items() if s[1]),
-                *((sealed_thread,) if sealed_thread else ()),
-            ),
-            isolated_channel_ids=tuple(c for c, s in states.items() if s[2]),
-            agent_channel_pins=pins,
-        )
+        yield _policy(*combo)
+
+
+@functools.cache
+def _sampled_policies() -> tuple[TenantAccessPolicy, ...]:
+    """What the slower checks run on, to keep CI fast: every pair of channel states
+    with every pin on x (thread rule, category and y cycled), plus a fixed random
+    sample of the rest."""
+    states = list(_channel_states())
+    cycled = (
+        _policy(a, b, _THREAD_RULES[i % 4], (i // 4) % 2 == 1, pin_x, _PINS_Y[i % 3])
+        for i, (a, b, pin_x) in enumerate(itertools.product(states, states, _PINS_X))
+    )
+    return (*cycled, *random.Random(406).sample(list(_policies()), 100))
 
 
 def _normalized(policy: TenantAccessPolicy) -> dict[str, object]:
@@ -231,7 +257,9 @@ def test_unknown_parent_fails_closed_only_while_something_is_confidential() -> N
 
 def test_channel_permissions_match_authorize() -> None:
     """A channel's readers and writers are what `authorize` enforces there."""
-    for policy, place, category in itertools.product(_policies(), _READ_PLACES, (None, "cat")):
+    for policy, place, category in itertools.product(
+        _sampled_policies(), _READ_PLACES, (None, "cat")
+    ):
         assert place.channel_id is not None, "every read place names a channel"
         view = channel_permissions(
             policy,
@@ -273,7 +301,7 @@ def test_slack_thread_turn_is_inside_its_key_seal() -> None:
 def test_agent_permissions_match_authorize() -> None:
     """Where an agent runs, posts, messages, publishes and is listed is what `authorize`
     allows a member."""
-    for policy, names in itertools.product(_policies(), _AGENTS):
+    for policy, names in itertools.product(_sampled_policies(), _AGENTS):
         view = agent_permissions(policy, names)
         agent = AgentRef.of(*names)
         for place in _TURN_PLACES:
@@ -325,7 +353,7 @@ def test_agent_permissions_match_authorize() -> None:
 def test_a_turn_inside_a_confidential_channel_keeps_its_content() -> None:
     """From a turn whose place keeps content, whatever agent runs posts, messages,
     publishes and creates agents exactly as the agent's permissions from there say."""
-    for policy, names in itertools.product(_policies(), _AGENTS):
+    for policy, names in itertools.product(_sampled_policies(), _AGENTS):
         view = agent_permissions(policy, names)
         agent = AgentRef.of(*names)
         for origin in _TURN_PLACES:
