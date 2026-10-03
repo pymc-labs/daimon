@@ -3839,7 +3839,8 @@
         For threads use read_thread. Each platform takes only its own
         pagination parameter — the other is rejected. Discord: at most 200
         messages per call; use before to fetch older messages. Slack: use
-        cursor to fetch the next page; at most 15 messages are returned.
+        cursor to fetch the next page; at most 200 messages per call, and
+        Slack may return a smaller page according to the workspace limits.
         Teams: channel_id is the channel (parent_channel_id in turn_controls);
         returns up to 50 posts with their replies, ordered by latest activity;
         pass next_cursor as cursor for less recently active posts. A 1:1 chat
@@ -3904,12 +3905,12 @@
         Read messages from a thread, oldest-first.
         
         Discord: thread_id is the thread's channel id; use before for older messages.
-        Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456);
-        before is rejected — Slack threads read one page of at most 15 messages
-        from the thread root, and has_more=true means the newest replies were
-        not returned. Teams: thread_id is <channel>;messageid=<root> (thread_id
+        Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456).
+        Pages start at the root; pass next_cursor as cursor to read newer replies.
+        At most 200 messages per call; Slack may return a smaller page.
+        Teams: thread_id is <channel>;messageid=<root> (thread_id
         in turn_controls); returns the root and the newest 50 replies; pass
-        next_cursor as cursor for older ones. cursor is Teams-only. Threads
+        next_cursor as cursor for older ones. cursor is Slack/Teams-only. Threads
         under a sealed channel need origin_context_id, as read_channel does.
       ''',
       'parameters': dict({
@@ -4754,8 +4755,12 @@
         returns — never base64 a file into a tool argument. Discord also
         takes ``attachments=[{url, filename}]``, fetched over https from
         Discord's own CDN hosts only (<=25 MiB each). Combined cap of 10
-        files per message. Slack takes no files: that needs a scope this
-        install does not have.
+        files per message. Slack accepts file_handles and signed file-proxy
+        links from its read tools in attachments (<=20 MiB each), for files
+        the requester can read where they were shared. Other URLs are
+        refused. Include a short caption: the text posts first, then files
+        upload into that thread. If upload fails, the text remains posted;
+        do not send it again. Requires the bot's files:write scope.
         
         Slack: ``channel_id`` may be ``channel_id:thread_ts`` (e.g.
         ``C0123456789:1717171717.123456``) to post into a thread. Content is

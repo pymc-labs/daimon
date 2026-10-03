@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import anthropic
 import httpx
 import pytest
+from aioresponses import aioresponses
 from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -27,6 +28,7 @@ from daimon.adapters.mcp.tools.skill_uploads import (
 from daimon.adapters.mcp.tools.skills import _list_impl  # pyright: ignore[reportPrivateUsage]
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import tenant_scoped_display_title
+from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.session_snapshot import SessionSnapshot, desired_snapshot
@@ -37,6 +39,7 @@ from daimon.core.stores.agent_creation_channels import record_creation_channel
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import create_origin
@@ -593,6 +596,82 @@ async def test_a_slack_file_link_from_another_workspace_is_refused(
             expected_ma_agent_id="agent_helper",
             attachment_url=f"https://daimon.example/slack/file/{token}",
         )
+
+
+def _mock_slack_file_shared_in(m: aioresponses, shares: dict[str, list[dict[str, str]]]) -> None:
+    m.get(  # pyright: ignore[reportUnknownMemberType]
+        re.compile(r"https://slack\.com/api/files\.info.*"),
+        payload={"ok": True, "file": {"id": "F1", "shares": {"public": shares}}},
+    )
+
+
+async def _slack_skill_world(factory: async_sessionmaker[AsyncSession]) -> _World:
+    world = await _world(factory)
+    assert world.runtime.fernet is not None
+    async with factory.begin() as session:
+        await upsert_slack_bot_token(
+            session, team_id="T_MINE", encrypted_token=encrypt_token(world.runtime.fernet, "xoxb")
+        )
+    return world
+
+
+async def test_a_slack_file_link_is_refused_unless_the_caller_can_read_the_file(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link is a bearer token: another turn's link to a DM file proves nothing here."""
+    world = await _slack_skill_world(db_session_factory)
+    fetched: list[str] = []
+
+    async def fake_fetch(*_: object, file_id: str, **__: object) -> tuple[bytes, str, str]:
+        fetched.append(file_id)
+        return _MD.encode(), "text/markdown", "SKILL.md"
+
+    monkeypatch.setattr(skill_uploads, "fetch_slack_file", fake_fetch)
+    token = mint_file_token(team_id="T_MINE", file_id="F1", exp=2**40, secret="proxy-secret")
+    with aioresponses() as m:
+        _mock_slack_file_shared_in(m, {"D_SOMEONE": [{"ts": "1.0"}]})
+        with pytest.raises(ToolError, match="not shared anywhere the requester can read"):
+            await _add_skill_impl(
+                world.runtime,
+                world.auth(platform="slack", external_id="T_MINE"),
+                agent_name="helper",
+                expected_ma_agent_id="agent_helper",
+                attachment_url=f"https://daimon.example/slack/file/{token}",
+            )
+    assert fetched == [], "a refused file must never be downloaded"
+
+
+async def test_a_slack_file_link_shared_in_a_channel_the_caller_reads_is_fetched(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = await _slack_skill_world(db_session_factory)
+    fetched: list[str] = []
+
+    async def fake_fetch(*_: object, file_id: str, **__: object) -> tuple[bytes, str, str]:
+        fetched.append(file_id)
+        return _MD.encode(), "text/markdown", "SKILL.md"
+
+    monkeypatch.setattr(skill_uploads, "fetch_slack_file", fake_fetch)
+    token = mint_file_token(team_id="T_MINE", file_id="F1", exp=2**40, secret="proxy-secret")
+    with aioresponses() as m:
+        _mock_slack_file_shared_in(m, {"C1": [{"ts": "1.0"}]})
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            re.compile(r"https://slack\.com/api/conversations\.info.*"),
+            payload={"ok": True, "channel": {"id": "C1", "is_private": False}},
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            re.compile(r"https://slack\.com/api/users\.info.*"),
+            payload={"ok": True, "user": {"id": USER, "is_restricted": False}},
+        )
+        result = await _add_skill_impl(
+            world.runtime,
+            world.auth(platform="slack", external_id="T_MINE"),
+            agent_name="helper",
+            expected_ma_agent_id="agent_helper",
+            attachment_url=f"https://daimon.example/slack/file/{token}",
+        )
+    assert fetched == ["F1"], "a file shared in a channel the caller reads is downloaded"
+    assert result.status == "preview"
 
 
 async def test_a_discord_attachment_zip_is_previewed(
