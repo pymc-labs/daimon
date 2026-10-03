@@ -35,10 +35,10 @@ from daimon.core.agent_detail_lists import DETAIL_LIST_COLLAPSED_COUNT
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routing_facts import (
-    PRECEDENCE_LINE,
     UNROUTED_LINE,
     build_routing_request,
     build_unrouted_note,
+    precedence_line,
 )
 from daimon.core.scope import ChannelScopeRef, TenantScopeRef
 from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, shared_keys_sentence
@@ -862,7 +862,7 @@ async def test_who_answers_where_states_the_precedence_and_the_routing_request(
     )
     label = _REQUEST_LABEL.get(driver.param_id, _CHANNEL_LABEL)
     request = build_routing_request(agent_name=_UNROUTED, channel_label=label)
-    assert routing.says(f"{PRECEDENCE_LINE} Tell Daimon: {request}"), (
+    assert routing.says(f"{precedence_line('legacy')} Tell Daimon: {request}"), (
         f"{driver.param_id}: the map states the rule, then the request that acts on it"
     )
     here = _HERE.get(driver.param_id, _CHANNEL_LABEL)

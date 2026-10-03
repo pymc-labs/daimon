@@ -249,7 +249,7 @@ Propagation tools: set and clear agent defaults at workspace or channel scope.
 | --- | --- | --- |
 | `clear_agent_default` | admin only, channel admins too, operator tokens with channels:write | Stop an agent answering in a channel by clearing its default routing. |
 | `explain_agent_resolution` | all callers | Who answers in this channel, for example #growth? Report who answers, the environment it runs in, and which routing tier decided each. |
-| `set_agent_default` | admin only, channel admins too, operator tokens with channels:write | Make an agent the default for a confidential channel or the whole workspace. |
+| `set_agent_default` | admin only, channel admins too, operator tokens with channels:write | Make an agent answer in a confidential channel or become the workspace default. |
 
 ## `publish`
 

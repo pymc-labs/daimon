@@ -437,13 +437,14 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel_id: str | None = None,
         expected_ma_agent_id: str | None = None,
     ) -> SetDefaultResult:
-        """Make an agent the default for a confidential channel or the whole workspace.
-        Shared channels use the workspace default; name an agent in a mention
-        to call it there. Use ``clear_agent_default`` to remove a default.
+        """Make an agent answer in a confidential channel or become the workspace default.
+        For example, make churn-explorer answer in #growth when #growth is
+        confidential. Shared channels use the workspace default; name an agent
+        in a mention to call it there. Use ``clear_agent_default`` to stop that routing.
 
         When ``channel_id`` is provided the default is scoped to that channel;
         under confidential-only routing, the channel must be isolated.
-        omit it to set the workspace-wide default.  Any existing default at the
+        Omit it to set the workspace-wide default. Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
         core).  Requires Manage Server (admin); an admin of the channel may set
         that channel's default to a built-in agent, the workspace default, an
