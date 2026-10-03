@@ -1,15 +1,13 @@
-"""Channel isolation: a sealed channel whose own agents are pinned to it alone.
+"""Channel isolation: the confidential preset of `daimon.core.permissions`.
 
-A server admin isolates channel C (`TenantAccessPolicy.isolated_channel_ids`).
-The marker sits on two existing controls: C is sealed, so its content reads
-only from inside it, and C's *own agents* are those pinned to C alone
-(`daimon.core.access_policy.isolation_owner`), so they answer nowhere else.
-The marker adds the rest, decided by `daimon.core.authz.authorize`
-(`channel_isolated`): inside C only its own agents run, post, read and get
-routines or bindings, and they post nowhere else. This module adds what the
-agent and setup surfaces show: outside C its agents are hidden, inside C
-only they are seen, and their memory stays writable in C, unlike a plain
-seal. A tenant that isolates nothing reads its policy and nothing more.
+A server admin isolates channel C (`TenantAccessPolicy.isolated_channel_ids`):
+its rule becomes ``readers: own, writers: own``, and its *own agents* are those
+pinned to C alone (`AgentPermissions.own_channel`). What that means is defined
+in `daimon.core.permissions` and decided by `daimon.core.authz.authorize`
+(`channel_isolated`). This module holds what the agent and setup surfaces show
+of it: who is listed where (`IsolationViewer`), routines kept inside, default
+bindings, and the status a panel shows. A tenant that isolates nothing reads
+its policy and nothing more.
 
 Everything here is pure but `load_isolation_viewer` and `is_thread_turn_refused`;
 `daimon.core.channel_isolation_setup` turns isolation on and off.
@@ -24,17 +22,19 @@ from typing import Literal
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.access_policy import (
-    TenantAccessPolicy,
-    isolated_channel_of,
-    isolation_owner,
-    source_seal_ids,
-)
+from daimon.core.access_policy import TenantAccessPolicy, isolated_channel_of, source_seal_ids
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize, build_turn_place
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import private_routine_stamp
 from daimon.core.errors import DaimonError
+from daimon.core.permissions import (
+    agent_permissions,
+    channel_permissions,
+    channel_rule,
+    listed_at,
+    pinned_alone,
+)
 from daimon.core.routine_delivery import delivery_target, teams_channel_of
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
@@ -76,14 +76,16 @@ def binding_refusal(
         place=Place(channel_id=channel_id, parent_channel_id=parent_channel_id),
     )
     if decision.reason == "agent_pinned_elsewhere":
-        return "agent_confined" if isolation_owner(policy, agent_names) else "agent_pinned"
+        own = agent_permissions(policy, agent_names).own_channel
+        return "agent_confined" if own else "agent_pinned"
     if decision.reason == "channel_isolated":
         return "channel_needs_own_agent"
     return None
 
 
 def clear_refusal(policy: TenantAccessPolicy, *, channel_id: str) -> BindingRefusal | None:
-    return "channel_isolated" if channel_id in policy.isolated_channel_ids else None
+    """A confidential channel's default stays one of its own agents, never a shared one."""
+    return "channel_isolated" if channel_rule(policy, channel_id).readers == "own" else None
 
 
 def routine_destination_channel(row: RoutineRow) -> str | None:
@@ -193,11 +195,13 @@ def keeps_routine_inside(
     `parent_channel_id` once the destination's parent is resolved; until then a
     thread whose parent is unknown stays inside while anything is isolated.
     """
-    if isolated_channel_of(policy, parent_channel_id) is not None:
+    if channel_permissions(policy, channel_id=parent_channel_id).keeps_content:
         return True
-    if parent_channel_id is None and is_routine_parent_unknown(row):
-        return bool(policy.isolated_channel_ids)
-    return isolated_channel_of(policy, routine_destination_channel(row)) is not None
+    return channel_permissions(
+        policy,
+        channel_id=routine_destination_channel(row),
+        parent_unresolved=parent_channel_id is None and is_routine_parent_unknown(row),
+    ).keeps_content
 
 
 def is_memory_hidden(
@@ -236,14 +240,11 @@ class ChannelIsolationStatus:
 
 def channel_isolation_status(policy: TenantAccessPolicy, channel_id: str) -> ChannelIsolationStatus:
     """What of isolation `channel_id` has now. Pure."""
+    rule = channel_rule(policy, channel_id)
     return ChannelIsolationStatus(
-        is_private=channel_id in policy.sealed_channel_ids,
-        dedicated_agent_names=tuple(
-            sorted(
-                name for name, pin in policy.agent_channel_pins.items() if set(pin) == {channel_id}
-            )
-        ),
-        is_hidden=channel_id in policy.isolated_channel_ids,
+        is_private=rule.readers != "any",
+        dedicated_agent_names=pinned_alone(policy, channel_id),
+        is_hidden=rule.readers == "own",
     )
 
 
@@ -273,7 +274,7 @@ class IsolationViewer:
         return (agent_name, *self.aliases.get(agent_name, ()))
 
     def sees_names(self, agent_names: tuple[str | None, ...]) -> bool:
-        return isolation_owner(self.policy, agent_names) == self.inside_channel_id
+        return listed_at(agent_permissions(self.policy, agent_names), self.inside_channel_id)
 
     def sees(self, agent_name: str | None) -> bool:
         """For a place that records one name (a routing row, a binding, a routine)."""
@@ -284,7 +285,8 @@ class IsolationViewer:
 
     def sees_place(self, channel_id: str | None) -> bool:
         """A channel (None: a tenant-wide place) on the reader's side of every line."""
-        return isolated_channel_of(self.policy, channel_id) == self.inside_channel_id
+        here = channel_permissions(self.policy, channel_id=channel_id)
+        return here.confidential_channel == self.inside_channel_id
 
 
 async def load_isolation_viewer(

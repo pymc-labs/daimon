@@ -27,6 +27,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATION_COPY, MA_MET
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.memory_resource import archive_memory_store_for_agent
+from daimon.core.permissions import AgentRule, with_agent_rule
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.access_policy import (
     load_access_policy,
@@ -115,8 +116,9 @@ def archive_refusal(
 
 
 def _without_pins(policy: TenantAccessPolicy, names: set[str]) -> TenantAccessPolicy:
-    pins = {n: ids for n, ids in policy.agent_channel_pins.items() if n not in names}
-    return policy.model_copy(update={"agent_channel_pins": pins})
+    for name in names:
+        policy = with_agent_rule(policy, name, AgentRule())
+    return policy
 
 
 async def _find(

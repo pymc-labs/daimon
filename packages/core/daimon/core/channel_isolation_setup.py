@@ -23,7 +23,7 @@ from typing import Literal
 import structlog
 from anthropic import APIError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.access_policy import TenantAccessPolicy, isolation_owner
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_fork import fork_agent
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_agent_reach
@@ -37,6 +37,15 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.permissions import (
+    AgentRule,
+    ChannelRule,
+    agent_permissions,
+    channel_rule,
+    pinned_alone,
+    with_agent_rule,
+    with_channel_rule,
+)
 from daimon.core.scope import ChannelConfigRow, ChannelScopeRef, DeploymentDefault, pick_agent
 from daimon.core.stores.access_policy import (
     load_access_policy,
@@ -177,26 +186,29 @@ def isolated_agent_name(
 
 
 def isolate(policy: TenantAccessPolicy, *, channel_id: str, agent_name: str) -> TenantAccessPolicy:
-    """`policy` with the channel sealed, `agent_name` pinned to it alone and marked. Pure."""
-    data = policy.model_dump()
-    data["sealed_channel_ids"] = tuple(dict.fromkeys((*policy.sealed_channel_ids, channel_id)))
-    data["agent_channel_pins"] = {**policy.agent_channel_pins, agent_name: (channel_id,)}
-    data["isolated_channel_ids"] = tuple(dict.fromkeys((*policy.isolated_channel_ids, channel_id)))
-    return TenantAccessPolicy.model_validate(data)
+    """`policy` with the channel confidential (protection kept) and `agent_name`
+    pinned to it alone, its own agent. Pure."""
+    protected = channel_rule(policy, channel_id).writers == "none"
+    rule = ChannelRule(readers="own", writers="none" if protected else "own")
+    policy = with_channel_rule(policy, channel_id, rule)
+    return with_agent_rule(policy, agent_name, AgentRule(runs_in=(channel_id,)))
 
 
 def end_isolation(
     policy: TenantAccessPolicy, *, channel_id: str, drop_seal_and_pins: bool
 ) -> TenantAccessPolicy:
-    """`policy` without the marker; with `drop_seal_and_pins`, without its seal and pins. Pure."""
-    data = policy.model_dump()
-    data["isolated_channel_ids"] = tuple(c for c in policy.isolated_channel_ids if c != channel_id)
+    """`policy` with the channel sealed, no longer confidential; with
+    `drop_seal_and_pins`, open, and every pin naming it alone gone. Pure."""
+    current = channel_rule(policy, channel_id)
+    readers = (
+        "any" if drop_seal_and_pins else "inside" if current.readers == "own" else current.readers
+    )
+    writers = "none" if current.writers == "none" else "any"
+    policy = with_channel_rule(policy, channel_id, ChannelRule(readers=readers, writers=writers))
     if drop_seal_and_pins:
-        data["sealed_channel_ids"] = tuple(c for c in policy.sealed_channel_ids if c != channel_id)
-        data["agent_channel_pins"] = {
-            name: pin for name, pin in policy.agent_channel_pins.items() if set(pin) != {channel_id}
-        }
-    return TenantAccessPolicy.model_validate(data)
+        for name in pinned_alone(policy, channel_id):
+            policy = with_agent_rule(policy, name, AgentRule())
+    return policy
 
 
 @dataclass(frozen=True)
@@ -241,8 +253,8 @@ async def _channel_agent(
     if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
         return _ChannelAgent(name, answering, "managed_channel_agent")
     names = (name, *agent_pin_names(agent.name, agent.metadata))
-    pins = [policy.agent_channel_pins[n] for n in names if n and n in policy.agent_channel_pins]
-    if any(set(pin) - {channel_id} for pin in pins):
+    pins = agent_permissions(policy, [n for n in names if n]).pins
+    if any(pin - {channel_id} for pin in pins):
         return _ChannelAgent(name, answering, "pinned_elsewhere")
     reach = await load_agent_reach(
         session,
@@ -311,7 +323,7 @@ async def isolation_refusal(
     )
     if found.refusal is not None:
         return ChannelIsolationRefused(found.refusal, agent_name=found.name)
-    if isolation_owner(policy, found.names) != channel_id:
+    if agent_permissions(policy, found.names).own_channel != channel_id:
         return ChannelIsolationRefused("channel_needs_own_agent", agent_name=found.name)
     return None
 

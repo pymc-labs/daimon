@@ -37,7 +37,6 @@ from anthropic.types.beta import (
 from daimon.core.access_policy import (
     TenantAccessPolicy,
     is_dm_source_sealed,
-    is_own_isolated_agent,
     isolated_channel_of,
     isolation_owner,
     source_seal_ids,
@@ -60,6 +59,7 @@ from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
+from daimon.core.permissions import agent_permissions, at_home, channel_permissions
 from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
 from daimon.core.stores.access_policy import load_access_policy
@@ -510,7 +510,7 @@ async def admit_impl(
     # --- Admission gate: channel budget; a DM counts toward the channel it came from,
     # and an isolated channel's own agent toward that channel wherever an exempt
     # caller (an admin, or that channel's admin) runs it ---
-    budget_channel_id = isolation_owner(policy, grant.agent.names) or (
+    budget_channel_id = agent_permissions(policy, grant.agent.names).budget_channel or (
         dm_source_channel_id if is_dm else channel_id
     )
     if await is_over_channel_budget(
@@ -638,12 +638,12 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
 
 def _is_own_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
     """An isolated channel's own agent at work there, whose memory stays writable."""
-    return is_own_isolated_agent(
+    here = channel_permissions(
         policy,
-        grant.agent.names,
         channel_id=grant.run_place.channel_id,
         parent_channel_id=grant.run_place.parent_channel_id,
     )
+    return at_home(agent_permissions(policy, grant.agent.names), here)
 
 
 async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:

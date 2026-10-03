@@ -27,7 +27,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
 from anthropic.types.beta.skill_list_response import SkillListResponse
-from daimon.core.access_policy import TenantAccessPolicy, isolation_owner
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.authz import Action, Decision, Place, Subject, authorize
 from daimon.core.constants import AGENT_SKILL_CAP
@@ -42,6 +42,7 @@ from daimon.core.defaults.metadata import (
     tenant_scoped_display_title,
 )
 from daimon.core.errors import SkillsListTruncatedError
+from daimon.core.permissions import agent_permissions
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_skills import add_channel_skill, list_channel_skills
@@ -151,7 +152,8 @@ async def choose_channel_skill(
     if not owners and "/" not in body and _TRUNCATED.search(body):
         return "not_usable"  # a cut title may have lost its agent part
     if owners and (
-        not owners <= names or isolation_owner(policy, tuple(owners)) not in (None, channel_id)
+        not owners <= names
+        or agent_permissions(policy, owners).own_channel not in (None, channel_id)
     ):
         return "not_usable"
     owner = min(owners) if owners else None
