@@ -49,7 +49,6 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_pins import (
     FormPinRefused,
     agent_pin_names,
-    consume_form_unless_pinned,
     request_pin_refusal,
 )
 from daimon.core.continuity.continuation import record_input_continuation
@@ -62,7 +61,13 @@ from daimon.core.credential_requests import (
 from daimon.core.credential_submit import (
     apply_env_file_submit,
     apply_env_submit,
+    consume_credential_submit,
     prepare_env_submit,
+    prepare_mcp_submit,
+    settle_credential_submit,
+    write_mcp_submit,
+    write_repo_submit,
+    write_skill_repo_submit,
 )
 from daimon.core.credential_submit import env_name_refusal as _env_name_refusal
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
@@ -107,9 +112,7 @@ from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
 )
 from daimon.core.stores.agent_repo_binding import set_binding
-from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
-from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -207,8 +210,7 @@ async def _consume(
     now: datetime,
 ) -> CredentialRequestRow | None:
     """Spend the form, deciding the pin rule in the same transaction (`FormPinRefused`)."""
-    async with runtime.sessionmaker() as session, session.begin():
-        return await consume_form_unless_pinned(session, row=request, agent=agent, now=now)
+    return await consume_credential_submit(runtime.sessionmaker, row=request, agent=agent, now=now)
 
 
 async def _dispatch_pending(trigger: ContinuationTrigger, *, kind: str) -> None:
@@ -821,11 +823,14 @@ async def _refuse_mcp_replacement(
     user_id: str,
 ) -> None:
     """Spend the request and write nothing: no vault token, no published token."""
-    async with runtime.sessionmaker() as session, session.begin():
-        await credential_requests_store.set_credential_request_outcome(
-            session, token=token, outcome="write_failed"
-        )
-        await record_input_continuation(session, row, platform="slack", carries_work=False)
+    await settle_credential_submit(
+        runtime.sessionmaker,
+        row=row,
+        platform="slack",
+        outcome="write_failed",
+        carries_work=False,
+        record=record_input_continuation,
+    )
     await edit_posted_card(client, row=row, state="refused", refusal="replacement_admin_required")
     await post_ephemeral(
         client,
@@ -893,8 +898,10 @@ async def run_mcp_credential_submission(
         )
         return
 
-    connect = await _decide_mcp_connect_at_submit(runtime, client, row=request, user_id=user_id)
-    now = datetime.now(UTC)
+    connect, now = await prepare_mcp_submit(
+        decide=lambda: _decide_mcp_connect_at_submit(runtime, client, row=request, user_id=user_id),
+        clock=lambda: datetime.now(UTC),
+    )
     try:
         consumed = await _consume(runtime, request=request, agent=agent, now=now)
     except FormPinRefused as refused:
@@ -960,24 +967,18 @@ async def run_mcp_credential_submission(
             text=rejected_token_message(mcp_server_url),
         )
         return
-    # Attach first, publish the agent-wide token only after that authorized
-    # attach, then the submitter's own vault copy: no other session may ever
-    # mirror a token this submission is refused for (see mcp_token_connect).
     try:
-        await connect_mcp_server_with_token(
+        await write_mcp_submit(
             runtime.anthropic,
-            sessionmaker=runtime.sessionmaker,
+            session_factory=runtime.sessionmaker,
+            row=consumed,
             fernet=runtime.turn_deps.fernet,
-            tenant_id=consumed.tenant_id,
-            agent_id=consumed.agent_id,
-            account_id=consumed.account_id,
-            server_name=consumed.target,
-            mcp_server_url=mcp_server_url,
-            token=value,
+            value=value,
             replace_allowed=connect.replace_allowed,
             jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
             public_url=str(mcp.public_url),
             now=now,
+            connect=connect_mcp_server_with_token,
         )
     except McpServerReplaceRefusedError:
         # A server or token for this URL appeared after the pre-consume check.
@@ -1017,11 +1018,14 @@ async def run_mcp_credential_submission(
             mcp_server_url=mcp_server_url,
             err_type=type(err.__cause__ or err).__name__,
         )
-        async with runtime.sessionmaker() as session, session.begin():
-            await credential_requests_store.set_credential_request_outcome(
-                session, token=token, outcome="write_failed"
-            )
-            await record_input_continuation(session, consumed, platform="slack", carries_work=False)
+        await settle_credential_submit(
+            runtime.sessionmaker,
+            row=consumed,
+            platform="slack",
+            outcome="write_failed",
+            carries_work=False,
+            record=record_input_continuation,
+        )
         await edit_posted_card(
             client,
             row=consumed,
@@ -1045,11 +1049,13 @@ async def run_mcp_credential_submission(
         )
         return
 
-    async with runtime.sessionmaker() as session, session.begin():
-        await credential_requests_store.set_credential_request_outcome(
-            session, token=token, outcome="applied"
-        )
-        queued = await record_input_continuation(session, consumed, platform="slack")
+    queued = await settle_credential_submit(
+        runtime.sessionmaker,
+        row=consumed,
+        platform="slack",
+        outcome="applied",
+        record=record_input_continuation,
+    )
     # The card is the receipt — no ephemeral beside it.
     await edit_posted_card(
         client,
@@ -1254,11 +1260,14 @@ async def _report_skill_repo_failure(
             ),
         )
         return
-    async with runtime.sessionmaker() as session, session.begin():
-        await credential_requests_store.set_credential_request_outcome(
-            session, token=row.token, outcome="write_failed"
-        )
-        await record_input_continuation(session, row, platform="slack", carries_work=False)
+    await settle_credential_submit(
+        runtime.sessionmaker,
+        row=row,
+        platform="slack",
+        outcome="write_failed",
+        carries_work=False,
+        record=record_input_continuation,
+    )
     await edit_posted_card(
         client,
         row=row,
@@ -1405,18 +1414,8 @@ async def run_skill_repo_credential_submission(
         )
         is_token_stored = True
         async with runtime.sessionmaker.begin() as session:
-            await set_skill_repo_credential(
-                session,
-                tenant_id=consumed.tenant_id,
-                agent_id=consumed.agent_id,
-                repo_url=url,
-                default_branch=branch,
-                path=path,
-                ma_secret_ref=ma_secret_ref,
-                proof=proof,
-            )
-            seeded_skill_names = await list_seeded_skill_names(
-                session, tenant_id=consumed.tenant_id
+            seeded_skill_names = await write_skill_repo_submit(
+                session, row=consumed, ma_secret_ref=ma_secret_ref, proof=proof
             )
         outcomes = await run_skill_sync(
             runtime.anthropic,
@@ -1466,11 +1465,14 @@ async def run_skill_repo_credential_submission(
     if not imported:
         # Nothing reached the library (an empty repo, or every skill refused
         # or failed), which an applied card must not claim.
-        async with runtime.sessionmaker() as session, session.begin():
-            await credential_requests_store.set_credential_request_outcome(
-                session, token=token, outcome="write_failed"
-            )
-            await record_input_continuation(session, consumed, platform="slack", carries_work=False)
+        await settle_credential_submit(
+            runtime.sessionmaker,
+            row=consumed,
+            platform="slack",
+            outcome="write_failed",
+            carries_work=False,
+            record=record_input_continuation,
+        )
         await edit_posted_card(
             client,
             row=consumed,
@@ -1496,13 +1498,14 @@ async def run_skill_repo_credential_submission(
         attached=attach.attached,
         note=attach.note,
     )
-    async with runtime.sessionmaker() as session, session.begin():
-        await credential_requests_store.set_credential_request_outcome(
-            session, token=token, outcome="applied" if attach.attached else "write_failed"
-        )
-        queued = await record_input_continuation(
-            session, consumed, platform="slack", carries_work=attach.attached
-        )
+    queued = await settle_credential_submit(
+        runtime.sessionmaker,
+        row=consumed,
+        platform="slack",
+        outcome="applied" if attach.attached else "write_failed",
+        carries_work=attach.attached,
+        record=record_input_continuation,
+    )
     # The card is the receipt; the import and the attach are one outcome to
     # the person who pasted the token, so they read as one line of copy.
     detail_lines = [failure_detail] if attach.attached else [attach.note, failure_detail]
@@ -1631,14 +1634,8 @@ async def run_repo_bind_credential_submission(
             now=now,
         )
         async with runtime.sessionmaker.begin() as session:
-            await set_binding(
-                session,
-                tenant_id=consumed.tenant_id,
-                agent_id=consumed.agent_id,
-                repo_url=repo_url,
-                default_branch=branch,
-                ma_secret_ref=ma_secret_ref,
-                proof=proof,
+            await write_repo_submit(
+                session, row=consumed, ma_secret_ref=ma_secret_ref, proof=proof, write=set_binding
             )
     except DaimonError as err:
         log.warning("credential_request.repo_write_failed", err_type=type(err).__name__)
@@ -1670,11 +1667,13 @@ async def run_repo_bind_credential_submission(
         )
         return
 
-    async with runtime.sessionmaker() as session, session.begin():
-        await credential_requests_store.set_credential_request_outcome(
-            session, token=token, outcome="applied"
-        )
-        queued = await record_input_continuation(session, consumed, platform="slack")
+    queued = await settle_credential_submit(
+        runtime.sessionmaker,
+        row=consumed,
+        platform="slack",
+        outcome="applied",
+        record=record_input_continuation,
+    )
     # No `unsaved_work`: this bind copies nothing, and the copy line is a
     # promise only the panel's own flow is in a position to make.
     await edit_posted_card(

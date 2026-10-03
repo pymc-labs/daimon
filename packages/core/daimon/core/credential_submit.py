@@ -1,4 +1,4 @@
-"""Shared env form transitions. Adapters supply live platform facts and receipts.
+"""Shared credential form transitions. Adapters supply live platform facts and receipts.
 
 The policy lock stays inside consume_form_unless_pinned's transaction. The
 key-set lock covers the second related-name read and every conditional write.
@@ -11,10 +11,12 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
+from cryptography.fernet import MultiFernet
 from daimon.core.agent_pins import consume_form_unless_pinned
 from daimon.core.continuity.continuation import record_input_continuation
-from daimon.core.credential_requests import CredentialRequestOutcome
+from daimon.core.credential_requests import CredentialRequestOutcome, split_skill_repo_target
 from daimon.core.env_file import (
     MEMBER_SECRET_SUFFIX_HINT,
     EnvEntry,
@@ -22,6 +24,9 @@ from daimon.core.env_file import (
     env_import_collisions,
     env_related_held,
 )
+from daimon.core.mcp_attach import McpConnectDecision
+from daimon.core.mcp_oauth import begin_mcp_oauth_flow
+from daimon.core.mcp_token_connect import connect_mcp_server_with_token
 from daimon.core.posted_controls import CardState
 from daimon.core.stores import credential_requests
 from daimon.core.stores.agent_files import (
@@ -29,7 +34,15 @@ from daimon.core.stores.agent_files import (
     lock_agent_keys,
     put_agent_file_if_unchanged,
 )
-from daimon.core.stores.domain import ChatPlatform, CredentialRequestRow
+from daimon.core.stores.agent_repo_binding import set_binding
+from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
+from daimon.core.stores.domain import (
+    ChatPlatform,
+    CredentialRequestRow,
+    McpOAuthFlowRow,
+    RepoAccessProof,
+)
+from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.turn_keys import list_turn_key_names
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -219,3 +232,147 @@ async def apply_env_file_submit(
                 session, token=row.token, outcome="stale_replacement"
             )
             return consumed, (err.entry,), False, frozenset({err.entry.name})
+
+
+async def consume_credential_submit(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    row: CredentialRequestRow,
+    agent: BetaManagedAgentsAgent | None,
+    now: datetime,
+) -> CredentialRequestRow | None:
+    """Spend an external-write form, holding the policy lock through commit."""
+    async with session_factory() as session, session.begin():
+        return await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+
+
+async def settle_credential_submit(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    row: CredentialRequestRow,
+    platform: ChatPlatform,
+    outcome: CredentialRequestOutcome,
+    carries_work: bool = True,
+    record: Callable[..., Awaitable[bool]] = record_input_continuation,
+) -> bool:
+    """Commit the external write's outcome and continuation in one transaction."""
+    async with session_factory() as session, session.begin():
+        await credential_requests.set_credential_request_outcome(
+            session, token=row.token, outcome=outcome
+        )
+        return await record(session, row, platform=platform, carries_work=carries_work)
+
+
+async def begin_oauth_submit(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    row: CredentialRequestRow,
+    agent: BetaManagedAgentsAgent | None,
+    app_root_url: str,
+    now: datetime,
+) -> tuple[CredentialRequestRow | None, McpOAuthFlowRow | None]:
+    """Consume and mint atomically; completion's vault/MCP pin checks stay there."""
+    async with session_factory() as session, session.begin():
+        consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+        flow = (
+            await begin_mcp_oauth_flow(
+                session, request=consumed, app_root_url=app_root_url, now=now
+            )
+            if consumed is not None
+            else None
+        )
+        return consumed, flow
+
+
+async def write_mcp_submit(
+    client: AsyncAnthropic,
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    row: CredentialRequestRow,
+    fernet: MultiFernet | None,
+    value: str,
+    replace_allowed: bool,
+    jwt_secret: bytes,
+    public_url: str,
+    now: datetime,
+    connect: Callable[..., Awaitable[None]] = connect_mcp_server_with_token,
+) -> None:
+    """Attach, publish, then vault-write after the adapter's token probe.
+
+    The connector retains its lock and fresh replacement checks; exceptions
+    reach the same platform audit/receipt boundary. The callback retains the
+    adapter's connector port.
+    """
+    assert row.mcp_server_url is not None
+    await connect(
+        client,
+        sessionmaker=session_factory,
+        fernet=fernet,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        account_id=row.account_id,
+        server_name=row.target,
+        mcp_server_url=row.mcp_server_url,
+        token=value,
+        replace_allowed=replace_allowed,
+        jwt_secret=jwt_secret,
+        public_url=public_url,
+        now=now,
+    )
+
+
+async def write_repo_submit(
+    session: AsyncSession,
+    *,
+    row: CredentialRequestRow,
+    ma_secret_ref: str,
+    proof: RepoAccessProof,
+    write: Callable[..., Awaitable[object]] = set_binding,
+) -> None:
+    """Write the working repo promised by the card, inside the caller's transaction."""
+    url, branch, _path = split_skill_repo_target(row.target)
+    await write(
+        session,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        repo_url=url,
+        default_branch=branch,
+        ma_secret_ref=ma_secret_ref,
+        proof=proof,
+    )
+
+
+async def write_skill_repo_submit(
+    session: AsyncSession,
+    *,
+    row: CredentialRequestRow,
+    ma_secret_ref: str,
+    proof: RepoAccessProof,
+) -> frozenset[str]:
+    """Store the skill repo credential and read the seeded-name fence together."""
+    url, branch, path = split_skill_repo_target(row.target)
+    await set_skill_repo_credential(
+        session,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        repo_url=url,
+        default_branch=branch,
+        path=path,
+        ma_secret_ref=ma_secret_ref,
+        proof=proof,
+    )
+    return await list_seeded_skill_names(session, tenant_id=row.tenant_id)
+
+
+async def prepare_mcp_submit(
+    *,
+    decide: Callable[[], Awaitable[McpConnectDecision]],
+    clock: Callable[[], datetime],
+) -> tuple[McpConnectDecision, datetime]:
+    """Snapshot the live platform replacement decision before opening the consume.
+
+    Adapters inject their decision helper unchanged. A refused replacement
+    still spends the form and receives the platform's existing receipt.
+    """
+    decision = await decide()
+    return decision, clock()
