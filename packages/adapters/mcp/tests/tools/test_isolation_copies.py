@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from collections.abc import Callable
@@ -19,6 +20,7 @@ from daimon.adapters.mcp.tools.isolation_copies import (
     _archive_isolation_copy_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
+from daimon.core.stores import access_policy
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
@@ -27,6 +29,7 @@ from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from fastmcp.exceptions import ToolError
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ROOM = "111111111111111111"
@@ -214,3 +217,33 @@ async def test_an_upstream_failure_changes_nothing(
     async with committing_sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=world.tenant_id)
     assert policy.agent_channel_pins == {COPY: (ROOM,)}, "the pin stays with the live copy"
+
+
+async def test_archiving_a_copy_waits_out_a_held_policy_fence(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A channel tidy holds the shared policy fence: the archive waits, then drops the pin.
+
+    Taking the fence only at the policy write, after the agent was archived,
+    left the copy archived with its pin when the fence was busy.
+    """
+    world, runtime = await _isolated_copy(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as holder:
+        await holder.execute(
+            text(
+                "SELECT pg_advisory_xact_lock_shared("
+                "hashtextextended(current_schema() || ':' || :key, 0))"
+            ),
+            {"key": access_policy._policy_write_key(world.tenant_id)},  # pyright: ignore[reportPrivateUsage]
+        )
+        archiver = asyncio.create_task(
+            _archive_isolation_copy_impl(runtime, world.auth(), name=COPY, channel_id=ROOM)
+        )
+        await asyncio.sleep(0.3)
+        assert not archiver.done(), "the archive must wait for the fence, not fail as busy"
+        assert not world.archived(COPY), "nothing is archived before the fence is held"
+    done = await asyncio.wait_for(archiver, 10)
+    assert done.name == COPY, done
+    async with committing_sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=world.tenant_id)
+    assert world.archived(COPY) and COPY not in policy.agent_channel_pins, "archived, pin dropped"

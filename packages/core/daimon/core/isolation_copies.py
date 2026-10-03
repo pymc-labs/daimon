@@ -31,6 +31,7 @@ from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigR
 from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_access_policy,
+    policy_write_transaction,
     set_access_policy,
 )
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
@@ -150,7 +151,7 @@ async def archive_isolation_copy(
         client, tenant_id=tenant_id, name=name, expected_ma_agent_id=expected_ma_agent_id
     )
     names = {n for n in agent_pin_names(agent.name, agent.metadata) if n}
-    async with sessionmaker.begin() as session:
+    async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         await lock_access_policy(session, tenant_id=tenant_id)
         policy = await load_access_policy(session, tenant_id=tenant_id)
         if not authorize(policy, subject=subject, action=Action.ARCHIVE_ISOLATION_COPY):

@@ -20,6 +20,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_access_policy,
+    policy_write_transaction,
     set_access_policy,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -86,7 +87,7 @@ async def set_channel_protection(
     default: DeploymentDefault,
 ) -> ProtectionChange:
     """Apply the toggle; raise `ChannelProtectionRefused` when it isn't the subject's to make."""
-    async with sessionmaker.begin() as session:
+    async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         await lock_access_policy(session, tenant_id=tenant_id)
         policy = await load_access_policy(session, tenant_id=tenant_id)
         if not authorize(

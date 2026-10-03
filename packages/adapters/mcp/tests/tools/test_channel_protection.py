@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from unittest.mock import MagicMock
 
@@ -13,11 +14,13 @@ from daimon.adapters.mcp.tools.channel_protection import (
 )
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import access_policy
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from fastmcp.exceptions import ToolError
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ROOM = "111111111111111111"
@@ -133,3 +136,26 @@ async def test_an_isolated_channel_stays_sealed_until_its_isolation_ends(
     assert protected.protected and protected.sealed, "protecting it keeps the seal"
     with pytest.raises(ToolError, match="Pass protected, sealed or both"):
         await _set_channel_protection_impl(runtime, admin, channel_id=ROOM)
+
+
+async def test_a_protection_change_waits_out_a_held_policy_fence(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A channel tidy holds the shared policy fence; the write waits instead of failing busy."""
+    tenant_id, account_id, runtime = await _world(committing_sessionmaker)
+    admin = _auth(tenant_id, account_id, admin=True)
+    async with committing_sessionmaker.begin() as holder:
+        await holder.execute(
+            text(
+                "SELECT pg_advisory_xact_lock_shared("
+                "hashtextextended(current_schema() || ':' || :key, 0))"
+            ),
+            {"key": access_policy._policy_write_key(tenant_id)},  # pyright: ignore[reportPrivateUsage]
+        )
+        writer = asyncio.create_task(
+            _set_channel_protection_impl(runtime, admin, channel_id=ROOM, protected=True)
+        )
+        await asyncio.sleep(0.3)
+        assert not writer.done(), "the write must wait for the fence, not fail as busy"
+    done = await asyncio.wait_for(writer, 10)
+    assert (done.protected, done.changed) == (True, True), done
