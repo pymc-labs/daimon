@@ -93,6 +93,7 @@ from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role, RoutineRow
+from daimon.core.stores.github_connect import delete_expired_flows
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import record_result, update_routine_agent_id
 from daimon.core.stores.scoped_config_read import resolve
@@ -576,6 +577,15 @@ async def _sweep_hub_oauth_kv(sm: async_sessionmaker[AsyncSession]) -> None:
         log.exception("scheduler.hub_oauth_kv_sweep.failed")
 
 
+async def _sweep_github_connect_flows(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Discard expired encrypted GitHub browser-flow tokens."""
+    try:
+        async with sm.begin() as session:
+            await delete_expired_flows(session, now=datetime.now(UTC))
+    except SQLAlchemyError:
+        log.exception("scheduler.github_connect_flow_sweep.failed")
+
+
 async def _settle_promo_credit(sm: async_sessionmaker[AsyncSession]) -> None:
     """Grant opened timed promo windows, expire closed ones, credit back late spend.
 
@@ -729,6 +739,7 @@ async def run(
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
+            await _sweep_github_connect_flows(sm)
             await _settle_promo_credit(sm)
             await _drain_github_push_resync(
                 engine=engine,
@@ -762,6 +773,7 @@ async def run(
                 await _sweep_slack_event_dedup(sm)
                 await _sweep_retired_turn_card_intents(sm)
                 await _sweep_hub_oauth_kv(sm)
+                await _sweep_github_connect_flows(sm)
                 await _settle_promo_credit(sm)
                 await _drain_github_push_resync(
                     engine=engine,

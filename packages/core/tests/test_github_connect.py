@@ -9,7 +9,14 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from daimon.core._models import Account, GitHubConnectInvitation, GitHubUserLink, Tenant
+from daimon.core._models import (
+    Account,
+    AccountGitHubLink,
+    GitHubConnectFlow,
+    GitHubConnectInvitation,
+    GitHubUserLink,
+    Tenant,
+)
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.github_requester_access import (
     PermissionCache,
@@ -104,6 +111,20 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
         await github_connect.get_invitation(db_session, github_connect.digest(expired_token))
         is None
     )
+    await github_connect.create_flow(
+        db_session,
+        invitation_hash=github_connect.digest(expired_token),
+        state="expired-flow",
+        cookie="cookie",
+        encrypted_verifier=b"encrypted",
+    )
+    expired_flow = await db_session.get(GitHubConnectFlow, github_connect.digest("expired-flow"))
+    assert expired_flow is not None
+    expired_flow.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.flush()
+    assert await github_connect.get_flow(db_session, state="expired-flow", cookie="cookie") is None
+    assert await github_connect.delete_expired_flows(db_session, now=datetime.now(UTC)) == 1
+    assert await db_session.get(GitHubConnectFlow, github_connect.digest("expired-flow")) is None
 
 
 @pytest.mark.asyncio
@@ -167,3 +188,71 @@ async def test_refresh_serializes_for_one_github_user(
     async with sessionmaker() as session:
         row = await github_links.get_user(session, github_user_id=user_id)
     assert row is not None and row.token_generation == 2 and row.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_user_token_401_invalidates_link(db_engine: AsyncEngine, db_clean: None) -> None:
+    sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    async with sessionmaker.begin() as session:
+        session.add(
+            GitHubUserLink(
+                github_user_id=1234,
+                login="alex",
+                encrypted_access_token=encrypt_token(fernet, "token"),
+                access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            )
+        )
+
+    def unauthorized(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"message": "bad credentials"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unauthorized)) as client:
+        result = await linked_permissions(
+            sessionmaker,
+            client,
+            user_id=1234,
+            installation_id=88,
+            fernet=fernet,
+            client_id="client",
+            client_secret="secret",
+            cache=PermissionCache(),
+        )
+    assert result == {}
+    async with sessionmaker() as session:
+        row = await github_links.get_user(session, github_user_id=1234)
+    assert row is not None and row.status == "broken" and row.link_generation == 2
+
+
+@pytest.mark.asyncio
+async def test_unlink_bumps_generation_and_deletes_last_token(db_session: AsyncSession) -> None:
+    tenant_id, account_a, account_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="workspace"))
+    await db_session.flush()
+    db_session.add(Account(id=account_a, tenant_id=tenant_id, role="user"))
+    db_session.add(Account(id=account_b, tenant_id=tenant_id, role="user"))
+    db_session.add(
+        GitHubUserLink(
+            github_user_id=1234,
+            login="alex",
+            encrypted_access_token=b"encrypted",
+            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+    )
+    await db_session.flush()
+    for account_id in (account_a, account_b):
+        db_session.add(
+            AccountGitHubLink(
+                account_id=account_id,
+                github_user_id=1234,
+                platform="discord",
+                platform_user_id=str(account_id),
+                verified_via="discord_oauth",
+            )
+        )
+    await db_session.flush()
+    assert await github_links.unlink_account(db_session, account_id=account_a) == 1234
+    user = await github_links.get_user(db_session, github_user_id=1234)
+    assert user is not None and user.link_generation == 2
+    assert await github_links.unlink_account(db_session, account_id=account_b) == 1234
+    assert await github_links.get_user(db_session, github_user_id=1234) is None
