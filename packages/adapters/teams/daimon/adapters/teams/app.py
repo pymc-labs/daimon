@@ -24,6 +24,7 @@ from typing import Any, Literal
 import anthropic
 import daimon.core.turn.bookkeeping as turn_bookkeeping
 import structlog
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.budget_notice import with_budget_notifier
@@ -74,6 +75,7 @@ from daimon.adapters.teams.site_grant import (
     redirect_uri,
     sign_state,
 )
+from daimon.adapters.teams.thread_handoff import hand_over_button
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
@@ -154,6 +156,7 @@ from microsoft_teams.api import (
     MessageActivityInput,
 )
 from microsoft_teams.apps import ActivityContext
+from microsoft_teams.cards import ExecuteAction
 from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
@@ -962,18 +965,23 @@ class TeamsApp:
                 await asyncio.shield(self._settle(intent_id, lifecycle.message_id, closed, markers))
 
     async def _refusal(
-        self, error: SessionPreparationFailed | SessionBusyError | SessionAgentMismatch, name: str
-    ) -> str:
+        self,
+        error: SessionPreparationFailed | SessionBusyError | SessionAgentMismatch,
+        agent: BetaManagedAgentsAgent,
+    ) -> tuple[str, tuple[ExecuteAction, ...]]:
+        """The notice for a refused bind, and the Hand over button when the agent changed."""
+        name = agent.name
         if isinstance(error, SessionPreparationFailed):
-            return render_preparation_failed(name)
+            return render_preparation_failed(name), ()
         if isinstance(error, SessionBusyError):
-            return render_current_work_must_finish(name, handoff=True)
+            return render_current_work_must_finish(name, handoff=True), ()
         owner = "the previous agent"
         with contextlib.suppress(anthropic.APIStatusError):
             owner = (await self.runtime.anthropic.beta.agents.retrieve(error.source_agent_id)).name
-        return render_responder_changed_without_handoff(
-            new_responder=name, owner=owner, channel="this chat"
+        text = render_responder_changed_without_handoff(
+            new_responder=name, owner=owner, channel="this chat", offer_button=True
         )
+        return text, (hand_over_button(agent_id=agent.id, agent_name=name),)
 
     async def _bind_and_run(
         self,
@@ -1008,7 +1016,8 @@ class TeamsApp:
                 deadline=deadline,
             )
         except _BIND_REFUSALS as error:
-            await lifecycle.close_with_notice(await self._refusal(error, admission.agent.name))
+            text, actions = await self._refusal(error, admission.agent)
+            await lifecycle.close_with_notice(text, actions=actions)
             if reraise:
                 raise
             return
