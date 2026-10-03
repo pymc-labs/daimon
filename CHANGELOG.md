@@ -11,15 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A thread can move to another agent without opening a new thread. Ask the agent in the thread to hand it over (`hand_off_task`), or, when a channel's agent changed under an existing thread, press Hand over on the notice that thread shows (Discord and Slack). The new agent gets the conversation and working files from the next message, and the old session is archived with its history still readable. Inherited seals keep memory read-only. A member may hand a thread to an agent of that channel: the one it answers with, one pinned to it, or one of an isolated channel's own agents. Other agents need a server admin, or a channel admin of the channel when the thread is not sealed and the agent is one they could make its default.
 - Agents can tidy their own posts on Discord and Slack. `edit_message` and `delete_message` change one message the agent posted with `send_message` or `create_thread`; `archive_thread` (Discord) and `delete_thread` close a thread it opened. An agent can change only what it posted itself, which daimon now records at send time; people's messages, other agents' and other bots' posts, turn replies and cards are refused. Each call is checked against the channel policy (protection, pins, isolation, seals), and checked again on a fresh policy right before the Discord or Slack call. Calls are refused in the support-escalation channels. Discord thread cleanup keeps the thread and other people's messages. Bulk deletes check and audit each message. Limits are 10 message actions per turn and 40 per hour per agent, and 20 refused calls in an hour pause tidying for that agent. Every edit or delete writes a security audit row with the channel and message ids, an HMAC of the replaced text keyed by a server secret, and the turn, never the text. Post records expire with `daimon audit prune`, and erasing an account clears the HMACs on its audit rows. A new seeded skill, `channel-tidy`, tells agents when to use them.
-
-- **Channel and agent permissions.** Protected, sealed, confidential (isolated) and pinned are now
-  presets of two rules: a channel rule says who may read a channel (`anyone`, `inside`,
-  `own_agents`) and who may write in it (`any_agent`, `own_agents`, `nobody`), and an agent rule
-  says where the agent runs. Where an agent posts, whom it may message, where it is listed and
-  whether it may be copied follow from those two. `daimon tenants access-policy rules` lists a
-  tenant's rules with their preset. Nothing is decided differently and the stored policy keeps
-  its shape; tests check the model against the access decision over every combination of
-  presets. See `docs/permissions.md`.
+- `daimon tenants access-policy rules PLATFORM WORKSPACE_ID [--json]` lists a tenant's access policy as channel and agent rules. A channel rule says who may read the channel (`anyone`, `inside`, `own_agents`) and who may write in it (`any_agent`, `own_agents`, `nobody`). Protected, sealed and confidential (isolated) are its presets. An agent rule says where a pinned agent runs. Each row gives the preset, and each agent row the confidential channel it belongs to. The command only reads; access decisions and the stored policy are unchanged. `docs/permissions.md` describes the model.
 
 ### Fixed
 
