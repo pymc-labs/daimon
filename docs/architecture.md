@@ -1098,6 +1098,14 @@ admission before any of this runs.
   Discord read and scoped search tools explain when the bot lacks View Channel
   or Read Message History permission, including on an otherwise empty read.
 
+- **GitHub connection invitations** are issued with `daimon github connect-link`
+  for a tenant admin. When the separate `DAIMON_GITHUB_APP__*` credentials and
+  encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,
+  `/oauth/github/callback`, `/oauth/github/setup` and GET/POST
+  `/oauth/github/confirm`. The browser flow checks the confirming person's
+  GitHub admin access before authorizing tenant repositories. These routes
+  are absent when GitHub connection is unconfigured.
+
 - **Scheduled routines** go through
   `packages/core/daimon/core/headless_runner.py`, which creates a session with
   the same `create_session` the chat path uses and delegates the drain to the

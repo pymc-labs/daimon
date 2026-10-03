@@ -81,6 +81,8 @@ OperationKind = Literal[
     "agent_spec_edit",
     "skill_add",
     "skill_remove",
+    "github_connect",
+    "github_grant",
 ]
 
 PolicyOutcome = Literal["allow", "needs_admin", "managed_agent"]
@@ -147,6 +149,8 @@ def _decide_operation(
     why the order differs between the spec and attachment families and why
     the posted-token family always allows.
     """
+    if operation in ("github_connect", "github_grant"):
+        return "allow" if is_admin else "needs_admin"
     decision = authorize(
         _NO_POLICY,
         subject=Subject(is_admin=is_admin),
@@ -186,7 +190,7 @@ def needs_reachability_read(
     re-derived at each of the three call sites that gate a live DB read on
     it.
     """
-    if operation in _POSTED_TOKEN_OPERATIONS:
+    if operation in _POSTED_TOKEN_OPERATIONS or operation in ("github_connect", "github_grant"):
         return False
     # Both remaining families only consult reachability once neither the
     # managed check nor the admin check has already settled the outcome.

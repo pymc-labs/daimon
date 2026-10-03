@@ -2428,6 +2428,58 @@ class TenantGitHubRepo(Base):
     version: Mapped[int] = mapped_column(Integer, server_default="1")
 
 
+class GitHubConnectInvitation(Base):
+    __tablename__ = "github_connect_invitations"
+    token_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    requester_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE")
+    )
+    workspace_label: Mapped[str] = mapped_column(Text)
+    requester_label: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GitHubConnectFlow(Base):
+    __tablename__ = "github_connect_flows"
+    state_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    invitation_hash: Mapped[str] = mapped_column(
+        Text, ForeignKey("github_connect_invitations.token_hash", ondelete="CASCADE")
+    )
+    cookie_hash: Mapped[str] = mapped_column(Text)
+    encrypted_verifier: Mapped[bytes] = mapped_column(LargeBinary)
+    encrypted_user_token: Mapped[bytes | None] = mapped_column(LargeBinary)
+    github_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TenantGitHubOrgScope(Base):
+    __tablename__ = "tenant_github_org_scopes"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "owner_id"),
+        CheckConstraint("max_access IN ('read', 'write')"),
+        CheckConstraint("scope = 'org_all'"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    owner_id: Mapped[int] = mapped_column(BigInteger)
+    installation_id: Mapped[int] = mapped_column(BigInteger)
+    owner_login: Mapped[str] = mapped_column(Text)
+    scope: Mapped[str] = mapped_column(Text, server_default="org_all")
+    max_access: Mapped[str] = mapped_column(Text)
+    authorized_by_github_user_id: Mapped[int] = mapped_column(BigInteger)
+    authorized_by_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE")
+    )
+    authorized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class AgentGitHubGrant(Base):
     __tablename__ = "agent_github_grants"
     __table_args__ = (

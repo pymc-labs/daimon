@@ -36,6 +36,7 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
     production_tenant_resolver,
 )
 from daimon.adapters.mcp.middleware.session_header import StripSessionIdMiddleware
+from daimon.adapters.mcp.oauth_github import build_oauth_github_routes
 from daimon.adapters.mcp.oauth_mcp import build_oauth_mcp_routes
 from daimon.adapters.mcp.oauth_slack import build_oauth_slack_routes
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -529,6 +530,26 @@ def create_mcp_app(
         app.add_route("/oauth/mcp/callback", mcp_oauth_callback, methods=["GET"])
     else:
         log.info("mcp oauth disabled", reason="no crypto keys or public url")
+
+    github_connect_cfg = effective_settings.github_app
+    if (
+        fernet is not None
+        and effective_settings.mcp.app_root_url is not None
+        and github_connect_cfg.app_id is not None
+        and github_connect_cfg.app_slug is not None
+        and github_connect_cfg.private_key is not None
+        and github_connect_cfg.client_id is not None
+        and github_connect_cfg.client_secret is not None
+    ):
+        github_connect, github_callback, github_setup, github_confirm = build_oauth_github_routes(
+            settings=effective_settings,
+            sessionmaker=effective_sessionmaker,
+            fernet=fernet,
+        )
+        app.add_route("/oauth/github/connect/{token}", github_connect, methods=["GET"])
+        app.add_route("/oauth/github/callback", github_callback, methods=["GET"])
+        app.add_route("/oauth/github/setup", github_setup, methods=["GET"])
+        app.add_route("/oauth/github/confirm", github_confirm, methods=["GET", "POST"])
 
     mount_hub_apps(
         app,

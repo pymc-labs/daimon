@@ -40,6 +40,18 @@ def test_attachment_allows_admin_on_managed_agent() -> None:
     )
 
 
+def test_github_operations_require_tenant_admin_even_for_local_channel_admin() -> None:
+    local = TargetFacts(
+        is_daimon_managed=False,
+        is_reachable_in_tenant=False,
+        is_local_to_caller_channels=True,
+    )
+    for operation in ("github_connect", "github_grant"):
+        assert decide_operation(operation, is_admin=False, target=local) == "needs_admin"
+        assert decide_operation(operation, is_admin=True, target=local) == "allow"
+        assert not needs_reachability_read(operation, is_admin=False, is_daimon_managed=False)
+
+
 def test_posted_token_operations_allow_non_admin_on_shared_agent() -> None:
     shared = _facts(managed=True, reachable=True)
     for operation in ("key_add", "keys_import", "mcp_connect"):
