@@ -7,9 +7,10 @@ presets of these two rules, not separate mechanisms.
 
 `daimon.core.permissions` is the model. It reads the stored policy as rules,
 writes rules back, and derives every limit below from them.
-`daimon.core.authz.authorize` decides each action through it. Tests check the
-two against each other for every combination of rules on two channels, a
-thread, a category and two pinned agents.
+`daimon.core.authz.authorize` decides through it and adds who is asking:
+admin exemptions and agents it couldn't resolve. Tests check the two against
+each other for every combination of rules on two channels, a thread, a
+category and two pinned agents.
 
 ## Channel rules
 
@@ -53,12 +54,12 @@ the model, so every caller asks the same question.
 | Limit | open | protected | sealed | confidential | Model |
 | --- | --- | --- | --- | --- | --- |
 | Turns start | yes | no | yes | yes | `writers` |
-| Agents that answer and post | any | none | any | own | `answers`, `runs_at`, `posts_at` |
+| Agents that answer and post | any | none | any | own | `run_refusal`, `post_refusal` |
 | Read from outside (channel, sessions, history) | yes | yes | no | no | `readable_from`, `session_readable_from` |
 | Sessions read and continued by | anyone allowed | anyone allowed | turns inside | own agents inside | `session_confidential_channels` |
 | Memory writable | yes | yes | no | own agents only | `memory_writable` |
 | Content kept inside | no | no | no | yes | `keeps_content`, `held_to` |
-| Agents listed there | all | all | all | own only | `lists`, `listed_at` |
+| Agents listed there | all | all | all | own only | `listed_at` |
 | Default agent | any | any | any | own only; never cleared | `binding_refusal`, `clear_refusal` |
 | Charged to its budget | its turns | its turns | its turns | its turns and its own agents' calls | `budget_channel` |
 
@@ -120,16 +121,18 @@ Agent keys and tokens with no person behind them are never exempt.
 ## Changing the rules
 
 Protection, seals, isolation and archiving an isolation copy are server
-admins' calls, never a channel admin's. Pins are written by isolation and by
-`daimon tenants access-policy set`. Isolating a channel makes its default
-agent its own, or copies it; a sealed channel can't be unsealed while it is
-confidential. Every writer goes through `with_channel_rule`,
-`with_category_rule` and `with_agent_rule`, so the stored lists never drift
-from the rules. The stored policy keeps its shape.
+admins' calls, never a channel admin's. Pins are written by isolation, by
+archiving an isolation copy and by `daimon tenants access-policy set`.
+Isolating a channel makes its default agent its own, or copies it; a sealed
+channel can't be unsealed while it is confidential. The panels, tools and
+isolation write through `with_channel_rule` and `with_agent_rule`, which
+refuse a rule nothing would enforce, such as a protected Slack thread key.
+`access-policy set` writes whole lists, and refuses the same keys. The stored
+policy keeps its shape.
 
 `daimon tenants access-policy rules PLATFORM WORKSPACE_ID [--json]` lists
 every channel, category and agent rule, with each channel's preset and each
-agent's kind.
+pinned name's kind. An agent carrying two pinned names is bound by both.
 
 The invoker allowlist, read-only DM memory, channel admins, environments,
 budgets and operator tokens are not channel or agent rules. They say who may
