@@ -103,7 +103,12 @@ def roster_rows(state: PanelState, *, attributions: Mapping[str, str]) -> tuple[
     """
     tenant_row, channel_rows = state.cascade_view
     if state.deployment_default.channel_defaults == "confidential_only":
-        channel_rows = [row for row in channel_rows if row.channel_id in state.isolated_channel_ids]
+        active_ids = (
+            {row.channel_id for row in state.answering_map.channel_overrides}
+            if state.answering_map is not None
+            else set(state.isolated_channel_ids)
+        )
+        channel_rows = [row for row in channel_rows if row.channel_id in active_ids]
     rows: list[RosterRow] = []
     for agent in state.roster_agents:
         status, default_tier = _classify(
