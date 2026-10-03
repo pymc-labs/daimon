@@ -17,6 +17,13 @@ _HUMAN_STEPS = (
     ),
 )
 _DEFAULT_URL = "postgresql+asyncpg://daimon:daimon@localhost:5432/daimon"
+_EXISTING_INSTALL_KEYS = (
+    *_GENERATED,
+    "DAIMON_ANTHROPIC__API_KEY",
+    "DAIMON_DISCORD__BOT_TOKEN",
+    "DAIMON_SLACK__APP_TOKEN",
+    "DAIMON_TEAMS__CLIENT_SECRET",
+)
 _READY_STEP = (
     "Run `docker compose up --build -d postgres init`. For a CLI first reply, run "
     "`docker compose run --rm --no-deps --entrypoint daimon init sessions create --json`, "
@@ -38,7 +45,18 @@ def values_from_env(content: str) -> dict[str, str]:
     for line in content.splitlines():
         match = re.match(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z_0-9]*)\s*=\s*(.*)$", line)
         if match:
-            values[match.group(1)] = match.group(2).strip().strip("\"'")
+            raw = match.group(2).strip()
+            quote: str | None = None
+            for index, char in enumerate(raw):
+                if char in "\"'":
+                    if quote == char:
+                        quote = None
+                    elif quote is None:
+                        quote = char
+                elif char == "#" and quote is None and (index == 0 or raw[index - 1].isspace()):
+                    raw = raw[:index].rstrip()
+                    break
+            values[match.group(1)] = raw.strip("\"'")
     return values
 
 
@@ -82,10 +100,24 @@ def run_setup(env_file: Path) -> dict[str, int | list[str] | list[dict[str, str 
     """Prepare missing secrets; return a stable, secret-free JSON payload."""
     content = read_env(env_file)
     values = values_from_env(content)
-    # Earlier setup versions created these three values but left the CLI tenant at
-    # the implicit `local` default. Pin that identity before generating anything;
-    # changing it on a setup rerun would orphan an existing installation's tenant.
-    legacy_install = all(values.get(name) for name in _GENERATED)
+    # A configured pre-workspace install used the implicit `local` tenant,
+    # even if it kept only one secret or kept secrets in the process environment.
+    # An untouched .env.example and a new install with only its Anthropic key
+    # supplied through the environment still need distinct identities.
+    legacy_install = (
+        any(values.get(name) for name in _EXISTING_INSTALL_KEYS)
+        or values.get("DAIMON_DATABASE__URL") not in (None, "", _DEFAULT_URL)
+        or any(
+            os.environ.get(name)
+            for name in (
+                *_GENERATED,
+                "DAIMON_DISCORD__BOT_TOKEN",
+                "DAIMON_SLACK__APP_TOKEN",
+                "DAIMON_TEAMS__CLIENT_SECRET",
+            )
+        )
+        or os.environ.get("DAIMON_DATABASE__URL") not in (None, "", _DEFAULT_URL)
+    )
     completed: list[str] = []
     workspace_name = "DAIMON_CLI__WORKSPACE_ID"
     if not values.get(workspace_name):

@@ -32,7 +32,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Non-root runtime user
 RUN useradd --uid 1000 --create-home daimon
 
-# uv binary needed for `uv run alembic` in init service
+# Keep uv available for runtime maintenance commands.
 COPY --from=ghcr.io/astral-sh/uv:0.9.11 /uv /usr/local/bin/uv
 
 WORKDIR /app

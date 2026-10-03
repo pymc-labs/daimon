@@ -15,6 +15,7 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.cli.commands import setup as setup_mod
 from daimon.adapters.cli.main import app
+from daimon.adapters.cli.setup_bootstrap import values_from_env
 from daimon.core.ma_identity import derive_tenant_uuid
 from typer.testing import CliRunner
 
@@ -124,6 +125,61 @@ def test_legacy_install_keeps_cli_local_tenant(tmp_path: Path) -> None:
     )
     assert _invoke("--env-file", str(env_file))[0] == 0
     assert _env_values(env_file.read_text())["DAIMON_CLI__WORKSPACE_ID"] == "local"
+
+
+@pytest.mark.parametrize(
+    "existing_line",
+    ["POSTGRES_PASSWORD=existing-password", "DAIMON_DISCORD__BOT_TOKEN=existing-token"],
+)
+def test_partial_legacy_env_keeps_cli_local_tenant(tmp_path: Path, existing_line: str) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(existing_line + "\n")
+    assert _invoke("--env-file", str(env_file))[0] == 0
+    assert _env_values(env_file.read_text())["DAIMON_CLI__WORKSPACE_ID"] == "local"
+
+
+def test_legacy_process_secret_keeps_cli_local_tenant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DAIMON_MCP__JWT_SECRET", "existing-jwt-secret")
+    env_file = tmp_path / ".env"
+    assert _invoke("--env-file", str(env_file))[0] == 0
+    assert _env_values(env_file.read_text())["DAIMON_CLI__WORKSPACE_ID"] == "local"
+
+
+def test_untouched_example_and_fresh_api_key_get_unique_tenants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "new-key")
+    example = Path(__file__).resolve().parents[5] / ".env.example"
+    env_file = tmp_path / ".env"
+    env_file.write_text(example.read_text())
+    assert _invoke("--env-file", str(env_file))[0] == 0
+    assert _env_values(env_file.read_text())["DAIMON_CLI__WORKSPACE_ID"].startswith("install-")
+    second = tmp_path / "new.env"
+    assert _invoke("--env-file", str(second))[0] == 0
+    assert _env_values(second.read_text())["DAIMON_CLI__WORKSPACE_ID"].startswith("install-")
+
+
+def test_inline_comments_do_not_supply_environment_values(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DAIMON_ANTHROPIC__API_KEY= # add later\n"
+        "DAIMON_DISCORD__BOT_TOKEN= # add later\n"
+        "POSTGRES_PASSWORD= # add later\n"
+    )
+    rc, payload = _invoke("--env-file", str(env_file))
+    assert rc == 0
+    assert payload["missing"] == ["DAIMON_ANTHROPIC__API_KEY"]
+    assert payload["optional_actions"][0]["status"] == "needs_token"
+    assert _env_values(env_file.read_text())["DAIMON_CLI__WORKSPACE_ID"].startswith("install-")
+
+
+def test_env_parser_preserves_hash_inside_quotes() -> None:
+    assert values_from_env('TOKEN="part # secret" # trailing comment\nEMPTY= # later\n') == {
+        "TOKEN": "part # secret",
+        "EMPTY": "",
+    }
 
 
 def test_setup_preserves_explicit_cli_workspace(tmp_path: Path) -> None:
@@ -349,6 +405,8 @@ def test_discord_verification_passes_all_checks(
     ]
     assert payload["failures"] == []
     assert "10,000 reachable users" in payload["warnings"][0]
+    assert any("Optional attach_files" in warning for warning in payload["warnings"])
+    assert any("Optional add_reactions" in warning for warning in payload["warnings"])
     assert "test-token" not in json.dumps(payload)
 
 
@@ -526,3 +584,37 @@ def test_discord_channel_must_belong_to_guild(
     )
     assert rc == 1
     assert "channel belongs to another guild" in payload["next_step"]
+
+
+def test_channel_overwrite_can_grant_permissions_missing_from_guild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DAIMON_DISCORD__BOT_TOKEN", raising=False)
+    env_file = _discord_env(tmp_path)
+    all_bits = _PERMISSION_BITS | (1 << 6) | (1 << 15)
+    _mock_discord(
+        monkeypatch,
+        {
+            "/api/v10/users/@me": (200, {"id": "123", "bot": True}),
+            "/api/v10/oauth2/applications/@me": (200, {"flags": 1 << 19}),
+            "/api/v10/guilds/456/members/123": (200, {"roles": ["789"]}),
+            "/api/v10/guilds/456/roles": (200, [{"id": "456", "permissions": "0"}]),
+            "/api/v10/channels/999": (
+                200,
+                {
+                    "guild_id": "456",
+                    "permission_overwrites": [
+                        {"id": "123", "type": 1, "allow": str(all_bits), "deny": "0"}
+                    ],
+                },
+            ),
+        },
+    )
+    rc, payload = _invoke(
+        "verify", "discord", "--env-file", str(env_file), "--guild-id", "456", "--channel-id", "999"
+    )
+    assert rc == 0
+    assert payload["status"] == "passed"
+    assert payload["completed"][-1] == "channel_permissions"
+    assert not any("Missing guild permissions" in item for item in payload["failures"])
+    assert not any("Optional" in item for item in payload["warnings"])

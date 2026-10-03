@@ -26,7 +26,28 @@ _PERMISSIONS = {
     "create_public_threads": 1 << 35,
     "send_messages_in_threads": 1 << 38,
 }
+_OPTIONAL_PERMISSIONS = {
+    "add_reactions": (1 << 6, "feedback reactions"),
+    "attach_files": (1 << 15, "generated file uploads"),
+}
 _ADMINISTRATOR = 1 << 3
+
+
+def _missing_permissions(permissions: int, required: dict[str, int]) -> list[str]:
+    if permissions & _ADMINISTRATOR:
+        return []
+    return sorted(name for name, bit in required.items() if not permissions & bit)
+
+
+def _optional_permission_warnings(permissions: int, location: str) -> list[str]:
+    missing = _missing_permissions(
+        permissions, {name: bit for name, (bit, _) in _OPTIONAL_PERMISSIONS.items()}
+    )
+    return [
+        f"Optional {name} permission is missing in {location}; "
+        f"{_OPTIONAL_PERMISSIONS[name][1]} may be unavailable."
+        for name in missing
+    ]
 
 
 def _emit(payload: dict[str, Any]) -> None:
@@ -258,22 +279,19 @@ def verify_discord(
                                             "Permissions: invalid role permission value."
                                         )
                             if not any(item.startswith("Permissions:") for item in failures):
-                                if permissions & _ADMINISTRATOR:
-                                    completed.append("guild_permissions")
-                                else:
-                                    absent = [
-                                        name
-                                        for name, bit in _PERMISSIONS.items()
-                                        if not permissions & bit
-                                    ]
+                                if not channel_id:
+                                    absent = _missing_permissions(permissions, _PERMISSIONS)
                                     if absent:
                                         failures.append(
                                             "Missing guild permissions: "
-                                            + ", ".join(sorted(absent))
+                                            + ", ".join(absent)
                                             + ". Grant them to the bot's roles in Discord."
                                         )
                                     else:
                                         completed.append("guild_permissions")
+                                    warnings.extend(
+                                        _optional_permission_warnings(permissions, "the guild")
+                                    )
                                 if channel_id and channel_id.isdecimal():
                                     channel, error = _get(client, f"/channels/{channel_id}")
                                     if error:
@@ -306,10 +324,8 @@ def verify_discord(
                                                     "Channel permissions: invalid overwrites."
                                                 )
                                             else:
-                                                absent = sorted(
-                                                    name
-                                                    for name, bit in _PERMISSIONS.items()
-                                                    if not effective & bit
+                                                absent = _missing_permissions(
+                                                    effective, _PERMISSIONS
                                                 )
                                                 if absent:
                                                     failures.append(
@@ -319,6 +335,11 @@ def verify_discord(
                                                     )
                                                 else:
                                                     completed.append("channel_permissions")
+                                                warnings.extend(
+                                                    _optional_permission_warnings(
+                                                        effective, f"channel {channel_id}"
+                                                    )
+                                                )
     next_step = failures[0] if failures else "Discord verification passed."
     _emit(
         {
