@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING
 import anthropic as anthropic_pkg
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.agent_reach import load_handoff_reach
+from daimon.core.agent_reach import load_binding_reach
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -334,7 +334,7 @@ async def hand_over_thread(
     answers_here = channel_config.agent_name == destination.name
     # A channel admin's standing over the destination, read only when it decides.
     reach = (
-        await load_handoff_reach(
+        await load_binding_reach(
             session,
             tenant_id=tenant_id,
             platform=platform,
@@ -344,7 +344,7 @@ async def hand_over_thread(
             default=default,
             caller=caller.channel_admin,
             administered=subject.administered_channel_ids,
-            parent_channel_id=parent_channel_id,
+            channel_id=parent_channel_id,
             is_daimon_managed=destination.is_daimon_managed,
             caller_account_id=caller.account_id,
         )

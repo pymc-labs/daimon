@@ -36,14 +36,17 @@ from collections.abc import Collection, Iterable, Sequence
 from typing import Final, NamedTuple
 
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import AgentReach as ReachFacts
 from daimon.core.authz import (
+    Action,
     AgentRef,
     AgentStanding,
+    Place,
     agent_held_in,
+    authorize,
     build_subject,
     channel_admin_holds,
 )
+from daimon.core.authz import AgentReach as ReachFacts
 from daimon.core.channel_admins import (
     ChannelAdminCaller,
     administered_channel_ids,
@@ -406,7 +409,6 @@ async def _caller_holds(
     caller: ChannelAdminCaller,
     administered: frozenset[str],
     reach: AgentReach,
-    binding: bool = False,
 ) -> bool:
     """Shell half of `channel_admin_holds`. An unreadable policy counts no pin."""
     try:
@@ -432,7 +434,6 @@ async def _caller_holds(
             created_for_channel_id=created_for,
             admin_default_channel_ids=reach.admin_default_channel_ids,
         ),
-        binding=binding,
     )
 
 
@@ -473,6 +474,7 @@ async def may_bind_as_channel_default(
     *,
     tenant_id: uuid.UUID,
     platform: str,
+    channel_id: str,
     agent_names: tuple[str, ...],
     ma_agent_id: str | None,
     default: DeploymentDefault,
@@ -480,48 +482,50 @@ async def may_bind_as_channel_default(
     is_daimon_managed: bool,
     caller_account_id: uuid.UUID | None = None,
 ) -> bool:
-    """Whether `caller` may make the agent the default of a channel they administer.
+    """Whether `caller` may make the agent the default of `channel_id`, which they administer.
 
-    Check the pin first, for everyone, with `authorize(BIND_CHANNEL_DEFAULT)`.
-    Then server admins bind anything. A channel admin binds only agents shared
-    by design (tenant-wide or defaults-managed, which stay read-only to them),
-    or one of their own (`channel_admin_holds` with `binding`: created for or
-    pinned inside their channels) that answers nowhere yet or answers and runs
-    only in their channels. Never another channel's own agent, or one a member
-    made: that would lend its keys and memory to this channel and, before,
-    hand its edit rights to whoever bound it. `caller_account_id` leaves the
-    caller's own live sessions out; None counts them.
+    Server admins bind anything. A channel admin binds by the handoff rule,
+    `authorize(BIND_CHANNEL_DEFAULT)` with `load_binding_reach`: never another
+    channel's own agent, or one a member made, which would lend its keys and
+    memory to this channel. `caller_account_id` leaves the caller's own live
+    sessions out; None counts them. An unreadable policy counts no pin.
     """
-    if caller.is_server_admin or is_daimon_managed:
+    if caller.is_server_admin:
         return True
-    reach = await load_agent_reach(
-        session,
-        tenant_id=tenant_id,
-        platform=platform,
-        agent_names=agent_names,
-        ma_agent_id=ma_agent_id,
-        default=default,
-        caller_account_id=caller_account_id,
-        caller_platform_user_id=caller.platform_user_id,
-    )
-    if reach.is_tenant_wide:
-        return True
+    try:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    except AccessPolicyUnreadable:
+        policy = TenantAccessPolicy()
     administered = await load_administered_channel_ids(
         session, tenant_id=tenant_id, platform=platform, caller=caller
     )
-    return reach.may_move_into(
-        administered, platform_user_id=caller.platform_user_id
-    ) and await _caller_holds(
+    agent = AgentRef.of(*agent_names)
+    reach = await load_binding_reach(
         session,
         tenant_id=tenant_id,
         platform=platform,
-        agent_names=reach.agent_names,
+        policy=policy,
+        agent=agent,
         ma_agent_id=ma_agent_id,
+        default=default,
         caller=caller,
         administered=administered,
-        reach=reach,
-        binding=True,
+        channel_id=channel_id,
+        is_daimon_managed=is_daimon_managed,
+        caller_account_id=caller_account_id,
     )
+    return authorize(
+        policy,
+        subject=build_subject(
+            is_admin=False,
+            platform_user_id=caller.platform_user_id,
+            administered_channel_ids=administered,
+        ),
+        action=Action.BIND_CHANNEL_DEFAULT,
+        agent=agent,
+        place=Place(channel_id=channel_id),
+        reach=reach,
+    ).allowed
 
 
 def _grant_holders(grants: Sequence[ChannelAdminsRow]) -> dict[tuple[str, str], frozenset[str]]:
@@ -535,28 +539,47 @@ def _grant_holders(grants: Sequence[ChannelAdminsRow]) -> dict[tuple[str, str], 
     return {holder: frozenset(channels) for holder, channels in held.items()}
 
 
-async def load_handoff_reach(
+def _held_by_other_admin(
+    policy: TenantAccessPolicy,
+    *,
+    reach: AgentReach,
+    agent: AgentRef,
+    standing: AgentStanding,
+    grants: Sequence[ChannelAdminsRow],
+    caller_platform_user_id: str | None,
+    channel_id: str,
+) -> bool:
+    """Whether a channel admin other than the caller holds the agent local to
+    channels without `channel_id`, which a binding there would take away.
+    """
+    return any(
+        channel_id not in held
+        and reach.is_local_to(held, platform_user_id=user_id if kind == "user" else None)
+        and agent_held_in(policy, agent=agent, standing=standing, channel_ids=held)
+        for (kind, user_id), held in _grant_holders(grants).items()
+        if (kind, user_id) != ("user", caller_platform_user_id)
+    )
+
+
+async def load_binding_reach(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     platform: str,
     policy: TenantAccessPolicy,
     agent: AgentRef,
-    ma_agent_id: str,
+    ma_agent_id: str | None,
     default: DeploymentDefault,
     caller: ChannelAdminCaller,
     administered: frozenset[str],
-    parent_channel_id: str,
+    channel_id: str,
     is_daimon_managed: bool,
     caller_account_id: uuid.UUID | None,
 ) -> ReachFacts:
-    """The facts `authorize(HAND_OFF)` reads for a channel admin of the parent channel.
+    """The facts `authorize` reads for a channel admin binding the agent into `channel_id`.
 
-    The facts `may_bind_as_channel_default` reads, since a thread binding makes
-    the agent answer here as a default would, plus whether another channel
-    admin holds it local to channels without this one. Each user and group a
-    grant names counts on its own, so one person's grants split across both
-    fails closed. DB reads only: safe under the tenant policy lock.
+    As a channel's default, or a thread under it handed off (`HAND_OFF`).
+    DB reads only: safe under the tenant policy lock.
     """
     if is_daimon_managed:
         return ReachFacts(managed=True)
@@ -575,11 +598,10 @@ async def load_handoff_reach(
     standing = AgentStanding(
         created_for_channel_id=await get_creation_channel(
             session, tenant_id=tenant_id, ma_agent_id=ma_agent_id, platform=platform
-        ),
+        )
+        if ma_agent_id is not None
+        else None,
         admin_default_channel_ids=reach.admin_default_channel_ids,
-    )
-    holders = _grant_holders(
-        await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
     )
     return ReachFacts(
         local_to_caller=reach.may_move_into(administered, platform_user_id=caller.platform_user_id),
@@ -594,12 +616,14 @@ async def load_handoff_reach(
             standing=standing,
             binding=True,
         ),
-        held_by_other_admin=any(
-            parent_channel_id not in channels
-            and reach.is_local_to(channels, platform_user_id=holder_id if kind == "user" else None)
-            and agent_held_in(policy, agent=agent, standing=standing, channel_ids=channels)
-            for (kind, holder_id), channels in holders.items()
-            if (kind, holder_id) != ("user", caller.platform_user_id)
+        held_by_other_admin=_held_by_other_admin(
+            policy,
+            reach=reach,
+            agent=agent,
+            standing=standing,
+            grants=await list_channel_admins(session, tenant_id=tenant_id, platform=platform),
+            caller_platform_user_id=caller.platform_user_id,
+            channel_id=channel_id,
         ),
     )
 
@@ -708,7 +732,7 @@ __all__ = [
     "UnattendedRights",
     "build_agent_reach",
     "load_agent_reach",
-    "load_handoff_reach",
+    "load_binding_reach",
     "load_target_facts",
     "may_bind_as_channel_default",
     "record_created_for_channel",

@@ -206,6 +206,55 @@ async def test_channel_admin_sets_only_their_own_channels_default(
     )
 
 
+@pytest.mark.parametrize("other_admin", [False, True], ids=["theirs-alone", "shared-hold"])
+async def test_channel_admin_never_sets_a_default_another_channel_admin_would_lose(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    other_admin: bool,
+) -> None:
+    """helper was made for OTHER_CHANNEL and answers there. USER administers both
+    channels; when another user administers OTHER_CHANNEL too, making helper
+    CHANNEL's default would take it out of their channels, as a handoff would."""
+    monkeypatch.setattr(
+        propagation,
+        "resolve_setup_agent",
+        AsyncMock(return_value=SimpleNamespace(id="agent_helper", name="helper", metadata={})),
+    )
+    tenant_id = await _tenant(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    admin = _auth(tenant_id, admin=True)
+    await _set_channel_admins_impl(runtime, admin, channel_id=CHANNEL, role_ids=[], user_ids=[USER])
+    others = ["555555555555555555"] if other_admin else []
+    await _set_channel_admins_impl(
+        runtime, admin, channel_id=OTHER_CHANNEL, role_ids=[], user_ids=[USER, *others]
+    )
+    async with committing_sessionmaker.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=OTHER_CHANNEL),
+            tenant_id=tenant_id,
+            agent_name="helper",
+        )
+        await record_creation_channel(
+            session,
+            tenant_id=tenant_id,
+            ma_agent_id="agent_helper",
+            platform="discord",
+            channel_id=OTHER_CHANNEL,
+        )
+    member = _auth(tenant_id)
+    if other_admin:
+        with pytest.raises(ToolError, match="another channel admin holds it"):
+            await propagation._set_agent_default_impl(runtime, member, "helper", CHANNEL)  # pyright: ignore[reportPrivateUsage]
+        return
+    await propagation._set_agent_default_impl(runtime, member, "helper", CHANNEL)  # pyright: ignore[reportPrivateUsage]
+    async with committing_sessionmaker() as session:
+        row = await get_scope(
+            session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL)
+        )
+    assert row is not None and row.agent_name == "helper", "USER alone holds helper, so it binds"
+
+
 def _agent(tenant_id: uuid.UUID, name: str) -> BetaManagedAgentsAgent:
     """The resolved agent the edit tools pass, so sharing reads its routines and sessions."""
     metadata = {"daimon_tenant": str(tenant_id), "daimon_name": name}

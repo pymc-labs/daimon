@@ -85,7 +85,8 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   budget; a channel admin may not, even for the channels they administer.
 - **Fork**: an admin's call, and a pinned agent can't be copied at all.
 - **Channel default**: nobody makes a pinned agent the default of a channel
-  outside its pin, since it would refuse every turn there.
+  outside its pin, since it would refuse every turn there. A channel admin
+  (`Request.reach`) binds by the handoff rule below.
 - **Handoff** (`HAND_OFF`): handing a thread to another agent is starting a
   turn there as that agent, so protection, the invoker allowlist, the pin and
   isolation all apply, with no admin exemption. A member may bring in an agent
@@ -363,11 +364,12 @@ class AgentReach:
     administered channels (`daimon.core.agent_reach`); and ``held_by_caller``
     one that is the caller's as a channel admin (`channel_admin_holds`).
 
-    For HAND_OFF, as for a default binding: ``local_to_caller`` also counts an
-    agent that answers nowhere yet, ``held_by_caller`` is read with `binding`,
-    ``tenant_wide`` is the tenant default or the deployment fall-through, and
-    ``held_by_other_admin`` an agent another channel admin holds and keeps
-    local to channels without this place, which a binding here would take away.
+    For HAND_OFF and BIND_CHANNEL_DEFAULT (`load_binding_reach`):
+    ``local_to_caller`` also counts an agent that answers nowhere yet,
+    ``held_by_caller`` is read with `binding`, ``tenant_wide`` is the tenant
+    default or the deployment fall-through, and ``held_by_other_admin`` an
+    agent another channel admin holds and keeps local to channels without
+    this place, which a binding here would take away.
     """
 
     managed: bool = False
@@ -589,12 +591,18 @@ def _decide_hand_off(policy: TenantAccessPolicy, req: Request) -> Decision:
             return _deny("sealed")
         # The default-binding rule: answering here would lend another
         # channel's own agent's keys and memory to this channel.
-        reach = req.reach or AgentReach()
-        bindable = reach.managed or reach.tenant_wide
-        bindable = bindable or (reach.local_to_caller and reach.held_by_caller)
-        if bindable and not reach.held_by_other_admin:
+        if _channel_admin_binds(req.reach or AgentReach()):
             return ALLOW
     return _deny("admin_required")
+
+
+def _channel_admin_binds(reach: AgentReach) -> bool:
+    """A channel admin's default binding or handoff: an agent shared by design,
+    or theirs and staying in their channels, unless another channel admin
+    would lose their hold on it."""
+    bindable = reach.managed or reach.tenant_wide
+    bindable = bindable or (reach.local_to_caller and reach.held_by_caller)
+    return bindable and not reach.held_by_other_admin
 
 
 def _protected(policy: TenantAccessPolicy, place: Place) -> bool:
@@ -841,6 +849,9 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             return _deny("agent_pinned_elsewhere")
         if _crosses_isolation(agent, place):
             return _deny("channel_isolated")
+        # A channel admin's binding carries `reach`; the handoff rule decides it.
+        if req.reach is not None and not _channel_admin_binds(req.reach):
+            return _deny("admin_required")
         return ALLOW
 
     if req.action is Action.SET_CHANNEL_ENVIRONMENT:

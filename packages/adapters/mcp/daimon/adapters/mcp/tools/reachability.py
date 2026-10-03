@@ -122,7 +122,7 @@ async def require_bindable_as_channel_default(
     is_daimon_managed: bool,
 ) -> None:
     """Raise ``ToolError`` when the agent is pinned elsewhere, or a channel admin
-    binds another channel's own agent."""
+    binds another channel's own agent or one another channel admin holds."""
     names = tuple(name for name in _target_names(agent_name, agent) if name)
     async with runtime.session_factory() as session:
         try:
@@ -155,6 +155,7 @@ async def require_bindable_as_channel_default(
             session,
             tenant_id=auth.tenant_id,
             platform=auth.platform or "",
+            channel_id=channel_id,
             agent_names=names,
             ma_agent_id=str(agent.id) if agent is not None else None,
             default=runtime.deployment_default,
@@ -166,10 +167,11 @@ async def require_bindable_as_channel_default(
     raise ToolError(
         f"'{agent_name}' was not made for or pinned to the channels this caller administers, "
         "answers in channels they do not administer, has other people's conversations or "
-        "routines whose channel is unknown, or runs unattended for someone with wider rights, "
-        "so only a workspace or server admin can make it this channel's default. A channel "
-        "admin may pick a built-in agent, the workspace default, or an agent made for or "
-        "pinned to their channels that answers nowhere else. Nothing was changed. Do not retry."
+        "routines whose channel is unknown, runs unattended for someone with wider rights, "
+        "or another channel admin holds it in channels without this one, so only a workspace "
+        "or server admin can make it this channel's default. A channel admin may pick a "
+        "built-in agent, the workspace default, or an agent made for or pinned to their "
+        "channels that answers nowhere else. Nothing was changed. Do not retry."
     )
 
 

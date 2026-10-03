@@ -224,6 +224,7 @@ async def test_channel_admin_binds_only_shared_agents_or_their_own(
             db_session,
             tenant_id=tenant.id,
             platform="discord",
+            channel_id="a",
             agent_names=(name,),
             ma_agent_id=agent_id,
             default=DEFAULT,
@@ -379,6 +380,54 @@ async def _member(db_session: AsyncSession, tenant, user_id: str, *, admin: bool
     return account
 
 
+@pytest.mark.parametrize(
+    ("c2_admins", "allowed"),
+    [(("u1",), True), (("u1", "u2"), False)],
+    ids=["theirs-alone", "another-admin-would-lose-it"],
+)
+async def test_a_channel_admin_never_binds_an_agent_away_from_another_channel_admin(
+    db_session: AsyncSession, c2_admins: tuple[str, ...], allowed: bool
+) -> None:
+    """The handoff rule: research was made for c2 and answers there. u1 administers
+    c1 and c2; binding it as c1's default would take it out of u2's channels."""
+    tenant = await make_tenant(db_session)
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c2"),
+        tenant_id=tenant.id,
+        agent_name="research",
+    )
+    await record_creation_channel(
+        db_session,
+        tenant_id=tenant.id,
+        ma_agent_id="ag_research",
+        platform="discord",
+        channel_id="c2",
+    )
+    await _grant(db_session, tenant.id, "c1", "u1")
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="c2",
+        role_ids=[],
+        user_ids=list(c2_admins),
+        actor_account_id=None,
+    )
+    may_bind = await may_bind_as_channel_default(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="c1",
+        agent_names=("research",),
+        ma_agent_id="ag_research",
+        default=DEFAULT,
+        caller=ChannelAdminCaller(platform_user_id="u1"),
+        is_daimon_managed=False,
+    )
+    assert may_bind is allowed, "only a binding that costs no other channel admin their hold"
+
+
 async def test_only_a_stronger_requesters_routine_keeps_an_agent_from_a_channel_admin(
     db_session: AsyncSession,
 ) -> None:
@@ -425,6 +474,7 @@ async def test_only_a_stronger_requesters_routine_keeps_an_agent_from_a_channel_
         db_session,
         tenant_id=tenant.id,
         platform="discord",
+        channel_id="c1",
         agent_names=("scheduled",),
         ma_agent_id=None,
         default=DEFAULT,
@@ -894,6 +944,7 @@ async def test_an_agent_answering_nowhere_is_local_to_no_channel_admin(
             db_session,
             tenant_id=tenant.id,
             platform="discord",
+            channel_id="c9",
             agent_names=("unrouted",),
             ma_agent_id="agent_x",
             default=DEFAULT,
