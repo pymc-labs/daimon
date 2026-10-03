@@ -580,6 +580,8 @@ async def test_verifier_rechecks_a_stored_discord_role_against_the_members_roles
         httpx.Response(200, json={"roles": []}),
         httpx.Response(404, json={"code": 10007}),
         httpx.Response(500),
+        httpx.Response(200, text="<html>"),
+        httpx.Response(200, json=["333333333333333333"]),
     ]
     asked: list[httpx.Request] = []
 
@@ -612,6 +614,8 @@ async def test_verifier_rechecks_a_stored_discord_role_against_the_members_roles
     assert await administered() == [], "the role was taken away"
     assert await administered() == [], "left the guild"
     assert await administered() == [], "a failed read grants nothing"
+    assert await administered() == [], "neither does a body that isn't JSON"
+    assert await administered() == [], "or isn't a member object"
 
 
 async def _agent_token(

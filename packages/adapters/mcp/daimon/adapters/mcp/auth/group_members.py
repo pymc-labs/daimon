@@ -53,7 +53,11 @@ class DiscordMembers:
             return frozenset()
         if response.status_code != 200:
             raise GroupLookupFailed(f"discord answered {response.status_code}")
-        roles: object = response.json().get("roles")
+        try:
+            body: object = response.json()
+        except ValueError as exc:
+            raise GroupLookupFailed("not json") from exc
+        roles: object = body.get("roles") if isinstance(body, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]  # JSON object
         if not isinstance(roles, list):
             raise GroupLookupFailed("no roles in the response")
         return frozenset(str(role) for role in roles)  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]  # JSON list

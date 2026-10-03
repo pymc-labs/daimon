@@ -40,7 +40,8 @@ class TestDiscordRuntime:
             "resolver_cache",
             "turn_deps",
             "mcp_token_probe",
-        }, f"expected 9 fields, got {fields}"
+            "group_members",
+        }, f"expected 10 fields, got {fields}"
 
     def test_frozen(self) -> None:
         """DiscordRuntime should be immutable (frozen=True)."""
