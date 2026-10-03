@@ -31,16 +31,7 @@ _LOOK_ALIKES = str.maketrans({"O": "0", "I": "1", "L": "1"})
 MAX_PROMO_AMOUNT_USD = Decimal("999999.99")
 
 PromoRefusal = Literal[
-    "invalid",
-    "revoked",
-    "not_started",
-    "expired",
-    "exhausted",
-    "already_redeemed",
-    "throttled",
-    "needs_channel",
-    "no_channel_budget",
-    "not_allowed",
+    "invalid", "revoked", "not_started", "expired", "exhausted", "already_redeemed", "throttled"
 ]
 """Why a redemption was refused."""
 
@@ -52,9 +43,6 @@ _REFUSAL_TEXT: dict[PromoRefusal, str] = {
     "exhausted": "That code has been fully redeemed.",
     "already_redeemed": "That code was already redeemed here.",
     "throttled": "Too many failed attempts. Try again in a few minutes.",
-    "needs_channel": "That code raises a channel's budget. Redeem it in that channel.",
-    "no_channel_budget": "That code raises a channel's budget, and this channel has none.",
-    "not_allowed": "Only a workspace or server admin can redeem that code.",
 }
 
 
@@ -134,7 +122,6 @@ def build_promo_code_terms(
     *,
     amount_usd: Decimal,
     timed: bool,
-    channel_budget: bool = False,
     credit_starts_at: datetime | None = None,
     credit_ends_at: datetime | None = None,
     redeem_starts_at: datetime | None = None,
@@ -142,11 +129,7 @@ def build_promo_code_terms(
     max_redemptions: int | None = None,
     note: str | None = None,
 ) -> PromoCodeTerms:
-    """Validate operator input. A timed code's redemption ends with its credit by default.
-
-    A ``channel_budget`` code raises one channel's budget limit by the amount
-    and takes no credit window.
-    """
+    """Validate operator input. A timed code's redemption ends with its credit by default."""
     if not amount_usd.is_finite() or amount_usd <= 0:
         raise PromoCodeError("amount must be a positive dollar amount")
     if amount_usd > MAX_PROMO_AMOUNT_USD:
@@ -154,8 +137,6 @@ def build_promo_code_terms(
     exponent = amount_usd.as_tuple().exponent
     if isinstance(exponent, int) and exponent < -2:
         raise PromoCodeError("amount must have at most two decimal places")
-    if timed and channel_budget:
-        raise PromoCodeError("a code is timed credit or a channel budget raise, not both")
     if timed:
         if credit_starts_at is None or credit_ends_at is None:
             raise PromoCodeError("a timed code needs both a credit start and a credit end")
@@ -166,7 +147,6 @@ def build_promo_code_terms(
             raise PromoCodeError("a timed code cannot stay redeemable after its credit ends")
     elif credit_starts_at is not None or credit_ends_at is not None:
         raise PromoCodeError("a credit start or end needs a timed code")
-    kind: PromoCodeKind = "timed" if timed else "channel_budget" if channel_budget else "credit"
     if (
         redeem_starts_at is not None
         and redeem_ends_at is not None
@@ -177,7 +157,7 @@ def build_promo_code_terms(
         raise PromoCodeError("max redemptions must be at least 1")
     return PromoCodeTerms(
         amount_usd=amount_usd,
-        kind=kind,
+        kind="timed" if timed else "credit",
         note=(note or "").strip() or None,
         credit_starts_at=credit_starts_at,
         credit_ends_at=credit_ends_at,

@@ -116,19 +116,11 @@ async def test_no_notice_while_the_budget_has_room(db_session: AsyncSession) -> 
     assert await _claim(db_session, tenant) is None
 
 
-async def test_setting_or_raising_the_budget_rearms_the_notice(db_session: AsyncSession) -> None:
+async def test_setting_the_budget_again_rearms_the_notice(db_session: AsyncSession) -> None:
     tenant = await _spent_channel(db_session)
     assert await _claim(db_session, tenant) is not None
     await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("1"))
     assert await _claim(db_session, tenant) is not None, "a budget set again is a new window"
-    await channel_budgets.raise_channel_budget(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        channel_id="chan-1",
-        amount_usd=Decimal("0"),
-    )
-    assert await _claim(db_session, tenant) is not None, "so is a raised one"
 
 
 async def test_releasing_an_old_window_leaves_the_newer_claim(db_session: AsyncSession) -> None:

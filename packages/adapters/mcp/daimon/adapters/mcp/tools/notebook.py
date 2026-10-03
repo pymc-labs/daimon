@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import httpx
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import require_publishable
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.notebooks.attach import InvalidAttachmentError
 from daimon.core.notebooks.host_client import NotebookHostError
@@ -138,7 +139,11 @@ async def _list_notebooks_impl(
 def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def create_notebook_upload_url(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, slug: str | None = None, permanent: bool = False, editable: bool = False
+        ctx: Context,
+        slug: str | None = None,
+        permanent: bool = False,
+        editable: bool = False,
+        origin_context_id: str | None = None,
     ) -> dict[str, str]:
         """Mint a one-time upload URL for a marimo notebook.
 
@@ -167,8 +172,12 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         notebooks); share that whole url. Its access_token is the notebook's only
         key, so share it only where the notebook belongs. Never paste large file
         contents into a tool argument.
+
+        Pass this turn's origin_context_id. A pinned agent, or a turn in an
+        isolated channel, publishes nothing.
         """
         auth = await _auth(ctx)
+        await require_publishable(runtime, auth, origin_context_id=origin_context_id)
         return await _create_notebook_upload_impl(
             runtime,
             slug=slug,
@@ -180,7 +189,7 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def create_attachment_upload_url(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, slug: str, name: str
+        ctx: Context, slug: str, name: str, origin_context_id: str | None = None
     ) -> dict[str, str]:
         """Mint a one-time upload URL for a raw data file in a notebook/blog workspace.
 
@@ -192,8 +201,10 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         name is the agent-visible filename (charset [A-Za-z0-9_][A-Za-z0-9_.-]{0,63},
         no slash); it becomes data/<name> inside the notebook. slug must match the slug
         you publish the notebook/blog under. Returns {upload_url, slug, upload_expires_at}.
+        Pass this turn's origin_context_id, as for create_notebook_upload_url.
         """
         auth = await _auth(ctx)
+        await require_publishable(runtime, auth, origin_context_id=origin_context_id)
         return await _create_attachment_upload_impl(
             runtime,
             slug=slug,

@@ -25,22 +25,30 @@ from typing import Final
 import anthropic
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment
+from daimon.core.access_policy import isolated_channel_of
 from daimon.core.answering_map import AnsweringMap
-from daimon.core.authz import Action, Decision, Place, Subject, authorize
+from daimon.core.authz import Action, Decision, Place, Subject, authorize, holds_seal
+from daimon.core.channel_isolation import IsolationViewer, load_isolation_viewer
 from daimon.core.defaults.ma_index import (
     find_environment_by_daimon_tag,
     list_environments_by_tenant,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.scope import (
+    ChannelConfigRow,
     ChannelScopeRef,
     ConfigTier,
     DeploymentDefault,
     ScopeContext,
+    TenantConfigRow,
     TenantScopeRef,
 )
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.scoped_config_read import get_scope, resolve
+from daimon.core.stores.scoped_config_read import (
+    get_scope,
+    list_propagations_for_tenant,
+    resolve,
+)
 from daimon.core.stores.scoped_config_write import set_fields, unset_fields
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -107,6 +115,25 @@ def build_sealed_network_refusal(*, environment_name: str | None) -> str:
         "admin can make that change here. Nothing changed. Pick an environment with limited "
         "networking and no allowed hosts, or ask a server admin."
     )
+
+
+def build_sealed_network_confirm(*, environment_name: str | None, panel: bool = False) -> str:
+    """Why a server admin's pick in a sealed channel waits for a confirmation.
+
+    A panel has no confirm step, so it points at chat, whose tool asks for one.
+    """
+    what = (
+        f"the {environment_name} environment has"
+        if environment_name is not None
+        else "the default it would fall back to has"
+    )
+    note = (
+        f"This channel is sealed, and {what} unrestricted network access, so its content "
+        "could leave through it. Nothing changed."
+    )
+    if panel:
+        note += " To use it anyway, ask daimon to make the change in chat and confirm there."
+    return note
 
 
 def build_environment_resolution_note(
@@ -195,15 +222,72 @@ def plan_environment_picker(
     )
 
 
-async def list_environment_names(client: AsyncAnthropic, *, tenant_id: uuid.UUID) -> list[str]:
+async def list_environment_names(
+    client: AsyncAnthropic, *, tenant_id: uuid.UUID, hidden: frozenset[str] = frozenset()
+) -> list[str]:
     """The names a scope may pick in this tenant, de-duplicated and sorted case-insensitively.
 
     The name is the resolver's key (`daimon_name`), the same one a turn and a
-    save look up; an environment without one cannot be picked, so is left out.
+    save look up; an environment without one cannot be picked, so is left out,
+    as is one in `hidden` (`load_hidden_environment_names`).
     """
     environments = await list_environments_by_tenant(client, tenant_id=tenant_id)
     names = {name for env in environments if (name := env.metadata.get(MA_METADATA_KEY_NAME))}
-    return sorted(names, key=str.casefold)
+    return sorted(names - hidden, key=str.casefold)
+
+
+def hidden_environment_names(
+    viewer: IsolationViewer,
+    *,
+    tenant: TenantConfigRow | None,
+    channels: Sequence[ChannelConfigRow],
+    default: DeploymentDefault,
+) -> frozenset[str]:
+    """Names only isolated channels the viewer stands outside pick. Pure.
+
+    A name could name the client a channel serves. One a default or any other
+    channel uses is shared, so stays seen.
+    """
+    hidden: set[str] = set()
+    shown = {tenant.environment_name if tenant is not None else None, default.environment_name}
+    for row in channels:
+        if row.environment_name:
+            owner = isolated_channel_of(viewer.policy, row.channel_id)
+            across = owner not in (None, viewer.inside_channel_id)
+            (hidden if across else shown).add(row.environment_name)
+    return frozenset(hidden - shown)
+
+
+async def load_hidden_environment_names(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    viewer: IsolationViewer | None,
+    default: DeploymentDefault,
+) -> frozenset[str]:
+    """`hidden_environment_names` for `viewer`; None, or nothing isolated, hides none."""
+    if viewer is None or not viewer.is_active:
+        return frozenset()
+    tenant, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
+    return hidden_environment_names(viewer, tenant=tenant, channels=channels, default=default)
+
+
+async def load_panel_hidden_environment_names(
+    session: AsyncSession,
+    client: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    is_admin: bool,
+    default: DeploymentDefault,
+) -> frozenset[str]:
+    """What a panel reader at `channel_id` doesn't see; a server admin sees every name."""
+    viewer = await load_isolation_viewer(
+        session, client, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
+    )
+    return await load_hidden_environment_names(
+        session, tenant_id=tenant_id, viewer=viewer, default=default
+    )
 
 
 def has_open_network(environment: BetaEnvironment) -> bool:
@@ -252,6 +336,9 @@ class EnvironmentPick:
     """The environment being set; None on a clear or a refusal."""
     missing: bool = False
     """A set naming no environment of the tenant: nothing to write."""
+    needs_confirm: bool = False
+    """An allowed pick leaves a sealed channel on an open network: written only
+    once the server admin confirms it."""
 
     @property
     def environment_name(self) -> str | None:
@@ -278,7 +365,8 @@ async def authorize_environment_pick(
     default, which then decides the network rule; a missing default counts
     as open. A set looks its environment up once, after the admin check, and
     one that doesn't exist is `missing`. `thread_id` is a thread under
-    `channel_id` the pick names, so a seal on that thread counts.
+    `channel_id` the pick names, so a seal on that thread counts. A pick only
+    a server admin may make, an open network in a sealed channel, `needs_confirm`.
     """
     policy = await load_access_policy(session, tenant_id=tenant_id)
     place = Place(
@@ -298,15 +386,21 @@ async def authorize_environment_pick(
     gate = decide(open_network=False)
     if not gate:
         return EnvironmentPick(decision=gate)
+    sealed = channel_id is not None and holds_seal(policy, channel_id, place)
     if environment_name is not None:
         environment = await find_environment_by_daimon_tag(
             client, tenant_id=tenant_id, name=environment_name
         )
         if environment is None:
             return EnvironmentPick(decision=gate, missing=True)
-        decision = decide(open_network=has_open_network(environment))
-        return EnvironmentPick(decision=decision, environment=environment if decision else None)
-    if decide(open_network=True):
+        open_network = has_open_network(environment)
+        decision = decide(open_network=open_network)
+        return EnvironmentPick(
+            decision=decision,
+            environment=environment if decision else None,
+            needs_confirm=bool(decision) and sealed and open_network,
+        )
+    if not sealed:
         return EnvironmentPick(decision=gate)
     fallback = await resolve(
         session, context=ScopeContext(tenant_id=tenant_id, channel_id=None), default=default
@@ -314,9 +408,9 @@ async def authorize_environment_pick(
     environment = await find_environment_by_daimon_tag(
         client, tenant_id=tenant_id, name=fallback.environment_name or "default"
     )
-    return EnvironmentPick(
-        decision=decide(open_network=environment is None or has_open_network(environment))
-    )
+    open_network = environment is None or has_open_network(environment)
+    decision = decide(open_network=open_network)
+    return EnvironmentPick(decision=decision, needs_confirm=bool(decision) and open_network)
 
 
 SEALED_OPEN_NETWORK_WARNING: Final = (
@@ -410,12 +504,16 @@ __all__ = [
     "build_clear_environment_note",
     "build_environment_resolution_note",
     "build_missing_environment_note",
+    "build_sealed_network_confirm",
     "build_sealed_network_refusal",
     "build_set_environment_note",
     "environment_choices",
     "environment_option_value",
     "has_open_network",
+    "hidden_environment_names",
     "list_environment_names",
+    "load_hidden_environment_names",
+    "load_panel_hidden_environment_names",
     "may_pick_environment_in",
     "parse_environment_option",
     "plan_environment_picker",

@@ -19,7 +19,12 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import require_channel_writable, turn_origin_place
+from daimon.adapters.mcp.tools._channel_policy import (
+    require_channel_writable,
+    require_identity_changeable,
+    require_publishable,
+    turn_origin_place,
+)
 from daimon.adapters.mcp.tools.agents import (
     AgentInfo,
     _create_agent_impl,  # pyright: ignore[reportPrivateUsage]
@@ -31,6 +36,10 @@ from daimon.adapters.mcp.tools.channel_isolation import (
     _set_channel_isolation_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
+from daimon.adapters.mcp.tools.environments import (
+    _get_environment_impl,  # pyright: ignore[reportPrivateUsage]
+    _list_environments_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.propagation import (
     _clear_agent_default_impl,  # pyright: ignore[reportPrivateUsage]
     _explain_agent_resolution_impl,  # pyright: ignore[reportPrivateUsage]
@@ -49,6 +58,7 @@ from daimon.adapters.mcp.tools.timers import (
     _list_timers_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.channel_environments import save_scope_environment
 from daimon.core.continuity.timers import schedule_timer
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
@@ -61,7 +71,7 @@ from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.turn_origins import create_origin, get_active_origin
 from daimon.core.stores.user_skills import upsert_user_skill
-from daimon.testing import ma_agent
+from daimon.testing import ma_agent, ma_environment
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma import (
@@ -418,9 +428,9 @@ async def test_posts_and_direct_messages_stay_on_their_side(
 
 
 async def _setup_thread_origin(
-    sessionmaker: async_sessionmaker[AsyncSession], world: _World
+    sessionmaker: async_sessionmaker[AsyncSession], world: _World, *, channel: str = ROOM
 ) -> str:
-    """A setup conversation in C, answered by the built-in (``shared`` here)."""
+    """A setup conversation in C (or `channel`), answered by the built-in (``shared`` here)."""
     now = dt.datetime.now(dt.UTC)
     async with sessionmaker.begin() as session:
         origin = await create_origin(
@@ -428,7 +438,7 @@ async def _setup_thread_origin(
             tenant_id=world.tenant_id,
             account_id=world.account_id,
             platform="discord",
-            parent_channel_id=ROOM,
+            parent_channel_id=channel,
             thread_id=SETUP_THREAD,
             responder_ma_agent_id="agent_shared",
             responder_name="shared",
@@ -665,6 +675,113 @@ async def test_an_own_agent_creates_no_agent(
             await _create_agent_impl(runtime, auth, spec)
     names = {str(agent["name"]) for agent in world.state.agents.values()}
     assert names == {"local", "shared"}, "no agent was created"
+
+
+async def test_an_own_agent_publishes_and_renames_daimon_nowhere(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A link, or daimon's server nickname, shows outside C: refused for every caller."""
+    world, runtime = await _world(committing_sessionmaker)
+    for auth in _own_agent_callers(world).values():
+        with pytest.raises(ToolError, match="isolated channel, so publishing is refused"):
+            await require_publishable(runtime, auth, origin_context_id=None)
+        with pytest.raises(ToolError, match="server-wide name or avatar is refused"):
+            await require_identity_changeable(runtime, auth, origin_context_id=None)
+
+
+async def test_publishing_is_held_by_the_turns_origin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A shared agent publishes from outside C, not from C's setup thread, and not with no
+    origin while C is isolated. A call with no executing agent is held nowhere."""
+    world, runtime = await _world(committing_sessionmaker)
+    builtin = world.auth(executing="agent_shared")
+    inside = await _setup_thread_origin(committing_sessionmaker, world)
+    with pytest.raises(ToolError, match="isolated channel"):
+        await require_publishable(runtime, builtin, origin_context_id=inside)
+    with pytest.raises(ToolError, match="origin_context_id"):
+        await require_publishable(runtime, builtin, origin_context_id=None)
+    outside = await _setup_thread_origin(committing_sessionmaker, world, channel=OTHER)
+    await require_publishable(runtime, builtin, origin_context_id=outside)
+    await require_publishable(runtime, world.auth(), origin_context_id=None)
+
+
+async def test_a_pinned_agent_publishes_nothing_even_for_an_admin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker, isolate=False)
+    async with committing_sessionmaker.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=world.tenant_id,
+            policy=TenantAccessPolicy(agent_channel_pins={"local": (ROOM,)}),
+        )
+    with pytest.raises(ToolError, match="pinned to its own channels"):
+        await require_publishable(
+            runtime, world.auth(executing="agent_local"), origin_context_id=None
+        )
+    await require_publishable(runtime, world.auth(executing="agent_shared"), origin_context_id=None)
+
+
+async def test_a_chat_turn_whose_agent_is_gone_is_refused_while_a_channel_is_isolated(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """It may have been C's own agent, so it must not be judged from outside."""
+    world, runtime = await _world(committing_sessionmaker)
+    with pytest.raises(ToolError, match="could not be found"):
+        await _list_agents_impl(runtime, world.auth(executing="agent_gone"), None)
+
+
+async def test_an_isolated_channels_environment_name_shows_only_inside_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A name only C picks could name its client, so only callers inside C see it. Names
+    other channels pick, and spare ones, show to all; an operator token sees every one."""
+    world, runtime = await _world(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        for channel, name in ((ROOM, "acme-env"), (OTHER, "other-env")):
+            await save_scope_environment(
+                session,
+                tenant_id=world.tenant_id,
+                channel_id=channel,
+                environment_name=name,
+                actor_account_id=world.account_id,
+            )
+    environments = [
+        ma_environment(id=f"env_{name}", name=name, tenant_id=world.tenant_id).model_dump(
+            mode="json"
+        )
+        for name in ("acme-env", "other-env", "spare")
+    ]
+
+    def environments_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/environments":
+            return list_response(environments)
+        raise NotHandled
+
+    runtime = replace(
+        runtime,
+        client=build_fake_anthropic(
+            combine_handlers(environments_handler, make_fake_ma_handler(world.state))
+        ),
+    )
+
+    async def names(auth: AuthIdentity) -> set[str]:
+        return {e.name for e in await _list_environments_impl(runtime, auth, None)}
+
+    assert await names(world.auth()) == {"other-env", "spare"}, "outside C its name is hidden"
+    inside = world.auth(executing="agent_local")
+    assert await names(inside) == {"acme-env", "other-env", "spare"}, "inside C it shows"
+    operator = replace(
+        world.auth(),
+        token_kind="operator",
+        token_jti=uuid.uuid4(),
+        scopes=frozenset({"tenant:read"}),
+    )
+    assert await names(operator) == {"acme-env", "other-env", "spare"}
+    with pytest.raises(ToolError, match="not found"):
+        await _get_environment_impl(runtime, world.auth(), "acme-env")
+    assert (await _get_environment_impl(runtime, inside, "acme-env")).name == "acme-env"
 
 
 async def test_an_own_agent_schedules_nothing_outside(

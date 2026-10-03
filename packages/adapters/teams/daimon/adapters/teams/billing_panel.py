@@ -97,11 +97,6 @@ def _timed_credit(state: BillingPanelState) -> list[str]:
 
 def redeemed_text(result: PromoRedeemed) -> str:
     amount = f"**${result.amount_usd:,.2f}**"
-    if result.channel_limit_usd is not None:
-        return (
-            f"🎟️ Raised channel `{result.channel_id}`'s budget by {amount}, "
-            f"to **${result.channel_limit_usd:,.2f}**."
-        )
     if result.credit_ends_at is None:
         return f"🎟️ Redeemed {amount} of credit. Balance: **${result.balance_usd:,.2f}**."
     window = f"until {card_time(result.credit_ends_at)}"

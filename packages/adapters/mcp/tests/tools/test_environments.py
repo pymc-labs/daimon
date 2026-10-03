@@ -54,17 +54,22 @@ def _ma_env(**overrides: object) -> BetaEnvironment:
     return BetaEnvironment.model_validate(base)
 
 
-def _runtime(client: AsyncAnthropic) -> McpRuntime:
+def _runtime(
+    client: AsyncAnthropic, sessionmaker: async_sessionmaker[AsyncSession] | None = None
+) -> McpRuntime:
     return McpRuntime(
-        session_factory=MagicMock(),
+        session_factory=sessionmaker or MagicMock(),
         client=client,  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
     )
 
 
-async def test_list_environments_impl_returns_list() -> None:
-    tenant_id = uuid.uuid4()
+async def test_list_environments_impl_returns_list(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with committing_sessionmaker.begin() as session:
+        tenant_id = (await make_tenant(session)).id
     account_id = uuid.uuid4()
 
     router = MARouter()
@@ -83,7 +88,9 @@ async def test_list_environments_impl_returns_list() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
-    result = await _list_environments_impl(_runtime(client), auth, page=None)
+    result = await _list_environments_impl(
+        _runtime(client, committing_sessionmaker), auth, page=None
+    )
     assert isinstance(result, list), "should return a list"
     assert [e.name for e in result] == ["e1"], "should list the tenant's environment"
 

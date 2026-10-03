@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _migration() -> ModuleType:
-    path = Path(__file__).parents[1] / "alembic/versions/0043_channel_budget_notices.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0042_channel_budget_notices.py"
     spec = importlib.util.spec_from_file_location("migration_channel_budget_notices", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

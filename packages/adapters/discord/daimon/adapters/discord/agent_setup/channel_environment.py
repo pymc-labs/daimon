@@ -27,10 +27,12 @@ from daimon.core.channel_environments import (
     authorize_environment_pick,
     build_clear_environment_note,
     build_missing_environment_note,
+    build_sealed_network_confirm,
     build_sealed_network_refusal,
     build_set_environment_note,
     environment_option_value,
     list_environment_names,
+    load_panel_hidden_environment_names,
     may_pick_environment_in,
     parse_environment_option,
     plan_environment_picker,
@@ -121,8 +123,18 @@ async def load_environment_picker(
     subject = await load_picker_subject(interaction, runtime=runtime, state=state, live=False)
     if not await may_pick_environment(subject, runtime=runtime, state=state):
         return None
+    tenant_id = panel_tenant_id(state)
     try:
-        names = await list_environment_names(runtime.anthropic, tenant_id=panel_tenant_id(state))
+        async with runtime.sessionmaker() as session:
+            hidden = await load_panel_hidden_environment_names(
+                session,
+                runtime.anthropic,
+                tenant_id=tenant_id,
+                channel_id=str(state.channel_id),
+                is_admin=state.is_admin,
+                default=runtime.deployment_default,
+            )
+        names = await list_environment_names(runtime.anthropic, tenant_id=tenant_id, hidden=hidden)
     except anthropic.APIError:
         log.warning("agent_setup.environment_picker.list_failed", exc_info=True)
         return None
@@ -188,6 +200,11 @@ async def save_environment_choice(
         return REFUSED_MESSAGE
     if name is not None and pick.missing:
         return build_missing_environment_note(name)
+    if pick.needs_confirm:
+        await audit_environment_pick(
+            runtime=runtime, state=state, user_id=user_id, outcome="denied", reason="needs_confirm"
+        )
+        return build_sealed_network_confirm(environment_name=name, panel=True)
     # The environment the network rule judged, not a second lookup by name.
     name = pick.environment_name or name
     async with runtime.sessionmaker.begin() as session:

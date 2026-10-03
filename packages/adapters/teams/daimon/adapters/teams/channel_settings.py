@@ -45,9 +45,11 @@ from daimon.core.channel_environments import (
     authorize_environment_pick,
     build_clear_environment_note,
     build_missing_environment_note,
+    build_sealed_network_confirm,
     build_sealed_network_refusal,
     build_set_environment_note,
     list_environment_names,
+    load_panel_hidden_environment_names,
     may_pick_environment_in,
     parse_environment_option,
     plan_environment_picker,
@@ -198,7 +200,18 @@ class ChannelSettingsDialog:
         picker = None
         if may_pick:
             try:
-                names = await list_environment_names(self._runtime.anthropic, tenant_id=tenant_id)
+                async with self._runtime.sessionmaker() as session:
+                    hidden = await load_panel_hidden_environment_names(
+                        session,
+                        self._runtime.anthropic,
+                        tenant_id=tenant_id,
+                        channel_id=channel_id,
+                        is_admin=actor.is_admin,
+                        default=self._runtime.deployment_default,
+                    )
+                names = await list_environment_names(
+                    self._runtime.anthropic, tenant_id=tenant_id, hidden=hidden
+                )
             except anthropic.APIError:
                 log.warning("teams.channel_settings.environments_unlisted", exc_info=True)
                 names = []
@@ -295,6 +308,9 @@ class ChannelSettingsDialog:
             return CHANNELS_NEED_ADMIN
         if name is not None and pick.missing:
             return build_missing_environment_note(name)
+        if pick.needs_confirm:
+            await self._audit(actor, "environment", outcome="denied", reason="needs_confirm")
+            return build_sealed_network_confirm(environment_name=name, panel=True)
         name = pick.environment_name or name
         account_id = await get_or_create_account(self._runtime, actor)
         async with self._runtime.sessionmaker.begin() as session:

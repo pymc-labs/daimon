@@ -785,7 +785,8 @@
         Omit ``channel_id`` to clear the workspace default, leaving the deployment
         default. The workspace default requires Manage Server (admin); an admin of the
         channel may clear that channel's environment, unless it is sealed and the
-        default has unrestricted networking. A thread id resolves to its parent channel.
+        default has unrestricted networking; then a server admin must confirm it, as
+        for ``set_channel_environment``. A thread id resolves to its parent channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -800,6 +801,10 @@
               }),
             ]),
             'default': None,
+          }),
+          'confirm_open_network': dict({
+            'default': False,
+            'type': 'boolean',
           }),
         }),
         'type': 'object',
@@ -1382,12 +1387,24 @@
         name is the agent-visible filename (charset [A-Za-z0-9_][A-Za-z0-9_.-]{0,63},
         no slash); it becomes data/<name> inside the notebook. slug must match the slug
         you publish the notebook/blog under. Returns {upload_url, slug, upload_expires_at}.
+        Pass this turn's origin_context_id, as for create_notebook_upload_url.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'name': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'slug': dict({
             'type': 'string',
@@ -1769,6 +1786,9 @@
         notebooks); share that whole url. Its access_token is the notebook's only
         key, so share it only where the notebook belongs. Never paste large file
         contents into a tool argument.
+        
+        Pass this turn's origin_context_id. A pinned agent, or a turn in an
+        isolated channel, publishes nothing.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1776,6 +1796,17 @@
           'editable': dict({
             'default': False,
             'type': 'boolean',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'permanent': dict({
             'default': False,
@@ -1803,12 +1834,10 @@
         ``amount_usd`` is the credit per redemption as a decimal string.
         ``credit`` codes stay until spent; ``timed`` codes need
         ``credit_starts_at`` and ``credit_ends_at`` and expire unspent credit
-        at the end. ``channel_budget`` codes add the amount to one channel's
-        budget limit for good instead of the balance; only a server admin
-        redeems them, never the channel's own admins. Redemption is open
-        between ``redeem_starts_at`` and ``redeem_ends_at`` when given (a
-        timed code's defaults to its credit end). Dates are ISO 8601, UTC
-        without an offset. ``code`` is shown only in this result.
+        at the end. Redemption is open between ``redeem_starts_at`` and
+        ``redeem_ends_at`` when given (a timed code's defaults to its credit
+        end). Dates are ISO 8601, UTC without an offset. ``code`` is shown
+        only in this result.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1842,7 +1871,6 @@
             'enum': list([
               'credit',
               'timed',
-              'channel_budget',
             ]),
             'type': 'string',
           }),
@@ -3695,9 +3723,10 @@
         should answer questions (defaults to this tenant's configured
         agent).
         
-        When the answering agent is pinned to channels, a non-admin may only
-        publish its reader from inside them: pass this turn's
-        ``origin_context_id``.
+        Pass this turn's ``origin_context_id``. A pinned agent, or a turn in
+        an isolated channel, publishes nothing: a link reaches whoever holds
+        it. When the answering agent is pinned to channels, a non-admin may
+        only publish its reader from inside them.
         
         Returns ``{upload_url, links}``: ``upload_url`` is a one-time
         capability URL: ``links`` maps each recipient's name to their own
@@ -3927,24 +3956,11 @@
         per server or workspace. Timed credit only exists between its start and
         end and is spent before other credit; whatever is left expires at the
         end. Repeated wrong codes pause redemption for a few minutes. Requires
-        Manage Server (Discord) or workspace admin (Slack). A channel budget
-        code raises one channel's budget limit instead: pass that channel's
-        ``channel_id`` (the id from <channel role="parent_channel">).
+        Manage Server (Discord) or workspace admin (Slack).
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
-          'channel_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
           'code': dict({
             'type': 'string',
           }),
@@ -4976,7 +4992,8 @@
         (``list_environments``). Conversations pick it up from their next message.
         The workspace default requires Manage Server (admin); an admin of the channel
         may set that channel's environment, except one with unrestricted networking in
-        a sealed channel, which needs a server admin.
+        a sealed channel, which needs a server admin and their confirmation: pass
+        ``confirm_open_network=true`` only after the caller confirms it.
         
         Pass the parent channel's id: Discord
         ``<channel platform="discord" id="..." role="parent_channel">``, Slack
@@ -4996,6 +5013,10 @@
               }),
             ]),
             'default': None,
+          }),
+          'confirm_open_network': dict({
+            'default': False,
+            'type': 'boolean',
           }),
           'environment_name': dict({
             'type': 'string',
@@ -5117,7 +5138,8 @@
         per-channel identity, so tell the user when they asked for one
         channel. There is no reset yet: an empty ``display_name`` is treated
         as omitted, so a name cannot be cleared back to the default. Needs a
-        server admin. Discord-only.
+        server admin. Pass this turn's origin_context_id: a pinned agent, or a
+        turn in an isolated channel, can't change it. Discord-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -5134,6 +5156,17 @@
             'default': None,
           }),
           'display_name': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
             'anyOf': list([
               dict({
                 'type': 'string',

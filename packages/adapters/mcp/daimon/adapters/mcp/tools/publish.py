@@ -23,6 +23,7 @@ import httpx
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import require_publishable
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
@@ -98,6 +99,8 @@ async def _publish_report_impl(
     if runtime.settings.mcp.jwt_secret is None:
         raise ToolError("report host not configured: DAIMON_MCP__JWT_SECRET is unset")
     jwt_secret = runtime.settings.mcp.jwt_secret.get_secret_value().encode()
+    if auth is not None:
+        await require_publishable(runtime, auth, origin_context_id=origin_context_id)
     authorize_source = (
         await _source_authorizer(runtime, auth, origin_context_id) if auth is not None else None
     )
@@ -177,9 +180,10 @@ def register_publish_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         should answer questions (defaults to this tenant's configured
         agent).
 
-        When the answering agent is pinned to channels, a non-admin may only
-        publish its reader from inside them: pass this turn's
-        ``origin_context_id``.
+        Pass this turn's ``origin_context_id``. A pinned agent, or a turn in
+        an isolated channel, publishes nothing: a link reaches whoever holds
+        it. When the answering agent is pinned to channels, a non-admin may
+        only publish its reader from inside them.
 
         Returns ``{upload_url, links}``: ``upload_url`` is a one-time
         capability URL: ``links`` maps each recipient's name to their own

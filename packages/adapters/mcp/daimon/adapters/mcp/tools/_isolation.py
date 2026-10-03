@@ -135,7 +135,8 @@ async def load_caller_isolation(
 
     A chat turn's own agent counts (only an isolated channel's own agents run
     there); an agent key's does not, and neither does a location, unless the
-    key is bound to the channel.
+    key is bound to the channel. A chat turn whose agent can't be found is
+    refused while any channel is isolated.
     """
     policy = await load_isolation(runtime, auth.tenant_id)
     if not policy.isolated_channel_ids:
@@ -157,8 +158,14 @@ async def load_caller_isolation(
             ),
             None,
         )
-        if agent is not None:
-            inside = isolation_owner(policy, agent_pin_names(agent.name, agent.metadata))
+        if agent is None:
+            # It may be an isolated channel's own agent: judged from outside, it
+            # would see and reach past its channel.
+            raise ToolError(
+                "this conversation's agent could not be found, so daimon can't tell "
+                "which channel it is held to. Nothing was done. Tell the caller."
+            )
+        inside = isolation_owner(policy, agent_pin_names(agent.name, agent.metadata))
     return CallerIsolation(policy, inside, agent_aliases(agents))
 
 

@@ -209,21 +209,3 @@ async def test_list_table_shows_the_redemption_window(db_session_factory: Factor
     out = _out(table)
     assert "redeem_starts_at" in out, "the table should have a redemption start column"
     assert "2026-06-01" in out and "2026-06-02" in out, "both window ends should be listed"
-
-
-async def test_create_a_channel_budget_code(db_session_factory: Factory) -> None:
-    rt = build_cli_runtime(db_session_factory)
-    await promo_create(rt=rt, console=_console(), amount="5", channel_budget=True)
-    with pytest.raises(typer.BadParameter, match="not both"):
-        await promo_create(
-            rt=rt,
-            console=_console(),
-            amount="5",
-            timed=True,
-            channel_budget=True,
-            starts="2026-06-01",
-            ends="2026-06-02",
-        )
-    async with db_session_factory() as session:
-        [row] = await promo_store.list_promo_codes(session)
-    assert (row.kind, row.credit_starts_at) == ("channel_budget", None), "no credit window"

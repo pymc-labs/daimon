@@ -222,6 +222,23 @@ async def test_a_channel_admin_puts_no_open_network_in_their_sealed_channel(
     assert await _events(db_session_factory) == [("panel:environment", "denied", "authz:sealed")]
 
 
+async def test_a_server_admin_is_sent_to_chat_to_confirm_an_open_network(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """The form has no confirm step, so it writes nothing and points at chat, which asks."""
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session, tenant_id=TENANT, policy=TenantAccessPolicy(sealed_channel_ids=(GROWTH,))
+        )
+    async with _running(db_session_factory, teams_api_fake) as service:
+        held = await post_activity(
+            service, _submit(ADMIN, "environment", channel=GROWTH, environment="env:science")
+        )
+
+    assert "confirm there" in json.dumps(held), json.dumps(held)
+    assert await _events(db_session_factory) == [("panel:environment", "denied", "needs_confirm")]
+
+
 async def test_a_member_gets_no_dialog_and_no_button(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:

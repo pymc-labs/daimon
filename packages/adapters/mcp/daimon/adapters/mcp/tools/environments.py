@@ -17,14 +17,22 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
-from daimon.core.channel_environments import build_archive_environment_note
+from daimon.core.channel_environments import (
+    build_archive_environment_note,
+    load_hidden_environment_names,
+)
 from daimon.core.defaults.ma_index import (
     find_environment_by_daimon_tag,
     find_environments_by_daimon_tag,
     list_environments_by_tenant,
 )
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, build_metadata
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
+    build_metadata,
+)
 from daimon.core.specs import EnvironmentSpec
 from daimon.core.stores.scoped_config_write import clear_environment_references
 from fastmcp import Context, FastMCP
@@ -48,6 +56,20 @@ class EnvironmentInfo(BaseModel):
         )
 
 
+async def _hidden_names(runtime: McpRuntime, auth: AuthIdentity) -> frozenset[str]:
+    """Names only isolated channels across the caller's line pick; an operator sees all."""
+    if auth.is_operator:
+        return frozenset()
+    caller = await load_caller_isolation(runtime, auth)
+    async with runtime.session_factory() as session:
+        return await load_hidden_environment_names(
+            session,
+            tenant_id=auth.tenant_id,
+            viewer=caller,
+            default=runtime.deployment_default,
+        )
+
+
 async def _list_environments_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -56,7 +78,12 @@ async def _list_environments_impl(
     del page
     require_scope(auth, "tenant:read")
     rows = await list_environments_by_tenant(runtime.client, tenant_id=auth.tenant_id)
-    return [EnvironmentInfo.from_ma(e) for e in rows]
+    hidden = await _hidden_names(runtime, auth)
+    return [
+        EnvironmentInfo.from_ma(e)
+        for e in rows
+        if e.metadata.get(MA_METADATA_KEY_NAME) not in hidden
+    ]
 
 
 async def _get_environment_impl(
@@ -65,7 +92,7 @@ async def _get_environment_impl(
     name: str,
 ) -> EnvironmentInfo:
     env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
-    if env is None:
+    if env is None or env.metadata.get(MA_METADATA_KEY_NAME) in await _hidden_names(runtime, auth):
         raise ToolError(f"environment '{name}' not found")
     return EnvironmentInfo.from_ma(env)
 
@@ -183,8 +210,8 @@ async def _archive_environment_impl(
 def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     # Reads are ungated — full visibility for every session, matching the
     # agents/skills read tools. list_environments also opens to operator tokens
-    # with tenant:read, so an integration can pick one for set_channel_environment;
-    # environments are tenant-wide, so the list carries no channel's data.
+    # with tenant:read, so an integration can pick one for set_channel_environment.
+    # Other callers don't see names only isolated channels across their line pick.
     # Mutations carry tags={"admin"} plus the _require_admin impl gate, with one
     # deliberate exception:
     # create_environment is ungated, because a new environment is inert until an

@@ -26,9 +26,11 @@ from daimon.core.channel_environments import (
     authorize_environment_pick,
     build_clear_environment_note,
     build_missing_environment_note,
+    build_sealed_network_confirm,
     build_sealed_network_refusal,
     build_set_environment_note,
     list_environment_names,
+    load_panel_hidden_environment_names,
     may_pick_environment_in,
     parse_environment_option,
     plan_environment_picker,
@@ -106,7 +108,16 @@ async def load_environment_picker(
     ):
         return None
     try:
-        names = await list_environment_names(runtime.anthropic, tenant_id=tenant_id)
+        async with runtime.sessionmaker() as session:
+            hidden = await load_panel_hidden_environment_names(
+                session,
+                runtime.anthropic,
+                tenant_id=tenant_id,
+                channel_id=channel_id,
+                is_admin=is_admin,
+                default=runtime.deployment_default,
+            )
+        names = await list_environment_names(runtime.anthropic, tenant_id=tenant_id, hidden=hidden)
     except anthropic.APIError:
         log.warning("slack.agent_setup.environment_picker.list_failed", exc_info=True)
         return None
@@ -163,6 +174,9 @@ async def save_environment_choice(
         return ENVIRONMENT_NEED_ADMIN_MESSAGE
     if name is not None and pick.missing:
         return build_missing_environment_note(name)
+    if pick.needs_confirm:
+        await audit(outcome="denied", reason="needs_confirm")
+        return build_sealed_network_confirm(environment_name=name, panel=True)
     # The environment the network rule judged, not a second lookup by name.
     name = pick.environment_name or name
     async with runtime.sessionmaker.begin() as session:

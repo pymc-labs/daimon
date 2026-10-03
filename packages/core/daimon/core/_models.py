@@ -1082,8 +1082,7 @@ class PromoCode(Base):
 
     Only the sha256 of the normalized code is stored: the operator sees the
     code once, at creation. A `timed` code's credit exists only inside its
-    credit window; a `credit` code's does not expire. A `channel_budget` code
-    raises one channel's budget limit instead of the balance.
+    credit window; a `credit` code's does not expire.
     """
 
     __tablename__ = "promo_codes"
@@ -1092,12 +1091,9 @@ class PromoCode(Base):
         CheckConstraint(
             "amount_usd > 0 AND amount_usd <= 999999.99", name="ck_promo_codes_amount_range"
         ),
+        CheckConstraint("kind IN ('credit', 'timed')", name="ck_promo_codes_kind"),
         CheckConstraint(
-            "kind IN ('credit', 'timed', 'channel_budget')", name="ck_promo_codes_kind"
-        ),
-        CheckConstraint(
-            "(kind IN ('credit', 'channel_budget')"
-            " AND credit_starts_at IS NULL AND credit_ends_at IS NULL)"
+            "(kind = 'credit' AND credit_starts_at IS NULL AND credit_ends_at IS NULL)"
             " OR (kind = 'timed' AND credit_starts_at < credit_ends_at)",
             name="ck_promo_codes_credit_window",
         ),
@@ -1177,8 +1173,6 @@ class PromoRedemption(Base):
     expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expired_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
     reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # The channel a channel_budget code raised; NULL for credit and timed codes.
-    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PromoRedeemFailure(Base):

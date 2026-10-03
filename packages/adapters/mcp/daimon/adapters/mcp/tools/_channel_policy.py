@@ -219,33 +219,108 @@ async def require_agent_creatable(
     outside it, so a prompt written there would carry the channel's content out.
     A chat turn that names no verified origin is refused too: it may be running
     in that setup thread, and judged from outside it would slip the rule."""
-    if auth.chat_agent_id is None and auth.agent_id is None:
-        return
-    policy = await load_channel_policy(runtime, auth)
-    if not policy.isolated_channel_ids:
-        return
-    decision = authorize(
-        policy,
-        subject=mcp_subject(auth),
-        action=Action.CREATE_AGENT,
-        agent=await _executing_agent(runtime, auth, policy),
-        origin=origin or (mcp_place(auth) if token_channel_id(auth) is not None else None),
-    )
-    if not decision:
-        record_authz_denial(Action.CREATE_AGENT, decision.reason)
-        raise ToolError(
-            "this conversation is held to an isolated channel, so it creates no agents: a "
-            "new agent would answer outside it. Tell the caller to create it from a "
-            "conversation outside that channel. Nothing was created. Do not retry."
-        )
-    if auth.agent_id is None and origin is None:
-        record_authz_denial(Action.CREATE_AGENT, "origin_missing")
+    refusal = await _held_refusal(runtime, auth, Action.CREATE_AGENT, origin)
+    if refusal == "origin_missing":
         raise ToolError(
             "create_agent needs a verified origin_context_id from a chat turn while a "
             "channel in this workspace is isolated, and this call has none. Nothing was "
             "created. Tell the caller to create the agent from a chat conversation. "
             "Do not retry."
         )
+    if refusal is not None:
+        raise ToolError(
+            "this conversation is held to an isolated channel, so it creates no agents: a "
+            "new agent would answer outside it. Tell the caller to create it from a "
+            "conversation outside that channel. Nothing was created. Do not retry."
+        )
+
+
+async def require_publishable(
+    runtime: McpRuntime, auth: AuthIdentity, *, origin_context_id: str | None
+) -> None:
+    """Publishing a report, notebook or blog puts content behind a link whoever
+    holds it opens, so it is refused wherever a post outside the channel is
+    (`authorize(PUBLISH)`), admins included: a pinned agent, an isolated
+    channel's own agent, or a call held to one. While a channel is isolated a
+    chat turn naming no verified origin is refused too, as for create_agent. An
+    agent key's call is held by its bound channel, never by an origin it names."""
+    await _require_unheld(
+        runtime, auth, origin_context_id, what="publishing", nothing="Nothing was published."
+    )
+
+
+async def require_identity_changeable(
+    runtime: McpRuntime, auth: AuthIdentity, *, origin_context_id: str | None
+) -> None:
+    """Daimon's server nickname and avatar show in every channel, so one
+    channel's agent changes them nowhere: refused as `require_publishable` is."""
+    await _require_unheld(
+        runtime,
+        auth,
+        origin_context_id,
+        what="changing daimon's server-wide name or avatar",
+        nothing="Nothing was changed.",
+    )
+
+
+async def _require_unheld(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin_context_id: str | None,
+    *,
+    what: str,
+    nothing: str,
+) -> None:
+    origin = (
+        None
+        if auth.agent_id is not None
+        else await get_verified_origin(runtime, auth, origin_context_id)
+    )
+    place = turn_origin_place(origin) if origin is not None else None
+    refusal = await _held_refusal(runtime, auth, Action.PUBLISH, place)
+    if refusal == "origin_missing":
+        raise ToolError(
+            f"{what} needs this turn's origin_context_id while a channel in this "
+            f"workspace is isolated, and this call has none. {nothing} Pass it and retry once."
+        )
+    if refusal == "agent_pinned":
+        raise ToolError(
+            f"this agent is pinned to its own channels, so {what} is refused: it shows "
+            f"outside them. Tell the caller. {nothing} Do not retry."
+        )
+    if refusal is not None:
+        raise ToolError(
+            f"this conversation is held to an isolated channel, so {what} is refused: it "
+            f"would carry the channel outside. Tell the caller. {nothing} Do not retry."
+        )
+
+
+async def _held_refusal(
+    runtime: McpRuntime, auth: AuthIdentity, action: Action, origin: Place | None
+) -> str | None:
+    """Why `action` is refused for a call held to a channel, audited; None when allowed.
+
+    An identity with no executing agent (the operator, a person's own hub
+    token) is held nowhere."""
+    if auth.chat_agent_id is None and auth.agent_id is None:
+        return None
+    policy = await load_channel_policy(runtime, auth)
+    if not (policy.isolated_channel_ids or policy.agent_channel_pins):
+        return None
+    decision = authorize(
+        policy,
+        subject=mcp_subject(auth),
+        action=action,
+        agent=await _executing_agent(runtime, auth, policy),
+        origin=origin or (mcp_place(auth) if token_channel_id(auth) is not None else None),
+    )
+    if not decision:
+        record_authz_denial(action, decision.reason)
+        return decision.reason
+    if policy.isolated_channel_ids and auth.agent_id is None and origin is None:
+        record_authz_denial(action, "origin_missing")
+        return "origin_missing"
+    return None
 
 
 class SealedChannelError(ToolError):

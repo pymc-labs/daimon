@@ -1219,6 +1219,42 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ALLOW,
     ),
     (
+        "a pinned agent publishes nothing, even for an admin",
+        PINNED,
+        {"subject": ADMIN, "action": Action.PUBLISH, "agent": ACME, "origin": INSIDE},
+        _deny("agent_pinned"),
+    ),
+    (
+        "isolation an own agent publishes nothing, even for an admin",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.PUBLISH, "agent": ACME},
+        _deny("channel_isolated"),
+    ),
+    (
+        "isolation a call from inside publishes nothing, whatever agent runs it",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.PUBLISH, "agent": SHARED, "origin": SETUP_ORIGIN},
+        _deny("channel_isolated"),
+    ),
+    (
+        "an unresolved agent publishes nothing while an agent is pinned",
+        PINNED,
+        {"subject": MEMBER, "action": Action.PUBLISH, "agent": AgentRef.unresolved()},
+        _deny("agent_unresolved"),
+    ),
+    (
+        "an unpinned agent publishes from outside",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.PUBLISH, "agent": SHARED, "origin": OUTSIDE},
+        ALLOW,
+    ),
+    (
+        "a call with no executing agent publishes",
+        ISOLATED,
+        {"subject": BEARER, "action": Action.PUBLISH},
+        ALLOW,
+    ),
+    (
         "isolation a routine saved in the setup thread stays in the channel",
         ISOLATED,
         {

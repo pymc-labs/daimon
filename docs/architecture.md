@@ -445,7 +445,7 @@ admin made it from one of their channels (`agent_creation_channels`, written by
 `create_agent` from a verified turn origin and by each setup panel's New agent
 form), when a server admin pinned it inside their channels only, or when a
 server admin set it as one of their channels' default
-(`channel_config.agent_name_set_by_admin`; migration 0045 backfilled it from
+(`channel_config.agent_name_set_by_admin`; migration 0044 backfilled it from
 each setter's role at upgrade time, not when they set it); any other agent needs a server
 admin on every surface (`channel_admin_holds`). Handing a thread to an agent makes it answer
 there as a default would, so binding and handoff are one rule
@@ -517,7 +517,12 @@ default (`channel_isolated` on `RUN_AGENT`, `POST`, `READ_CHANNEL`,
 post nowhere outside C, not even the requester's DM, and send no direct
 messages (`DIRECT_MESSAGE`) or create agents (`CREATE_AGENT`, also refused
 for any call whose verified turn origin is in C, such as its setup thread),
-whose prompts would answer outside C. Admission, `reauthorize` and the scheduler's
+whose prompts would answer outside C. Nor do they publish (`PUBLISH`:
+`publish_report` and the notebook and attachment upload URLs) or change
+daimon's server-wide name or avatar (`set_display_identity`), each seen outside
+C; a pinned agent does neither anywhere, admins included, and a chat turn
+naming no verified origin while a channel is isolated is refused, as for
+`CREATE_AGENT`. Admission, `reauthorize` and the scheduler's
 fire check (the resolved agent, by every name, at the routine's destination)
 decide through `RUN_AGENT`; thread participation skips a refused turn before
 its classifier runs. Memory stays writable for C's own agents in C and is
@@ -538,7 +543,8 @@ What callers see follows from where they stand. An MCP call is inside C when
 its verified turn origin is in C, when it carries a channel-bound coding-tool
 token for C, or when its chat turn's agent is one of C's; an agent key is
 never inside by its agent alone. The roster, agent and key tools take the
-turn's `origin_context_id` for this. From outside, C's agents are missing from
+turn's `origin_context_id` for this. A chat turn whose agent can't be found is
+refused while a channel is isolated, since it may be one of C's. From outside, C's agents are missing from
 `list_agents` and every by-name lookup, from handoff destinations,
 `explain_agent_resolution` and the hub, and so are their agent-scoped skills, their routines,
 routines posting into C and timers set in C; inside C only C's agents show. For members the
@@ -594,11 +600,19 @@ sealed channel, or one holding a sealed thread (a Slack `channel:ts`, or a
 Discord thread the pick names), an environment with unrestricted
 networking (any network beyond package managers and MCP servers: anything but
 a cloud environment on limited networking with no allowed hosts) needs a
-server admin, and so does clearing a pick onto a default that has one. A pick
+server admin, and so does clearing a pick onto a default that has one. Even a
+server admin's such pick waits for a confirmation (`EnvironmentPick.needs_confirm`):
+`set_channel_environment` and `clear_channel_environment` take
+`confirm_open_network`, which the model passes only once the caller confirms,
+and the panels write nothing and point to chat. A pick
 made before the seal never met that rule, so sealing or isolating a channel
 whose own pick is open warns that a server admin should confirm it; who made
 a pick isn't recorded. An operator token's
-`channels:write` covers a channel's environment, never the tenant default. A
+`channels:write` covers a channel's environment, never the tenant default. An
+environment name only isolated channels across the reader's line pick could
+name a client, so it is left out of `list_environments`, `get_environment` and
+the panel pickers (`hidden_environment_names`); operator tokens, and server
+admins on the panels, see every name. A
 channel with no environment of its own falls through, so nothing changes until
 one is set. Chat over MCP has no channel, so it uses the tenant or deployment
 default. The channel tools read a Slack or Teams thread id as its channel and
@@ -1157,9 +1171,7 @@ codes. Admins redeem them from `/billing` on Discord and Slack (a Redeem code
 button, shown only while a code is redeemable, and a modal), the Teams
 `billing` card (a code field and button, shown the same way) or with the MCP
 tool `redeem_promo_code`; each surface calls
-`daimon.core.promo_credit.redeem_promo_code`. A channel budget code raises
-the invoking channel's budget limit; only server admins redeem one
-(`SET_CHANNEL_BUDGET`), never a channel admin. Scheduler housekeeping settles
+`daimon.core.promo_credit.redeem_promo_code`. Scheduler housekeeping settles
 timed credit windows through `daimon.core.promo_settlement`. See
 [billing.md](billing.md#promo-codes).
 

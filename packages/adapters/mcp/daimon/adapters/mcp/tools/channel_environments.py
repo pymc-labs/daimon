@@ -29,6 +29,7 @@ from daimon.core.channel_environments import (
     EnvironmentPick,
     authorize_environment_pick,
     build_clear_environment_note,
+    build_sealed_network_confirm,
     build_sealed_network_refusal,
     build_set_environment_note,
     save_scope_environment,
@@ -90,6 +91,7 @@ async def _require_pick_allowed(
     *,
     target: _Target,
     environment_name: str | None,
+    confirm_open_network: bool,
 ) -> EnvironmentPick:
     """The decided pick; raise ``ToolError`` unless the caller may leave the scope on it."""
     require_scope(auth, "channels:write")
@@ -124,6 +126,12 @@ async def _require_pick_allowed(
             f"No environment named '{environment_name}' exists in this workspace. Nothing was "
             "changed. Use list_environments to pick an existing one, or create_environment first."
         )
+    if pick.needs_confirm and not confirm_open_network:
+        raise ToolError(
+            build_sealed_network_confirm(environment_name=environment_name)
+            + " Ask the caller whether to go ahead; only if they confirm, retry with "
+            "confirm_open_network=true. Never confirm on their behalf."
+        )
     return pick
 
 
@@ -133,10 +141,15 @@ async def _set_channel_environment_impl(
     *,
     environment_name: str,
     channel_id: str | None,
+    confirm_open_network: bool = False,
 ) -> ChannelEnvironmentResult:
     target = await _environment_channel(runtime, auth, channel_id)
     pick = await _require_pick_allowed(
-        runtime, auth, target=target, environment_name=environment_name.strip()
+        runtime,
+        auth,
+        target=target,
+        environment_name=environment_name.strip(),
+        confirm_open_network=confirm_open_network,
     )
     name = pick.environment_name or environment_name.strip()
     async with runtime.session_factory.begin() as session:
@@ -161,9 +174,16 @@ async def _clear_channel_environment_impl(
     auth: AuthIdentity,
     *,
     channel_id: str | None,
+    confirm_open_network: bool = False,
 ) -> ChannelEnvironmentResult:
     target = await _environment_channel(runtime, auth, channel_id, lenient=True)
-    await _require_pick_allowed(runtime, auth, target=target, environment_name=None)
+    await _require_pick_allowed(
+        runtime,
+        auth,
+        target=target,
+        environment_name=None,
+        confirm_open_network=confirm_open_network,
+    )
     channel_id = target.channel_id
     async with runtime.session_factory.begin() as session:
         previous = await save_scope_environment(
@@ -188,6 +208,7 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         ctx: Context,
         environment_name: str,
         channel_id: str | None = None,
+        confirm_open_network: bool = False,
     ) -> ChannelEnvironmentResult:
         """Choose the environment a channel's turns run in, or the workspace default.
         For example, run #growth in the pymc environment. Changes where the agent runs,
@@ -198,7 +219,8 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         (``list_environments``). Conversations pick it up from their next message.
         The workspace default requires Manage Server (admin); an admin of the channel
         may set that channel's environment, except one with unrestricted networking in
-        a sealed channel, which needs a server admin.
+        a sealed channel, which needs a server admin and their confirmation: pass
+        ``confirm_open_network=true`` only after the caller confirms it.
 
         Pass the parent channel's id: Discord
         ``<channel platform="discord" id="..." role="parent_channel">``, Slack
@@ -206,13 +228,18 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         id resolves to its parent. The caller must be able to see the channel.
         """
         return await _set_channel_environment_impl(
-            runtime, await _auth(ctx), environment_name=environment_name, channel_id=channel_id
+            runtime,
+            await _auth(ctx),
+            environment_name=environment_name,
+            channel_id=channel_id,
+            confirm_open_network=confirm_open_network,
         )
 
     @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
     async def clear_channel_environment(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str | None = None,
+        confirm_open_network: bool = False,
     ) -> ChannelEnvironmentResult:
         """Stop a channel picking its own environment, so it uses the workspace default.
         For example, put #growth back on the default environment. A no-op when the
@@ -221,8 +248,12 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         Omit ``channel_id`` to clear the workspace default, leaving the deployment
         default. The workspace default requires Manage Server (admin); an admin of the
         channel may clear that channel's environment, unless it is sealed and the
-        default has unrestricted networking. A thread id resolves to its parent channel.
+        default has unrestricted networking; then a server admin must confirm it, as
+        for ``set_channel_environment``. A thread id resolves to its parent channel.
         """
         return await _clear_channel_environment_impl(
-            runtime, await _auth(ctx), channel_id=channel_id
+            runtime,
+            await _auth(ctx),
+            channel_id=channel_id,
+            confirm_open_network=confirm_open_network,
         )

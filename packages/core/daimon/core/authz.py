@@ -123,7 +123,7 @@ and direct messages, channel and session reads (including the hub's admin
 and channel admin reads and the refusal to continue a sealed conversation),
 fork, channel default binds, channel environment picks, channel protection and
 seal toggles, isolation copy archives, coding-tool token mints, agent
-creation (`CREATE_AGENT`), the protection of a turn's own notices and of a
+creation (`CREATE_AGENT`), publishing (`PUBLISH`), the protection of a turn's own notices and of a
 routine's destination (`POST` with no agent), a routine's creator at fire and delivery
 (`ACT_FOR_CREATOR`), and the shared-agent table (`CHANGE_SHARED_AGENT`, asked by
 `daimon.core.operation_policy`).
@@ -182,6 +182,10 @@ class Action(StrEnum):
     DIRECT_MESSAGE = "direct_message"
     # Create an agent from the calling turn; `agent` is the one it executes as.
     CREATE_AGENT = "create_agent"
+    # Publish a report, notebook or blog, or change daimon's server-wide
+    # identity, from the calling turn: seen outside every channel, so judged as
+    # a post outside them.
+    PUBLISH = "publish"
     # Change what a possibly shared agent runs or reaches: a spec edit, an
     # attachment replace/remove, or a posted-token contribution
     # (`daimon.core.operation_policy`). Decided per `Request.operation_family`
@@ -524,7 +528,7 @@ def _isolation_exempt(subject: Subject, agent: AgentRef) -> bool:
     )
 
 
-def _holds_seal(policy: TenantAccessPolicy, channel: str, *places: Place | None) -> bool:
+def holds_seal(policy: TenantAccessPolicy, channel: str, *places: Place | None) -> bool:
     """Whether `channel`, or a thread under it, is sealed: a Slack ``channel:ts``
     by its id, a Discord thread only when one of `places` names it as a thread."""
     if any(key.startswith(f"{channel}:") for key in policy.sealed_channel_ids):
@@ -863,7 +867,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         # A sealed channel's content must not leave through an open network
         # that the channel admin chose; that is a server admin's call. The
         # environment covers every thread under the channel, so a sealed one counts.
-        if req.open_network and _holds_seal(policy, channel, place, req.origin):
+        if req.open_network and holds_seal(policy, channel, place, req.origin):
             return _deny("sealed")
         return ALLOW
 
@@ -937,6 +941,17 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             return _deny("agent_unresolved")
         if _held_to(agent, req.origin) is not None:
             return _deny("channel_isolated")
+        return ALLOW
+
+    if req.action is Action.PUBLISH:
+        # Refused wherever a post outside the channel is, admins included: a
+        # link is read by whoever holds it, never only the acting admin.
+        if not agent.resolved and (policy.agent_channel_pins or policy.isolated_channel_ids):
+            return _deny("agent_unresolved")
+        if _held_to(agent, req.origin) is not None:
+            return _deny("channel_isolated")
+        if _names_pinned(policy, agent.names):
+            return _deny("agent_pinned")
         return ALLOW
 
     if req.action is Action.CHANGE_SHARED_AGENT:
@@ -1144,4 +1159,5 @@ __all__ = [
     "build_turn_place",
     "channel_admin_holds",
     "channel_readable",
+    "holds_seal",
 ]

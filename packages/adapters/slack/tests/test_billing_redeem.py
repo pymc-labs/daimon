@@ -283,34 +283,3 @@ async def test_submission_from_a_non_admin_redeems_nothing(fake_slack_web_client
         "promo_redeem",
         "denied",
     ), "the refusal is audited"
-
-
-async def test_submission_raises_the_panels_channel_budget(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """A channel budget code raises the budget of the channel the panel was opened in."""
-    tenant = await make_tenant(db_session, platform="slack", workspace_id=_TEAM)
-    await make_channel_budget(db_session, tenant=tenant, platform="slack", channel_id="C1")
-    terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False, channel_budget=True)
-    await promo_store.insert_promo_code(
-        db_session, code_hash=hash_promo_code(normalize_promo_code("CHANNEL-RAISE-26")), terms=terms
-    )
-    runtime = MagicMock()
-    runtime.sessionmaker = db_session_factory
-
-    with _slack(fake_slack_web_client, admin=True):
-        await run_redeem_submission(
-            runtime,
-            fake_slack_web_client.client,
-            team_id=_TEAM,
-            user_id=_USER,
-            decision=evaluate_redeem_submission(_submission("CHANNEL-RAISE-26")),
-        )
-
-    result = _bodies(fake_slack_web_client, "views.update")[0]
-    assert "Raised <#C1>'s budget by *$10.00*, to *$15.00*." in _texts(result["view"]["blocks"])
-    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("0"), (
-        "the balance is untouched"
-    )

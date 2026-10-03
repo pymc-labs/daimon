@@ -149,7 +149,7 @@ def test_model_and_migration_reason_constraints_match_the_enum() -> None:
     ]
     assert len(checks) == 1
     created = set(re.findall(r"'([^']+)'", ast.literal_eval(checks[0].args[0])))
-    latest = _migration("0046_admission_refusal_reasons.py").OUTCOME_REASONS
+    latest = _migration("0045_admission_refusal_reasons.py").OUTCOME_REASONS
     assert created < expected, "0029 created the constraint with a subset of today's reasons"
     assert set(latest) == expected, "the latest migration that widens the constraint matches"
 

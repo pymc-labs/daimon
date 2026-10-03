@@ -13,8 +13,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0043_channel_budget_notices"
-down_revision: str | None = "0042_channel_budget_promo_codes"
+revision: str = "0042_channel_budget_notices"
+down_revision: str | None = "0041_channel_tidy"
 branch_labels: str | None = None
 depends_on: str | None = None
 

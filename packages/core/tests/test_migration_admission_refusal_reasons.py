@@ -20,7 +20,7 @@ _ADDED = (
 
 
 def _migration() -> ModuleType:
-    path = Path(__file__).parents[1] / "alembic/versions/0046_admission_refusal_reasons.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0045_admission_refusal_reasons.py"
     spec = importlib.util.spec_from_file_location("migration_admission_refusal_reasons", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

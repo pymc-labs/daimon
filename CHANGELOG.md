@@ -23,6 +23,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   naming no `origin_context_id` while a channel in its workspace is isolated.
   `list_timers` also showed the notes of timers set in an isolated channel
   from anywhere; they now list only inside that channel, as its routines do.
+- **Publishing and daimon's server name stay inside isolated channels.** A
+  pinned agent, an isolated channel's own agent, or a turn in an isolated
+  channel can no longer publish a report, notebook or attachment link, or
+  change daimon's server-wide name or avatar, admins included; these tools
+  now take the turn's `origin_context_id`. A chat turn whose agent can't be
+  found is refused while a channel is isolated instead of being treated as
+  outside it.
+- **Environment names across isolation.** An environment only isolated
+  channels pick no longer shows in `list_environments`, `get_environment` or a
+  channel admin's picker outside them; operator tokens and server admins on
+  the panels still see every name.
+- **Open networks in sealed channels need confirming.** A server admin's
+  environment pick or clear that leaves a sealed channel on unrestricted
+  networking now waits for `confirm_open_network` on
+  `set_channel_environment` and `clear_channel_environment`; the panels write
+  nothing and point to chat.
 - **Isolated runs from the hub or a DM count toward the channel budget.** A
   run of an isolated channel's own agent from the hub or a DM, which only
   admins and that channel's admins may make, is now gated by and charged to
@@ -45,7 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `daimon usage turns` could not say which gate stopped it. These now record
   `admission_channel_protected`, `admission_agent_pinned_elsewhere` and
   `admission_channel_isolated`, from chat and MCP turns alike. Migration
-  `0046_admission_refusal_reasons` widens the `turn_outcomes.reason` check;
+  `0045_admission_refusal_reasons` widens the `turn_outcomes.reason` check;
   its downgrade folds them back into `admission_denied`. Earlier rows keep
   `admission_denied`.
 - **Channel admins change only their channels' own agents.** A channel admin
@@ -116,12 +132,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   received; `DAIMON_BUDGET_NOTICES` turns it off per tenant.
 - **Audited CLI budget changes.** `daimon channels budget set` and `clear`
   now record the change in `security_audit_events`.
-- **Channel budget promo codes.** Promo codes can raise a channel's budget
-  instead of the tenant balance: `daimon promo create --channel-budget` or
-  `create_promo_code(kind="channel_budget")`. Redeeming one in a channel with
-  a budget (from `/billing` there, or `redeem_promo_code` with `channel_id`)
-  adds its amount to that budget's limit for good. Only server admins redeem
-  it, never the channel's own admins.
 - **Timed credit and channel flags in listings.** `get_tenant_summary` and
   `daimon channels list --json` list the tenant's live timed promo credit
   (`timed_credit`: what is left of each grant and when it ends).
