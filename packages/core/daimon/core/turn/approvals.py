@@ -32,7 +32,13 @@ from daimon.core.confirmation import (
     no_confirmation_surface,
     prompt_for_tool_call,
 )
-from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy, ToolVerdict, decide_tool_call
+from daimon.core.tool_safety import (
+    ToolCall,
+    ToolSafetyPolicy,
+    ToolVerdict,
+    decide_tool_call,
+    is_publish_call,
+)
 from daimon.core.turn.posture import (
     AutoApprove,
     PolicyApproval,
@@ -285,13 +291,32 @@ def chat_tool_confirmation(
     """
     if not policy.enabled and not asks_before_publishing:
         return RequireApproval()
-    if not attended:
-        return PolicyApproval(decide=unattended_decider(policy, trusted_servers=trusted_servers))
-    return PolicyApproval(
-        decide=interactive_decider(
+    decide = (
+        interactive_decider(
             policy,
             requester_platform_user_id=requester_platform_user_id,
             confirm=confirm if confirm is not None else no_confirmation_surface,
             trusted_servers=trusted_servers,
         )
+        if attended
+        else unattended_decider(policy, trusted_servers=trusted_servers)
     )
+    if not policy.enabled:
+        decide = _publish_only(decide, trusted_servers=trusted_servers)
+    return PolicyApproval(decide=decide)
+
+
+def _publish_only(decide: ToolCallDecider, *, trusted_servers: frozenset[str]) -> ToolCallDecider:
+    """Tool safety off: publish calls are decided; any other blocked call is
+    refused, as `RequireApproval` would have ended the turn before it ran."""
+
+    async def _decide(call: ToolCall) -> ToolConfirmationResult:
+        if is_publish_call(call, trusted_servers):
+            return await decide(call)
+        return ToolConfirmationResult(
+            allow=False,
+            deny_message=f"Refused: {call.key} waits for an approval nobody here can give, "
+            "so it did not run. Do not retry it.",
+        )
+
+    return _decide

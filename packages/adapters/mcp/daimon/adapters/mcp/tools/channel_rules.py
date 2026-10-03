@@ -37,6 +37,7 @@ from daimon.core.authz import Action
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
 from daimon.core.channel_rules import ChannelRuleRefused, set_agent_rule, set_channel_rule
 from daimon.core.errors import DaimonError
+from daimon.core.permissions import RuleRefused, thread_rule_key
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from fastmcp import Context, FastMCP
@@ -74,6 +75,15 @@ def _platform(auth: AuthIdentity) -> str:
     if auth.platform not in ("discord", "slack", "teams"):
         raise ToolError("Rules exist only on Discord, Slack and Teams.")
     return auth.platform
+
+
+def _rule_target(auth: AuthIdentity, channel_id: str) -> str:
+    """A channel, or a Slack thread (`channel:ts`), which keeps a rule of its own."""
+    try:
+        thread = thread_rule_key(_platform(auth), channel_id)
+    except RuleRefused as exc:
+        raise ToolError(f"{exc}. Nothing was changed.") from exc
+    return thread or _channel(auth, channel_id)
 
 
 def _channel(auth: AuthIdentity, channel_id: str) -> str:
@@ -128,7 +138,7 @@ async def _set_channel_rule_impl(
     release_agents: bool = False,
 ) -> SetChannelRuleResult:
     require_scope(auth, "channels:write")
-    channel = _channel(auth, channel_id)
+    channel = _rule_target(auth, channel_id)
     if readers is None and writers is None and not release_agents:
         raise ToolError("Pass readers, writers or release_agents. Nothing was changed.")
     label = await _channel_label(runtime, auth, channel) if copy_from is not None else None
@@ -225,7 +235,7 @@ def register_channel_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         agent, without credentials, as the channel's default. To make agent X the only
         agent in a channel, set the channel's default to X first. ``release_agents``
         drops the rules of the agents kept to the channel, once readers aren't ``own``.
-        ``channel_id`` is the channel's id; a Slack or Teams thread id names its channel.
+        ``channel_id`` is the channel's id, or a Slack thread's ``channel:ts`` (readers only).
         """
         return await _set_channel_rule_impl(
             runtime,

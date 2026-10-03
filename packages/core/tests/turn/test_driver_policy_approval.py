@@ -15,7 +15,12 @@ from typing import cast
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.tool_safety import (
+    DAIMON_SERVER_NAME,
+    OPEN_TOOL_SAFETY,
+    ToolCall,
+    ToolSafetyPolicy,
+)
 from daimon.core.turn import run_turn
 from daimon.core.turn.approvals import (
     chat_tool_confirmation,
@@ -329,6 +334,21 @@ def test_unattended_chat_turn_gets_the_unattended_rules() -> None:
         _ON, requester_platform_user_id="U1", confirm=None, attended=False
     )
     assert isinstance(posture, PolicyApproval)
+
+
+async def test_with_safety_off_asking_before_publishing_runs_no_other_held_call() -> None:
+    posture = chat_tool_confirmation(
+        OPEN_TOOL_SAFETY,
+        requester_platform_user_id="U1",
+        confirm=None,
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        asks_before_publishing=True,
+    )
+    assert isinstance(posture, PolicyApproval)
+    held = await posture.decide(ToolCall(tool_use_id="t1", server_name="linear", tool_name="x"))
+    assert not held.allow, "a tool the agent's own definition holds still never runs"
+    publish = ToolCall(tool_use_id="t2", server_name=DAIMON_SERVER_NAME, tool_name="publish_report")
+    assert not (await posture.decide(publish)).allow, "no card to press: the publish is refused"
 
 
 def _replay_script(fa: FakeAnthropic) -> None:

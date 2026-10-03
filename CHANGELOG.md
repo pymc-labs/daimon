@@ -35,9 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `get_channel_budget` and `get_thread_participation` look only inside it.
 - **Publishing and daimon's server name stay inside isolated channels.** A
   pinned agent, an isolated channel's own agent, or a turn in an isolated
-  channel can no longer publish a report, notebook or attachment link, or
-  change daimon's server-wide name or avatar, admins included; these tools
-  now take the turn's `origin_context_id`. No one publishes a reader of an
+  channel publishes a report, notebook or attachment link only once the
+  requester presses Approve on a card (agent keys and runs nobody watches
+  can't), and can't change daimon's server-wide name or avatar, admins
+  included; these tools now take the turn's `origin_context_id`. No one publishes a reader of an
   isolated channel's own agent. A chat turn whose agent can't be
   found is refused while a channel is isolated instead of being treated as
   outside it.
@@ -66,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Channel and agent rules replace protected, sealed, isolated (confidential) and pinned.** Entries below that use those words describe these rules: a protected channel or category is `writers: none`, a sealed one `readers: inside`, an isolated or confidential one `readers: own` and `writers: own`, and a pin is an agent rule. `set_channel_protection`, `set_channel_isolation`, `daimon channels protect`, `daimon channels isolate` and the rule flags of `daimon tenants access-policy set` are replaced by the rule tools and commands; `archive_isolation_copy` is now `archive_channel_copy`. A stored policy written before reads as the same rules and is saved in the new shape on its next change, so no migration runs. A build from before this change can't read a policy saved by it and refuses rather than falls open. From a channel kept to its own agents, or by an agent with a rule, publishing a report, notebook or attachment now asks the requester to approve it instead of being refused.
+- **Channel and agent rules replace protected, sealed, isolated (confidential) and pinned.** Other entries in this section that use those words describe these rules: a protected channel or category is `writers: none`, a sealed one `readers: inside`, an isolated or confidential one `readers: own` and `writers: own`, and a pin is an agent rule. `set_channel_protection`, `set_channel_isolation`, `daimon channels protect`, `daimon channels isolate` and the rule flags of `daimon tenants access-policy set` are replaced by the rule tools and commands; `archive_isolation_copy` is now `archive_channel_copy`. A stored policy written before reads as the same rules and is saved in the new shape on its next change, so no migration runs. A build from before this change can't read a policy saved by it and refuses rather than falls open. From a channel kept to its own agents, or by an agent with a rule, publishing a report, notebook or attachment now asks the requester to approve it instead of being refused.
 - **Turn outcomes tell protection, pin and isolation refusals apart.** A turn
   refused because its channel is protected, its agent is pinned to other
   channels, or the channel is isolated and the agent is not one of its own was

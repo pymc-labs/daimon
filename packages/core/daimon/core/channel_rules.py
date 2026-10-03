@@ -678,6 +678,8 @@ async def set_category_rule(
         if not authorize(policy, subject=subject, action=Action.SET_CHANNEL_RULE):
             raise ChannelRuleRefused("admin_required")
         try:
+            if writers == "own":  # readers own only: a category takes writers none alone
+                raise RuleRefused("a category only takes writers none")
             updated = with_category_rule(policy, category_id, ChannelRule(writers=writers))
         except RuleRefused as exc:
             raise ChannelRuleRefused("invalid", message=f"{exc}.") from None

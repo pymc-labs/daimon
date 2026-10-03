@@ -42,6 +42,7 @@ from daimon.core.config import load_settings
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.permissions import RuleRefused, thread_rule_key
 from daimon.core.stores import channel_budgets
 from daimon.core.stores.channel_admins import (
     delete_channel_admins,
@@ -871,7 +872,8 @@ def channels_rule_set_command(
     platform: str,
     workspace_id: str,
     channel_id: Annotated[
-        str, typer.Argument(help="The channel's id; a thread names its channel.")
+        str,
+        typer.Argument(help="The channel's id, or a Slack thread's channel_id:thread_ts."),
     ],
     readers: Annotated[
         str | None,
@@ -975,7 +977,11 @@ async def channels_rule_set(
         status = "now" if changed else "already"
         console.print(f"{where} {channel_id.strip()}: {status} writers {wanted_writers}.")
         return
-    channel, _, _ = _ids(platform, channel_id, roles=[], users=[])
+    try:
+        thread = thread_rule_key(platform, channel_id)
+    except RuleRefused as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    channel = thread or _ids(platform, channel_id, roles=[], users=[])[0]
     label = (
         await _channel_label(
             rt,

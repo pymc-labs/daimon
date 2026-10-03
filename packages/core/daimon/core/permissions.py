@@ -79,6 +79,21 @@ def with_channel_rule(
     return _rebuilt(policy, channel_rules=_with(policy.channel_rules, channel_id, rule))
 
 
+def thread_rule_key(platform: str, raw: str) -> str | None:
+    """`raw` when it names a Slack thread (``channel:ts``), which keeps a rule of
+    its own; None for any other id. Raise `RuleRefused` for a thread id that
+    would otherwise fall to its channel: a Teams thread, or a malformed Slack one.
+    """
+    value = raw.strip()
+    if platform == "slack" and ":" in value:
+        if _SLACK_THREAD_KEY.fullmatch(value):
+            return value
+        raise RuleRefused(f"{value} is not a Slack channel id or channel:thread_ts")
+    if platform == "teams" and ";messageid=" in value:
+        raise RuleRefused("a Teams thread has no rule of its own; set the rule on its channel")
+    return None
+
+
 def check_channel_rule(channel_id: str, rule: ChannelRule) -> None:
     """Raise `RuleRefused` for a rule nothing would enforce at `channel_id`.
 
@@ -592,6 +607,7 @@ __all__ = [
     "channel_permissions",
     "channel_rule",
     "check_channel_rule",
+    "thread_rule_key",
     "crosses_home",
     "dm_source_limited",
     "held_to",

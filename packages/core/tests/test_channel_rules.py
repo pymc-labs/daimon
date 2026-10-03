@@ -25,6 +25,7 @@ from daimon.core.channel_rules import (
     copy_name,
     render_rule_refusal,
     set_agent_rule,
+    set_category_rule,
     set_channel_rule,
 )
 from daimon.core.defaults.ma_index import list_agents_by_tenant
@@ -35,7 +36,7 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.permissions import runs_only_in
+from daimon.core.permissions import RuleRefused, runs_only_in, thread_rule_key
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
@@ -790,6 +791,26 @@ async def test_only_admins_set_rules_and_a_slack_thread_takes_readers_inside_onl
         client, db_session_factory, tenant.id, "C01AB:1700000000.000200", readers="inside"
     )
     assert inside.changed
+
+
+def test_a_thread_id_keeps_a_rule_of_its_own_only_on_slack() -> None:
+    assert thread_rule_key("slack", " C01AB:1700000000.000200 ") == "C01AB:1700000000.000200"
+    assert thread_rule_key("slack", "C01AB") is None and thread_rule_key("discord", "1") is None
+    for platform, raw in (("slack", "C01AB:x"), ("teams", "19:a@thread.tacv2;messageid=1")):
+        with pytest.raises(RuleRefused):
+            thread_rule_key(platform, raw)  # never silently its channel's rule
+
+
+async def test_a_category_takes_writers_none_only(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    with pytest.raises(ChannelRuleRefused) as own:
+        await set_category_rule(
+            db_session_factory, tenant_id=tenant.id, category_id="900", writers="own", subject=ADMIN
+        )
+    assert own.value.reason == "invalid"
 
 
 async def _agent_rule(

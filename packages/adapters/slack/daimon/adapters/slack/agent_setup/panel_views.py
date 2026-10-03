@@ -130,8 +130,8 @@ ACTION_RULE_READERS: Final = "agent_setup__rule:readers"
 ACTION_RULE_WRITERS: Final = "agent_setup__rule:writers"
 ACTION_RULE_COPY: Final = "agent_setup__rule:copy"
 ACTION_RULE_RELEASE: Final = "agent_setup__rule:release"
-"""Isolate this channel (with a copy of its agent when needed), end it, or lift its seal
-and pins too. Admins only."""
+"""This channel's Permissions: who reads it, who posts, keep it to a copy of its
+agent, release its agents. Admins only."""
 
 ACTION_CODING_TOOLS: Final = "agent_setup__coding_tools"
 """Mint a coding-tool token for the agent named in the button's `value`."""

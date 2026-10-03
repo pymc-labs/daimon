@@ -366,7 +366,8 @@ def _confirmed_daimon_write(call: ToolCall) -> bool:
     )
 
 
-def _publish_call(call: ToolCall, trusted_servers: frozenset[str]) -> bool:
+def is_publish_call(call: ToolCall, trusted_servers: frozenset[str]) -> bool:
+    """`call` publishes through daimon's own server (`PUBLISH_TOOLS`)."""
     return call.server_name in trusted_servers and call.tool_name in PUBLISH_TOOLS
 
 
@@ -430,7 +431,7 @@ def decide_tool_call(
     A trusted `PUBLISH_TOOLS` call pauses only in a session that asks before
     publishing, so it asks (or, unattended, is refused) even with the policy off.
     """
-    if _publish_call(call, trusted_servers):
+    if is_publish_call(call, trusted_servers):
         if attended:
             return ToolVerdict(outcome="ask", effect="write", reason="publish_needs_confirmation")
         return ToolVerdict(outcome="deny", effect="write", reason="unattended_publish")
