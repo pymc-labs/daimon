@@ -1,4 +1,4 @@
-"""The GitHub access schema can be removed and restored without changing legacy rows."""
+"""The GitHub access schema can be removed and restored on a fresh database."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _load_migration():
-    path = Path(__file__).parents[1] / "alembic/versions/0040_github_access_foundation.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0048_github_access_foundation.py"
     spec = importlib.util.spec_from_file_location("migration_github_access_foundation", path)
     assert spec and spec.loader
     migration = importlib.util.module_from_spec(spec)

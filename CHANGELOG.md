@@ -13,7 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agents can tidy their own posts on Discord and Slack. `edit_message` and `delete_message` change one message the agent posted with `send_message` or `create_thread`; `archive_thread` (Discord) and `delete_thread` close a thread it opened. An agent can change only what it posted itself, which daimon now records at send time; people's messages, other agents' and other bots' posts, turn replies and cards are refused. Each call is checked against the channel policy (protection, pins, isolation, seals), and checked again on a fresh policy right before the Discord or Slack call. Calls are refused in the support-escalation channels. Discord thread cleanup keeps the thread and other people's messages. Bulk deletes check and audit each message. Limits are 10 message actions per turn and 40 per hour per agent, and 20 refused calls in an hour pause tidying for that agent. Every edit or delete writes a security audit row with the channel and message ids, an HMAC of the replaced text keyed by a server secret, and the turn, never the text. Post records expire with `daimon audit prune`, and erasing an account clears the HMACs on its audit rows. A new seeded skill, `channel-tidy`, tells agents when to use them.
 
 - Separate `DAIMON_GITHUB_APP__*` settings for agent-scoped GitHub App credentials.
+
 ### Fixed
+
+- Privacy deletion removes encrypted GitHub user tokens after the last linked account is erased, and shows the removed link in Discord, Slack and Teams panels.
 
 - **An isolated channel's content no longer leaves through new agents, timers
   or reads.** An isolated channel's own agent, wherever it runs and through

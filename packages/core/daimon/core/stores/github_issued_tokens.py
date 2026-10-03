@@ -33,6 +33,10 @@ class IssuedToken(BaseModel):
     revoke_attempts: int
 
 
+class GitHubTokenRowClosedError(ValueError):
+    """The issued-token row was closed before its minted token could be stored."""
+
+
 async def create_pending(
     session: AsyncSession,
     *,
@@ -80,7 +84,10 @@ async def create_pending(
 async def store_token(
     session: AsyncSession, *, token_id: uuid.UUID, token: str, fernet: MultiFernet
 ) -> IssuedToken:
+    """Store a minted token; if revoked, the minter must DELETE /installation/token."""
     row = await session.get(GitHubIssuedToken, token_id, with_for_update=True)
+    if row is not None and row.status == "revoked":
+        raise GitHubTokenRowClosedError("token row was closed before storage")
     if row is None or row.status != "pending":
         raise ValueError("token is not pending")
     row.encrypted_token = encrypt_token(fernet, token)
