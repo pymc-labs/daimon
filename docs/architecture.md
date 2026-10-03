@@ -610,9 +610,11 @@ whose own pick is open warns that a server admin should confirm it; who made
 a pick isn't recorded. An operator token's
 `channels:write` covers a channel's environment, never the tenant default. An
 environment name only isolated channels across the reader's line pick could
-name a client, so it is left out of `list_environments`, `get_environment` and
-the panel pickers (`hidden_environment_names`); operator tokens, and server
-admins on the panels, see every name. A
+name a client, so `list_environments`, `get_environment`, the
+environment-changing tools and the panel pickers treat it as missing, and
+`get_tenant_summary` blanks it, with other isolated channels' agent names
+(`hidden_environment_names`); operator tokens, and server admins on the
+panels, see every name. A
 channel with no environment of its own falls through, so nothing changes until
 one is set. Chat over MCP has no channel, so it uses the tenant or deployment
 default. The channel tools read a Slack or Teams thread id as its channel and
@@ -891,7 +893,8 @@ then, where it matters:
 - A published report's reader variant carries its source agent's names
   (`daimon_reader_source`), so a pin on the source holds for the reader, and
   publishing a pinned agent's reader needs an admin or an `origin_context_id`
-  from inside its channels.
+  from inside its channels. An isolated channel's own agent's reader is never
+  published (`require_reader_source_publishable`), admins included.
 - An agent-scoped key is never exempt as an admin inside `authorize`,
   whoever minted it, and never holds its minter's channel admin grants
   (`build_subject`), so a channel-bound key reaches no channel but its own.

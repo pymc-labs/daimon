@@ -2832,7 +2832,8 @@
         apply there, the roles and members administering it, and the budget's
         limit, window and spend (``budget`` is null without one), and the
         live timed promo credit with when each grant ends. Money is a decimal
-        string.
+        string. Agent and environment names this conversation's channel
+        isolation keeps from it read as null.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3725,8 +3726,9 @@
         
         Pass this turn's ``origin_context_id``. A pinned agent, or a turn in
         an isolated channel, publishes nothing: a link reaches whoever holds
-        it. When the answering agent is pinned to channels, a non-admin may
-        only publish its reader from inside them.
+        it. An isolated channel's own agent never answers a report. When the
+        answering agent is pinned to channels, a non-admin may only publish
+        its reader from inside them.
         
         Returns ``{upload_url, links}``: ``upload_url`` is a one-time
         capability URL: ``links`` maps each recipient's name to their own

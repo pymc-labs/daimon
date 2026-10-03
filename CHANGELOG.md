@@ -27,13 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned agent, an isolated channel's own agent, or a turn in an isolated
   channel can no longer publish a report, notebook or attachment link, or
   change daimon's server-wide name or avatar, admins included; these tools
-  now take the turn's `origin_context_id`. A chat turn whose agent can't be
+  now take the turn's `origin_context_id`. No one publishes a reader of an
+  isolated channel's own agent. A chat turn whose agent can't be
   found is refused while a channel is isolated instead of being treated as
   outside it.
 - **Environment names across isolation.** An environment only isolated
-  channels pick no longer shows in `list_environments`, `get_environment` or a
-  channel admin's picker outside them; operator tokens and server admins on
-  the panels still see every name.
+  channels pick no longer shows in `list_environments`, `get_environment`,
+  `get_tenant_summary` or a channel admin's picker outside them, and the
+  environment-changing tools treat it as missing; operator tokens and server
+  admins on the panels still see every name.
 - **Open networks in sealed channels need confirming.** A server admin's
   environment pick or clear that leaves a sealed channel on unrestricted
   networking now waits for `confirm_open_network` on

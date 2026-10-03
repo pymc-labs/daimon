@@ -22,6 +22,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._isolation import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import Action
@@ -121,7 +122,7 @@ async def _require_pick_allowed(
         if target.channel_id is None:
             _require_admin(auth)  # the workspace default's own copy
         raise ToolError(_NEEDS_ADMIN)
-    if pick.missing:
+    if pick.missing or environment_name in await load_caller_hidden_environments(runtime, auth):
         raise ToolError(
             f"No environment named '{environment_name}' exists in this workspace. Nothing was "
             "changed. Use list_environments to pick an existing one, or create_environment first."

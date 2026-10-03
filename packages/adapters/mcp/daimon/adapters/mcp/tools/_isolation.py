@@ -25,6 +25,7 @@ from daimon.core.access_policy import (
     isolation_owner,
 )
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
+from daimon.core.channel_environments import load_hidden_environment_names
 from daimon.core.channel_isolation import BindingRefusal, IsolationViewer, binding_refusal
 from daimon.core.channel_isolation_setup import render_isolation_refusal
 from daimon.core.defaults.ma_index import list_agents_by_tenant
@@ -169,11 +170,26 @@ async def load_caller_isolation(
     return CallerIsolation(policy, inside, agent_aliases(agents))
 
 
+async def load_caller_hidden_environments(
+    runtime: McpRuntime, auth: AuthIdentity
+) -> frozenset[str]:
+    """Environment names only isolated channels across the caller's line pick; an operator
+    sees all. Tools treat them as missing."""
+    if auth.is_operator:
+        return frozenset()
+    caller = await load_caller_isolation(runtime, auth)
+    async with runtime.session_factory() as session:
+        return await load_hidden_environment_names(
+            session, tenant_id=auth.tenant_id, viewer=caller, default=runtime.deployment_default
+        )
+
+
 __all__ = [
     "NO_SKILL_OWNERS",
     "OPEN_ISOLATION",
     "CallerIsolation",
     "SkillOwners",
+    "load_caller_hidden_environments",
     "load_caller_isolation",
     "load_isolation",
     "load_skill_owners",

@@ -23,6 +23,7 @@ from daimon.adapters.mcp.tools._channel_policy import (
     require_channel_writable,
     require_identity_changeable,
     require_publishable,
+    require_reader_source_publishable,
     turn_origin_place,
 )
 from daimon.adapters.mcp.tools.agents import (
@@ -31,6 +32,9 @@ from daimon.adapters.mcp.tools.agents import (
     _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _list_agents_impl,  # pyright: ignore[reportPrivateUsage]
     _update_agent_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.channel_environments import (
+    _set_channel_environment_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.channel_isolation import (
     _set_channel_isolation_impl,  # pyright: ignore[reportPrivateUsage]
@@ -53,6 +57,9 @@ from daimon.adapters.mcp.tools.routines import (
 from daimon.adapters.mcp.tools.skills import (
     _get_impl,  # pyright: ignore[reportPrivateUsage]
     _list_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.tenant_summary import (
+    _get_tenant_summary_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.timers import (
     _list_timers_impl,  # pyright: ignore[reportPrivateUsage]
@@ -782,6 +789,32 @@ async def test_an_isolated_channels_environment_name_shows_only_inside_it(
     with pytest.raises(ToolError, match="not found"):
         await _get_environment_impl(runtime, world.auth(), "acme-env")
     assert (await _get_environment_impl(runtime, inside, "acme-env")).name == "acme-env"
+    with pytest.raises(ToolError, match="No environment named 'acme-env'"):
+        await _set_channel_environment_impl(
+            runtime, world.auth(), environment_name="acme-env", channel_id=None
+        )
+
+    async def summary_row(auth: AuthIdentity) -> tuple[str | None, str | None]:
+        summary = await _get_tenant_summary_impl(runtime, auth)
+        row = next(row for row in summary.channels if row.channel_id == ROOM)
+        return row.agent_name, row.environment_name
+
+    assert await summary_row(world.auth()) == (None, None), "the summary hides C's names outside"
+    assert await summary_row(operator) == ("local", "acme-env"), "an operator token sees them"
+
+
+async def test_no_one_publishes_an_own_agents_reader(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A reader answers as its source for whoever holds the link: never C's own agent."""
+    world, runtime = await _world(committing_sessionmaker)
+    own, shared = (
+        ma_agent(id=f"agent_{name}", name=name, tenant_id=world.tenant_id)
+        for name in ("local", "shared")
+    )
+    with pytest.raises(ToolError, match="isolated channel's own agent"):
+        await require_reader_source_publishable(runtime, world.auth(), own)
+    await require_reader_source_publishable(runtime, world.auth(), shared)
 
 
 async def test_an_own_agent_schedules_nothing_outside(

@@ -6,8 +6,9 @@ import base64
 import json
 from collections.abc import Callable
 from typing import Any, cast
-from unittest.mock import create_autospec
+from unittest.mock import MagicMock, create_autospec
 
+import daimon.adapters.mcp.tools.notebook as notebook_mod
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
@@ -17,6 +18,7 @@ from daimon.adapters.mcp.tools.notebook import (
     _create_notebook_upload_impl,  # pyright: ignore[reportPrivateUsage]
     _delete_notebook_impl,  # pyright: ignore[reportPrivateUsage]
     _list_notebooks_impl,  # pyright: ignore[reportPrivateUsage]
+    register_notebook_tools,
 )
 from daimon.core.config import (
     AnthropicSettings,
@@ -26,6 +28,7 @@ from daimon.core.config import (
 )
 from daimon.core.notebooks.publish import _principal_prefix  # pyright: ignore[reportPrivateUsage]
 from daimon.core.scope import DeploymentDefault
+from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -222,3 +225,31 @@ async def test_create_notebook_upload_impl_refuses_editable_unless_operator_allo
         await _create_notebook_upload_impl(
             runtime, slug="x", permanent=False, editable=True, principal_key="acct-1"
         )
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("create_notebook_upload_url", {}),
+        ("create_attachment_upload_url", {"slug": "s", "name": "data.csv"}),
+    ],
+)
+async def test_upload_urls_are_held_before_anything_is_minted(
+    monkeypatch: pytest.MonkeyPatch, tool: str, arguments: dict[str, object]
+) -> None:
+    """Both tools check the turn's origin (`require_publishable`) before minting a URL."""
+
+    async def held(_runtime: McpRuntime, _auth: object, *, origin_context_id: str | None) -> None:
+        assert origin_context_id == "o1", "the turn's origin decides where the call is held"
+        raise ToolError("held to an isolated channel")
+
+    async def auth(_ctx: object) -> MagicMock:
+        return MagicMock()
+
+    monkeypatch.setattr(notebook_mod, "_auth", auth)
+    monkeypatch.setattr(notebook_mod, "require_publishable", held)
+    mcp = FastMCP("notebook")
+    register_notebook_tools(mcp, _make_runtime(_make_settings()))
+    async with Client(mcp) as client:
+        with pytest.raises(ToolError, match="held"):
+            await client.call_tool(tool, {**arguments, "origin_context_id": "o1"})

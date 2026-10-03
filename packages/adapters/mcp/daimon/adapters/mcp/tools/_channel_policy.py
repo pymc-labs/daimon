@@ -19,6 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
@@ -247,6 +248,30 @@ async def require_publishable(
     await _require_unheld(
         runtime, auth, origin_context_id, what="publishing", nothing="Nothing was published."
     )
+
+
+async def require_reader_source_publishable(
+    runtime: McpRuntime, auth: AuthIdentity, source: BetaManagedAgentsAgent
+) -> None:
+    """A published reader answers as its source agent for whoever holds the link,
+    so an isolated channel's own agent's reader is refused, admins included. A
+    pinned source is the pin write rule's (`require_pin_write_access`)."""
+    policy = await load_channel_policy(runtime, auth)
+    if not policy.isolated_channel_ids:
+        return
+    decision = authorize(
+        policy,
+        subject=mcp_subject(auth),
+        action=Action.PUBLISH,
+        agent=build_agent_ref(source.name, source.metadata),
+    )
+    if decision.reason == "channel_isolated":
+        record_authz_denial(Action.PUBLISH, decision.reason)
+        raise ToolError(
+            f"'{source.name}' is an isolated channel's own agent, so its reader can't be "
+            "published: a link reaches whoever holds it. Tell the caller. Nothing was "
+            "published. Do not retry."
+        )
 
 
 async def require_identity_changeable(

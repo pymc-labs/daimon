@@ -17,12 +17,9 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._isolation import load_caller_isolation
+from daimon.adapters.mcp.tools._isolation import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
-from daimon.core.channel_environments import (
-    build_archive_environment_note,
-    load_hidden_environment_names,
-)
+from daimon.core.channel_environments import build_archive_environment_note
 from daimon.core.defaults.ma_index import (
     find_environment_by_daimon_tag,
     find_environments_by_daimon_tag,
@@ -56,20 +53,6 @@ class EnvironmentInfo(BaseModel):
         )
 
 
-async def _hidden_names(runtime: McpRuntime, auth: AuthIdentity) -> frozenset[str]:
-    """Names only isolated channels across the caller's line pick; an operator sees all."""
-    if auth.is_operator:
-        return frozenset()
-    caller = await load_caller_isolation(runtime, auth)
-    async with runtime.session_factory() as session:
-        return await load_hidden_environment_names(
-            session,
-            tenant_id=auth.tenant_id,
-            viewer=caller,
-            default=runtime.deployment_default,
-        )
-
-
 async def _list_environments_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -78,7 +61,7 @@ async def _list_environments_impl(
     del page
     require_scope(auth, "tenant:read")
     rows = await list_environments_by_tenant(runtime.client, tenant_id=auth.tenant_id)
-    hidden = await _hidden_names(runtime, auth)
+    hidden = await load_caller_hidden_environments(runtime, auth)
     return [
         EnvironmentInfo.from_ma(e)
         for e in rows
@@ -92,7 +75,7 @@ async def _get_environment_impl(
     name: str,
 ) -> EnvironmentInfo:
     env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
-    if env is None or env.metadata.get(MA_METADATA_KEY_NAME) in await _hidden_names(runtime, auth):
+    if env is None or name in await load_caller_hidden_environments(runtime, auth):
         raise ToolError(f"environment '{name}' not found")
     return EnvironmentInfo.from_ma(env)
 
@@ -160,7 +143,7 @@ async def _update_environment_impl(
     if not patch:
         raise ToolError("update_environment: at least one field is required")
     env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
-    if env is None:
+    if env is None or name in await load_caller_hidden_environments(runtime, auth):
         raise ToolError(f"environment '{name}' not found")
     _reject_managed_environment(
         env,
@@ -189,7 +172,7 @@ async def _archive_environment_impl(
     """Archive the environment, then clear every pick of it so those channels fall through."""
     _require_admin(auth)
     env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
-    if env is None:
+    if env is None or name in await load_caller_hidden_environments(runtime, auth):
         raise ToolError(f"environment '{name}' not found")
     _reject_managed_environment(
         env,
