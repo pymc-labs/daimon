@@ -1,0 +1,190 @@
+"""Durable, encrypted installation-token inventory. Callers own transactions."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+from typing import Literal
+
+from cryptography.fernet import MultiFernet
+from daimon.core._models import GitHubIssuedToken
+from daimon.core.github_credentials import decrypt_token, encrypt_token
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+class IssuedToken(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+    token_id: uuid.UUID
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    session_id: str
+    installation_id: int
+    repo_ids: list[int]
+    permissions: dict[str, str]
+    grant_versions: dict[str, int]
+    requester_account_id: uuid.UUID | None
+    link_generation: int | None
+    encrypted_token: bytes | None
+    expires_at: datetime
+    status: Literal["pending", "stored", "delivered", "revoked"]
+    revoked_at: datetime | None
+    revoke_attempts: int
+
+
+class GitHubTokenRowClosedError(ValueError):
+    """The issued-token row was closed before its minted token could be stored."""
+
+
+async def create_pending(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    session_id: str,
+    installation_id: int,
+    repo_ids: list[int],
+    permissions: dict[str, str],
+    grant_versions: dict[str, int],
+    expires_at: datetime,
+    requester_account_id: uuid.UUID | None = None,
+    link_generation: int | None = None,
+) -> IssuedToken:
+    if not repo_ids or len(repo_ids) > 500 or len(set(repo_ids)) != len(repo_ids):
+        raise ValueError("token inventory requires 1..500 repository IDs")
+    if any(
+        repo_id <= 0
+        or grant_versions.get(f"grant:{repo_id}", 0) <= 0
+        or grant_versions.get(f"authorization:{repo_id}", 0) <= 0
+        for repo_id in repo_ids
+    ):
+        raise ValueError("token inventory requires positive IDs and both recorded versions")
+    if expires_at.utcoffset() is None:
+        raise ValueError("expires_at must include a timezone")
+    row = GitHubIssuedToken(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        session_id=session_id,
+        installation_id=installation_id,
+        repo_ids=repo_ids,
+        permissions=permissions,
+        grant_versions=grant_versions,
+        requester_account_id=requester_account_id,
+        link_generation=link_generation,
+        expires_at=expires_at,
+        status="pending",
+        revoke_attempts=0,
+    )
+    session.add(row)
+    await session.flush()
+    return IssuedToken.model_validate(row)
+
+
+async def store_token(
+    session: AsyncSession, *, token_id: uuid.UUID, token: str, fernet: MultiFernet
+) -> IssuedToken:
+    """Store a minted token; if revoked, the minter must DELETE /installation/token."""
+    row = await session.get(GitHubIssuedToken, token_id, with_for_update=True)
+    if row is not None and row.status == "revoked":
+        raise GitHubTokenRowClosedError("token row was closed before storage")
+    if row is None or row.status != "pending":
+        raise ValueError("token is not pending")
+    row.encrypted_token = encrypt_token(fernet, token)
+    row.status = "stored"
+    await session.flush()
+    return IssuedToken.model_validate(row)
+
+
+async def mark_delivered(session: AsyncSession, *, token_id: uuid.UUID) -> IssuedToken:
+    row = await session.get(GitHubIssuedToken, token_id, with_for_update=True)
+    if row is None or row.status != "stored":
+        raise ValueError("token is not stored")
+    row.status = "delivered"
+    await session.flush()
+    return IssuedToken.model_validate(row)
+
+
+async def mark_revoked(session: AsyncSession, *, token_id: uuid.UUID) -> IssuedToken:
+    row = await session.get(GitHubIssuedToken, token_id, with_for_update=True)
+    if row is None:
+        raise ValueError("unknown token")
+    if row.status == "revoked":
+        return IssuedToken.model_validate(row)
+    row.status = "revoked"
+    row.revoked_at = datetime.now(UTC)
+    await session.flush()
+    return IssuedToken.model_validate(row)
+
+
+async def record_revoke_attempt(session: AsyncSession, *, token_id: uuid.UUID) -> None:
+    row = await session.get(GitHubIssuedToken, token_id, with_for_update=True)
+    if row is None:
+        raise ValueError("unknown token")
+    row.revoke_attempts += 1
+    await session.flush()
+
+
+def decrypt_issued_token(row: IssuedToken, *, fernet: MultiFernet) -> str | None:
+    return decrypt_token(fernet, row.encrypted_token) if row.encrypted_token is not None else None
+
+
+async def select_stale_tokens(
+    session: AsyncSession, *, now: datetime | None = None
+) -> list[IssuedToken]:
+    """Find live tokens with changed grant, authorization or requester link state."""
+    current = now or datetime.now(UTC)
+    statement = (
+        select(GitHubIssuedToken)
+        .from_statement(
+            text(
+                """
+            SELECT token.*
+            FROM github_issued_tokens AS token
+            LEFT JOIN github_app_installations AS installation
+              ON installation.installation_id = token.installation_id
+            LEFT JOIN account_github_links AS account_link
+              ON account_link.account_id = token.requester_account_id
+            LEFT JOIN github_user_links AS user_link
+              ON user_link.github_user_id = account_link.github_user_id
+            WHERE token.status IN ('stored', 'delivered')
+              AND token.expires_at > :now
+              AND (
+                installation.installation_id IS NULL
+                OR installation.suspended_at IS NOT NULL
+                OR (
+                  token.link_generation IS NOT NULL
+                  AND (
+                    user_link.github_user_id IS NULL
+                    OR user_link.status <> 'active'
+                    OR user_link.link_generation IS DISTINCT FROM token.link_generation
+                  )
+                )
+                OR EXISTS (
+                  SELECT 1
+                  FROM unnest(token.repo_ids) AS repo(repo_id)
+                  LEFT JOIN agent_github_grants AS grant_row
+                    ON grant_row.tenant_id = token.tenant_id
+                   AND grant_row.agent_id = token.agent_id
+                   AND grant_row.repo_id = repo.repo_id
+                  LEFT JOIN tenant_github_repos AS auth_row
+                    ON auth_row.tenant_id = token.tenant_id
+                   AND auth_row.repo_id = repo.repo_id
+                  WHERE grant_row.repo_id IS NULL
+                     OR grant_row.staged
+                     OR auth_row.repo_id IS NULL
+                     OR auth_row.status <> 'active'
+                     OR auth_row.installation_id <> token.installation_id
+                     OR token.grant_versions ->> ('grant:' || repo.repo_id::text)
+                        IS DISTINCT FROM grant_row.version::text
+                     OR token.grant_versions ->> ('authorization:' || repo.repo_id::text)
+                        IS DISTINCT FROM auth_row.version::text
+                )
+              )
+            """
+            )
+        )
+        .execution_options(populate_existing=True)
+    )
+    rows = await session.scalars(statement, {"now": current})
+    return [IssuedToken.model_validate(row) for row in rows]

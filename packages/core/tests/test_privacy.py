@@ -14,9 +14,11 @@ from datetime import UTC, datetime, timedelta
 
 from daimon.core._models import (
     Account,
+    AccountGitHubLink,
     AgentGithubBinding,
     Base,
     CliPrincipal,
+    GitHubUserLink,
     McpToken,
     MessageFeedback,
     PlatformPrincipal,
@@ -52,6 +54,50 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .factories.github import make_oauth_state
+
+
+async def test_account_purge_deletes_github_user_after_last_link(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    first = await make_account(db_session, tenant=tenant)
+    second = await make_account(db_session, tenant=tenant)
+    db_session.add(
+        GitHubUserLink(
+            github_user_id=101,
+            login="example",
+            encrypted_access_token=b"ciphertext",
+            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            status="active",
+            token_generation=1,
+            link_generation=1,
+        )
+    )
+    await db_session.flush()
+    for account in (first, second):
+        db_session.add(
+            AccountGitHubLink(
+                account_id=account.id,
+                github_user_id=101,
+                platform="discord",
+                platform_user_id=str(account.id),
+                verified_via="discord_oauth",
+            )
+        )
+    await db_session.commit()
+
+    first_preview = await collect_purge_preview(sm=db_session_factory, account_id=first.id)
+    assert first_preview.github_user_links.count == 0
+    first_report = await purge_account(sm=db_session_factory, account_id=first.id)
+    assert first_report.db.github_user_links == 0
+
+    second_preview = await collect_purge_preview(sm=db_session_factory, account_id=second.id)
+    assert second_preview.github_user_links.count == 1
+    second_report = await purge_account(sm=db_session_factory, account_id=second.id)
+    assert second_report.db.github_user_links == 1
+    async with db_session_factory() as session:
+        assert await session.get(GitHubUserLink, 101) is None
 
 
 async def test_collect_purge_preview_returns_zero_counts_when_account_has_no_data(
@@ -732,6 +778,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "accounts": "account",
         "user_skills": "user_skills",
         "github_credentials": "github_credentials",
+        "github_user_links": "github_user_links",
         "github_oauth_states": "github_oauth_states",
         "mcp_tokens": "mcp_tokens",
         "agent_github_binding": "agent_github_binding",
@@ -833,6 +880,21 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # redeemed_by_account_id with ON DELETE SET NULL, so erasure severs who
             # redeemed a code while the tenant keeps its credit history.
             "promo_redemptions",
+            # Repo authorization and grants belong to the tenant. Their nullable
+            # creator references are erased by ON DELETE SET NULL.
+            "tenant_github_repos",
+            # An invitation is single-use and disappears with its requesting
+            # account; its encrypted flow rows cascade from the invitation.
+            "github_connect_invitations",
+            # An org-wide authorization belongs to the tenant. Erasing the
+            # confirming admin severs nullable provenance, preserving access.
+            "tenant_github_org_scopes",
+            "agent_github_grants",
+            # The account link is removed by ON DELETE CASCADE. A token's
+            # requester reference is erased by SET NULL; its recorded link
+            # generation then fails the inventory sweeper's link check.
+            "account_github_links",
+            "github_issued_tokens",
         }
     )
 

@@ -28,6 +28,8 @@ def _summary_line(preview: PurgePreview) -> str:
         parts.append(f"{preview.user_skills.count} synced skill(s)")
     if preview.github_credentials.count > 0:
         parts.append(f"{preview.github_credentials.count} GitHub token(s)")
+    if preview.github_user_links.count > 0:
+        parts.append(f"{preview.github_user_links.count} GitHub user link(s)")
     if preview.github_oauth_states.count > 0:
         parts.append(f"{preview.github_oauth_states.count} OAuth handshake record(s)")
     if preview.mcp_tokens.count > 0:

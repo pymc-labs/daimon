@@ -39,6 +39,11 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # the binding side (repo-access proven at bind). Unfiltered get_for_repo
     # is issue #1 — this exemption documents the structural gap, not safety.
     "github_app_installations": "no Daimon tenant at GitHub-install time; see #1",
+    # A GitHub user can link accounts in several tenants; the user row is
+    # deployment-wide. Account links inherit tenant isolation from accounts.id.
+    "github_user_links": "deployment-wide GitHub user identity; tenant links live in account_github_links",
+    "account_github_links": "keyed by account_id (globally unique, maps to one tenant)",
+    "github_connect_flows": "keyed by random state hash and bound by FK to a tenant-scoped invitation",
     # Push delivery receipts and jobs are deployment-wide GitHub metadata, not
     # tenant data. Resync resolves each tenant's bindings and scoped credentials
     # at execution time from the canonical repository/ref.
