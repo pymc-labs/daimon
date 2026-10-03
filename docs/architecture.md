@@ -596,10 +596,6 @@ other MCP servers don't see the policy; an agent created inside C isn't C's
 own until it is pinned there; `/dm` from C is refused; a call is held to C
 only where its tool takes a verified origin (not the send, DM, self-edit or
 routine edit tools), and a call that names none is judged from outside.
-Publishing tools require a verified origin for an agent call while any channel
-is isolated; an isolated or pinned agent cannot publish a report or mint a
-notebook or attachment upload URL, even with an outside origin. Calls with no
-executing agent remain available to the operator.
 
 When C closes, `archive_isolation_copy` (server admins, or the
 `agents:archive` operator scope; `core/isolation_copies.py`) archives the copy
@@ -924,10 +920,6 @@ then, where it matters:
   publishing a pinned agent's reader needs an admin or an `origin_context_id`
   from inside its channels. An isolated channel's own agent's reader is never
   published (`require_reader_source_publishable`), admins included.
-- Report and notebook publishing use `authorize(PUBLISH)` with the executing
-  agent and verified turn origin. An isolated or pinned agent cannot publish
-  content outside its channel; an agent call with no verified origin is refused
-  while isolation is active.
 - An agent-scoped key is never exempt as an admin inside `authorize`,
   whoever minted it, and never holds its minter's channel admin grants
   (`build_subject`), so a channel-bound key reaches no channel but its own.

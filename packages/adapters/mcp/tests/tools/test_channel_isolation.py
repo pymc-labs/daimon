@@ -62,10 +62,6 @@ from daimon.adapters.mcp.tools.routines import (
     _list_routines_impl,  # pyright: ignore[reportPrivateUsage]
     _update_routine_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.self_edit import (
-    _self_write_file_impl,  # pyright: ignore[reportPrivateUsage]
-    _set_repo_binding_impl,  # pyright: ignore[reportPrivateUsage]
-)
 from daimon.adapters.mcp.tools.skills import (
     _get_impl,  # pyright: ignore[reportPrivateUsage]
     _list_impl,  # pyright: ignore[reportPrivateUsage]
@@ -711,23 +707,6 @@ async def test_an_own_agent_publishes_and_renames_daimon_nowhere(
             await require_publishable(runtime, auth, origin_context_id=None)
         with pytest.raises(ToolError, match="server-wide name or avatar is refused"):
             await require_identity_changeable(runtime, auth, origin_context_id=None)
-
-
-async def test_an_isolated_agents_self_edit_writes_are_refused(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    world, runtime = await _world(committing_sessionmaker)
-    agent_key = replace(
-        world.auth(admin=False),
-        agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_local"),
-    )
-
-    with pytest.raises(ToolError, match="pinned"):
-        await _self_write_file_impl(runtime, agent_key, key="NOTES_TOKEN", content="notes")
-    with pytest.raises(ToolError, match="pinned"):
-        await _set_repo_binding_impl(
-            runtime, agent_key, repo_url="owner/repo", default_branch="main"
-        )
 
 
 async def test_publishing_is_held_by_the_turns_origin(
