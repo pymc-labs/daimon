@@ -29,6 +29,7 @@ from daimon.core.agent_reach import load_target_facts, may_bind_as_channel_defau
 from daimon.core.authz import Action, AgentRef, Place, authorize
 from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
 from daimon.core.operation_policy import OperationKind, TargetFacts, decide_operation
+from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins
 from fastmcp.exceptions import ToolError
@@ -42,6 +43,11 @@ UNPLACED_RUN_REASON: Final[str] = (
     "be in any channel"
 )
 """Refusal wording for `TargetFacts.has_unplaced_run`, after the agent's name."""
+
+NOT_HELD_REASON: Final[str] = (
+    "was not made for, pinned to or given to the channels this caller administers by a server admin"
+)
+"""Refusal wording for a local agent that is not the channel admin's, after its name."""
 
 
 def channel_admin_caller(auth: AuthIdentity) -> ChannelAdminCaller:
@@ -116,7 +122,7 @@ async def require_bindable_as_channel_default(
     is_daimon_managed: bool,
 ) -> None:
     """Raise ``ToolError`` when the agent is pinned elsewhere, or a channel admin
-    binds another channel's own agent."""
+    binds another channel's own agent or one another channel admin holds."""
     names = tuple(name for name in _target_names(agent_name, agent) if name)
     async with runtime.session_factory() as session:
         try:
@@ -131,6 +137,8 @@ async def require_bindable_as_channel_default(
             agent=AgentRef.of(*names),
             place=Place(channel_id=channel_id),
         )
+        if not decision:
+            record_authz_denial(Action.BIND_CHANNEL_DEFAULT, decision.reason)
         if decision.reason == "channel_isolated":
             raise ToolError(
                 "This channel is isolated, so only its own agents (pinned to it alone) can be "
@@ -147,6 +155,7 @@ async def require_bindable_as_channel_default(
             session,
             tenant_id=auth.tenant_id,
             platform=auth.platform or "",
+            channel_id=channel_id,
             agent_names=names,
             ma_agent_id=str(agent.id) if agent is not None else None,
             default=runtime.deployment_default,
@@ -156,12 +165,13 @@ async def require_bindable_as_channel_default(
         ):
             return
     raise ToolError(
-        f"'{agent_name}' answers in channels this caller does not administer, has other "
-        "people's conversations or routines whose channel is unknown, or runs unattended for "
-        "someone with wider rights, so only a workspace or server admin can "
-        "make it this channel's default. A channel admin may "
-        "pick a built-in agent, the workspace default, an agent that answers nowhere yet, "
-        "or one that answers only in their channels. Nothing was changed. Do not retry."
+        f"'{agent_name}' was not made for or pinned to the channels this caller administers, "
+        "answers in channels they do not administer, has other people's conversations or "
+        "routines whose channel is unknown, runs unattended for someone with wider rights, "
+        "or another channel admin holds it in channels without this one, so only a workspace "
+        "or server admin can make it this channel's default. A channel admin may pick a "
+        "built-in agent, the workspace default, or an agent made for or pinned to their "
+        "channels that answers nowhere else. Nothing was changed. Do not retry."
     )
 
 
@@ -203,6 +213,8 @@ async def require_admin_for_reachable_agent(
             )
         elif facts.has_unplaced_run:
             why = UNPLACED_RUN_REASON
+        elif facts.is_local_to_caller_channels:
+            why = NOT_HELD_REASON
         else:
             why = (
                 "is currently a default agent here and answers or runs outside the channels "

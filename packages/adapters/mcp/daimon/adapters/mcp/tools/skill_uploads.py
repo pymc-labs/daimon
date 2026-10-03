@@ -51,6 +51,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import decrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_personal_servers import visible_tools
 from daimon.core.operation_policy import OperationKind, decide_operation
 from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
@@ -59,6 +60,8 @@ from daimon.core.skills.add import (
     add_agent_skill,
     fetch_attachment,
     fetch_repo_skill,
+    fetch_teams_attachment,
+    is_teams_download_url,
     repo_origin,
 )
 from daimon.core.skills.fetch import GitHubFetchError
@@ -149,7 +152,13 @@ async def _session_asks_first(
             [tool.model_dump(mode="json") for tool in ma_session.agent.tools], tool_name=_TOOL_NAME
         ):
             return True
-        return await _recorded_as_gated(runtime, auth, live, ma_agent_id=ma_session.agent.id)
+        return await _recorded_as_gated(
+            runtime,
+            auth,
+            live,
+            ma_agent_id=ma_session.agent.id,
+            reported_tools_sha256=hash_tools(ma_session.agent.tools),
+        )
     except anthropic.APIError as exc:
         # Unreadable (a deleted session, an outage) is not evidence of a card:
         # the confirm is refused like any other session without one.
@@ -160,14 +169,22 @@ async def _session_asks_first(
 
 
 async def _recorded_as_gated(
-    runtime: McpRuntime, auth: AuthIdentity, live: ThreadSessionRow, *, ma_agent_id: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    live: ThreadSessionRow,
+    *,
+    ma_agent_id: str,
+    reported_tools_sha256: str,
 ) -> bool:
     """Whether the tools daimon recorded for `live` are the gated ones, `add_skill` asking.
 
-    For a session MA reports without its per-session overrides. The bind records
-    the hash of the tools it last sent the session; equal to the gated tools a
-    session for this caller gets now (`session_tools`), it is the server's own
-    record of the card. An agent changed since that bind reads as not gated.
+    Only for a session MA reports without its per-session overrides, i.e. with
+    the agent's own tools (`reported_tools_sha256`): a report showing other
+    tools, such as a session switched to `always_allow` out of band, is taken
+    at its word. The bind records the hash of the tools it last sent the
+    session; equal to the gated tools a session for this caller gets now
+    (`session_tools`), it is the server's own record of the card. An agent
+    changed since that bind reads as not gated.
     """
     recorded = live.effective_config
     if recorded is None:
@@ -180,6 +197,12 @@ async def _recorded_as_gated(
         account_id=auth.account_id,
         server_urls={server.name: server.url for server in agent.mcp_servers},
     )
+    # MA reporting the agent's own tools means it left the overrides out.
+    if reported_tools_sha256 not in {
+        hash_tools(agent.tools),
+        hash_tools(visible_tools(agent, hidden)),
+    }:
+        return False
     public_url = runtime.settings.mcp.public_url
     tools = session_tools(
         agent,
@@ -203,7 +226,8 @@ async def require_skill_change(
     """Raise unless the caller may add or remove one of `agent`'s skills.
 
     A built-in agent is refused; a server admin may change any other; a
-    channel admin one that answers and runs only in their channels; anyone one
+    channel admin one of theirs that answers and runs only in their channels
+    (`daimon.core.authz.channel_admin_holds`); anyone one
     nobody else uses, read as widely as a key change
     (`daimon.core.agent_reach.WIDE_SHARING_OPERATIONS`).
     """
@@ -224,6 +248,8 @@ async def require_skill_change(
         why = "runs unattended (a routine or queued wake) for someone with wider rights"
     elif facts.has_unplaced_run:
         why = reachability.UNPLACED_RUN_REASON
+    elif facts.is_local_to_caller_channels:
+        why = reachability.NOT_HELD_REASON
     else:
         why = (
             "is used beyond this caller (a default, a bound thread, or someone else's "
@@ -281,7 +307,9 @@ async def _fetch_platform_attachment(
     """Bytes and filename of a file attached in the caller's own chat platform.
 
     Discord: its CDN over https. Slack: this server's signed file link, for the
-    caller's own workspace, read with that workspace's bot token. Nothing else.
+    caller's own workspace, read with that workspace's bot token. Teams: the
+    file's pre-authorised SharePoint, OneDrive or Graph download link, with no
+    credential and no redirect off those hosts. Nothing else.
     """
     parsed = urlparse(url)
     if auth.platform == "discord":
@@ -297,8 +325,19 @@ async def _fetch_platform_attachment(
         return data, filename
     if auth.platform == "slack":
         return await _fetch_slack_attachment(runtime, auth, http, url)
+    if auth.platform == "teams":
+        try:
+            allowed = is_teams_download_url(httpx.URL(url))
+        except httpx.InvalidURL:
+            allowed = False
+        if not allowed:
+            raise ToolError("attachment_url must be a Teams file's SharePoint or OneDrive link.")
+        try:
+            return await fetch_teams_attachment(http, url)
+        except httpx.HTTPError as exc:
+            raise ToolError(f"Could not download the attachment: {exc}") from exc
     raise ToolError(
-        "Attachments come only from Discord or Slack. Pass skill_md or repo_url instead."
+        "Attachments come only from Discord, Slack or Teams. Pass skill_md or repo_url instead."
     )
 
 

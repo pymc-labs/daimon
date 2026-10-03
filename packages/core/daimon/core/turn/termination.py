@@ -36,7 +36,7 @@ from daimon.core.turn.errors import (
     SessionPreparationFailed,
 )
 
-__all__ = ["TerminationReason", "termination_reason"]
+__all__ = ["TerminationReason", "denial_termination_reason", "termination_reason"]
 
 
 class TerminationReason(StrEnum):
@@ -78,8 +78,11 @@ class TerminationReason(StrEnum):
     ADMISSION_BALANCE_DEPLETED = "admission_balance_depleted"
     ADMISSION_CAP_EXCEEDED = "admission_cap_exceeded"
     ADMISSION_CHANNEL_BUDGET_EXCEEDED = "admission_channel_budget_exceeded"
+    ADMISSION_CHANNEL_PROTECTED = "admission_channel_protected"
+    ADMISSION_AGENT_PINNED_ELSEWHERE = "admission_agent_pinned_elsewhere"
+    ADMISSION_CHANNEL_ISOLATED = "admission_channel_isolated"
     ADMISSION_DENIED = "admission_denied"
-    """Any other admission refusal (an access policy, a future gate)."""
+    """Any other admission refusal (the invoker allowlist, a future gate)."""
     ADMISSION_CONCURRENCY_SHED = "admission_concurrency_shed"
     """`daimon.core.turn.gating.should_admit_turn` refused: too many turns in
     flight. It returns a bool rather than raising, so callers that shed a turn
@@ -107,7 +110,19 @@ _BY_DENIAL: dict[str, TerminationReason] = {
     "balance_depleted": TerminationReason.ADMISSION_BALANCE_DEPLETED,
     "cap_exceeded": TerminationReason.ADMISSION_CAP_EXCEEDED,
     "channel_budget_exceeded": TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
+    "channel_protected": TerminationReason.ADMISSION_CHANNEL_PROTECTED,
+    "agent_pinned_elsewhere": TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE,
+    "channel_isolated": TerminationReason.ADMISSION_CHANNEL_ISOLATED,
 }
+
+
+def denial_termination_reason(denial: str | None) -> TerminationReason:
+    """The member for an admission denial reason, `ADMISSION_DENIED` when it has none.
+
+    Takes a plain string so a gate that decides with `authorize` rather than
+    raising `AdmissionDenied` records the same member for the same reason.
+    """
+    return _BY_DENIAL.get(str(denial), TerminationReason.ADMISSION_DENIED)
 
 
 def termination_reason(err: BaseException | None) -> TerminationReason:
@@ -124,8 +139,7 @@ def termination_reason(err: BaseException | None) -> TerminationReason:
         case TurnError():
             return _BY_VALUE.get(str(err.kind), TerminationReason.UNKNOWN)
         case AdmissionDenied():
-            denial = getattr(err, "reason", None)
-            return _BY_DENIAL.get(str(denial), TerminationReason.ADMISSION_DENIED)
+            return denial_termination_reason(getattr(err, "reason", None))
         case MissingTurnConfigError():
             return TerminationReason.MISSING_CONFIG
         case MAResolverMissError():

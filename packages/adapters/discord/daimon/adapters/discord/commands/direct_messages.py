@@ -7,9 +7,9 @@ from typing import Literal
 import anthropic
 import structlog
 from daimon.adapters.discord.bot import (
-    CHANNEL_BUDGET_NOTICE,
     GLOBAL_CAP_NOTICE,
     DaimonBot,
+    admission_refusal_message,
     log_anthropic_overload,
 )
 from daimon.adapters.discord.checks import (
@@ -17,6 +17,7 @@ from daimon.adapters.discord.checks import (
     member_role_ids,
     require_registered_guild,
 )
+from daimon.core.config import Settings
 from daimon.core.direct_messages import (
     reply_to_dm,
     require_dm_enabled,
@@ -30,7 +31,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.direct_messages import dm_enabled, get_conversation, set_dm_enabled
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
-from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
+from daimon.core.turn.errors import AdmissionDenied
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -41,33 +42,11 @@ log = structlog.get_logger(__name__)
 _CONVERSATION_TYPES = frozenset({discord.MessageType.default, discord.MessageType.reply})
 
 
-def _error_text(exc: Exception, fallback: str) -> str:
-    if isinstance(exc, AdmissionDenied) and exc.reason == "channel_budget_exceeded":
-        return "Sorry, " + CHANNEL_BUDGET_NOTICE
+def _error_text(exc: Exception, fallback: str, *, settings: Settings) -> str:
+    """Person-facing copy for a failure; an admission refusal is never shown as its code."""
+    if isinstance(exc, AdmissionDenied):
+        return admission_refusal_message(exc.reason, settings, in_dm=True)
     return str(exc) if isinstance(exc, DaimonError) else fallback
-
-
-_DM_DENIAL_COPY: dict[AdmissionDenialReason, str] = {
-    "agent_pinned_elsewhere": (
-        "This channel's agent only runs in the channels an operator pinned it to, "
-        "so it can't continue in a DM."
-    ),
-    "invoker_not_allowed": (
-        "You aren't on this workspace's list of people who can start a turn. An admin can add you."
-    ),
-    "channel_protected": "This channel is protected, so it can't be moved to a DM.",
-    "channel_isolated": (
-        "This channel is isolated, so its conversations stay in it and can't move to a DM."
-    ),
-    "balance_depleted": "This workspace's daimon credit is depleted. An admin can top up.",
-    "cap_exceeded": "The monthly usage cap is reached. An admin can adjust it.",
-    "channel_budget_exceeded": "Sorry, " + CHANNEL_BUDGET_NOTICE,
-}
-
-
-def _dm_denial_message(exc: AdmissionDenied) -> str:
-    """Person-facing copy for a /dm refused at admission (the raw reason is a code)."""
-    return _DM_DENIAL_COPY.get(exc.reason, "This conversation can't be moved to a DM.")
 
 
 class DirectMessageCog(commands.Cog):
@@ -173,12 +152,10 @@ class DirectMessageCog(commands.Cog):
             SQLAlchemyError,
         ) as exc:
             log.warning("discord.dm.move_failed", error_type=type(exc).__name__)
-            message = (
-                _dm_denial_message(exc)
-                if isinstance(exc, AdmissionDenied)
-                else str(exc)
-                if isinstance(exc, DaimonError)
-                else "Couldn't open the conversation. Check that your DMs are open and retry."
+            message = _error_text(
+                exc,
+                "Couldn't open the conversation. Check that your DMs are open and retry.",
+                settings=self.bot.runtime.settings,
             )
             await interaction.followup.send(message, ephemeral=True)
 
@@ -258,7 +235,9 @@ class DirectMessageCog(commands.Cog):
             )
             log.warning("discord.dm.turn_failed", error_type=type(exc).__name__)
             error = _error_text(
-                exc, "Couldn't verify or complete this private conversation. Please retry."
+                exc,
+                "Couldn't verify or complete this private conversation. Please retry.",
+                settings=self.bot.runtime.settings,
             )
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(error, allowed_mentions=discord.AllowedMentions.none())

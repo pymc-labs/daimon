@@ -24,6 +24,7 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from daimon.testing.ma_models import ma_agent
@@ -121,13 +122,25 @@ def test_screen_offers_isolating_ending_or_lifting_it(account_id: uuid.UUID) -> 
     assert LIFT_LABEL in _labels(ended), "after ending, the seal and pin can still be lifted"
 
 
-async def test_a_member_who_lost_manage_server_changes_nothing(account_id: uuid.UUID) -> None:
-    sessionmaker = MagicMock()
-    view = _view(_runtime(sessionmaker), account_id, isolated=False)
+async def test_a_member_who_lost_manage_server_changes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+        account = await make_account(session, tenant=tenant)
+    view = _view(_runtime(db_session_factory), account.id, isolated=False)
     member = _interaction(admin=False)
     await _button(view, ISOLATE_LABEL).callback(member)
     member.response.send_message.assert_awaited_once()
-    sessionmaker.begin.assert_not_called()
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant.id)
+        (event,) = await list_events(session, tenant_id=tenant.id)
+    assert policy.isolated_channel_ids == (), "nothing was isolated"
+    assert (event.tool_name, event.outcome, event.reason) == (
+        "panel:isolation",
+        "denied",
+        "needs_admin",
+    ), "the refusal is audited"
 
 
 async def test_isolate_refuses_a_shared_agent_then_copies_it_and_ends(

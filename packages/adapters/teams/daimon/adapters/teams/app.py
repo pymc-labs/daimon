@@ -26,8 +26,10 @@ import daimon.core.turn.bookkeeping as turn_bookkeeping
 import structlog
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
+from daimon.adapters.teams.budget_notice import with_budget_notifier
 from daimon.adapters.teams.card import enable_files_card
 from daimon.adapters.teams.card_actions import toast
+from daimon.adapters.teams.channel_admin_groups import owned_team_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.commands import (
     ANSWERED_IN_CHAT,
@@ -116,6 +118,7 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import protection_state
@@ -152,39 +155,28 @@ _RECOVERY_RETRY_DELAY_S = 1.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats are in flight right now. Try again in a moment."
-_BALANCE_DEPLETED = (
-    "This organisation's credit is depleted. An admin can top up with `billing` in a 1:1 "
-    "chat with me."
-)
-_CAP_REACHED = "Monthly usage cap reached for this organisation. Ask an admin to adjust it."
-_NOT_INVITED = (
-    "You aren't on this organisation's list of people who can start a turn. An admin can add you."
-)
-_PINNED_ELSEWHERE = (
-    "This agent only runs in the channels an operator pinned it to, so it can't answer here."
-)
-_CHANNEL_BUDGET = "This channel has used its spending budget. An admin can raise or clear it."
 _RESOLVER_MISS = (
     "The configured agent or environment no longer exists. Pick another with `setup` in a "
     "1:1 chat with me, or ask an admin to restore it."
 )
-_ISOLATED = "This channel is isolated: only its own agents answer here."
 _CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
 _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
 _CANCELLING = "Cancelling…"
 # Everything a turn can raise that is not a bug in this adapter.
 _TURN_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ERRORS)
 _BIND_REFUSALS = (SessionPreparationFailed, SessionBusyError, SessionAgentMismatch)
-_DENIALS: dict[AdmissionDenialReason, tuple[str, str | None]] = {
-    "balance_depleted": ("turn.skipped.over_balance", _BALANCE_DEPLETED),
-    "cap_exceeded": ("turn.skipped.over_cap", _CAP_REACHED),
-    "invoker_not_allowed": ("turn.skipped.invoker_not_allowed", _NOT_INVITED),
-    "agent_pinned_elsewhere": ("turn.skipped.agent_pinned_elsewhere", _PINNED_ELSEWHERE),
-    "channel_budget_exceeded": ("turn.skipped.channel_budget_exceeded", _CHANNEL_BUDGET),
-    # A protected channel hears nothing, a refusal included.
-    "channel_protected": ("turn.skipped.channel_protected", None),
-    # Teams isolates no channels, so this is unreachable; the reply keeps the map total.
-    "channel_isolated": ("turn.skipped.channel_isolated", _ISOLATED),
+TEAMS_REFUSAL_NOUNS = RefusalNouns(
+    scope="organisation", admin="an admin", billing="`billing` in a 1:1 chat with me"
+)
+# The log event each refusal is recorded under.
+_DENIALS: dict[AdmissionDenialReason, str] = {
+    "balance_depleted": "turn.skipped.over_balance",
+    "cap_exceeded": "turn.skipped.over_cap",
+    "invoker_not_allowed": "turn.skipped.invoker_not_allowed",
+    "agent_pinned_elsewhere": "turn.skipped.agent_pinned_elsewhere",
+    "channel_budget_exceeded": "turn.skipped.channel_budget_exceeded",
+    "channel_protected": "turn.skipped.channel_protected",
+    "channel_isolated": "turn.skipped.channel_isolated",
 }
 
 _NO_CONTEXT = (
@@ -227,9 +219,11 @@ def _admission_refusal(
     if isinstance(err, MAResolverMissError):
         log.warning("teams.resolver.miss", kind=err.kind, daimon_tag=err.daimon_tag)
         return _RESOLVER_MISS
-    event, copy = _DENIALS[err.reason]
-    log.info(event, tenant_id=str(tenant_id))
-    return copy
+    log.info(_DENIALS[err.reason], tenant_id=str(tenant_id))
+    # A protected channel hears nothing, a refusal included.
+    if err.reason == "channel_protected":
+        return None
+    return admission_refusal_text(err.reason, TEAMS_REFUSAL_NOUNS)
 
 
 class TeamsApp:
@@ -251,7 +245,7 @@ class TeamsApp:
         teams = runtime.settings.teams
         if teams is None:
             raise ValueError("TeamsApp requires Teams settings")
-        self.runtime = runtime
+        self.runtime = runtime = with_budget_notifier(runtime, direct)
         self._teams = teams
         # Known before any read, so `_may_post` can gate every post.
         self._tenant_id = derive_tenant_uuid(platform="teams", workspace_id=teams.tenant_id)
@@ -786,6 +780,11 @@ class TeamsApp:
                 channel_id=inbound.channel_id,
                 thread_id=inbound.thread_id,
                 role=self._role(inbound),
+                platform_role_ids=sorted(
+                    await owned_team_ids(self.runtime, tenant_id=tenant_id, user_id=inbound.user_id)
+                )
+                if self._role(inbound) is not Role.ADMIN
+                else (),
                 now=datetime.now(UTC),
                 is_dm=inbound.kind == "dm",
             )

@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
-from daimon.adapters.discord.bot import CHANNEL_BUDGET_NOTICE
 from daimon.adapters.discord.commands import direct_messages as dm_module
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.core.defaults.provisioning import provision_tenant
@@ -22,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _GUILD = 700000101
 _PARENT = 2
 _THREAD = 3
+_OVER_BUDGET = "This channel has used its spending budget. A server admin can raise or clear it."
 
 
 async def _no_history(*, limit: int) -> AsyncIterator[discord.Message]:
@@ -85,7 +85,7 @@ async def test_dm_from_a_thread_admits_and_records_its_parent_channel(
     )
     (reply,), _ = interaction.followup.send.await_args
     if over_budget:
-        assert reply == "Sorry, " + CHANNEL_BUDGET_NOTICE, "the member is told why"
+        assert reply == _OVER_BUDGET, "the member is told why"
         start_dm.assert_not_awaited()
         member.create_dm.assert_not_awaited()
     else:
@@ -139,5 +139,5 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
     await cog.on_message(message)
 
     (reply,), _ = message.channel.send.await_args
-    assert reply == "Sorry, " + CHANNEL_BUDGET_NOTICE, "the member is told why the DM stopped"
+    assert reply == _OVER_BUDGET, "the member is told why the DM stopped"
     bot.release_global_turn.assert_called_once()

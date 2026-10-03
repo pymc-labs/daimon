@@ -6,16 +6,19 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_reach import (
-    is_agent_local_to_caller,
+    _caller_locality,  # pyright: ignore[reportPrivateUsage]
     load_agent_reach,
     load_target_facts,
     may_bind_as_channel_default,
 )
 from daimon.core.channel_admins import ChannelAdminCaller
-from daimon.core.operation_policy import OperationKind
+from daimon.core.operation_policy import OperationKind, decide_operation
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef, UserScopeRef
 from daimon.core.stores import accounts
+from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_creation_channels import record_creation_channel
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.credential_requests import create_credential_request
 from daimon.core.stores.direct_messages import (
@@ -43,6 +46,31 @@ from daimon.testing.factories import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 DEFAULT = DeploymentDefault(agent_name="daimon")
+
+
+async def _is_local_to_caller(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    agent_names: tuple[str, ...],
+    ma_agent_id: str | None,
+    default: DeploymentDefault,
+    caller: ChannelAdminCaller,
+) -> bool:
+    """Whether the agent is local to the caller's channels, as `load_target_facts` reads it."""
+    locality = await _caller_locality(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        agent_names=agent_names,
+        ma_agent_id=ma_agent_id,
+        default=default,
+        caller=caller,
+        caller_account_id=None,
+        caller_platform_user_id=caller.platform_user_id,
+    )
+    return locality.is_local
 
 
 async def test_reach_and_locality_follow_channels_and_threads(db_session: AsyncSession) -> None:
@@ -77,7 +105,7 @@ async def test_reach_and_locality_follow_channels_and_threads(db_session: AsyncS
     caller = ChannelAdminCaller(platform_user_id="u1")
 
     async def local() -> bool:
-        return await is_agent_local_to_caller(
+        return await _is_local_to_caller(
             db_session,
             tenant_id=tenant.id,
             platform="discord",
@@ -130,7 +158,7 @@ async def test_load_target_facts_marks_only_a_channel_admins_local_agent(
             tenant_id=tenant.id,
             platform="discord",
             agent_names=("helper",),
-            ma_agent_id=None,
+            ma_agent_id="agent_1",
             default=DEFAULT,
             caller=caller,
             is_daimon_managed=False,
@@ -155,35 +183,50 @@ async def test_load_target_facts_marks_only_a_channel_admins_local_agent(
     assert not admin.is_reachable_in_tenant, "an admin's decision needs no read"
 
 
-async def test_channel_admin_binds_only_shared_unrouted_or_own_channel_agents(
+async def test_channel_admin_binds_only_shared_agents_or_their_own(
     db_session: AsyncSession,
 ) -> None:
+    """Shared by design, created for one of their channels, or pinned inside them."""
     tenant = await make_tenant(db_session)
-    for scope, name in (
-        (TenantScopeRef(tenant_id=tenant.id), "shared"),
-        (ChannelScopeRef(tenant_id=tenant.id, channel_id="b"), "b-agent"),
+    for scope, name, by_admin in (
+        (TenantScopeRef(tenant_id=tenant.id), "shared", False),
+        (ChannelScopeRef(tenant_id=tenant.id, channel_id="b"), "b-agent", False),
+        (ChannelScopeRef(tenant_id=tenant.id, channel_id="a"), "assigned", True),
     ):
         await set_fields(
-            db_session, scope=scope, tenant_id=tenant.id, agent_name=name, mode="agent"
+            db_session,
+            scope=scope,
+            tenant_id=tenant.id,
+            agent_name=name,
+            mode="agent",
+            set_by_admin=by_admin,
         )
-    await set_channel_admins(
+    await _grant(db_session, tenant.id, "a", "u1")
+    for agent_id, channel in (("ag_made", "a"), ("ag_elsewhere", "b")):
+        await record_creation_channel(
+            db_session,
+            tenant_id=tenant.id,
+            ma_agent_id=agent_id,
+            platform="discord",
+            channel_id=channel,
+        )
+    await set_access_policy(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
-        channel_id="a",
-        role_ids=[],
-        user_ids=["u1"],
-        actor_account_id=None,
+        policy=TenantAccessPolicy(agent_channel_pins={"pinned": ("a",)}),
     )
     caller = ChannelAdminCaller(platform_user_id="u1")
 
-    async def may_bind(name: str, *, managed: bool = False, who=caller) -> bool:
+    async def may_bind(
+        name: str, *, agent_id: str | None = None, managed: bool = False, who=caller
+    ) -> bool:
         return await may_bind_as_channel_default(
             db_session,
             tenant_id=tenant.id,
             platform="discord",
+            channel_id="a",
             agent_names=(name,),
-            ma_agent_id=None,
+            ma_agent_id=agent_id,
             default=DEFAULT,
             caller=who,
             is_daimon_managed=managed,
@@ -192,9 +235,107 @@ async def test_channel_admin_binds_only_shared_unrouted_or_own_channel_agents(
     assert not await may_bind("b-agent"), "another channel's own agent never moves in"
     assert await may_bind("b-agent", managed=True), "a managed agent is shared by design"
     assert await may_bind("shared"), "the tenant default is shared by design"
-    assert await may_bind("unrouted"), "an agent answering nowhere is free to bind"
+    assert not await may_bind("unrouted", agent_id="ag_other"), (
+        "an unpinned agent someone else made is a server admin's to bind"
+    )
+    assert await may_bind("made", agent_id="ag_made"), "one made for their channel binds"
+    assert not await may_bind("elsewhere", agent_id="ag_elsewhere"), (
+        "one made for a channel they do not administer does not"
+    )
+    assert await may_bind("pinned"), "one a server admin pinned inside their channels binds"
+    assert not await may_bind("assigned"), (
+        "a default a server admin set is not theirs to bind: binding is what sets it"
+    )
     assert await may_bind("b-agent", who=caller.model_copy(update={"is_server_admin": True})), (
         "a server admin binds anything"
+    )
+
+
+async def test_a_channel_admin_changes_only_a_local_agent_that_is_theirs(
+    db_session: AsyncSession,
+) -> None:
+    """Each way an agent becomes theirs, and what takes it away."""
+    tenant = await make_tenant(db_session)
+    await _grant(db_session, tenant.id, "a", "u1")
+
+    async def default_of_a(name: str, *, by_admin: bool) -> None:
+        await set_fields(
+            db_session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="a"),
+            tenant_id=tenant.id,
+            agent_name=name,
+            mode="agent",
+            set_by_admin=by_admin,
+        )
+
+    async def outcome(name: str, agent_id: str) -> str:
+        facts = await load_target_facts(
+            db_session,
+            "agent_spec_edit",
+            tenant_id=tenant.id,
+            platform="discord",
+            agent_names=(name,),
+            ma_agent_id=agent_id,
+            default=DEFAULT,
+            caller=ChannelAdminCaller(platform_user_id="u1"),
+            is_daimon_managed=False,
+        )
+        return decide_operation("agent_spec_edit", is_admin=False, target=facts)
+
+    await default_of_a("bound", by_admin=False)
+    assert await outcome("bound", "ag_bound") == "needs_admin", (
+        "an unpinned agent someone else made stays a server admin's once a member binds it"
+    )
+    await default_of_a("bound", by_admin=True)
+    assert await outcome("bound", "ag_bound") == "allow", "a server admin's assignment counts"
+
+    await default_of_a("made", by_admin=False)
+    await record_creation_channel(
+        db_session,
+        tenant_id=tenant.id,
+        ma_agent_id="ag_made",
+        platform="discord",
+        channel_id="a",
+    )
+    assert await outcome("made", "ag_made") == "allow", "one made for their channel is theirs"
+    assert await outcome("made", "ag_slack") == "needs_admin", "the record is per agent id"
+    await record_creation_channel(
+        db_session,
+        tenant_id=tenant.id,
+        ma_agent_id="ag_far",
+        platform="discord",
+        channel_id="b",
+    )
+    await default_of_a("far", by_admin=False)
+    assert await outcome("far", "ag_far") == "needs_admin", (
+        "made for a channel they do not administer"
+    )
+
+    await default_of_a("pinned", by_admin=False)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"pinned": ("a",)}),
+    )
+    assert await outcome("pinned", "ag_pinned") == "allow", "pinned inside their channels"
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"pinned": ("a", "b")}),
+    )
+    assert await outcome("pinned", "ag_pinned") == "needs_admin", "a pin reaching beyond them"
+
+    await default_of_a("made", by_admin=False)
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="b"),
+        tenant_id=tenant.id,
+        agent_name="made",
+        mode="agent",
+        set_by_admin=True,
+    )
+    assert await outcome("made", "ag_made") == "needs_admin", (
+        "an agent made for their channel that also answers elsewhere lost its locality"
     )
 
 
@@ -218,7 +359,7 @@ async def _admin_of_c1(db_session: AsyncSession, tenant_id) -> None:
 
 
 async def _is_local(db_session: AsyncSession, tenant_id, agent_name: str = "helper") -> bool:
-    return await is_agent_local_to_caller(
+    return await _is_local_to_caller(
         db_session,
         tenant_id=tenant_id,
         platform="discord",
@@ -237,6 +378,54 @@ async def _member(db_session: AsyncSession, tenant, user_id: str, *, admin: bool
     if admin:
         await accounts.set_role(db_session, account.id, Role.ADMIN)
     return account
+
+
+@pytest.mark.parametrize(
+    ("c2_admins", "allowed"),
+    [(("u1",), True), (("u1", "u2"), False)],
+    ids=["theirs-alone", "another-admin-would-lose-it"],
+)
+async def test_a_channel_admin_never_binds_an_agent_away_from_another_channel_admin(
+    db_session: AsyncSession, c2_admins: tuple[str, ...], allowed: bool
+) -> None:
+    """The handoff rule: research was made for c2 and answers there. u1 administers
+    c1 and c2; binding it as c1's default would take it out of u2's channels."""
+    tenant = await make_tenant(db_session)
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c2"),
+        tenant_id=tenant.id,
+        agent_name="research",
+    )
+    await record_creation_channel(
+        db_session,
+        tenant_id=tenant.id,
+        ma_agent_id="ag_research",
+        platform="discord",
+        channel_id="c2",
+    )
+    await _grant(db_session, tenant.id, "c1", "u1")
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="c2",
+        role_ids=[],
+        user_ids=list(c2_admins),
+        actor_account_id=None,
+    )
+    may_bind = await may_bind_as_channel_default(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="c1",
+        agent_names=("research",),
+        ma_agent_id="ag_research",
+        default=DEFAULT,
+        caller=ChannelAdminCaller(platform_user_id="u1"),
+        is_daimon_managed=False,
+    )
+    assert may_bind is allowed, "only a binding that costs no other channel admin their hold"
 
 
 async def test_only_a_stronger_requesters_routine_keeps_an_agent_from_a_channel_admin(
@@ -285,6 +474,7 @@ async def test_only_a_stronger_requesters_routine_keeps_an_agent_from_a_channel_
         db_session,
         tenant_id=tenant.id,
         platform="discord",
+        channel_id="c1",
         agent_names=("scheduled",),
         ma_agent_id=None,
         default=DEFAULT,
@@ -377,7 +567,7 @@ async def test_a_stronger_requesters_private_input_counts_against_the_agent_that
     )
 
     async def local() -> bool:
-        return await is_agent_local_to_caller(
+        return await _is_local_to_caller(
             db_session,
             tenant_id=tenant.id,
             platform="discord",
@@ -566,9 +756,13 @@ async def test_a_personal_default_is_shared_for_key_changes_and_never_local(
         "someone's personal default answers them everywhere"
     )
     spec = await _key_facts(
-        db_session, tenant.id, operation="agent_spec_edit", names=("solo",), ma_agent_id=None
+        db_session,
+        tenant.id,
+        operation="agent_spec_edit",
+        names=("solo",),
+        ma_agent_id="agent_solo",
     )
-    assert not spec.is_reachable_in_tenant, "a spec edit keeps the cascade-only read"
+    assert spec.is_reachable_in_tenant, "a spec edit reads the personal default too"
     assert not await _is_local(db_session, tenant.id, "solo"), "not local for binding either"
 
 
@@ -729,13 +923,13 @@ async def test_other_peoples_routines_count_by_their_channel(db_session: AsyncSe
 async def test_an_agent_answering_nowhere_is_local_to_no_channel_admin(
     db_session: AsyncSession,
 ) -> None:
-    """Locality never widens the sharing read; binding such an agent stays open."""
+    """Locality never widens the sharing read; binding such an agent needs it to be theirs."""
     tenant = await make_tenant(db_session)
     await _grant(db_session, tenant.id, "c9", "u9")
     facts = await _unrouted_key_facts(db_session, tenant.id, "u9")
     assert not facts.is_reachable_in_tenant, "an agent no one reaches is open to anyone"
     assert not facts.is_local_to_caller_channels, "and local to no channel admin"
-    assert not await is_agent_local_to_caller(
+    assert not await _is_local_to_caller(
         db_session,
         tenant_id=tenant.id,
         platform="discord",
@@ -744,16 +938,25 @@ async def test_an_agent_answering_nowhere_is_local_to_no_channel_admin(
         default=DEFAULT,
         caller=ChannelAdminCaller(platform_user_id="u9"),
     ), "answering nowhere is not local"
-    assert await may_bind_as_channel_default(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        agent_names=("unrouted",),
-        ma_agent_id="agent_x",
-        default=DEFAULT,
-        caller=ChannelAdminCaller(platform_user_id="u9"),
-        is_daimon_managed=False,
-    ), "a channel admin still binds an agent answering nowhere yet"
+
+    async def may_bind() -> bool:
+        return await may_bind_as_channel_default(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="c9",
+            agent_names=("unrouted",),
+            ma_agent_id="agent_x",
+            default=DEFAULT,
+            caller=ChannelAdminCaller(platform_user_id="u9"),
+            is_daimon_managed=False,
+        )
+
+    assert not await may_bind(), "an agent answering nowhere is not theirs by that alone"
+    await record_creation_channel(
+        db_session, tenant_id=tenant.id, ma_agent_id="agent_x", platform="discord", channel_id="c9"
+    )
+    assert await may_bind(), "a channel admin binds one made for their channel, answering nowhere"
 
 
 async def test_a_key_change_without_a_stable_id_is_local_to_nobody(
@@ -767,7 +970,9 @@ async def test_a_key_change_without_a_stable_id_is_local_to_nobody(
         "a key change that cannot see live sessions is never a channel admin's"
     )
     spec = await _key_facts(db_session, tenant.id, operation="agent_spec_edit", ma_agent_id=None)
-    assert spec.is_local_to_caller_channels, "a spec edit reads the cascade and stays local"
+    assert spec.is_reachable_in_tenant and not spec.is_local_to_caller_channels, (
+        "a spec edit reads sharing as widely as a key change, so it fails closed too"
+    )
 
 
 @pytest.mark.parametrize("reach", ["personal_default", "thread_binding", "routine", "live_session"])
@@ -835,5 +1040,51 @@ async def test_skill_changes_read_sharing_as_wide_as_a_key_change(
     assert await shared("skill_add") and await shared("skill_remove"), (
         f"{reach}: a skill upload or removal reaches every place a key does"
     )
-    if reach in ("routine", "live_session"):
-        assert not await shared("repo_bind"), "a repo bind keeps the cascade-only read"
+    assert await shared("agent_spec_edit") and await shared("repo_bind"), (
+        f"{reach}: a prompt edit or repo bind reaches every place a key does"
+    )
+
+
+async def test_a_member_may_not_edit_an_agent_only_an_admins_routine_runs(
+    db_session: AsyncSession,
+) -> None:
+    """A routine alone makes the agent shared for its prompt and repo, not just its keys.
+
+    The admin's routine would run whatever a member wrote; the routine's own
+    creator and any admin may still edit it.
+    """
+    tenant = await make_tenant(db_session)
+    await _member(db_session, tenant, "u9", admin=True)
+    await _member(db_session, tenant, "u7")
+    await make_routine(
+        db_session, tenant=tenant, created_by_user_id="u9", agent_id="agent_x", agent_name="solo"
+    )
+    await make_routine(
+        db_session, tenant=tenant, created_by_user_id="u7", agent_id="agent_y", agent_name="mine"
+    )
+
+    async def outcome(operation: OperationKind, user_id: str, name: str, *, admin: bool = False):
+        facts = await load_target_facts(
+            db_session,
+            operation,
+            tenant_id=tenant.id,
+            platform="discord",
+            agent_names=(name,),
+            ma_agent_id="agent_x" if name == "solo" else "agent_y",
+            default=DEFAULT,
+            caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=admin),
+            is_daimon_managed=False,
+            caller_platform_user_id=user_id,
+        )
+        return decide_operation(operation, is_admin=admin, target=facts)
+
+    for operation in ("agent_spec_edit", "repo_bind"):
+        assert await outcome(operation, "u7", "solo") == "needs_admin", (
+            f"{operation}: a member may not change what an admin's routine runs"
+        )
+        assert await outcome(operation, "u9", "solo", admin=True) == "allow", (
+            f"{operation}: an admin still may"
+        )
+        assert await outcome(operation, "u7", "mine") == "allow", (
+            f"{operation}: a member's own routine does not hold back their own agent"
+        )

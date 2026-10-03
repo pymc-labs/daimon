@@ -156,6 +156,8 @@ async def _set_agent_default_impl(
             agent_name=agent_name,
             mode="agent",
             actor_account_id=auth.account_id,
+            # What makes a channel's default its channel admins' to administer.
+            set_by_admin=auth.is_admin and auth.agent_id is None,
         )
 
     return SetDefaultResult(

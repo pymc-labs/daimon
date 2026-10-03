@@ -218,6 +218,7 @@ async def test_members_get_no_select_and_no_environment_listing(
 
     view = await load_routing_view(
         _runtime(db_session_factory, tenant_id, calls),
+        _client(),
         tenant_id=tenant_id,
         meta=META,
         is_admin=False,
@@ -316,3 +317,33 @@ async def test_a_channel_admin_of_a_sealed_channel_is_refused_an_open_network(
         await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
         is None
     ), "the refused pick writes nothing"
+
+
+async def test_a_workspace_admin_is_sent_to_chat_to_confirm_an_open_network(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The select has no confirm step, so it writes nothing and points at chat, which asks."""
+    monkeypatch.setattr(actions, "resolve_is_admin", AsyncMock(return_value=True))
+    tenant_id = await _seed(db_session_factory, grant=False)
+    async with db_session_factory() as session, session.begin():
+        await set_access_policy(
+            session, tenant_id=tenant_id, policy=TenantAccessPolicy(sealed_channel_ids=(CHANNEL,))
+        )
+    client = _client()
+
+    await _pick(
+        _runtime(db_session_factory, tenant_id, []),
+        client,
+        tenant_id,
+        environment_option_value("science"),
+    )
+
+    assert "confirm there" in client.chat_postEphemeral.call_args.kwargs["text"], (
+        "it points at chat"
+    )
+    assert (
+        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
+        is None
+    ), "the unconfirmed pick writes nothing"

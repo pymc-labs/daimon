@@ -9,6 +9,7 @@ redeemable, the admin view has a code box whose Redeem button submits it.
 
 from __future__ import annotations
 
+import functools
 import uuid
 from datetime import UTC, datetime
 from typing import cast
@@ -32,19 +33,23 @@ from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.billing_panel import (
+    CHANNEL_BUDGETS_SHOWN,
     TOPUP_AMOUNTS,
     BillingPanelState,
     caller_line,
+    channel_budget_line,
     create_checkout,
     estimate_turns,
     fmt_usd,
     load_billing_snapshot,
     month_start,
+    more_channel_budgets,
     period_label,
     spend_over_cap,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.panel_audit import record_panel_write
 from daimon.core.promo_codes import describe_refusal
 from daimon.core.promo_credit import PromoRedeemed, PromoRedeemRefused, redeem_promo_code
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
@@ -117,6 +122,19 @@ def _member_body(state: BillingPanelState, since: datetime) -> list[CardElement]
     ]
 
 
+def _channel_budgets(state: BillingPanelState) -> list[str]:
+    """The admin view's channel budgets, most used first; nothing when there are none."""
+    if not state.channel_budgets:
+        return []
+    lines = ["📊 **Channel budgets**"] + [
+        channel_budget_line(status, label=f"Channel `{status.budget.channel_id}`")
+        for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
+    ]
+    if more := more_channel_budgets(state):
+        lines.append(f"{more} more channel budgets")
+    return lines
+
+
 def _topup(amount: int, state: BillingPanelState) -> Action:
     turns = estimate_turns(amount, guild_spend=state.guild_spend, guild_turns=state.guild_turns)
     return button(VERB, f"${amount} · ≈{turns:,} turns", "topup", amount=str(amount))
@@ -139,6 +157,7 @@ def _admin_body(state: BillingPanelState, since: datetime) -> list[CardElement]:
     body: list[CardElement] = [
         heading("💸 Billing · admin view"),
         *text_lines(totals, f"🏦 **Credit**: {balance} balance", *_timed_credit(state)),
+        *text_lines(*_channel_budgets(state)),
         *text_lines("🏆 **Top spenders**", *(top or ["no usage yet this period"])),
         *text_lines("💳 **Top up credit**"),
         ActionSet(actions=[_topup(amount, state) for amount in TOPUP_AMOUNTS]),
@@ -203,6 +222,7 @@ class BillingPanel:
                 is_admin=is_admin,
                 since=since,
                 now=now,
+                platform="teams",
             )
         return panel_card(state, since=since, notice=notice)
 
@@ -236,7 +256,16 @@ class BillingPanel:
 
     async def _redeem(self, actor: Actor, code: str) -> AdaptiveCardInvokeResponse:
         """Redeem for a live admin; a refusal leaves the card, and the typed code, as it was."""
+        audit = functools.partial(
+            record_panel_write,
+            self._runtime.sessionmaker,
+            tenant_id=actor.tenant_id,
+            platform="teams",
+            platform_user_id=actor.user_id,
+            op="promo_redeem",
+        )
         if not actor.is_admin:
+            await audit(outcome="denied", reason="needs_admin")
             return toast(REDEEM_ADMIN_ONLY)
         if not code.strip():
             return toast(ENTER_CODE)
@@ -248,6 +277,8 @@ class BillingPanel:
             now=datetime.now(UTC),
         )
         if isinstance(result, PromoRedeemRefused):
+            await audit(outcome="denied", reason=f"promo:{result.reason}")
             return toast(describe_refusal(result.reason))
+        await audit(outcome="allowed", reason="completed")
         card = await self._panel(actor.tenant_id, actor.user_id, True, notice=redeemed_text(result))
         return replace_card(card)

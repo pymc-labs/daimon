@@ -37,6 +37,7 @@ from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
     NOT_OFFERED_NOTE,
     EnvironmentPicker,
+    save_scope_environment,
 )
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -47,7 +48,12 @@ from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.testing import ma_environment
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, build_no_retry_anthropic
+from daimon.testing.ma import (
+    MARouter,
+    build_fake_anthropic,
+    build_no_retry_anthropic,
+    list_response,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 2001
@@ -68,6 +74,7 @@ def _anthropic(tenant_id: uuid.UUID, *names: str, calls: list[str] | None = None
     router.add_environment_list(
         *(ma_environment(id=f"env_{name}", name=name, tenant_id=tenant_id) for name in names)
     )
+    router.add("GET", r"/v1/agents", lambda _r, _m: list_response([]))
 
     def handler(request: httpx.Request) -> httpx.Response:
         if calls is not None:
@@ -513,6 +520,75 @@ async def test_a_channel_admin_of_a_sealed_channel_is_refused_an_open_network(
         )
         is None
     ), "the refused pick writes nothing"
+
+
+async def test_a_server_admin_is_sent_to_chat_to_confirm_an_open_network_in_a_sealed_channel(
+    db_session_factory: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    """The select has no confirm step, so it writes nothing and points at chat, which asks."""
+    tenant_id, account_id = await _seed(db_session_factory)
+    async with db_session_factory() as session, session.begin():
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(sealed_channel_ids=(str(CHANNEL_ID),)),
+        )
+    runtime = _runtime(db_session_factory, _anthropic(tenant_id, "science"))
+    state = _state(account_id, is_admin=True, answering_map=AnsweringMap())
+    interaction = _interaction(admin=True)
+    view = await build_routing_view(
+        interaction, runtime=runtime, state=state, allowed_user_id=USER_ID
+    )
+    select = _select(view)
+    assert select is not None, "a server admin gets the select"
+
+    select._values = ["env:science"]  # pyright: ignore[reportPrivateUsage]  # a real dispatch sets this
+    await select.callback(interaction)
+
+    assert "confirm there" in interaction.followup.send.call_args.args[0], "it points at chat"
+    assert (
+        await get_scope(
+            db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=str(CHANNEL_ID))
+        )
+        is None
+    ), "the unconfirmed pick writes nothing"
+
+
+async def test_a_channel_admin_never_sees_another_isolated_channels_own_environment(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Its name could name that channel's client; a server admin still sees every name."""
+    tenant_id, account_id = await _seed(db_session_factory)
+    await _grant_channel(db_session_factory, tenant_id)
+    isolated = str(CHANNEL_ID + 1)
+    async with db_session_factory() as session, session.begin():
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=(isolated,), isolated_channel_ids=(isolated,)
+            ),
+        )
+        await save_scope_environment(
+            session,
+            tenant_id=tenant_id,
+            channel_id=isolated,
+            environment_name="acme",
+            actor_account_id=None,
+        )
+    runtime = _runtime(db_session_factory, _anthropic(tenant_id, "acme", "science"))
+
+    async def names(*, admin: bool) -> tuple[str, ...]:
+        picker = await load_environment_picker(
+            _interaction(admin=admin),
+            runtime=runtime,
+            state=_state(account_id, is_admin=admin, answering_map=AnsweringMap()),
+        )
+        assert picker is not None, "both get the picker"
+        return picker.names
+
+    assert await names(admin=False) == ("science",), "the isolated channel's own name is hidden"
+    assert await names(admin=True) == ("acme", "science"), "a server admin sees every name"
 
 
 # ---------------------------------------------------------------------------

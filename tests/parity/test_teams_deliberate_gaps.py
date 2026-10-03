@@ -10,9 +10,9 @@ The rest follows from what a Teams bot can do (see `docs/teams.md`): there is
 no message only its sender sees, so a command typed in a channel is answered in
 the 1:1 chat and the manifest offers commands there only; the 1:1 chat has no
 threads, so a setup conversation is keyed inside it, and since panels live
-there a channel admin cannot mint a coding-tool token, which must be minted
-inside their channel; files in a channel work only once a tenant admin grants
-the app the team's SharePoint site (`Sites.Selected`), because no team-scoped
+there a channel admin picks which of their channels a coding-tool token is
+bound to rather than pressing the button inside it; files in a channel work
+only once a tenant admin grants the app the team's SharePoint site (`Sites.Selected`), because no team-scoped
 permission reaches it; a dialog has no file input, so a `.env` file is pasted
 rather than uploaded; and once a dialog closes nothing private reaches the
 requester, so a GitHub token is checked against its repo before the request is
@@ -112,7 +112,7 @@ def test_a_teams_setup_conversation_lives_inside_its_chat() -> None:
 def test_teams_channel_files_need_a_site_grant_not_a_manifest_permission() -> None:
     manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
     granted = manifest["authorization"]["permissions"]["resourceSpecific"]
-    assert [p["name"] for p in granted] == ["ChannelMessage.Read.Group"], (
+    assert [p["name"] for p in granted] == ["ChannelMessage.Read.Group", "TeamMember.Read.Group"], (
         "no team permission reaches SharePoint, so files need an admin's Sites.Selected grant"
     )
 

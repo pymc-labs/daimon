@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import create_autospec
+from unittest.mock import MagicMock, create_autospec
 
 import httpx
 import pytest
@@ -99,6 +99,35 @@ async def test_publish_report_impl_raises_when_jwt_secret_unset() -> None:
             recipients=[Recipient(name="Ada", label="ada")],
             cap_usd="2.50",
             agent=None,
+        )
+
+
+async def test_publish_report_impl_is_held_before_anything_is_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chat call is checked with its turn's origin before the host is reached."""
+
+    async def held(_runtime: McpRuntime, _auth: object, *, origin_context_id: str | None) -> None:
+        assert origin_context_id == "o1", "the turn's origin decides where the call is held"
+        raise ToolError("held to an isolated channel")
+
+    async def never(**_kwargs: object) -> PublishResult:
+        raise AssertionError("nothing may be published")
+
+    monkeypatch.setattr("daimon.adapters.mcp.tools.publish.require_publishable", held)
+    monkeypatch.setattr("daimon.adapters.mcp.tools.publish.publish_report", never)
+    with pytest.raises(ToolError, match="held"):
+        await _publish_report_impl(
+            _make_runtime(_make_settings()),
+            tenant_id=uuid.uuid4(),
+            account_id=uuid.uuid4(),
+            slug="q1-results",
+            title="Q1 results",
+            recipients=[Recipient(name="Ada", label="ada")],
+            cap_usd="2.50",
+            agent=None,
+            auth=MagicMock(),
+            origin_context_id="o1",
         )
 
 

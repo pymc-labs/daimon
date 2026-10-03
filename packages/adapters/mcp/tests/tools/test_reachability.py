@@ -13,6 +13,7 @@ from daimon.adapters.mcp.tools.reachability import require_admin_for_reachable_a
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -74,6 +75,24 @@ async def test_non_admin_unreachable_agent_returns_none(
         account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.USER, is_admin=False
     )
     result = await require_admin_for_reachable_agent(
-        _runtime(db_session_factory), auth, agent_name="my-agent"
+        _runtime(db_session_factory),
+        auth,
+        agent_name="my-agent",
+        agent=ma_agent(id="agent_mine", name="my-agent", tenant_id=tenant.id),
     )
     assert result is None, "unreachable agent must not be gated for a non-admin caller"
+
+
+async def test_non_admin_is_gated_when_no_agent_is_resolved(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """With no stable id to find routines and sessions by, a member's edit fails closed."""
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord")
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.USER, is_admin=False
+    )
+    with pytest.raises(ToolError, match="an admin must change its setup"):
+        await require_admin_for_reachable_agent(
+            _runtime(db_session_factory), auth, agent_name="my-agent"
+        )

@@ -23,7 +23,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
 from anthropic.types.beta.beta_managed_agents_custom_tool import BetaManagedAgentsCustomTool
 from anthropic.types.beta.beta_managed_agents_custom_tool_input_schema import (
     BetaManagedAgentsCustomToolInputSchema,
@@ -436,6 +436,62 @@ async def _count_live_rows(
         return int(result.scalar_one())
 
 
+async def test_a_foreign_daimon_server_is_healed_at_the_bind_and_in_the_update(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An agent whose `daimon-mcp` points elsewhere gets sessions pointed at this
+    deployment: the next bind reads that as current, and a real tools change
+    pushes the healed server, so neither updates the session on every turn."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+
+    def foreign(*extra: BetaManagedAgentsCustomTool) -> BetaManagedAgentsAgent:
+        payload = _agent_with_servers(*extra).model_dump(mode="json")
+        payload["mcp_servers"][0]["url"] = "https://elsewhere.example/mcp"
+        return BetaManagedAgentsAgent.model_validate(payload)
+
+    agent = foreign()
+    _register(transport.state, agent)
+    deps = _gated_deps(db_session_factory, transport)
+
+    async def prepare(current: BetaManagedAgentsAgent) -> PreparedTurn:
+        prepared = await _prepare(
+            deps, _admission(account=account, agent=current), tenant=tenant, account=account
+        )
+        assert isinstance(prepared, PreparedTurn)
+        return prepared
+
+    first = await prepare(agent)
+    session_servers = transport.state.sessions[first.ma_session_id].agent.mcp_servers
+    assert [server.url for server in session_servers if server.name == "daimon-mcp"] == [
+        _PUBLIC_URL
+    ], "the session runs this deployment's server"
+    second = await prepare(agent)
+    assert (second.continuity, transport.updates) == (ContinuityOutcome(), []), (
+        "the healed server reads as current on the next bind"
+    )
+
+    search = BetaManagedAgentsCustomTool(
+        description="search the corpus",
+        input_schema=BetaManagedAgentsCustomToolInputSchema(type="object"),
+        name="search",
+        type="custom",
+    )
+    changed = foreign(search)
+    _register(transport.state, changed)
+    third = await prepare(changed)
+    assert third.continuity.applied == ("tools",), "one in-place update"
+    [update] = transport.updates
+    assert [
+        server["url"] for server in update["agent"]["mcp_servers"] if server["name"] == "daimon-mcp"
+    ] == [_PUBLIC_URL], "the update pushes the healed server"
+    fourth = await prepare(changed)
+    assert fourth.continuity == ContinuityOutcome(), "and that reads as current after"
+
+
 async def test_a_compatible_session_is_reused_without_touching_ma(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -775,6 +831,35 @@ async def test_a_model_change_replaces_the_session_and_bills_the_new_model(
         "the recorder must bill the model the successor froze, not the one it replaced"
     )
     assert [row.managed_session_id for row in rows] == [second.ma_session_id]
+
+
+async def test_a_channels_skills_are_added_at_create_and_read_as_current_on_the_next_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Create and the drift check build the same skill list; dropping one replaces the session."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    extra = (BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="v7"),)
+    with_skill = replace(_admission(account=account), channel_skills=extra)
+
+    first = await _prepare(deps, with_skill, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    frozen = transport.state.sessions[first.ma_session_id].agent.skills
+    assert [(s.skill_id, s.version) for s in frozen] == [("skill_team", "v7")]
+
+    second = await _prepare(deps, with_skill, tenant=tenant, account=account)
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id == first.ma_session_id, "the channel's skills are not drift"
+    assert transport.creates == 1
+
+    third = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+    assert isinstance(third, PreparedTurn)
+    assert third.ma_session_id != first.ma_session_id, "a removed channel skill leaves the session"
+    assert transport.state.sessions[third.ma_session_id].agent.skills == []
 
 
 async def test_a_fresh_start_retires_the_old_row_and_carries_nothing(

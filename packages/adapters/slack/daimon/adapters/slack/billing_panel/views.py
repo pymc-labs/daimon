@@ -13,11 +13,14 @@ from typing import Any
 
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.billing_panel import (
+    CHANNEL_BUDGETS_SHOWN,
     TOPUP_AMOUNTS,
     BillingPanelState,
     caller_line,
+    channel_budget_line,
     estimate_turns,
     fmt_usd,
+    more_channel_budgets,
     period_label,
     spend_over_cap,
 )
@@ -51,6 +54,19 @@ def _channel_budget_suffix(state: BillingPanelState) -> str:
     if state.channel_budget is None:
         return ""
     return f"\nthis channel: {describe_budget(state.channel_budget)}"
+
+
+def _channel_budgets_text(state: BillingPanelState) -> str | None:
+    """The admin view's channel budgets, most used first; None when there are none."""
+    if not state.channel_budgets:
+        return None
+    lines = ["📊 *Channel budgets*"] + [
+        channel_budget_line(status, label=f"<#{status.budget.channel_id}>")
+        for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
+    ]
+    if more := more_channel_budgets(state):
+        lines.append(f"_{more} more channel budgets_")
+    return "\n".join(lines)
 
 
 def build_loading_view() -> dict[str, Any]:
@@ -117,6 +133,8 @@ def build_billing_container(
             f"{_channel_budget_suffix(state)}"
         )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": credit_line}})
+        if (budgets_text := _channel_budgets_text(state)) is not None:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": budgets_text}})
 
         # Top spenders
         top5 = state.member_rows[:5]

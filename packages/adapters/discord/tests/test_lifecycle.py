@@ -11,7 +11,7 @@ import dataclasses
 import time
 import types
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
 
@@ -37,7 +37,7 @@ from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---------------------------------------------------------------------------
@@ -55,6 +55,7 @@ def _make_lifecycle(
     render_tables: bool = False,
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
     tenant_id: uuid.UUID | None = None,
+    budget_channel_id: str | None = None,
 ) -> tuple[DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]]]:
     """Create lifecycle with recorder callables.
 
@@ -83,6 +84,7 @@ def _make_lifecycle(
         cancel_view=cancel_view,
         sessionmaker=sessionmaker,
         tenant_id=tenant_id,
+        budget_channel_id=budget_channel_id,
     )
     return lc, sends, edits
 
@@ -1524,3 +1526,37 @@ async def test_rejected_table_upload_retries_original_answer_as_text(status, not
     assert delivered[0]["allowed_mentions"].to_dict().get("users", []) == ([123] if notify else [])
     assert any(entry["event"] == "turn.table_delivery_failed" for entry in logs)
     assert lifecycle.was_answered
+
+
+@pytest.mark.asyncio
+async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("12.50"))
+    await make_channel_budget(db_session, tenant=tenant, channel_id="C1", limit_usd=Decimal("5"))
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("-1.25"), channel_id="C1")
+    await make_channel_budget(
+        db_session,
+        tenant=tenant,
+        channel_id="C2",
+        window="total",
+        starts_at=datetime.now(UTC) + timedelta(days=1),
+    )
+    await db_session.commit()
+
+    footers: dict[str | None, str] = {}
+    for channel in ("C1", "C2", "C3", None):
+        lc, _sends, edits = _make_lifecycle(
+            sessionmaker=db_session_factory, tenant_id=tenant.id, budget_channel_id=channel
+        )
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+        await lc.on_terminal_success(_make_success_state())
+        footers[channel] = _terminal_embed(edits).footer.text
+    assert footers["C1"].endswith("· $3.75 of channel budget left"), "the budget's remainder"
+    for channel in ("C2", "C3", None):
+        assert footers[channel].endswith("· $11.25 left"), (
+            f"{channel}: an inactive or missing budget shows the tenant balance"
+        )

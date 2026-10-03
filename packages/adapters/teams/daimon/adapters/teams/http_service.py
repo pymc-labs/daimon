@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
@@ -24,7 +25,10 @@ from daimon.adapters.teams import (
 )
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.billing_panel import BillingPanel
+from daimon.adapters.teams.channel_admin_groups import fetch_team_owner_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
+from daimon.adapters.teams.channel_settings import ChannelSettingsDialog
+from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
 from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.feedback import record_feedback
@@ -243,6 +247,9 @@ def create_teams_http_service(
         return {channel.id: channel.name for channel in standard if channel.id}
 
     graph, groups = GraphClient(runtime.http_client, graph_token), TeamGroups(team_group)
+    runtime = dataclasses.replace(
+        runtime, team_owners=functools.partial(fetch_team_owner_ids, graph)
+    )
     installs = TeamInstalls(
         runtime.sessionmaker,
         groups,
@@ -260,6 +267,7 @@ def create_teams_http_service(
     privacy = PrivacyPanel(runtime, spawn=spawn)
     billing = BillingPanel(runtime)
     setup = SetupPanel(runtime)
+    channel_settings = ChannelSettingsDialog(runtime, channel_names=channel_names)
     commands: dict[str, CommandHandler] = {
         "new": new_command,
         "setup": setup.command,
@@ -319,6 +327,10 @@ def create_teams_http_service(
     teams_app.on_dialog_submit(setup_card.CREATE_DIALOG, setup.on_create_submit)
     teams_app.on_dialog_open(setup_card.TOKEN_DIALOG, setup.on_token_open)
     teams_app.on_dialog_submit(setup_card.TOKEN_DIALOG, setup.on_token_submit)
+    teams_app.on_dialog_open(setup_card.OPERATOR_DIALOG, setup.on_operator_open)
+    teams_app.on_dialog_submit(setup_card.OPERATOR_DIALOG, setup.on_operator_submit)
+    teams_app.on_dialog_open(CHANNEL_DIALOG, channel_settings.on_open)
+    teams_app.on_dialog_submit(CHANNEL_DIALOG, channel_settings.on_submit)
     teams_app.on_dialog_open(CREDENTIAL_DIALOG, turns.credentials.on_dialog_open)
     teams_app.on_dialog_submit(credential_requests.SUBMIT, turns.credentials.on_dialog_submit)
     teams_app.on_message_submit_feedback(handle_feedback)

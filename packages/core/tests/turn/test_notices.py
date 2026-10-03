@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import get_args
 
 import pytest
 from daimon.core.turn import TerminationReason, render_termination_notice
-from daimon.core.turn.notices import fit_notice
+from daimon.core.turn.errors import AdmissionDenialReason
+from daimon.core.turn.notices import RefusalNouns, admission_refusal_text, fit_notice
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
 
 _ENDED_EARLY = [r for r in TerminationReason if r is not TerminationReason.COMPLETED]
@@ -176,3 +178,96 @@ def test_several_failed_servers_read_as_plural() -> None:
     assert notice is not None
     assert notice.cause.startswith("The tool servers 00ssss, 01ssss failed")
     assert notice.cause.endswith("without them.")
+
+
+_NOUNS = RefusalNouns(scope="server", admin="a server admin", billing="`/billing`")
+
+
+@pytest.mark.parametrize("in_dm", [False, True])
+@pytest.mark.parametrize("reason", get_args(AdmissionDenialReason))
+def test_every_admission_refusal_is_a_sentence_not_a_code(
+    reason: AdmissionDenialReason, in_dm: bool
+) -> None:
+    text = admission_refusal_text(reason, _NOUNS, bot_name="daimon", in_dm=in_dm)
+
+    assert reason not in text, f"the raw reason leaked: {text!r}"
+    assert text[0].isupper() and text.endswith("."), f"not a sentence: {text!r}"
+    assert "{" not in text, f"a placeholder was left unfilled: {text!r}"
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        (
+            "balance_depleted",
+            "This server's daimon credit is depleted. A server admin can top up with `/billing`.",
+        ),
+        ("cap_exceeded", "You've reached your monthly usage cap. An operator can raise it."),
+        (
+            "channel_budget_exceeded",
+            "This channel has used its spending budget. A server admin can raise or clear it.",
+        ),
+        (
+            "invoker_not_allowed",
+            "You aren't on this server's list of people who can start a turn. "
+            "A server admin can add you.",
+        ),
+        (
+            "agent_pinned_elsewhere",
+            "This agent only runs in the channels an operator pinned it to, "
+            "so it can't answer here.",
+        ),
+        (
+            "channel_isolated",
+            "This channel is isolated and the agent that would answer isn't one of its own. "
+            "A server admin must set the channel's agent.",
+        ),
+        ("channel_protected", "This channel is protected, so the agent can't answer in it."),
+    ],
+)
+def test_admission_refusal_words_each_reason_in_the_platform_nouns(
+    reason: AdmissionDenialReason, expected: str
+) -> None:
+    assert admission_refusal_text(reason, _NOUNS, bot_name="daimon") == expected, reason
+
+
+def test_admission_refusal_without_a_bot_name_reads_naturally() -> None:
+    nouns = RefusalNouns(
+        scope="organisation", admin="an admin", billing="`billing` in a 1:1 chat with me"
+    )
+    text = admission_refusal_text("balance_depleted", nouns)
+
+    assert text == (
+        "This organisation's credit is depleted. "
+        "An admin can top up with `billing` in a 1:1 chat with me."
+    ), text
+
+
+@pytest.mark.parametrize(
+    ("reason", "word"),
+    [
+        ("agent_pinned_elsewhere", "pinned"),
+        ("channel_isolated", "isolated"),
+        ("channel_protected", "protected"),
+    ],
+)
+def test_a_place_bound_refusal_in_a_dm_says_why_it_cannot_move(
+    reason: AdmissionDenialReason, word: str
+) -> None:
+    text = admission_refusal_text(reason, _NOUNS, in_dm=True)
+
+    assert word in text and text.endswith("a DM."), text
+
+
+def test_a_dm_refusal_not_bound_to_the_place_reads_as_in_the_channel() -> None:
+    in_dm = admission_refusal_text("channel_budget_exceeded", _NOUNS, in_dm=True)
+
+    assert in_dm == admission_refusal_text("channel_budget_exceeded", _NOUNS), in_dm
+
+
+def test_the_cap_notice_says_the_cap_is_the_persons_and_an_operator_raises_it() -> None:
+    """The cap is per person and only the operator raises it, as the refusal says."""
+    notice = render_termination_notice(TerminationReason.ADMISSION_CAP_EXCEEDED)
+    assert notice is not None
+    assert notice.cause.startswith("You've reached your monthly usage cap"), notice.cause
+    assert notice.next_step == "An operator can raise it.", "no admin command raises a cap"

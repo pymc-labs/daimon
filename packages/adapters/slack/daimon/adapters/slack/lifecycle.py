@@ -40,7 +40,7 @@ import contextlib
 import dataclasses
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -68,10 +68,10 @@ from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.support_escalation import build_ask_human_button
 from daimon.adapters.slack.tables import render_slack_tables
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.channel_budget import balance_footer
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
-from daimon.core.stores import tenant_ledger
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import fit_notice, render_termination_notice
@@ -170,6 +170,7 @@ class SlackTurnLifecycle:
         request_id: Callable[[], str] = bound_request_id,
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         tenant_id: UUID | None = None,
+        budget_channel_id: str | None = None,
         alert_webhook_url: SecretStr | None = None,
         ask_human: bool = False,
     ) -> None:
@@ -184,6 +185,7 @@ class SlackTurnLifecycle:
         self._request_id = request_id
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
+        self._budget_channel_id = budget_channel_id
         self._alert_webhook_url = alert_webhook_url
         self._channel = channel
         self._thread_ts = thread_ts
@@ -388,13 +390,15 @@ class SlackTurnLifecycle:
         if self._sessionmaker is not None and self._tenant_id is not None:
             try:
                 async with self._sessionmaker() as session:
-                    balance = await tenant_ledger.get_prepaid_balance(
-                        session, tenant_id=self._tenant_id
+                    footer = await balance_footer(
+                        session,
+                        tenant_id=self._tenant_id,
+                        platform="slack",
+                        budget_channel_id=self._budget_channel_id,
+                        now=datetime.now(UTC),
                     )
-                if balance is not None:
-                    self._state = dataclasses.replace(
-                        self._state, balance_str=f"${balance:.2f} left"
-                    )
+                if footer is not None:
+                    self._state = dataclasses.replace(self._state, balance_str=footer)
             except Exception:
                 log.warning("turn.balance_footer_failed", exc_info=True)
 

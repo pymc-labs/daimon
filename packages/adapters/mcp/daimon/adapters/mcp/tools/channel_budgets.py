@@ -2,52 +2,47 @@
 
 A budget caps what one channel may spend (see ``daimon.core.channel_budget``
 for how spend and windows are counted). Reading one is a member action for a
-channel the caller can see. Listing, setting and clearing act on the whole
-server or workspace, so they are admin-tagged and re-checked in the impl.
-Operator tokens read them with ``tenant:read`` and change them with
-``channels:write``. Money crosses this boundary as decimal strings, both ways.
+channel the caller can see. Listing, setting and clearing are admin-only:
+`authorize` (SET_CHANNEL_BUDGET) allows a server admin and never a channel
+admin, since money stays with server admins. Operator tokens read them with ``tenant:read`` and
+change them with ``channels:write``. Money crosses this boundary as decimal
+strings, both ways.
 """
 
 from __future__ import annotations
 
-import contextlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
 
-import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._channel_target import resolve_channel
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
-from daimon.adapters.mcp.tools.discord import resolve_visible_channel
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.adapters.mcp.tools.slack._client import (
-    _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
-    _require_team_id,  # pyright: ignore[reportPrivateUsage]
-    slack_web_client,
-)
-from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
-from daimon.adapters.mcp.tools.teams._directory import locate_channel, require_client, split_thread
+from daimon.core.authz import Action
 from daimon.core.channel_budget import (
     ChannelBudgetError,
     ChannelBudgetStatus,
     describe_budget,
     get_channel_budget_status,
     load_budget_status,
+    may_set_channel_budget,
     parse_budget_spec,
 )
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.security_audit import record_authz_denial, record_policy_decision
 from daimon.core.stores import channel_budgets as store
 from daimon.core.stores.direct_messages import get_source_channel
 from daimon.core.stores.turn_origins import get_active_origin
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PLATFORMS = ("discord", "slack", "teams")
@@ -93,6 +88,23 @@ class ClearChannelBudgetResult:
     """False when the channel had no budget to clear."""
 
 
+_NEEDS_BUDGET_ADMIN = (
+    "Changing a channel's budget needs a workspace or server admin, and the caller is not "
+    "one; a channel's own admins can't change it either. Tell them who can make it and give "
+    "them a sentence that admin can say, preserving the requested action and channel. "
+    "Do not retry."
+)
+
+
+def require_budget_write(auth: AuthIdentity, channel_id: str) -> None:
+    """Raise ``ToolError`` unless the caller may set, clear or raise ``channel_id``'s budget."""
+    decision = may_set_channel_budget(mcp_subject(auth, is_admin=auth.is_admin), channel_id)
+    if not decision:
+        record_authz_denial(Action.SET_CHANNEL_BUDGET, decision.reason)
+        raise ToolError(_NEEDS_BUDGET_ADMIN)
+    record_policy_decision(Action.SET_CHANNEL_BUDGET, "allow")
+
+
 def _result(status: ChannelBudgetStatus) -> ChannelBudgetResult:
     budget = status.budget
     return ChannelBudgetResult(
@@ -123,42 +135,10 @@ def _require_channel_id(channel_id: str | None) -> str:
     return channel_id.strip()
 
 
-async def _resolve_slack_channel(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
-    """A Slack channel the caller can see; a `<channel>:<thread ts>` id resolves to the channel."""
-    channel_id = channel_id.partition(":")[0]
-    client = await slack_web_client(runtime, team_id=_require_team_id(auth))
-    try:
-        info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
-    except SlackApiError as err:
-        raise ToolError(f"Slack could not find {channel_id} in this workspace") from err
-    channel = cast("dict[str, object]", info["channel"])
-    await check_channel_access(client, channel=channel, user_id=_require_slack_identity(auth))
-    return channel_id
-
-
-async def _resolve_teams_channel(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
-    """A Teams channel the caller is in; a thread id resolves to its channel."""
-    client, caller = require_client(runtime, auth)
-    ref = await locate_channel(runtime, auth, client, split_thread(channel_id)[0])
-    try:
-        is_member = await client.is_member(ref.channel_id, caller)
-    except (httpx.HTTPError, ValueError) as err:
-        raise ToolError("could not confirm you are in that channel") from err
-    if not is_member:
-        raise ToolError("you are not a member of that channel")
-    return ref.channel_id
-
-
 async def _budget_channel(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
     """The channel id a budget is stored under, after confirming the caller can see it."""
-    platform = _require_platform(auth)
-    if platform == "discord":
-        if not channel_id.isdigit():
-            raise ToolError(f"{channel_id!r} is not a Discord channel id")
-        return await resolve_visible_channel(runtime, auth, channel_id)
-    if platform == "teams":
-        return await _resolve_teams_channel(runtime, auth, channel_id)
-    return await _resolve_slack_channel(runtime, auth, channel_id)
+    _require_platform(auth)
+    return (await resolve_channel(runtime, auth, channel_id)).channel_id
 
 
 def _is_dm_scope(thread_id: str) -> bool:
@@ -196,9 +176,11 @@ async def origin_budget_channel(
             platform=cast(str, auth.platform),
             now=datetime.now(UTC),
         )
+        # A chat turn's credential names its agent as chat_agent_id (`require_turn_origin`).
+        executing_agent = auth.agent_id or auth.chat_agent_id
         if origin is None or (
-            auth.agent_id is not None
-            and auth.agent_id
+            executing_agent is not None
+            and executing_agent
             != derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
         ):
             return None
@@ -280,7 +262,6 @@ async def _set_channel_budget_impl(
 ) -> ChannelBudgetResult:
     """Validate everything before the write: a refused call leaves no row behind."""
     require_scope(auth, "channels:write")
-    _require_admin(auth)
     platform = _require_platform(auth)
     try:
         spec = parse_budget_spec(
@@ -289,6 +270,7 @@ async def _set_channel_budget_impl(
     except ChannelBudgetError as err:
         raise ToolError(f"{err}. Nothing was saved.") from err
     target = await _budget_channel(runtime, auth, _require_channel_id(channel_id))
+    require_budget_write(auth, target)
     async with runtime.session_factory.begin() as session:
         budget = await store.set_channel_budget(
             session,
@@ -313,13 +295,11 @@ async def _clear_channel_budget_impl(
     hidden can still be cleared.
     """
     require_scope(auth, "channels:write")
-    _require_admin(auth)
     platform = _require_platform(auth)
-    target = _require_channel_id(channel_id)
-    target = split_thread(target)[0] if platform == "teams" else target.partition(":")[0]
-    if platform == "discord" and target.isdigit():
-        with contextlib.suppress(ToolError):
-            target = await _budget_channel(runtime, auth, target)
+    target = (
+        await resolve_channel(runtime, auth, _require_channel_id(channel_id), lenient=True)
+    ).channel_id
+    require_budget_write(auth, target)
     async with runtime.session_factory.begin() as session:
         cleared = await store.delete_channel_budget(
             session, tenant_id=auth.tenant_id, platform=platform, channel_id=target

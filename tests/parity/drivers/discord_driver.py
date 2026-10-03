@@ -86,12 +86,9 @@ from .protocol import PanelAction, parity_account_id, pin_agent
 from .views import CapturedView, normalize_line, read_discord_modal, read_discord_view
 
 _BALANCE_BLOCKED_TEXT = (
-    "This server's daimon credit is depleted. An admin can top up with `/billing`."
+    "This server's daimon credit is depleted. A server admin can top up with `/billing`."
 )
-_CAP_BLOCKED_TEXT = (
-    "Monthly usage cap reached for this guild. "
-    "An admin can adjust the cap with `/billing` (when available)."
-)
+_CAP_BLOCKED_TEXT = "You've reached your monthly usage cap. An operator can raise it."
 
 #: The message id the faked REST POST hands back for a posted card. The row
 #: records it, and every later edit and validity check is matched against it.

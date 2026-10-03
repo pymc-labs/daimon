@@ -35,6 +35,9 @@ agent:
   - Channel admins, on Who answers where, pushes the form naming this
     channel's admins, submitted in channel_admins.py. Workspace admins only,
     re-checked live on the click and on the submission.
+  - Channel skills, on Who answers where, pushes the form adding or removing
+    this channel's extra skills, submitted in channel_skills.py. Workspace
+    admins only, re-checked live on the click and on the submission.
   - This channel's environment, on Who answers where, saves the pick through
     channel_environment.py. Workspace admins and this channel's admins,
     re-checked live on the pick.
@@ -51,6 +54,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import aiohttp
@@ -100,6 +104,7 @@ from daimon.adapters.slack.agent_setup.state import (
     decode_panel_metadata,
     encode_panel_metadata,
 )
+from daimon.adapters.slack.channel_admin_groups import list_user_groups
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.errors import render_error
 from daimon.adapters.slack.interactions import resolve_web_client
@@ -112,16 +117,20 @@ from daimon.adapters.slack.setup_conversations import (
     setup_reply_button,
 )
 from daimon.core.answering_map import AnsweringMap, routed_agent_names
+from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.channel_isolation import channel_isolation_status
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.panel_audit import record_panel_write
+from daimon.core.panel_operator_tokens import list_panel_operator_tokens
 from daimon.core.roster import Roster, paginate
 from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins, list_channel_admins
+from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -129,8 +138,12 @@ from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
 
+OPERATOR_TOKENS_NEED_ADMIN_MESSAGE = "Only a workspace admin can mint or revoke operator tokens."
 CHANNEL_ADMINS_NEED_ADMIN_MESSAGE = (
     "Only a workspace admin can name a channel's admins. Nothing changed."
+)
+CHANNEL_SKILLS_NEED_ADMIN_MESSAGE = (
+    "Only a workspace admin can change a channel's skills. Nothing changed."
 )
 
 
@@ -278,6 +291,9 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         panel_views.ACTION_ADD_SKILL,
         panel_views.ACTION_REVOKE_TOKEN,
         panel_views.ACTION_CHANNEL_ADMINS,
+        panel_views.ACTION_CHANNEL_SKILLS,
+        panel_views.ACTION_OPERATOR_MINT,
+        panel_views.ACTION_OPERATOR_REVOKE,
         panel_views.ACTION_ENVIRONMENT,
         *_ISOLATION_ACTIONS,
     }
@@ -390,6 +406,7 @@ async def load_agents_view(
 
 async def load_routing_view(
     runtime: SlackRuntime,
+    client: AsyncWebClient,
     *,
     tenant_id: uuid.UUID,
     meta: PanelMetadata,
@@ -416,9 +433,21 @@ async def load_routing_view(
             if is_admin
             else None
         )
+        operator_tokens = (
+            await list_panel_operator_tokens(session, tenant_id=tenant_id, now=datetime.now(UTC))
+            if is_admin and runtime.settings.mcp.jwt_secret is not None
+            else None
+        )
         isolation = (
             channel_isolation_status(
                 await load_access_policy(session, tenant_id=tenant_id), meta.channel_id
+            )
+            if is_admin and meta.channel_id
+            else None
+        )
+        channel_skills = (
+            await list_channel_skills(
+                session, tenant_id=tenant_id, platform="slack", channel_id=meta.channel_id
             )
             if is_admin and meta.channel_id
             else None
@@ -448,6 +477,7 @@ async def load_routing_view(
     )
     environment_picker = await load_environment_picker(
         runtime,
+        client,
         tenant_id=tenant_id,
         answering_map=answering_map,
         channel_id=meta.channel_id,
@@ -467,6 +497,8 @@ async def load_routing_view(
         channel_admins=channel_admins,
         environment_picker=environment_picker,
         isolation=isolation,
+        operator_tokens=operator_tokens,
+        channel_skills=channel_skills,
     )
 
 
@@ -543,7 +575,7 @@ async def _update_paged_view(
     target = meta.with_page(max(meta.page + delta, 0))
     view = (
         await load_routing_view(
-            runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin, user_id=user_id
+            runtime, client, tenant_id=tenant_id, meta=target, is_admin=is_admin, user_id=user_id
         )
         if meta.view == "routing"
         else await load_agents_view(runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin)
@@ -627,6 +659,7 @@ async def _dispatch_panel_action(
     if action_id == panel_views.ACTION_ROUTING:
         view = await load_routing_view(
             runtime,
+            client,
             tenant_id=tenant_id,
             meta=meta.with_view("routing"),
             is_admin=is_admin,
@@ -716,12 +749,92 @@ async def _dispatch_panel_action(
             grant = await get_channel_admins(
                 session, tenant_id=tenant_id, platform="slack", channel_id=meta.channel_id
             )
+        try:
+            groups: dict[str, str] | None = await list_user_groups(client)
+        except GroupLookupFailed:
+            log.warning("slack.agent_setup.channel_admins.groups_unlisted", exc_info=True)
+            groups = None
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]
             trigger_id=trigger_id,
             view=panel_views.build_channel_admins_form(
                 meta=meta.with_view("channel_admins", root_view_id=view_id),
                 user_ids=grant.user_ids if grant else (),
+                group_ids=grant.role_ids if grant else (),
+                groups=groups,
             ),
+        )
+        return
+
+    if action_id == panel_views.ACTION_CHANNEL_SKILLS:
+        if not is_admin or not meta.channel_id:
+            await record_panel_write(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                op="channel_skills",
+                outcome="denied",
+                reason="needs_admin",
+            )
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text=CHANNEL_SKILLS_NEED_ADMIN_MESSAGE,
+            )
+            return
+        async with runtime.sessionmaker() as session:
+            rows = await list_channel_skills(
+                session, tenant_id=tenant_id, platform="slack", channel_id=meta.channel_id
+            )
+        await client.views_push(  # pyright: ignore[reportUnknownMemberType]
+            trigger_id=trigger_id,
+            view=panel_views.build_channel_skills_form(
+                meta=meta.with_view("channel_skills", root_view_id=view_id), rows=rows
+            ),
+        )
+        return
+
+    if action_id == panel_views.ACTION_OPERATOR_MINT:
+        if not is_admin:
+            await record_panel_write(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                op="operator_token_mint",
+                outcome="denied",
+                reason="needs_admin",
+                token_kind="operator",
+            )
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text=OPERATOR_TOKENS_NEED_ADMIN_MESSAGE,
+            )
+            return
+        await client.views_push(  # pyright: ignore[reportUnknownMemberType]
+            trigger_id=trigger_id,
+            view=panel_views.build_operator_token_form(
+                meta=meta.with_view("operator_token", root_view_id=view_id)
+            ),
+        )
+        return
+
+    if action_id == panel_views.ACTION_OPERATOR_REVOKE:
+        # Lazy import: that module refreshes the routing view built here.
+        from daimon.adapters.slack.agent_setup.operator_tokens import (
+            handle_operator_token_revoke,
+        )
+
+        picked: dict[str, Any] = action.get("selected_option") or {}
+        try:
+            jti = uuid.UUID(str(picked.get("value") or ""))
+        except ValueError:
+            return
+        await handle_operator_token_revoke(
+            runtime, client, meta=meta, user_id=user_id, is_admin=is_admin, jti=jti, view_id=view_id
         )
         return
 
@@ -731,7 +844,7 @@ async def _dispatch_panel_action(
         if not value or not meta.channel_id:
             return
         subject = await load_picker_subject(
-            runtime, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
+            runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
         )
         if not await may_pick_environment(
             runtime, tenant_id=tenant_id, channel_id=meta.channel_id, subject=subject
@@ -741,6 +854,15 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id,
                 user_id=user_id,
                 text=ENVIRONMENT_NEED_ADMIN_MESSAGE,
+            )
+            await record_panel_write(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                op="environment",
+                outcome="denied",
+                reason="needs_admin",
             )
             return
         note = await save_environment_choice(
@@ -754,7 +876,7 @@ async def _dispatch_panel_action(
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id,
             view=await load_routing_view(
-                runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin, user_id=user_id
+                runtime, client, tenant_id=tenant_id, meta=meta, is_admin=is_admin, user_id=user_id
             ),
         )
         await post_ephemeral(client, channel_id=meta.channel_id, user_id=user_id, text=note)
@@ -763,6 +885,15 @@ async def _dispatch_panel_action(
     if action_id in _ISOLATION_ACTIONS:
         if not is_admin or not meta.channel_id:
             text = ISOLATION_NEED_ADMIN_MESSAGE
+            await record_panel_write(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                op="isolation",
+                outcome="denied",
+                reason="needs_admin",
+            )
         else:
             text = await change_isolation(
                 runtime,
@@ -779,7 +910,7 @@ async def _dispatch_panel_action(
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=view_id,
                 view=await load_routing_view(
-                    runtime, tenant_id=tenant_id, meta=meta, is_admin=True
+                    runtime, client, tenant_id=tenant_id, meta=meta, is_admin=True
                 ),
             )
         return

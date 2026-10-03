@@ -129,6 +129,37 @@ def isolation_owner(policy: TenantAccessPolicy, agent_names: tuple[str | None, .
     return channel if channel in policy.isolated_channel_ids else None
 
 
+def is_own_isolated_agent(
+    policy: TenantAccessPolicy,
+    agent_names: tuple[str | None, ...],
+    *,
+    channel_id: str | None,
+    parent_channel_id: str | None = None,
+) -> bool:
+    """Whether an isolated channel's own agent is at work in it; its memory stays writable."""
+    inside = isolated_channel_of(policy, channel_id, parent_channel_id)
+    return inside is not None and isolation_owner(policy, agent_names) == inside
+
+
+def source_seal_ids(
+    policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None
+) -> frozenset[str]:
+    """Every id that seals a turn: its channel and a thread sealed on its own.
+
+    A Discord thread is sealed by its id, a Slack one as channel_id:thread_ts.
+    All of them are recorded, so unsealing one later leaves the others holding.
+    """
+    return frozenset(
+        candidate
+        for candidate in (
+            channel_id,
+            thread_id,
+            f"{channel_id}:{thread_id}" if thread_id is not None else None,
+        )
+        if candidate is not None and candidate in policy.sealed_channel_ids
+    )
+
+
 def is_sealed_source(policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None) -> bool:
     """Whether a turn from `channel_id` (optionally `thread_id` under it) is inside a seal.
 

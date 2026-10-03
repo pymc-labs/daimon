@@ -16,6 +16,7 @@ from typing import Annotated, cast
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.continuity import timers
 from daimon.core.continuity.timers import TimerError
@@ -94,10 +95,17 @@ async def _create_timer_impl(
 
 
 async def _list_timers_impl(runtime: McpRuntime, auth: AuthIdentity) -> list[Timer]:
+    """A timer's note is the agent's own words about its conversation, so one set
+    across an isolated channel's line stays there, as its routines do."""
     rows = await timers.list_timers(
         runtime.session_factory, tenant_id=auth.tenant_id, account_id=auth.account_id
     )
-    return [_timer(row) for row in rows]
+    caller = await load_caller_isolation(runtime, auth)
+    return [
+        _timer(row)
+        for row in rows
+        if caller.sees(row.target_name) and caller.sees_place(row.parent_channel_id)
+    ]
 
 
 async def _cancel_timer_impl(

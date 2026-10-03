@@ -24,6 +24,10 @@ it asks `authorize(POST)` with no agent, the same check a routine delivery
 asks, from a fresh policy read right before the send: a protected destination
 is refused.
 
+A channel with its own admins sends the request to them by DM first, then to
+the server admins, and to the escalation channel only when no DM landed
+(`daimon.core.support_routing`); the DM carries what the post would.
+
 What reaches the escalation channel: the requester (mention, name, workspace),
 a permalink to the answer, and the note the person typed. Nothing from the
 conversation itself, which is what Discord posts too. A permalink opens only for
@@ -48,14 +52,15 @@ import uuid
 from typing import Any, Final, cast
 
 import structlog
+from daimon.adapters.slack.channel_admin_groups import user_group_members
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy, is_sealed_source
-from daimon.core.authz import Action, Place, Subject, authorize, build_subject, build_turn_place
-from daimon.core.channel_admins import load_stored_subject
-from daimon.core.config import SupportSettings
+from daimon.core.authz import Action, Place, Subject, authorize, build_turn_place
+from daimon.core.channel_admins import StoredAdmin, confirm_stored_subject, read_stored_admin
+from daimon.core.config import DirectMessagePolicy, SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.identity import find_platform_principal
@@ -78,6 +83,7 @@ from daimon.core.support_escalation import (
     received_text,
     remaining_credits,
 )
+from daimon.core.support_routing import support_recipient_tiers
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -253,9 +259,9 @@ def evaluate_support_submission(payload: dict[str, Any]) -> SupportSubmission:
     return dataclasses.replace(base, proceed=True, note=note)
 
 
-async def _subject(
+async def _stored_admin(
     session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str
-) -> tuple[Subject, uuid.UUID | None]:
+) -> tuple[StoredAdmin, uuid.UUID | None]:
     """The clicker as their stored role describes them, and their account id.
 
     Read-only, like the feedback vote: asking for help must not mint an
@@ -267,15 +273,15 @@ async def _subject(
     )
     account_id = principal.account_id if principal is not None else None
     if account_id is None:
-        return build_subject(is_admin=False, platform_user_id=user_id), None
-    subject = await load_stored_subject(
+        return StoredAdmin(is_admin=False, platform="slack", platform_user_id=user_id), None
+    stored = await read_stored_admin(
         session,
         tenant_id=tenant_id,
         platform="slack",
         account_id=account_id,
         platform_user_id=user_id,
     )
-    return subject, account_id
+    return stored, account_id
 
 
 def _may_ask(
@@ -359,11 +365,16 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
         except AccessPolicyUnreadable:
             await reply(POLICY_UNREADABLE)
             return
-        subject, _account_id = await _subject(session, tenant_id=tenant_id, user_id=user_id)
-        if not _may_ask(policy, subject, channel_id=channel_id, thread_ts=thread_ts):
-            log.info("support.refused", tenant_id=str(tenant_id))
-            await reply(NOT_ALLOWED)
-            return
+        stored, _account_id = await _stored_admin(session, tenant_id=tenant_id, user_id=user_id)
+    # Looked up with no session open: a slow Slack must not hold a connection.
+    subject = await confirm_stored_subject(
+        stored, user_group_members(runtime, client, tenant_id=tenant_id)
+    )
+    if not _may_ask(policy, subject, channel_id=channel_id, thread_ts=thread_ts):
+        log.info("support.refused", tenant_id=str(tenant_id))
+        await reply(NOT_ALLOWED)
+        return
+    async with runtime.sessionmaker() as session:
         already = await find_escalation_for_message(
             session,
             tenant_id=tenant_id,
@@ -422,12 +433,17 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=s.team_id)
     # What the authoritative source check saw, for the reply and the post.
     decided: dict[str, Any] = {}
+    async with runtime.sessionmaker() as session:
+        stored, account_id = await _stored_admin(session, tenant_id=tenant_id, user_id=s.user_id)
+    # Looked up with no session open: a slow Slack must not hold a connection.
+    subject = await confirm_stored_subject(
+        stored, user_group_members(runtime, client, tenant_id=tenant_id)
+    )
     async with runtime.sessionmaker() as session, session.begin():
         tenant = await get_tenant(session, tenant_id)
         if tenant is None or tenant.archived_at is not None:
             log.info("support.tenant_missing", tenant_id=str(tenant_id))
             return
-        subject, account_id = await _subject(session, tenant_id=tenant_id, user_id=s.user_id)
         thread_row = await get_latest_thread_session(
             session, tenant_id=tenant_id, platform="slack", thread_id=s.thread_ts
         )
@@ -477,7 +493,9 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
         return
 
     # The row is committed; everything below is best-effort delivery.
-    delivered = await _post_to_escalation_channel(
+    delivered = await _dm_channel_admins(
+        runtime, client, submission=s, tenant_id=tenant_id, sealed=sealed
+    ) or await _post_to_escalation_channel(
         runtime,
         source_client=client,
         submission=s,
@@ -525,6 +543,54 @@ def render_escalation_post(*, submission: SupportSubmission, link: str | None, s
     if sealed:
         lines.append("_From a sealed channel: answer there, the conversation stays in it._")
     return "\n".join(lines) + "\n\n" + escape_mrkdwn(s.note)
+
+
+async def _dm_channel_admins(
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    *,
+    submission: SupportSubmission,
+    tenant_id: uuid.UUID,
+    sealed: bool,
+) -> bool:
+    """DM the origin channel's admins, else the server admins. True once a tier got it.
+
+    False at once for a channel with no admins of its own, so it keeps the
+    escalation channel. Each DM is held to the tenant's DM policy.
+    """
+    s = submission
+    tiers = await support_recipient_tiers(
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="slack",
+        channel_id=s.channel_id,
+        requester_id=s.user_id,
+        members=user_group_members(runtime, client, tenant_id=tenant_id),
+    )
+    if not tiers:
+        return False
+    policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
+    link = await _permalink(client, channel_id=s.channel_id, message_ts=s.message_ts)
+    text = render_escalation_post(submission=s, link=link, sealed=sealed)
+    for tier in tiers:
+        landed = 0
+        for user_id in (uid for uid in tier if policy.allows(uid)):
+            try:
+                opened = await client.conversations_open(users=user_id)  # pyright: ignore[reportUnknownMemberType]
+                channel = cast("dict[str, str]", opened["channel"])["id"]
+                await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel, text=text, unfurl_links=False, unfurl_media=False
+                )
+                landed += 1
+            except SlackApiError as err:
+                log.info(
+                    "support.admin_dm_undelivered",
+                    error=str(err.response.get("error", "slack_api_error")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
+                )
+        if landed:
+            log.info("support.sent_to_admins", recipients=landed)
+            return True
+    return False
 
 
 async def _post_to_escalation_channel(

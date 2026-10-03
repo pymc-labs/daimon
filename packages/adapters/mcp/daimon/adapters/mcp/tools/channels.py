@@ -386,6 +386,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         display_name: str | None = None,
         avatar_url: str | None = None,
+        origin_context_id: str | None = None,
     ) -> DisplayIdentityRow:
         """Change how daimon appears in this Discord server: its display name,
         its avatar, or both.
@@ -398,14 +399,19 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         per-channel identity, so tell the user when they asked for one
         channel. There is no reset yet: an empty ``display_name`` is treated
         as omitted, so a name cannot be cleared back to the default. Needs a
-        server admin. Discord-only.
+        server admin. Pass this turn's origin_context_id: a pinned agent, or a
+        turn in an isolated channel, can't change it. Discord-only.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
             raise _slack_unsupported("set_display_identity")
         # MCP clients often send "" for an optional param they mean to omit.
         return await _set_display_identity_impl(
-            runtime, auth, display_name=display_name or None, avatar_url=avatar_url or None
+            runtime,
+            auth,
+            display_name=display_name or None,
+            avatar_url=avatar_url or None,
+            origin_context_id=origin_context_id or None,
         )
 
     @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]

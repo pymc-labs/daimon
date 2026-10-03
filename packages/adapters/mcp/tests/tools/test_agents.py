@@ -41,27 +41,33 @@ from daimon.core.agent_mcp_credentials import (
 )
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED, tenant_scoped_display_title
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.github_credentials import build_multifernet, get_pat, upsert_credential_encrypted
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routing_facts import UNROUTED_LINE
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
+from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.specs import AgentSpec, SkillRef, SkillRepo
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 from daimon.core.stores.agent_repo_binding import get_binding, set_binding
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing import ma_agent
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
+    FakeMAState,
     MARouter,
+    NotHandled,
     build_fake_anthropic,
     build_no_retry_anthropic,
+    combine_handlers,
     json_body,
     list_response,
+    make_fake_ma_handler,
 )
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -1737,6 +1743,84 @@ async def test_fork_agent_impl_copies_source_skills(
     assert sent_ids == {"skill_abc", "cli-auth"}, (
         f"forked agent must keep every source skill; got skill_ids {sorted(sent_ids)}"
     )
+
+
+async def test_fork_agent_reports_the_skills_it_copied_even_when_its_reread_fails(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The returned snapshot may predate the copied skills: name them, so the model
+    does not add them again."""
+    tenant = await make_tenant(db_session)
+    source = ma_agent(
+        id="agent_src",
+        name="shared",
+        tenant_id=tenant.id,
+        skills=[{"type": "custom", "skill_id": "skill_own", "version": "1"}],
+    )
+    state = FakeMAState()
+    state.agents[source.id] = source.model_dump(mode="json")
+    notes = bundle_from_markdown("---\nname: notes\ndescription: Take notes.\n---\nWrite.\n")
+    skills = [
+        SkillListResponse(
+            id="skill_own",
+            type="custom",
+            display_title=tenant_scoped_display_title(tenant_id=tenant.id, name="shared/notes"),
+            latest_version="1",
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+            source="custom",
+        ).model_dump(mode="json")
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path, method = request.url.path, request.method
+        if method == "GET" and path == "/v1/skills":
+            return list_response(skills)
+        if method == "POST" and path == "/v1/skills":
+            created = {**skills[0], "id": "sk_new", "display_title": "copy"}
+            skills.append(created)
+            return httpx.Response(200, json=created)
+        if method == "GET" and path.endswith("/content"):
+            return httpx.Response(200, content=notes.zip_bytes)
+        copy = next((a for i, a in state.agents.items() if i != "agent_src"), None)
+        attached = copy is not None and any(
+            skill["skill_id"] == "sk_new" for skill in copy.get("skills") or []
+        )
+        if method == "GET" and copy is not None and path == f"/v1/agents/{copy['id']}" and attached:
+            return httpx.Response(
+                404, json={"type": "error", "error": {"type": "not_found_error", "message": "x"}}
+            )
+        raise NotHandled
+
+    await upsert_user_skill(
+        db_session,
+        tenant_id=tenant.id,
+        principal_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_src"),
+        agent_name="shared",
+        name="notes",
+        source_repo_url="",
+        source_repo_branch="",
+        source_path="",
+        content_hash=notes.preview.content_hash,
+        anthropic_id="skill_own",
+        anthropic_latest_version="1",
+        source="upload",
+        origin="pasted",
+    )
+    await db_session.commit()
+    client = build_fake_anthropic(combine_handlers(handler, make_fake_ma_handler(state)))
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
+    )
+
+    info = await _fork_agent_impl(
+        _runtime(client, session_factory=db_session_factory),
+        auth,
+        source_name="shared",
+        new_name="team-alpha",
+    )
+
+    assert info.copied_skills == ["team-alpha/notes"], info.copied_skills
 
 
 async def test_fork_agent_merges_daimon_mcp_when_public_url_set(

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 109 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 114 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -18,6 +18,7 @@ tool is hidden by default and restored only for a matching caller.
 - **agent tokens only** — carries the `agent-chat` tag.
 - **channel admins too** — carries the `channel-admin` tag.
 - **Discord callers** — carries the `discord` tag.
+- **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
 - **operator tokens with channels:write** — carries the `scope:channels:write` tag.
 - **operator tokens with promo:create** — carries the `scope:promo:create` tag.
 - **operator tokens with promo:redeem** — carries the `scope:promo:redeem` tag.
@@ -86,7 +87,7 @@ Channel admin tools: who administers one channel on top of the server admins.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `clear_channel_admins` | admin only, operator tokens with channels:write | Remove every channel admin from one channel, leaving it to the server admins. |
-| `list_channel_admins` | admin only, operator tokens with tenant:read | List the channels that have their own admins, with the roles and members named for each. |
+| `list_channel_admins` | admin only, operator tokens with tenant:read | List the channels that have their own admins, with the groups and members named for each. |
 | `set_channel_admins` | admin only, operator tokens with channels:write | Name who administers one channel, on top of the server admins. |
 
 ## `channel_budgets`
@@ -116,6 +117,24 @@ Channel isolation tool: keep a channel's own agents inside it.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `set_channel_isolation` | admin only, operator tokens with channels:write | Isolate one channel, or end its isolation. |
+
+## `channel_protection`
+
+Channel protection tool: protect or seal one channel, or lift either.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `set_channel_protection` | admin only, operator tokens with channels:write | Protect or seal one channel, or lift either. |
+
+## `channel_skills`
+
+Channel skill tools: extra skills one channel's turns run with.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `add_channel_skill` | admin only, operator tokens with channels:write | Add a skill to whatever agent answers in one channel, there only. |
+| `list_channel_skills` | admin only, operator tokens with tenant:read | List the extra skills a channel's turns run with, on top of its agent's. |
+| `remove_channel_skill` | admin only, operator tokens with channels:write | Remove an extra skill from a channel, by id or name. |
 
 ## `channels`
 
@@ -165,7 +184,7 @@ Environment tools: list / get / create / update / archive.
 | `archive_environment` | admin only | Archive the MA environment and delete from the tenant pool. |
 | `create_environment` | all callers | Create a sandbox environment a channel or the workspace can later run in. |
 | `get_environment` | all callers | Return one environment by name. |
-| `list_environments` | all callers | List environments in the tenant pool. |
+| `list_environments` | operator tokens with tenant:read | List environments in the tenant pool. |
 | `update_environment` | admin only | Patch-update an environment. |
 
 ## `github_app`
@@ -175,6 +194,14 @@ GitHub App install-link tool: post_github_app_install_link.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `post_github_app_install_link` | Discord callers, Slack callers, Teams callers | Install the GitHub App: post a link inviting the user to grant repository access. |
+
+## `isolation_copies`
+
+Isolation copy archive tool: retire the copy a closing isolated channel was given.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `archive_isolation_copy` | admin only, operator tokens with agents:archive | Archive the agent copied for an isolated channel, when that channel closes. |
 
 ## `media`
 

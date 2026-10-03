@@ -293,6 +293,7 @@ async def create_ma_session(
         origin_thread_id=admission.origin_thread_id,
         origin_seal_ids=frozenset(seal),
         before_create=fence,
+        channel_skills=admission.channel_skills,
     )
 
     has_repo = any(

@@ -279,7 +279,12 @@ class _World:
     sessionmaker: async_sessionmaker[AsyncSession]
 
     async def turn(
-        self, *, agent: str = _AGENT, parent: str = _CHANNEL, thread: str = _CHANNEL
+        self,
+        *,
+        agent: str = _AGENT,
+        parent: str = _CHANNEL,
+        thread: str = _CHANNEL,
+        is_setup: bool = False,
     ) -> tuple[AuthIdentity, str]:
         now = datetime.now(UTC)
         async with self.sessionmaker.begin() as s:
@@ -297,6 +302,7 @@ class _World:
                 role=Role.USER,
                 expires_at=now + timedelta(hours=1),
                 now=now,
+                is_setup=is_setup,
             )
         auth = AuthIdentity(
             account_id=self.account_id,
@@ -606,6 +612,58 @@ async def test_a_pinned_agent_cannot_tidy_outside_its_channels(
             message_id=message_id,
             content="moved",
             origin_context_id=origin,
+        )
+    assert fake.messages[message_id]["content"] == "first draft", "nothing was edited"
+
+
+def _isolate(channel_id: str, *, own_agent: str) -> TenantAccessPolicy:
+    return TenantAccessPolicy(
+        agent_channel_pins={own_agent: (channel_id,)},
+        sealed_channel_ids=(channel_id,),
+        isolated_channel_ids=(channel_id,),
+    )
+
+
+async def test_no_other_agent_edits_into_an_isolated_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: _FakeDiscord
+) -> None:
+    """An edit writes new text, so an outsider edits nothing it posted before isolation."""
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    message_id = await _post(world, auth)
+    await world.set_policy(_isolate(_CHANNEL, own_agent=_OTHER_AGENT))
+
+    with pytest.raises(ToolError, match="this channel is isolated"):
+        await _edit_message_impl(
+            world.runtime,
+            auth,
+            channel_id=_CHANNEL,
+            message_id=message_id,
+            content="moved",
+            origin_context_id=origin,
+        )
+    assert fake.messages[message_id]["content"] == "first draft", "nothing was edited"
+
+
+async def test_a_turn_inside_an_isolated_channel_edits_nothing_outside_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: _FakeDiscord
+) -> None:
+    """The unpinned built-in answering isolated C's setup thread edits its own earlier
+    post in another channel: the edit would carry C's text out, so it is held to C."""
+    world = await _world(committing_sessionmaker)
+    outside_auth, _ = await world.turn(parent=_OTHER_CHANNEL, thread=_OTHER_CHANNEL)
+    message_id = await _post(world, outside_auth, channel_id=_OTHER_CHANNEL)
+    await world.set_policy(_isolate(_CHANNEL, own_agent=_OTHER_AGENT))
+    auth, setup = await world.turn(thread=_THREAD, is_setup=True)
+
+    with pytest.raises(ToolError, match="nothing said here is posted or sent outside it"):
+        await _edit_message_impl(
+            world.runtime,
+            auth,
+            channel_id=_OTHER_CHANNEL,
+            message_id=message_id,
+            content="what C said",
+            origin_context_id=setup,
         )
     assert fake.messages[message_id]["content"] == "first draft", "nothing was edited"
 

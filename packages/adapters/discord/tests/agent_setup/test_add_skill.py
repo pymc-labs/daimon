@@ -202,10 +202,17 @@ def _followups(interaction: MagicMock) -> list[str]:
     return [call.args[0] for call in interaction.followup.send.await_args_list]
 
 
-async def _route(world: _World, scope: ChannelScopeRef | TenantScopeRef) -> None:
+async def _route(
+    world: _World, scope: ChannelScopeRef | TenantScopeRef, *, by_admin: bool = False
+) -> None:
     async with world.factory.begin() as session:
         await set_fields(
-            session, scope=scope, tenant_id=world.tenant_id, agent_name="helper", mode="agent"
+            session,
+            scope=scope,
+            tenant_id=world.tenant_id,
+            agent_name="helper",
+            mode="agent",
+            set_by_admin=by_admin,
         )
 
 
@@ -255,6 +262,7 @@ async def test_a_server_default_needs_a_server_admin(
 async def test_a_channel_admin_may_add_to_an_agent_local_to_their_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Only once a server admin made it the channel's default; a member's binding is not enough."""
     world = await _world(db_session_factory)
     agent = world.put_agent()
     await _route(world, ChannelScopeRef(tenant_id=world.tenant_id, channel_id=str(CHANNEL_ID)))
@@ -272,6 +280,13 @@ async def test_a_channel_admin_may_add_to_an_agent_local_to_their_channel(
             user_ids=[str(USER_ID)],
             actor_account_id=None,
         )
+    member_bound = _interaction()
+    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(member_bound)
+    member_bound.response.send_modal.assert_not_awaited()
+
+    await _route(
+        world, ChannelScopeRef(tenant_id=world.tenant_id, channel_id=str(CHANNEL_ID)), by_admin=True
+    )
     channel_admin = _interaction()
     await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(channel_admin)
     channel_admin.response.send_modal.assert_awaited_once()

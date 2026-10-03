@@ -9,6 +9,20 @@ from collections.abc import Iterable
 from typing import Any
 
 MA_METADATA_KEY_PRIVATE_DM = "daimon_private_dm"
+# A routine's session carries the private-DM stamp as "routine:<id>": as with a
+# DM, no admin or channel admin reads it from the hub; its owner still does,
+# as any session of theirs (under its channel's seal).
+_PRIVATE_ROUTINE_PREFIX = "routine:"
+
+
+def private_routine_stamp(routine_id: uuid.UUID) -> str:
+    return f"{_PRIVATE_ROUTINE_PREFIX}{routine_id}"
+
+
+def is_private_routine_stamp(value: str) -> bool:
+    return value.startswith(_PRIVATE_ROUTINE_PREFIX)
+
+
 # Stamped on a session opened for a channel turn: the channel it runs in, the
 # thread under it (when there is one), and -- once any of its turns ran sealed --
 # the sealed id that sealed it (the channel, or a thread sealed on its own). The
@@ -25,6 +39,9 @@ MA_METADATA_KEY_ACCOUNT = "daimon_account"
 MA_METADATA_KEY_MANAGED = "daimon_managed"
 MA_METADATA_KEY_SPEC_HASH = "daimon_spec_hash"
 MA_METADATA_KEY_ISOLATED = "daimon_isolated"
+# Stamped on the copy `set_channel_isolation` makes, with the channel it was
+# made for, so `archive_isolation_copy` archives only such copies.
+MA_METADATA_KEY_ISOLATION_COPY = "daimon_isolation_copy"
 # Stamped on a reader variant (see `daimon.core.reader_agent`) with the
 # source agent's spec-hash-or-fallback fingerprint, so a subsequent publish
 # can tell "unchanged source, reuse the variant" from "source moved, update

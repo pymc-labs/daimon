@@ -31,6 +31,7 @@ from daimon.adapters.teams.card_actions import (
     error_text,
     submitted_fields,
 )
+from daimon.adapters.teams.channel_admin_groups import channel_admin_caller
 from daimon.adapters.teams.credential_repos import attach_imported_skills, store_agent_pat
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
@@ -43,7 +44,6 @@ from daimon.core.agent_pins import (
     request_pin_refusal,
 )
 from daimon.core.agent_reach import load_target_facts
-from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
@@ -507,8 +507,11 @@ class TeamsCredentialRequests:
                 ma_agent_id=str(agent.id),
                 default=self._runtime.deployment_default,
                 # Only the requester may submit, so they are the caller.
-                caller=ChannelAdminCaller(
-                    platform_user_id=row.requester_platform_user_id, is_server_admin=is_admin
+                caller=await channel_admin_caller(
+                    self._runtime,
+                    tenant_id=row.tenant_id,
+                    user_id=row.requester_platform_user_id,
+                    is_admin=is_admin,
                 ),
                 is_daimon_managed=managed,
                 # Slack leaves the caller's own sessions out of a skill import's
@@ -917,8 +920,11 @@ class TeamsCredentialRequests:
                 url=row.mcp_server_url,
                 platform="teams",
                 # Only the requester may submit, so they are the caller.
-                caller=ChannelAdminCaller(
-                    platform_user_id=row.requester_platform_user_id, is_server_admin=is_admin
+                caller=await channel_admin_caller(
+                    self._runtime,
+                    tenant_id=row.tenant_id,
+                    user_id=row.requester_platform_user_id,
+                    is_admin=is_admin,
                 ),
                 default=self._runtime.deployment_default,
                 shares_token=True,

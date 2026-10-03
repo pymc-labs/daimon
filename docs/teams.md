@@ -68,7 +68,7 @@ longer goes to the agent. None of them runs an agent turn.
 | --- | --- |
 | `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
 | `help` | List the commands. |
-| `setup` | Agents, their details and who answers where; create an agent, connect coding tools (admins), or open a setup conversation. |
+| `setup` | Agents, their details and who answers where; create an agent, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
 | `privacy` | See, export or delete what daimon stores about you. |
@@ -86,8 +86,20 @@ and dialog re-checks the organisation, the clicker and their role. The list
 is read at boot, which also takes the stored admin role, used by routines and
 MCP clients, from anyone no longer on it. There are no ephemeral messages:
 refusals come as toasts, dialog messages or card edits only the clicker sees.
-Channel admins (`set_channel_admins`, by Entra object ID; Teams has no roles
-here) and channel budgets (`set_channel_budget`) work as on Discord and Slack.
+Channel admins (`set_channel_admins`, by Entra object ID, or by a team's Entra
+group ID in `role_ids` to admit that team's owners), channel budgets
+(`set_channel_budget`) and channel environments (`set_channel_environment`)
+work as on Discord and Slack. Who answers where lists each channel's
+environment, and its **Channel settings** dialog changes one channel picked
+there, since the panel lives in the 1:1 chat: its environment (server admins,
+or that channel's admins), and its isolation and admins by Entra object ID
+(server admins only).
+Channel isolation works as on Discord and Slack, with `set_channel_isolation`,
+`daimon channels isolate` or `--isolated-channel`. A thread (`;messageid=`)
+counts as its channel, and the isolated agents send nothing to 1:1 chats. The
+CLI can't read channel names, so a copy it makes is named from the channel id.
+The setup panel lives in the 1:1 chat, outside every channel, so a member's
+Agents list leaves out each isolated channel's own agents; an admin sees all.
 
 ### Channel history
 
@@ -105,7 +117,9 @@ be read, the agent is told history is unavailable and why, rather than
 guessing from nothing.
 
 Graph access is the resource-specific consent `ChannelMessage.Read.Group` in
-the manifest. A team owner grants it when adding the app to a team, for that
+the manifest, plus `TeamMember.Read.Group` for the owner list a team grant of
+channel admins reads (cached for a minute; without it the team's owners are
+not channel admins). A team owner grants them when adding the app to a team, for that
 team only; no tenant-wide permission or admin consent is needed. It also makes
 Teams deliver every channel post to the bot, which ignores those without a
 mention unless their thread is followed. An existing install needs the updated app package uploaded again
@@ -166,6 +180,12 @@ consent above) a followed thread stays mention-only.
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and
 every redirect hop is re-checked (Graph reads follow none).
+
+A shared `.md` or `.zip` can become a skill: `add_skill(attachment_url=…)`
+takes its download link only over https from a SharePoint, OneDrive or Graph
+host, sends no token, refuses a redirect off those hosts, and checks the
+file's name before reading its capped body, with the usual preview and
+confirmation card.
 
 ### Channel files (optional)
 
@@ -292,7 +312,5 @@ different agent posts a notice instead of running. A deployment with
 ### Not supported
 
 Group chats, reactions, `/dm` conversations, files in channels whose site is
-not granted or in private and shared channels, and coding-tool tokens minted by
-a channel admin (one must be minted inside their channel, and panels live in
-the 1:1 chat). Removing the app does not
+not granted or in private and shared channels. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.

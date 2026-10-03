@@ -221,6 +221,33 @@
 # ---
 # name: test_rendered_tool_schema_matches_snapshot
   dict({
+    'add_channel_skill': dict({
+      'description': '''
+        Add a skill to whatever agent answers in one channel, there only. Admin-only.
+        
+        ``skill`` is a skill id, a workspace library skill's name, or
+        ``agent/name`` for one uploaded to the agent that answers in this
+        channel; another agent's upload is refused. The latest version is
+        added; add it again to pick up a newer one. It applies from the next
+        message in each conversation there. A thread id resolves to its parent.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'skill': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'skill',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'add_skill': dict({
       'description': '''
         Add a skill to one agent from a pasted SKILL.md, a .md or .zip attached in
@@ -370,6 +397,54 @@
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'name': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'archive_isolation_copy': dict({
+      'description': '''
+        Archive the agent copied for an isolated channel, when that channel closes.
+        For example, retire #client-acme's agent once the engagement ends. Requires a
+        server or workspace admin.
+        
+        Only an agent ``set_channel_isolation`` copied for a channel can be archived
+        here, never a built-in agent or a default. Pass ``channel_id``, the channel it
+        was made for, to drop its pin and default there with it; while it is pinned
+        or a default anywhere else, the call is refused. The channel stays sealed and
+        isolated, so nothing answers there afterwards. ``expected_ma_agent_id`` guards
+        against a namesake made since the agent was listed.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'name': dict({
             'type': 'string',
           }),
@@ -710,7 +785,8 @@
         Omit ``channel_id`` to clear the workspace default, leaving the deployment
         default. The workspace default requires Manage Server (admin); an admin of the
         channel may clear that channel's environment, unless it is sealed and the
-        default has unrestricted networking. A thread id resolves to its parent channel.
+        default has unrestricted networking; then a server admin must confirm it, as
+        for ``set_channel_environment``. A thread id resolves to its parent channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -725,6 +801,10 @@
               }),
             ]),
             'default': None,
+          }),
+          'confirm_open_network': dict({
+            'default': False,
+            'type': 'boolean',
           }),
         }),
         'type': 'object',
@@ -817,7 +897,9 @@
         ``skill_repos`` or use ``sync_skills`` after the agent is created.
         
         A returned ``answering`` field says the new agent is routed nowhere yet:
-        post it verbatim.
+        post it verbatim. Always pass this turn's ``origin_context_id``: a chat turn
+        without it is refused while a channel in the workspace is isolated, and with
+        it a channel admin creating the agent for their channel may set it up there.
       ''',
       'parameters': dict({
         '$defs': dict({
@@ -1225,6 +1307,17 @@
           'name': dict({
             'type': 'string',
           }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'skill_repos': dict({
             'anyOf': list([
               dict({
@@ -1294,12 +1387,24 @@
         name is the agent-visible filename (charset [A-Za-z0-9_][A-Za-z0-9_.-]{0,63},
         no slash); it becomes data/<name> inside the notebook. slug must match the slug
         you publish the notebook/blog under. Returns {upload_url, slug, upload_expires_at}.
+        Pass this turn's origin_context_id, as for create_notebook_upload_url.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'name': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'slug': dict({
             'type': 'string',
@@ -1681,6 +1786,9 @@
         notebooks); share that whole url. Its access_token is the notebook's only
         key, so share it only where the notebook belongs. Never paste large file
         contents into a tool argument.
+        
+        Pass this turn's origin_context_id. A pinned agent, or a turn in an
+        isolated channel, publishes nothing.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1688,6 +1796,17 @@
           'editable': dict({
             'default': False,
             'type': 'boolean',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'permanent': dict({
             'default': False,
@@ -2711,8 +2830,10 @@
         Lists every channel with its own agent or environment setting, a
         spending budget, channel admins or isolation, with the agent and environment that
         apply there, the roles and members administering it, and the budget's
-        limit, window and spend (``budget`` is null without one). Money is a
-        decimal string.
+        limit, window and spend (``budget`` is null without one), and the
+        live timed promo credit with when each grant ends. Money is a decimal
+        string. Agent and environment names this conversation's channel
+        isolation keeps from it read as null.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2947,7 +3068,7 @@
     }),
     'list_channel_admins': dict({
       'description': '''
-        List the channels that have their own admins, with the roles and members
+        List the channels that have their own admins, with the groups and members
         named for each. For example, list the admins of #support. Requires Manage
         Server (admin).
       ''',
@@ -2964,6 +3085,21 @@
         'additionalProperties': False,
         'properties': dict({
         }),
+        'type': 'object',
+      }),
+    }),
+    'list_channel_skills': dict({
+      'description': "List the extra skills a channel's turns run with, on top of its agent's. Admin-only.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+        ]),
         'type': 'object',
       }),
     }),
@@ -2992,7 +3128,11 @@
       }),
     }),
     'list_environments': dict({
-      'description': 'List environments in the tenant pool. ``page`` is reserved for future pagination.',
+      'description': '''
+        List environments in the tenant pool. ``page`` is reserved for future pagination.
+        
+        Operator tokens need the ``tenant:read`` scope.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3584,9 +3724,11 @@
         should answer questions (defaults to this tenant's configured
         agent).
         
-        When the answering agent is pinned to channels, a non-admin may only
-        publish its reader from inside them: pass this turn's
-        ``origin_context_id``.
+        Pass this turn's ``origin_context_id``. A pinned agent, or a turn in
+        an isolated channel, publishes nothing: a link reaches whoever holds
+        it. An isolated channel's own agent never answers a report. When the
+        answering agent is pinned to channels, a non-admin may only publish
+        its reader from inside them.
         
         Returns ``{upload_url, links}``: ``upload_url`` is a one-time
         capability URL: ``links`` maps each recipient's name to their own
@@ -3880,6 +4022,25 @@
         'required': list([
           'agent_name',
           'key',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'remove_channel_skill': dict({
+      'description': 'Remove an extra skill from a channel, by id or name. Admin-only.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'skill': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'skill',
         ]),
         'type': 'object',
       }),
@@ -4722,9 +4883,15 @@
         channels' default agent. Built-in agents and the workspace default stay with
         server admins.
         
-        Ids are the platform's own: Discord role and user ids, Slack user ids, Teams
-        Entra object ids (Slack and Teams have no roles here, so ``role_ids`` must be
-        empty). ``channel_id`` MUST be the parent channel's id, never a thread's.
+        Ids are the platform's own. ``user_ids``: Discord or Slack user ids, Teams
+        Entra object ids. ``role_ids`` names groups whose members all count: Discord
+        role ids, Slack user group ids (``S...``), or a Teams team's Entra group id,
+        which admits that team's owners. ``channel_id`` MUST be the parent channel's
+        id; a Slack or Teams thread id names its channel.
+        
+        A Slack user group makes anyone who can join or edit it a channel admin, and
+        Slack lets every member edit user groups by default: name one only where the
+        workspace limits user group management to admins.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4827,11 +4994,13 @@
         (``list_environments``). Conversations pick it up from their next message.
         The workspace default requires Manage Server (admin); an admin of the channel
         may set that channel's environment, except one with unrestricted networking in
-        a sealed channel, which needs a server admin.
+        a sealed channel, which needs a server admin and their confirmation: pass
+        ``confirm_open_network=true`` only after the caller confirms it.
         
         Pass the parent channel's id: Discord
         ``<channel platform="discord" id="..." role="parent_channel">``, Slack
-        ``<channel platform="slack" id="...">``; a thread id resolves to its parent.
+        ``<channel platform="slack" id="...">``, Teams ``19:…@thread.tacv2``; a thread
+        id resolves to its parent. The caller must be able to see the channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4847,6 +5016,10 @@
             ]),
             'default': None,
           }),
+          'confirm_open_network': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
           'environment_name': dict({
             'type': 'string',
           }),
@@ -4860,7 +5033,7 @@
     'set_channel_isolation': dict({
       'description': '''
         Isolate one channel, or end its isolation. For example, give #team-alpha an
-        agent nobody outside it can see or reach. Requires Manage Server (admin).
+        agent nobody outside it can see or reach. Requires a server or workspace admin.
         
         Isolating seals the channel and pins its own agent to it: its default agent,
         answering nowhere else, pinned nowhere else and not built in. If it has none, pass
@@ -4875,7 +5048,8 @@
         handed tasks from elsewhere; inside it only they appear. Its messages are
         readable only from inside it. Ending isolation keeps the seal and the pins; a
         server admin lifts them from Who answers where in the setup panel.
-        ``channel_id`` MUST be the parent channel's id, never a thread's.
+        ``channel_id`` is the channel's id, never a Discord thread's; a Slack or Teams
+        thread id names its channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4905,6 +5079,54 @@
         'type': 'object',
       }),
     }),
+    'set_channel_protection': dict({
+      'description': '''
+        Protect or seal one channel, or lift either. For example, stop daimon posting
+        in #announcements, or make #legal readable only from inside it. Leave a flag out
+        to keep it as it is.
+        
+        ``protected`` stops every post into the channel and its threads, replies
+        included. ``sealed`` makes its messages and conversations readable only from
+        inside it. Requires a server admin; a channel's own admins can't change either.
+        An isolated channel stays sealed until its isolation ends
+        (``set_channel_isolation``). ``channel_id`` is the channel's id; a Slack or
+        Teams thread id names its channel.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'protected': dict({
+            'anyOf': list([
+              dict({
+                'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'sealed': dict({
+            'anyOf': list([
+              dict({
+                'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'channel_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'set_display_identity': dict({
       'description': '''
         Change how daimon appears in this Discord server: its display name,
@@ -4918,7 +5140,8 @@
         per-channel identity, so tell the user when they asked for one
         channel. There is no reset yet: an empty ``display_name`` is treated
         as omitted, so a name cannot be cleared back to the default. Needs a
-        server admin. Discord-only.
+        server admin. Pass this turn's origin_context_id: a pinned agent, or a
+        turn in an isolated channel, can't change it. Discord-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4935,6 +5158,17 @@
             'default': None,
           }),
           'display_name': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
             'anyOf': list([
               dict({
                 'type': 'string',

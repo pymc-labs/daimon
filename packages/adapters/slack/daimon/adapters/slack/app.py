@@ -39,9 +39,21 @@ from daimon.adapters.slack.agent_setup.channel_admins import (
     evaluate_channel_admins_submission,
     run_channel_admins_submission,
 )
+from daimon.adapters.slack.agent_setup.channel_skills import (
+    ChannelSkillsSubmission,
+    evaluate_channel_skills_submission,
+    run_channel_skills_submission,
+)
+from daimon.adapters.slack.agent_setup.operator_tokens import (
+    OperatorTokenSubmission,
+    evaluate_operator_token_submission,
+    run_operator_token_submission,
+)
 from daimon.adapters.slack.agent_setup.panel_views import (
     CALLBACK_ADD_SKILL,
     CALLBACK_CHANNEL_ADMINS,
+    CALLBACK_CHANNEL_SKILLS,
+    CALLBACK_OPERATOR_MINT,
 )
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_private_metadata
 from daimon.adapters.slack.agent_setup.submit import (
@@ -68,6 +80,8 @@ from daimon.adapters.slack.boot_sweep import (
     retire_orphaned_turns,
     snapshot_slack_card_intents,
 )
+from daimon.adapters.slack.budget_notice import with_budget_notifier
+from daimon.adapters.slack.channel_admin_groups import user_group_ids
 from daimon.adapters.slack.context import build_context_xml, build_delta_xml
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.credential_requests import (
@@ -122,6 +136,7 @@ from daimon.adapters.slack.routines_panel.submit import (
 )
 from daimon.adapters.slack.runtime import (
     SlackRuntime,
+    admission_refusal_message,
     resolve_bot_display_name,
     responder_handle,
 )
@@ -318,7 +333,7 @@ class SlackApp:
     """
 
     def __init__(self, *, runtime: SlackRuntime) -> None:
-        self.runtime = runtime
+        self.runtime = with_budget_notifier(runtime)
         # Per-thread concurrency state (keys are Slack thread_ts strings).
         self._processing: set[str] = set()
         self._pending: dict[str, list[dict[str, Any]]] = {}
@@ -820,6 +835,52 @@ class SlackApp:
                             )
 
                     self._spawn(_run_channel_admins())
+            elif cb_id == CALLBACK_CHANNEL_SKILLS:
+                _cs = evaluate_channel_skills_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id)
+                )
+                if _cs is not None:
+                    _cs_team: dict[str, Any] = payload.get("team") or {}
+                    _cs_user: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_channel_skills(
+                        *,
+                        _t: str = str(_cs_team.get("id") or ""),
+                        _u: str = str(_cs_user.get("id") or ""),
+                        _s: ChannelSkillsSubmission = _cs,
+                    ) -> None:
+                        wc = await resolve_web_client(self.runtime, team_id=_t)
+                        if wc is not None:
+                            await run_channel_skills_submission(
+                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
+                            )
+
+                    self._spawn(_run_channel_skills())
+            elif cb_id == CALLBACK_OPERATOR_MINT:
+                # Pure evaluate, then an empty ack closes the form; the token
+                # arrives as an ephemeral and the routing view refreshes.
+                _ot = evaluate_operator_token_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id)
+                )
+                if _ot is not None:
+                    _ot_team: dict[str, Any] = payload.get("team") or {}
+                    _ot_user: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_operator_token(
+                        *,
+                        _t: str = str(_ot_team.get("id") or ""),
+                        _u: str = str(_ot_user.get("id") or ""),
+                        _s: OperatorTokenSubmission = _ot,
+                    ) -> None:
+                        wc = await resolve_web_client(self.runtime, team_id=_t)
+                        if wc is not None:
+                            await run_operator_token_submission(
+                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
+                            )
+
+                    self._spawn(_run_operator_token())
             elif cb_id == CALLBACK_ADD_SKILL:
                 # Pure evaluate, off the loop: errors, a fresh preview, or close and add.
                 _as = await asyncio.to_thread(evaluate_add_skill_submission, payload)
@@ -1697,6 +1758,13 @@ class SlackApp:
                 channel_id=channel,
                 thread_id=thread_id,
                 role=Role.ADMIN if is_admin else Role.USER,
+                platform_role_ids=()
+                if is_admin
+                else sorted(
+                    await user_group_ids(
+                        self.runtime, web_client, tenant_id=tenant_id, user_id=author_id
+                    )
+                ),
                 now=datetime.now(UTC),
             )
         except MissingTurnConfigError as err:
@@ -1760,14 +1828,6 @@ class SlackApp:
                     team_id=team_id,
                     channel_id=channel,
                 )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        "You aren't on this workspace's list of people who can start a turn. "
-                        "A workspace admin can add you."
-                    ),
-                )
             elif err.reason == "agent_pinned_elsewhere":
                 log.info(
                     "turn.skipped.agent_pinned_elsewhere",
@@ -1775,14 +1835,6 @@ class SlackApp:
                     team_id=team_id,
                     channel_id=channel,
                     thread_id=thread_id,
-                )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        "This agent only runs in the channels an operator pinned it to, "
-                        "so it can't answer here."
-                    ),
                 )
             elif err.reason == "channel_isolated":
                 log.info(
@@ -1792,14 +1844,6 @@ class SlackApp:
                     channel_id=channel,
                     thread_id=thread_id,
                 )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        "This channel is isolated and the agent that would answer isn't one of "
-                        "its own. A workspace admin must set the channel's agent."
-                    ),
-                )
             elif err.reason == "balance_depleted":
                 log.info(
                     "turn.skipped.over_balance",
@@ -1808,16 +1852,6 @@ class SlackApp:
                     channel_id=channel,
                     thread_id=thread_id,
                 )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        f"This workspace's "
-                        f"{escape_mrkdwn(resolve_bot_display_name(self.runtime.settings))} "
-                        "credit is depleted. "
-                        "An admin can top up with `/billing`."
-                    ),
-                )
             elif err.reason == "channel_budget_exceeded":
                 log.info(
                     "turn.skipped.over_channel_budget",
@@ -1825,14 +1859,6 @@ class SlackApp:
                     team_id=team_id,
                     channel_id=channel,
                     thread_id=thread_id,
-                )
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=(
-                        "This channel has used its spending budget. "
-                        "A workspace admin can raise or clear it."
-                    ),
                 )
             else:
                 log.info(
@@ -1843,13 +1869,11 @@ class SlackApp:
                     channel_id=channel,
                     thread_id=thread_id,
                 )
+            if err.reason != "channel_protected":
                 await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel,
                     thread_ts=thread_id,
-                    text=(
-                        "Monthly usage cap reached for this workspace. "
-                        "An admin can adjust the cap with `/billing` (when available)."
-                    ),
+                    text=admission_refusal_message(err.reason, self.runtime.settings),
                 )
             return
 
@@ -1881,6 +1905,7 @@ class SlackApp:
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
+            budget_channel_id=admission.budget_channel_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
             channel=channel,
@@ -2314,6 +2339,7 @@ class SlackApp:
                     alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                     ask_human=slack_support_enabled(self.runtime.settings.support),
                     tenant_id=tenant_id,
+                    budget_channel_id=admission.budget_channel_id,
                     render_tables=self.runtime.settings.table_rendering.get(tenant_id, False)
                     is True,
                     client=web_client,
@@ -2649,6 +2675,16 @@ class SlackApp:
             channel_id=channel,
             thread_id=thread_id,
             role=role,
+            platform_role_ids=()
+            if role is Role.ADMIN
+            else sorted(
+                await user_group_ids(
+                    self.runtime,
+                    web_client,
+                    tenant_id=tenant_id,
+                    user_id=row.requester_external_user_id,
+                )
+            ),
             now=datetime.now(UTC),
             # A continuation owed to a private DM conversation is a DM turn:
             # outside every pin, with the DM memory rule.
@@ -2692,6 +2728,7 @@ class SlackApp:
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
+            budget_channel_id=follow_admission.budget_channel_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
             channel=channel,
@@ -2775,6 +2812,7 @@ class SlackApp:
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 ask_human=slack_support_enabled(self.runtime.settings.support),
                 tenant_id=tenant_id,
+                budget_channel_id=follow_admission.budget_channel_id,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 client=web_client,
                 channel=channel,

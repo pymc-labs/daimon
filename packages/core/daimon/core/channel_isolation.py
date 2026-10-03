@@ -24,11 +24,18 @@ from typing import Literal
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.access_policy import TenantAccessPolicy, isolated_channel_of, isolation_owner
+from daimon.core.access_policy import (
+    TenantAccessPolicy,
+    isolated_channel_of,
+    isolation_owner,
+    source_seal_ids,
+)
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize, build_turn_place
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
+from daimon.core.defaults.metadata import private_routine_stamp
 from daimon.core.errors import DaimonError
+from daimon.core.routine_delivery import delivery_target, teams_channel_of
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
@@ -83,22 +90,37 @@ def routine_destination_channel(row: RoutineRow) -> str | None:
     """The channel a routine delivers into (a thread's parent), or None without a destination.
 
     The saved `channel_id` is the destination's parent; a row saved before it
-    was recorded falls back to the destination id's channel part.
+    was recorded falls back to the channel its destination id carries, or the
+    id itself (a channel, or a Discord thread whose parent is unknown).
     """
     if row.destination_kind is None or row.destination_id is None:
         return None
-    return row.channel_id or row.destination_id.partition(":")[0]
+    if row.channel_id:
+        return row.channel_id
+    if row.destination_kind == "channel":
+        return row.destination_id
+    return _channel_in_thread_id(row.destination_id) or row.destination_id
 
 
 def is_routine_parent_unknown(row: RoutineRow) -> bool:
     """A thread destination saved before its parent channel was recorded, whose id
-    doesn't carry it (a Discord thread; a Slack one is ``channel:ts``)."""
+    doesn't carry it (a Discord thread; a Slack one is ``channel:ts``, a Teams one
+    ``19:…;messageid=…``)."""
     return (
         row.destination_kind == "thread"
         and row.channel_id is None
         and row.destination_id is not None
-        and ":" not in row.destination_id
+        and _channel_in_thread_id(row.destination_id) is None
     )
+
+
+def _channel_in_thread_id(thread_id: str) -> str | None:
+    """The channel a thread id carries: Teams and Slack ids do, a Discord id doesn't."""
+    teams = teams_channel_of(thread_id)
+    if teams is not None:
+        return teams
+    channel, sep, _ = thread_id.partition(":")
+    return channel if sep and channel else None
 
 
 def routine_destination_place(row: RoutineRow, *, channel_id: str | None) -> Place:
@@ -111,6 +133,52 @@ def routine_destination_place(row: RoutineRow, *, channel_id: str | None) -> Pla
         channel_id=channel_id,
         parent_channel_id=routine_destination_channel(row),
         parent_unresolved=is_routine_parent_unknown(row),
+    )
+
+
+@dataclass(frozen=True)
+class RoutineOrigin:
+    """Where a routine's session runs, stamped on it like a turn there, and
+    the private stamp that keeps its transcript its owner's alone."""
+
+    channel_id: str
+    thread_id: str | None
+    seal_ids: frozenset[str]
+    private_dm_id: str
+
+
+def routine_origin(
+    policy: TenantAccessPolicy, row: RoutineRow, *, platform: str
+) -> RoutineOrigin | None:
+    """The channel and thread a routine fires into, with the seal over them now.
+
+    Stamped on the routine's session so an isolated or sealed channel's
+    routine transcript stays inside it. A routine without a destination is
+    placed by its saved channel (for one made in a DM, the channel the DM
+    came from); one with neither is headless (None). Every stamp is private
+    too (`private_routine_stamp`): the routine runs on its owner's
+    credentials, so no admin or channel admin reads it from the hub, as
+    before it carried a channel.
+    """
+    channel_id = routine_destination_channel(row) or row.channel_id
+    if channel_id is None:
+        return None
+    thread_id: str | None = None
+    if row.destination_kind == "thread" and row.destination_id is not None:
+        # Slack names a thread by its ts under the channel; Discord and Teams by its own id.
+        target = delivery_target(row, platform=platform)
+        thread_id = (
+            (target.thread_ts if target is not None else None)
+            if platform == "slack"
+            else row.destination_id
+        )
+    if thread_id == channel_id:
+        thread_id = None
+    return RoutineOrigin(
+        channel_id=channel_id,
+        thread_id=thread_id,
+        seal_ids=source_seal_ids(policy, channel_id=channel_id, thread_id=thread_id),
+        private_dm_id=private_routine_stamp(row.id),
     )
 
 

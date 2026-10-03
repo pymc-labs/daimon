@@ -147,7 +147,10 @@ def test_every_operation_kind_has_a_rule() -> None:
 
 def test_channel_admin_locality_allows_reachable_agent_but_not_managed_one() -> None:
     local = TargetFacts(
-        is_daimon_managed=False, is_reachable_in_tenant=True, is_local_to_caller_channels=True
+        is_daimon_managed=False,
+        is_reachable_in_tenant=True,
+        is_local_to_caller_channels=True,
+        is_held_by_caller=True,
     )
     managed_local = local.model_copy(update={"is_daimon_managed": True})
     for operation in ("agent_spec_edit", "key_replace", "key_remove", "mcp_remove", "repo_bind"):
@@ -155,6 +158,23 @@ def test_channel_admin_locality_allows_reachable_agent_but_not_managed_one() -> 
         assert (
             decide_operation(operation, is_admin=False, target=managed_local) == "managed_agent"
         ), f"{operation}: a managed agent stays refused to a channel admin"
+
+
+def test_locality_counts_only_on_an_agent_that_is_the_channel_admins() -> None:
+    """A local agent a channel admin did not make, nor got from a server admin, is not theirs."""
+    unheld = TargetFacts(
+        is_daimon_managed=False, is_reachable_in_tenant=True, is_local_to_caller_channels=True
+    )
+    held_elsewhere = unheld.model_copy(
+        update={"is_local_to_caller_channels": False, "is_held_by_caller": True}
+    )
+    for operation in ("agent_spec_edit", "key_replace", "mcp_remove", "repo_bind", "skill_add"):
+        assert decide_operation(operation, is_admin=False, target=unheld) == "needs_admin", (
+            f"{operation}: locality alone no longer makes an agent a channel admin's"
+        )
+        assert decide_operation(operation, is_admin=False, target=held_elsewhere) == (
+            "needs_admin"
+        ), f"{operation}: an agent of theirs that lost its locality needs a server admin"
 
 
 def test_locality_defaults_off_so_reachable_agent_still_needs_admin() -> None:
@@ -170,7 +190,10 @@ def test_locality_defaults_off_so_reachable_agent_still_needs_admin() -> None:
 def test_skill_add_and_remove_follow_the_spec_family() -> None:
     """Managed refused for all; admin allowed; channel admin on local; anyone on unrouted."""
     local = TargetFacts(
-        is_daimon_managed=False, is_reachable_in_tenant=True, is_local_to_caller_channels=True
+        is_daimon_managed=False,
+        is_reachable_in_tenant=True,
+        is_local_to_caller_channels=True,
+        is_held_by_caller=True,
     )
     for operation in ("skill_add", "skill_remove"):
         managed = decide_operation(

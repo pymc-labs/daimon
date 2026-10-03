@@ -17,7 +17,13 @@ import anthropic as anthropic_pkg
 import httpx
 import structlog
 from anthropic import AsyncAnthropic, omit
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaManagedAgentsSession
+from anthropic.types.beta import (
+    BetaEnvironment,
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsCustomSkill,
+    BetaManagedAgentsSession,
+    BetaManagedAgentsSkillParams,
+)
 from anthropic.types.beta.agent_create_params import Tool
 from anthropic.types.beta.beta_managed_agents_agent_with_overrides_params import (
     BetaManagedAgentsAgentWithOverridesParams,
@@ -53,7 +59,7 @@ from daimon.core.mcp_vault import (
 from daimon.core.memory_resource import ensure_memory_store_and_mount
 from daimon.core.repo_resource import build_repo_resource
 from daimon.core.session_seal import origin_stamp
-from daimon.core.session_snapshot import session_mcp_servers, session_tools
+from daimon.core.session_snapshot import session_mcp_servers, session_skills, session_tools
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from pydantic import SecretStr
@@ -122,6 +128,7 @@ async def create_session(
     origin_thread_id: str | None = None,
     origin_seal_ids: Collection[str] = (),
     before_create: Callable[[], Awaitable[None]] | None = None,
+    channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -140,6 +147,9 @@ async def create_session(
     ``origin_channel_id``/``origin_thread_id``/``origin_seal_ids`` name the channel
     turn a session is opened for; they are stamped on it so the transcript tools
     can refuse a sealed conversation's transcript outside its channel.
+
+    ``channel_skills`` are the turn's channel's extra skills, added after the
+    agent's own (`session_skills`, the shape the drift check hashes too).
 
     ``budget_channel_id`` is the channel whose budget the session's spend counts
     toward (for a DM, the channel it was moved from). It is stamped apart from
@@ -420,7 +430,7 @@ async def create_session(
     servers = session_mcp_servers(agent, hidden, tool_safety=tool_safety, public_url=public_url)
     gated = list(tools) != list(visible_tools(agent, hidden))
     healed = list(servers) != list(visible_mcp_servers(agent, hidden))
-    if hidden or gated or healed:
+    if hidden or gated or healed or channel_skills:
         overrides: BetaManagedAgentsAgentWithOverridesParams = {
             "type": "agent_with_overrides",
             "id": agent.id,
@@ -435,6 +445,13 @@ async def create_session(
                 cast(Tool, tool.model_dump(mode="json", exclude_none=True)) for tool in tools
             ],
         }
+        if channel_skills:
+            # A full replacement too: the agent's own at the versions it pins.
+            overrides["skills"] = [
+                cast(BetaManagedAgentsSkillParams, skill.model_dump(mode="json"))
+                for skill in session_skills(agent, channel_skills)
+            ]
+            _log.info("session.channel_skills_applied", agent_id=agent.id)
         agent_argument = overrides
         if healed:
             # The reserved name on a server daimon does not run: the tool-safety

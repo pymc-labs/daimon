@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,15 +19,25 @@ import httpx
 import pytest
 import pytest_asyncio
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import Action, AgentRef, Place, SessionFacts, Subject, Surface, authorize
+from daimon.core.authz import (
+    Action,
+    AgentReach,
+    AgentRef,
+    Place,
+    SessionFacts,
+    Subject,
+    Surface,
+    authorize,
+)
 from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_SEALED
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
+from daimon.core.stores.agent_creation_channels import record_creation_channel
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import TenantRow, ThreadAgentBindingRow
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.core.stores.security_audit import append_event
+from daimon.core.stores.security_audit import append_event, list_events
 from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.stores.thread_sessions import create_thread_session, get_thread_session_by_id
 from daimon.core.thread_handoff import (
@@ -61,6 +72,7 @@ def _hand_off(
     agent: AgentRef | None = None,
     answers_here: bool = False,
     place: Place = _THREAD,
+    reach: AgentReach | None = None,
 ) -> str | None:
     decision = authorize(
         policy,
@@ -70,6 +82,7 @@ def _hand_off(
         agent=agent or AgentRef.of("research-bot"),
         place=place,
         answers_here=answers_here,
+        reach=reach,
     )
     return None if decision.allowed else decision.reason
 
@@ -90,14 +103,29 @@ def test_a_member_may_hand_to_an_agent_scoped_to_the_channel() -> None:
     assert _hand_off(isolated) is None, "one of an isolated channel's own agents"
 
 
-def test_any_other_agent_needs_a_server_admin_or_a_channel_admin() -> None:
+_THEIRS = AgentReach(local_to_caller=True, held_by_caller=True)
+
+
+def test_any_other_agent_needs_a_server_admin_or_a_channel_admin_who_could_bind_it() -> None:
     policy = TenantAccessPolicy()
     assert _hand_off(policy) == "admin_required"
     assert _hand_off(policy, subject=Subject(is_admin=True, platform_user_id="U1")) is None
     channel_admin = Subject(platform_user_id="U1", administered_channel_ids=frozenset({"C1"}))
-    assert _hand_off(policy, subject=channel_admin) is None
+    for reach in (_THEIRS, AgentReach(managed=True), AgentReach(tenant_wide=True)):
+        assert _hand_off(policy, subject=channel_admin, reach=reach) is None, (
+            f"a channel admin may bind {reach} as C1's default, so may hand to it"
+        )
+    for reach in (
+        None,
+        AgentReach(held_by_caller=True),
+        AgentReach(local_to_caller=True),
+        AgentReach(local_to_caller=True, held_by_caller=True, held_by_other_admin=True),
+    ):
+        assert _hand_off(policy, subject=channel_admin, reach=reach) == "admin_required", (
+            f"{reach} is not the channel admin's to bring into C1"
+        )
     other_channel = Subject(platform_user_id="U1", administered_channel_ids=frozenset({"C2"}))
-    assert _hand_off(policy, subject=other_channel) == "admin_required"
+    assert _hand_off(policy, subject=other_channel, reach=_THEIRS) == "admin_required"
     agent_key = Subject(is_admin=True, platform_user_id="U1", via_agent_key=True)
     assert _hand_off(policy, subject=agent_key) == "admin_required", "a key is never an admin"
 
@@ -168,7 +196,11 @@ def _caller(account_id: uuid.UUID | None = None, *, admin: bool = False) -> Hand
 
 
 async def _switch(
-    session: AsyncSession, tenant_id: uuid.UUID, caller: HandoffCaller | None = None
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    caller: HandoffCaller | None = None,
+    recorded: tuple[RecordedSession, ...] | None = None,
+    destination: HandoffDestination = _RESEARCH,
 ) -> ThreadAgentBindingRow:
     return await hand_over_thread(
         session,
@@ -177,10 +209,11 @@ async def _switch(
         parent_channel_id="C1",
         thread_id="T1",
         caller=caller or _caller(),
-        destination=_RESEARCH,
+        destination=destination,
         current_responder_ma_agent_id="agt_daimon",
         default=_DEFAULT,
         now=_NOW,
+        recorded=recorded,
     )
 
 
@@ -442,16 +475,161 @@ def _channel_admin_of_c1() -> HandoffCaller:
 
 
 async def _grant_c1(factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> None:
+    await _grant(factory, tenant_id, "C1", "U1")
+
+
+async def _grant(
+    factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, channel_id: str, *users: str
+) -> None:
     async with factory.begin() as session:
         await set_channel_admins(
             session,
             tenant_id=tenant_id,
             platform="slack",
-            channel_id="C1",
+            channel_id=channel_id,
             role_ids=(),
+            user_ids=users,
+            actor_account_id=None,
+        )
+
+
+async def _research_made_for_c2(
+    factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> None:
+    """A channel admin of C2 made research-bot there; it answers in C2 alone (`_seed`)."""
+    async with factory.begin() as session:
+        await record_creation_channel(
+            session,
+            tenant_id=tenant_id,
+            ma_agent_id="agt_research",
+            platform="slack",
+            channel_id="C2",
+        )
+
+
+@pytest.mark.parametrize(
+    ("c2_admins", "allowed"),
+    [((), False), (("U1",), True), (("U1", "U2"), False)],
+    ids=["another-channels-agent", "their-own-agent", "another-admin-would-lose-it"],
+)
+async def test_a_channel_admin_hands_a_thread_only_to_an_agent_they_could_bind_here(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    c2_admins: tuple[str, ...],
+    allowed: bool,
+) -> None:
+    """research-bot was made for C2 and answers there. U1 administers C1. Unless U1
+    administers C2 too, it is C2's own agent, and answering in C1 would lend C1 its
+    keys and memory. If U2 administers only C2, the binding would take research-bot
+    out of U2's channels and cost U2 their rights over it."""
+    tenant_id = (await _seed(db_session)).id
+    await _grant_c1(db_session_factory, tenant_id)
+    if c2_admins:
+        await _grant(db_session_factory, tenant_id, "C2", *c2_admins)
+    await _research_made_for_c2(db_session_factory, tenant_id)
+
+    async def switch() -> None:
+        async with db_session_factory.begin() as session:
+            await _switch(session, tenant_id, _channel_admin_of_c1(), recorded=())
+
+    if allowed:
+        await switch()
+        assert await _binding(db_session_factory, tenant_id) is not None, "U1's own agent"
+    else:
+        with pytest.raises(ThreadHandoffRefused) as refused:
+            await switch()
+        assert refused.value.refusal.reason == "admin_required", "a server admin's call"
+        assert await _binding(db_session_factory, tenant_id) is None, "nothing was switched"
+
+
+@pytest.mark.parametrize("shared", ["managed", "tenant-default"])
+async def test_a_channel_admin_hands_a_thread_to_an_agent_shared_by_design(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], shared: str
+) -> None:
+    """research-bot was made for C2, which U2 administers. A defaults-managed agent
+    or the tenant default is shared by design, so U1 of C1 may bring it in."""
+    tenant_id = (await _seed(db_session)).id
+    await _grant_c1(db_session_factory, tenant_id)
+    await _grant(db_session_factory, tenant_id, "C2", "U2")
+    await _research_made_for_c2(db_session_factory, tenant_id)
+    destination = _RESEARCH
+    if shared == "managed":
+        destination = replace(_RESEARCH, is_daimon_managed=True)
+    else:
+        # C1 answers with its own agent, so research-bot does not answer here.
+        async with db_session_factory.begin() as session:
+            await set_fields(
+                session,
+                scope=TenantScopeRef(tenant_id=tenant_id),
+                tenant_id=tenant_id,
+                agent_name="research-bot",
+            )
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="C1"),
+                tenant_id=tenant_id,
+                agent_name="helper",
+            )
+    async with db_session_factory.begin() as session:
+        await _switch(
+            session, tenant_id, _channel_admin_of_c1(), recorded=(), destination=destination
+        )
+    assert await _binding(db_session_factory, tenant_id) is not None, f"{shared}: shared"
+
+
+@pytest.mark.parametrize("r2_holds_c3", [False, True], ids=["theirs-alone", "split-grants"])
+async def test_a_hold_split_across_user_and_group_grants_still_counts(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    r2_holds_c3: bool,
+) -> None:
+    """research-bot was made for C2 and answers in C2 and C3. U1 administers C1, C2
+    and C3. U2 holds it through a user grant on C2 and group R2's grant on C3:
+    neither alone covers it, together they do, so the binding would cost U2 it."""
+    tenant_id = (await _seed(db_session)).id
+    await _grant_c1(db_session_factory, tenant_id)
+    await _grant(db_session_factory, tenant_id, "C2", "U1", "U2")
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="C3"),
+            tenant_id=tenant_id,
+            agent_name="research-bot",
+        )
+        await set_channel_admins(
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            channel_id="C3",
+            role_ids=("R2",) if r2_holds_c3 else (),
             user_ids=("U1",),
             actor_account_id=None,
         )
+    await _research_made_for_c2(db_session_factory, tenant_id)
+
+    async def switch() -> None:
+        async with db_session_factory.begin() as session:
+            await _switch(session, tenant_id, _channel_admin_of_c1(), recorded=())
+
+    if not r2_holds_c3:
+        await switch()
+        assert await _binding(db_session_factory, tenant_id) is not None, "U1 alone holds it"
+        return
+    with pytest.raises(ThreadHandoffRefused) as refused:
+        await switch()
+    assert refused.value.refusal.reason == "admin_required", "U2 would lose their hold"
+    assert await _binding(db_session_factory, tenant_id) is None, "nothing was switched"
+
+
+async def test_a_server_admin_hands_a_thread_to_another_channels_agent(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant_id = (await _seed(db_session)).id
+    await _grant(db_session_factory, tenant_id, "C2", "U2")
+    await _research_made_for_c2(db_session_factory, tenant_id)
+    async with db_session_factory.begin() as session:
+        await _switch(session, tenant_id, _caller(admin=True))
+    assert await _binding(db_session_factory, tenant_id) is not None, "a server admin's call"
 
 
 @pytest.mark.parametrize(
@@ -473,6 +651,9 @@ async def test_a_channel_admin_cant_hand_a_once_sealed_session_to_an_outside_age
     admin lifted the seal: its content is still sealed content."""
     tenant_id = (await _seed(db_session)).id
     await _grant_c1(db_session_factory, tenant_id)
+    # research-bot is U1's own, so only the seal can refuse it.
+    await _grant(db_session_factory, tenant_id, "C2", "U1")
+    await _research_made_for_c2(db_session_factory, tenant_id)
     sessions = (recorded,) if isinstance(recorded, RecordedSession) else recorded
 
     async def switch() -> None:
@@ -689,3 +870,44 @@ async def test_channel_admin_switch_refuses_legacy_seal_without_a_channel(
     async with db_session_factory() as session:
         unchanged = await get_thread_session_by_id(session, id=row.id)
     assert unchanged is not None and unchanged.seal_ids is None
+
+
+@pytest.mark.parametrize(
+    ("server_admin", "row"),
+    [
+        (True, ("panel:handoff", "allowed", "completed")),
+        (False, ("panel:handoff", "denied", "authz:admin_required")),
+    ],
+    ids=["server-admin-allowed", "channel-admin-refused"],
+)
+async def test_a_hand_over_click_by_an_admin_is_audited(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    server_admin: bool,
+    row: tuple[str, str, str],
+) -> None:
+    """As `hand_off_task`'s trail: a click resting on admin standing, or refused by
+    `authorize`, writes a `panel:handoff` row. research-bot is C2's own agent."""
+    tenant_id = (await _seed(db_session)).id
+    await _grant_c1(db_session_factory, tenant_id)
+    router = MARouter()
+    router.add_agent(ma_agent(id="agt_research", name="research-bot", tenant_id=tenant_id))
+    outcome = await switch_thread_on_request(
+        build_fake_anthropic(router.dispatch),
+        db_session_factory,
+        tenant_id=tenant_id,
+        platform="slack",
+        parent_channel_id="C1",
+        thread_id="T1",
+        ma_agent_id="agt_research",
+        caller=ChannelAdminCaller(platform_user_id="U1", is_server_admin=server_admin),
+        default=_DEFAULT,
+        channel="#c1",
+        now=_NOW,
+    )
+    assert outcome.switched is server_admin, "only the server admin may bring it into C1"
+    async with db_session_factory() as session:
+        events = await list_events(session, tenant_id=tenant_id)
+    assert [(e.tool_name, e.outcome, e.reason) for e in events] == [row], (
+        "one panel row per admin-tier click"
+    )

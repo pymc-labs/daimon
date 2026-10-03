@@ -688,6 +688,7 @@ async def _prepare_session_for_turn_locked(
             tool_safety=deps.tool_safety,
             public_url=deps.public_url,
             memory_read_only=admission.memory_read_only,
+            channel_skills=admission.channel_skills,
         )
         fresh_start = row.fresh_start_requested_at is not None
         if handed_over:

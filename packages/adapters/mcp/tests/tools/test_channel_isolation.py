@@ -19,17 +19,32 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import require_channel_writable, turn_origin_place
+from daimon.adapters.mcp.tools._channel_policy import (
+    require_channel_writable,
+    require_identity_changeable,
+    require_publishable,
+    require_reader_source_publishable,
+    turn_origin_place,
+)
 from daimon.adapters.mcp.tools.agents import (
     AgentInfo,
+    _create_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _list_agents_impl,  # pyright: ignore[reportPrivateUsage]
     _update_agent_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.channel_environments import (
+    _clear_channel_environment_impl,  # pyright: ignore[reportPrivateUsage]
+    _set_channel_environment_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.channel_isolation import (
     _set_channel_isolation_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
+from daimon.adapters.mcp.tools.environments import (
+    _get_environment_impl,  # pyright: ignore[reportPrivateUsage]
+    _list_environments_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.propagation import (
     _clear_agent_default_impl,  # pyright: ignore[reportPrivateUsage]
     _explain_agent_resolution_impl,  # pyright: ignore[reportPrivateUsage]
@@ -44,10 +59,19 @@ from daimon.adapters.mcp.tools.skills import (
     _get_impl,  # pyright: ignore[reportPrivateUsage]
     _list_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.tenant_summary import (
+    _get_tenant_summary_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.timers import (
+    _list_timers_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.channel_environments import save_scope_environment
+from daimon.core.continuity.timers import schedule_timer
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.specs import AgentSpec
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.domain import Role
@@ -55,7 +79,7 @@ from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.turn_origins import create_origin, get_active_origin
 from daimon.core.stores.user_skills import upsert_user_skill
-from daimon.testing import ma_agent
+from daimon.testing import ma_agent, ma_environment
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma import (
@@ -412,9 +436,9 @@ async def test_posts_and_direct_messages_stay_on_their_side(
 
 
 async def _setup_thread_origin(
-    sessionmaker: async_sessionmaker[AsyncSession], world: _World
+    sessionmaker: async_sessionmaker[AsyncSession], world: _World, *, channel: str = ROOM
 ) -> str:
-    """A setup conversation in C, answered by the built-in (``shared`` here)."""
+    """A setup conversation in C (or `channel`), answered by the built-in (``shared`` here)."""
     now = dt.datetime.now(dt.UTC)
     async with sessionmaker.begin() as session:
         origin = await create_origin(
@@ -422,7 +446,7 @@ async def _setup_thread_origin(
             tenant_id=world.tenant_id,
             account_id=world.account_id,
             platform="discord",
-            parent_channel_id=ROOM,
+            parent_channel_id=channel,
             thread_id=SETUP_THREAD,
             responder_ma_agent_id="agent_shared",
             responder_name="shared",
@@ -534,3 +558,343 @@ async def test_the_setup_thread_is_held_to_its_channel(
         origin_context_id=origin_id,
     )
     assert routine.agent_name == "local", "C's agent is scheduled into C from its setup thread"
+
+    spec = AgentSpec(name="notes-bot", model="claude-sonnet-4-6", system="what C's room said")
+    with pytest.raises(ToolError, match="creates no agents"):
+        await _create_agent_impl(runtime, builtin, spec, origin_id)
+    names = {str(agent["name"]) for agent in world.state.agents.values()}
+    assert "notes-bot" not in names, "a new agent would carry the setup thread's text out of C"
+
+
+@pytest.mark.parametrize(
+    "origin_id",
+    [None, "not-a-uuid", "6f9c2b1e-4d3a-4f8e-9b7c-1a2d3e4f5a6b"],
+    ids=["none", "not-a-uuid", "unknown-uuid"],
+)
+async def test_a_chat_turn_naming_no_verified_origin_creates_no_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], origin_id: str | None
+) -> None:
+    """Left out or made up, the origin could hide C's setup thread: refuse. A run with no
+    origin, such as a routine, has nothing to retry with, so the refusal says not to."""
+    world, runtime = await _world(committing_sessionmaker)
+    await _setup_thread_origin(committing_sessionmaker, world)
+    builtin = world.auth(admin=True, executing="agent_shared")
+    spec = AgentSpec(name="notes-bot", model="claude-sonnet-4-6", system="what C's room said")
+
+    with pytest.raises(ToolError, match="origin_context_id") as refused:
+        await _create_agent_impl(runtime, builtin, spec, origin_id)
+
+    assert str(refused.value).endswith(
+        "Tell the caller to create the agent from a chat conversation. Do not retry."
+    ), "nothing to retry with, so the model must not loop"
+
+    names = {str(agent["name"]) for agent in world.state.agents.values()}
+    assert "notes-bot" not in names, "nothing was created"
+
+
+def _key(world: _World, *, bound: str | None) -> AuthIdentity:
+    """An agent key of C's own agent, minted in C (``bound``) or anywhere else."""
+    return AuthIdentity(
+        account_id=world.account_id,
+        tenant_id=world.tenant_id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="444444444444444444",
+        agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_local"),
+        bound_channel_id=bound,
+    )
+
+
+def _own_agent_callers(world: _World) -> dict[str, AuthIdentity]:
+    """Everyone C's own agent may run for: in C, in an admin's or C's channel admin's
+    DM (the credential is the same wherever the turn runs), and its agent keys."""
+    channel_admin = replace(
+        world.auth(admin=False, executing="agent_local"), administered_channel_ids=frozenset({ROOM})
+    )
+    return {
+        "member": world.auth(admin=False, executing="agent_local"),
+        "admin": world.auth(admin=True, executing="agent_local"),
+        "channel admin": channel_admin,
+        "bound key": _key(world, bound=ROOM),
+        "unbound key": _key(world, bound=None),
+    }
+
+
+async def test_an_own_agent_posts_and_messages_nowhere_outside_wherever_it_runs(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Send and DM paths: C's agent posts into C only, never another channel, a thread
+    elsewhere or the requester's own DM, and sends no direct messages, for every caller."""
+    world, runtime = await _world(committing_sessionmaker)
+    for who, auth in _own_agent_callers(world).items():
+        for channel, parent in ((OTHER, None), ("t9", OTHER), ("D123", None)):
+            with pytest.raises(ToolError, match="pinned to its own channels"):
+                await require_channel_writable(
+                    runtime, auth, channel_id=channel, parent_channel_id=parent
+                )
+        await require_channel_writable(runtime, auth, channel_id="t1", parent_channel_id=ROOM)
+        with pytest.raises(ToolError, match="sends no direct messages"):
+            await send_direct_message_impl(runtime, auth, recipient_id="123", content="hi")
+        assert who, "every caller is held"
+
+
+async def test_an_own_agent_writes_into_no_other_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Self-edit paths: from C the agent can't name another agent to edit, and what it
+    writes into its own spec stays hidden outside C."""
+    world, runtime = await _world(committing_sessionmaker)
+    world.state.agents["agent_local"]["metadata"]["daimon_account"] = str(world.account_id)
+    admin_inside = world.auth(admin=True, executing="agent_local")
+
+    async def update(auth: AuthIdentity, name: str, agent_id: str) -> AgentInfo:
+        return await _update_agent_impl(
+            runtime,
+            auth,
+            name,
+            model=None,
+            description="the client's plans",
+            system=None,
+            tools=None,
+            mcp_servers=None,
+            skills=None,
+            expected_ma_agent_id=agent_id,
+        )
+
+    with pytest.raises(ToolError, match="missing or changed"):
+        await update(admin_inside, "shared", "agent_shared")
+    own = await update(admin_inside, "local", "agent_local")
+    assert own.description == "the client's plans", "C's agent edits itself"
+    listed = await _list_agents_impl(runtime, world.auth(), None)
+    assert [a.name for a in listed] == ["shared"], "outside, its edited spec never shows"
+    with pytest.raises(ToolError, match="not found"):
+        await _get_agent_impl(runtime, world.auth(), "local")
+
+
+async def test_an_own_agent_creates_no_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A new agent answers outside C, so a prompt C's agent wrote into it would carry
+    C's content out: refused for every caller it runs for, before anything is made."""
+    world, runtime = await _world(committing_sessionmaker)
+    spec = AgentSpec(name="notes-bot", model="claude-sonnet-4-6", system="the client's plans")
+    for auth in _own_agent_callers(world).values():
+        with pytest.raises(ToolError, match="creates no agents"):
+            await _create_agent_impl(runtime, auth, spec)
+    names = {str(agent["name"]) for agent in world.state.agents.values()}
+    assert names == {"local", "shared"}, "no agent was created"
+
+
+async def test_an_own_agent_publishes_and_renames_daimon_nowhere(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A link, or daimon's server nickname, shows outside C: refused for every caller."""
+    world, runtime = await _world(committing_sessionmaker)
+    for auth in _own_agent_callers(world).values():
+        with pytest.raises(ToolError, match="isolated channel, so publishing is refused"):
+            await require_publishable(runtime, auth, origin_context_id=None)
+        with pytest.raises(ToolError, match="server-wide name or avatar is refused"):
+            await require_identity_changeable(runtime, auth, origin_context_id=None)
+
+
+async def test_publishing_is_held_by_the_turns_origin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A shared agent publishes from outside C, not from C's setup thread, and not with no
+    origin while C is isolated. A call with no executing agent is held nowhere."""
+    world, runtime = await _world(committing_sessionmaker)
+    builtin = world.auth(executing="agent_shared")
+    inside = await _setup_thread_origin(committing_sessionmaker, world)
+    with pytest.raises(ToolError, match="isolated channel"):
+        await require_publishable(runtime, builtin, origin_context_id=inside)
+    with pytest.raises(ToolError, match="origin_context_id"):
+        await require_publishable(runtime, builtin, origin_context_id=None)
+    outside = await _setup_thread_origin(committing_sessionmaker, world, channel=OTHER)
+    await require_publishable(runtime, builtin, origin_context_id=outside)
+    await require_publishable(runtime, world.auth(), origin_context_id=None)
+
+
+async def test_a_pinned_agent_publishes_nothing_even_for_an_admin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker, isolate=False)
+    async with committing_sessionmaker.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=world.tenant_id,
+            policy=TenantAccessPolicy(agent_channel_pins={"local": (ROOM,)}),
+        )
+    with pytest.raises(ToolError, match="pinned to its own channels"):
+        await require_publishable(
+            runtime, world.auth(executing="agent_local"), origin_context_id=None
+        )
+    await require_publishable(runtime, world.auth(executing="agent_shared"), origin_context_id=None)
+
+
+async def test_a_chat_turn_whose_agent_is_gone_is_refused_while_a_channel_is_isolated(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """It may have been C's own agent, so it must not be judged from outside."""
+    world, runtime = await _world(committing_sessionmaker)
+    with pytest.raises(ToolError, match="could not be found"):
+        await _list_agents_impl(runtime, world.auth(executing="agent_gone"), None)
+
+
+async def test_an_isolated_channels_environment_name_shows_only_inside_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A name only C picks could name its client, so only callers inside C see it. Names
+    other channels pick, and spare ones, show to all; an operator token sees every one."""
+    world, runtime = await _world(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        for channel, name in ((ROOM, "acme-env"), (OTHER, "other-env")):
+            await save_scope_environment(
+                session,
+                tenant_id=world.tenant_id,
+                channel_id=channel,
+                environment_name=name,
+                actor_account_id=world.account_id,
+            )
+    environments = [
+        ma_environment(id=f"env_{name}", name=name, tenant_id=world.tenant_id).model_dump(
+            mode="json"
+        )
+        for name in ("acme-env", "other-env", "spare")
+    ]
+
+    def environments_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/environments":
+            return list_response(environments)
+        raise NotHandled
+
+    runtime = replace(
+        runtime,
+        client=build_fake_anthropic(
+            combine_handlers(environments_handler, make_fake_ma_handler(world.state))
+        ),
+    )
+
+    async def names(auth: AuthIdentity) -> set[str]:
+        return {e.name for e in await _list_environments_impl(runtime, auth, None)}
+
+    assert await names(world.auth()) == {"other-env", "spare"}, "outside C its name is hidden"
+    inside = world.auth(executing="agent_local")
+    assert await names(inside) == {"acme-env", "other-env", "spare"}, "inside C it shows"
+    operator = replace(
+        world.auth(),
+        token_kind="operator",
+        token_jti=uuid.uuid4(),
+        scopes=frozenset({"tenant:read"}),
+    )
+    assert await names(operator) == {"acme-env", "other-env", "spare"}
+    with pytest.raises(ToolError, match="not found"):
+        await _get_environment_impl(runtime, world.auth(), "acme-env")
+    assert (await _get_environment_impl(runtime, inside, "acme-env")).name == "acme-env"
+    with pytest.raises(ToolError, match="No environment named 'acme-env'"):
+        await _set_channel_environment_impl(
+            runtime, world.auth(), environment_name="acme-env", channel_id=None
+        )
+
+    async def summary_row(auth: AuthIdentity) -> tuple[str | None, str | None]:
+        summary = await _get_tenant_summary_impl(runtime, auth)
+        row = next(row for row in summary.channels if row.channel_id == ROOM)
+        return row.agent_name, row.environment_name
+
+    assert await summary_row(world.auth()) == (None, None), "the summary hides C's names outside"
+    assert await summary_row(operator) == ("local", "acme-env"), "an operator token sees them"
+    cleared = await _clear_channel_environment_impl(
+        runtime, world.auth(), channel_id=ROOM, confirm_open_network=True
+    )
+    assert cleared.changed and cleared.previous_environment_name is None, "cleared, unnamed"
+
+
+async def test_no_one_publishes_an_own_agents_reader(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A reader answers as its source for whoever holds the link: never C's own agent."""
+    world, runtime = await _world(committing_sessionmaker)
+    own, shared = (
+        ma_agent(id=f"agent_{name}", name=name, tenant_id=world.tenant_id)
+        for name in ("local", "shared")
+    )
+    with pytest.raises(ToolError, match="isolated channel's own agent"):
+        await require_reader_source_publishable(runtime, world.auth(), own)
+    await require_reader_source_publishable(runtime, world.auth(), shared)
+
+
+async def test_an_own_agent_schedules_nothing_outside(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Routine paths: from C the agent can neither schedule another agent nor edit a
+    routine running elsewhere, so no trigger carries C's content out."""
+    world, runtime = await _world(committing_sessionmaker)
+
+    async def destination(
+        runtime: McpRuntime, auth: AuthIdentity, **kwargs: str | None
+    ) -> str | None:
+        return kwargs["destination_id"]
+
+    monkeypatch.setattr(routines_mod, "_check_destination", destination)
+    async with committing_sessionmaker.begin() as session:
+        elsewhere = await routines_store.create_routine(
+            session,
+            tenant_id=world.tenant_id,
+            created_by_user_id="444444444444444444",
+            agent_id="agent_shared",
+            agent_name="shared",
+            cron_expr="0 * * * *",
+            timezone_="UTC",
+            trigger_message="hi",
+            enabled=True,
+            next_fire_at=None,
+            destination_kind="channel",
+            destination_id=OTHER,
+            channel_id=OTHER,
+        )
+    for who in ("member", "admin", "channel admin"):
+        auth = _own_agent_callers(world)[who]
+        with pytest.raises(ToolError, match="no agent named"):
+            await _create_routine_impl(
+                runtime,
+                auth,
+                agent_name="shared",
+                cron_expr="0 * * * *",
+                timezone="UTC",
+                trigger_message="the client's plans",
+                destination_kind="channel",
+                destination_id=OTHER,
+            )
+        with pytest.raises(ToolError, match="routine not found"):
+            await _update_routine_impl(
+                runtime, auth, routine_id=elsewhere.id, trigger_message="the client's plans"
+            )
+
+
+async def test_a_timer_set_in_an_isolated_channel_lists_only_inside_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A timer's note is the agent's words about C, so listing it from outside, even
+    the same person's own, would carry them out."""
+    world, runtime = await _world(committing_sessionmaker)
+    when = dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)
+    for channel, agent_id, name in (
+        (ROOM, "agent_local", "local"),
+        (OTHER, "agent_shared", "shared"),
+    ):
+        await schedule_timer(
+            committing_sessionmaker,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            parent_channel_id=channel,
+            thread_id=channel,
+            requester_account_id=world.account_id,
+            requester_external_user_id="444444444444444444",
+            target_ma_agent_id=agent_id,
+            target_name=name,
+            note=f"check on {name}",
+            fire_at=when,
+        )
+    outside = await _list_timers_impl(runtime, world.auth(executing="agent_shared"))
+    assert [t.note for t in outside] == ["check on shared"], "C's timer stays inside C"
+    inside = await _list_timers_impl(runtime, world.auth(executing="agent_local"))
+    assert [t.note for t in inside] == ["check on local"], "and only C's shows there"

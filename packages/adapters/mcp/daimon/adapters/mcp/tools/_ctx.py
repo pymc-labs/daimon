@@ -8,20 +8,26 @@ from datetime import UTC, datetime
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
+from daimon.core.access_policy import isolation_owner
 from daimon.core.authz import Action, AgentRef, Surface, authorize, build_subject
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.core.tenant_balance import is_over_balance
+from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
-from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn.termination import TerminationReason, denial_termination_reason
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
+
+# How MCP refusals name the tenant, matching the invoker allowlist refusal below.
+_REFUSAL_NOUNS = RefusalNouns(scope="workspace", admin="a workspace admin", billing="/billing")
 
 
 async def _auth(ctx: Context) -> AuthIdentity:  # pyright: ignore[reportUnusedFunction]
@@ -79,11 +85,13 @@ async def _policy_gate(
     tool_name: str,
     agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None,
     pin_exempt: bool,
-) -> None:
+) -> str | None:
     """The access-policy half of ``_admit``: the agent pin, then the invoker allowlist.
 
     Reads the policy fresh on every call, so ``_admission_recheck`` can run it
     again right before a turn's session is created or its message is sent.
+    Returns the isolated channel the agent is one of the own agents of
+    (`isolation_owner`), when ``agent_names`` is given, else None.
     """
 
     def refused(reason: TerminationReason) -> None:
@@ -98,8 +106,9 @@ async def _policy_gate(
         raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
 
     # The hub admin exemption needs no agent lookup (`authorize` allows it
-    # before reading names), so skip the lookup for it. The stored role is
-    # read again here, so a re-check also sees a demotion saved meanwhile.
+    # before reading names), so skip the lookup for it unless the budget needs
+    # it (below). The stored role is read again here, so a re-check also sees
+    # a demotion saved meanwhile.
     hub_admin = (
         pin_exempt
         and auth.platform_user_id is not None
@@ -108,7 +117,9 @@ async def _policy_gate(
     )
     names: tuple[str | None, ...] = ()
     gated = bool(policy.agent_channel_pins or policy.isolated_channel_ids)
-    if agent_names is not None and gated and not hub_admin:
+    # An isolated channel's own agent is charged to that channel, so the
+    # names are read for a hub admin too while anything is isolated.
+    if agent_names is not None and gated and (not hub_admin or policy.isolated_channel_ids):
         # Resolving the agent's names may await the network (an MA lookup);
         # read the policy again after it, so the pin is decided on the policy
         # as it is once every await is done, not as it was before the lookup.
@@ -152,6 +163,7 @@ async def _policy_gate(
         else None
     )
     if decision is not None and not decision:
+        record_authz_denial(Action.RUN_AGENT, decision.reason)
         log.info(
             "mcp.admission_denied",
             tenant_id=str(auth.tenant_id),
@@ -159,7 +171,7 @@ async def _policy_gate(
             tool=tool_name,
             gate="channel_isolation" if decision.reason == "channel_isolated" else "agent_pin",
         )
-        refused(TerminationReason.ADMISSION_DENIED)
+        refused(denial_termination_reason(decision.reason))
         if decision.reason == "channel_isolated":
             raise ToolError(
                 "TERMINAL ERROR: This agent's key is bound to an isolated channel that "
@@ -171,14 +183,17 @@ async def _policy_gate(
             "those channels; a question about a shared report can't be answered here."
         )
 
+    owner = isolation_owner(policy, names) if names else None
     if auth.platform_user_id is None:
-        return
+        return owner
     is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
-    if not authorize(
+    start = authorize(
         policy,
         subject=mcp_subject(auth, is_admin=is_admin),
         action=Action.START_TURN,
-    ):
+    )
+    if not start:
+        record_authz_denial(Action.START_TURN, start.reason)
         log.info(
             "mcp.admission_denied",
             tenant_id=str(auth.tenant_id),
@@ -191,6 +206,7 @@ async def _policy_gate(
             "TERMINAL ERROR: You aren't on this workspace's list of people who can "
             "use daimon. A workspace admin can add you."
         )
+    return owner
 
 
 def _admission_recheck(  # pyright: ignore[reportUnusedFunction]
@@ -262,10 +278,11 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       ``agent_names`` is called only when a pin exists, so the agent lookup it
       may need costs nothing on unpinned tenants.
     - Then runs ``is_over_balance`` then ``is_over_cap``, then the channel
-      budget of a key's bound channel; each denial raises a ``TERMINAL
-      ERROR:`` ``ToolError`` and logs a deny event carrying only ids
-      (tenant/user/tool/gate) — never prompt content or raw Gemini text
-      (Pitfall 9).
+      budget of the isolated channel whose own agent this is (an exempt
+      caller's hub or DM run included), else of a key's bound channel;
+      each denial raises a ``TERMINAL ERROR:`` ``ToolError`` and logs a deny
+      event carrying only ids (tenant/user/tool/gate) — never prompt content
+      or raw Gemini text (Pitfall 9).
     """
 
     def refused(reason: TerminationReason) -> None:
@@ -274,7 +291,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     if auth.platform_user_id is None and agent_names is None:
         return auth
 
-    await _policy_gate(
+    owner = await _policy_gate(
         auth,
         sessionmaker=sessionmaker,
         tool_name=tool_name,
@@ -313,16 +330,13 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
             gate="cap",
         )
         refused(TerminationReason.ADMISSION_CAP_EXCEEDED)
-        raise ToolError(
-            "TERMINAL ERROR: Monthly usage cap reached for this guild. "
-            "An admin can adjust the cap with /billing."
-        )
+        raise ToolError(f"TERMINAL ERROR: {admission_refusal_text('cap_exceeded', _REFUSAL_NOUNS)}")
 
     if await is_over_channel_budget(
         sessionmaker=sessionmaker,
         tenant_id=auth.tenant_id,
         platform=auth.platform or "",
-        channel_id=token_channel_id(auth),
+        channel_id=owner or token_channel_id(auth),
         now=datetime.now(UTC),
     ):
         log.info(

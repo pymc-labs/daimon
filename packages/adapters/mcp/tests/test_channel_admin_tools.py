@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import propagation
@@ -25,6 +26,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores import accounts
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_creation_channels import record_creation_channel
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
@@ -114,10 +116,22 @@ async def test_a_teams_admin_names_channel_admins_by_entra_id(
         runtime, admin, channel_id=channel, role_ids=[], user_ids=[user]
     )
     assert result.channel.user_ids == [user.lower()], "Entra ids fold to lower case"
-    with pytest.raises(ToolError, match="no roles"):
+    thread = f"{channel};messageid=1717"
+    again = await _set_channel_admins_impl(
+        runtime, admin, channel_id=thread, role_ids=[], user_ids=[user]
+    )
+    assert again.channel.channel_id == channel, "a Teams thread id names its channel"
+    cleared = await _clear_channel_admins_impl(runtime, admin, channel_id=thread)
+    assert (cleared.channel.channel_id, cleared.changed) == (channel, True), "and clears it"
+    with pytest.raises(ToolError, match="invalid teams group id"):
         await _set_channel_admins_impl(
             runtime, admin, channel_id=channel, role_ids=["r"], user_ids=[]
         )
+    team = "0F2C8A51-7D3E-4B9A-8C61-2E5F4A9B7C10"
+    owners = await _set_channel_admins_impl(
+        runtime, admin, channel_id=channel, role_ids=[team], user_ids=[]
+    )
+    assert owners.channel.role_ids == [team.lower()], "a team's owners, by its Entra group id"
 
 
 async def test_channel_admin_tools_refuse_members_and_bad_ids(
@@ -129,12 +143,12 @@ async def test_channel_admin_tools_refuse_members_and_bad_ids(
         await _set_channel_admins_impl(
             runtime, _auth(tenant_id), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
         )
-    with pytest.raises(ToolError, match="no roles"):
+    with pytest.raises(ToolError, match="invalid slack group id"):
         await _set_channel_admins_impl(
             runtime,
             _auth(tenant_id, admin=True, platform="slack"),
             channel_id="C0123",
-            role_ids=["S1"],
+            role_ids=["@leads"],
             user_ids=[],
         )
     with pytest.raises(ToolError, match="invalid discord channel id"):
@@ -163,13 +177,24 @@ async def test_channel_admin_sets_only_their_own_channels_default(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
     )
 
+    with pytest.raises(ToolError, match="was not made for or pinned to"):
+        await propagation._set_agent_default_impl(runtime, member, "helper", CHANNEL)  # pyright: ignore[reportPrivateUsage]
+    async with committing_sessionmaker.begin() as session:
+        await record_creation_channel(
+            session,
+            tenant_id=tenant_id,
+            ma_agent_id="agent_helper",
+            platform="discord",
+            channel_id=CHANNEL,
+        )
     await propagation._set_agent_default_impl(runtime, member, "helper", CHANNEL)  # pyright: ignore[reportPrivateUsage]
     row = await get_scope(
         db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL)
     )
     assert row is not None and row.agent_name == "helper", (
-        "the channel admin set its channel's agent"
+        "the channel admin set its channel's agent, one made for it"
     )
+    assert not row.agent_name_set_by_admin, "a channel admin's binding is not a server admin's"
     with pytest.raises(ToolError, match="admin of that channel"):
         await propagation._set_agent_default_impl(runtime, member, "helper", OTHER_CHANNEL)  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(ToolError, match="requires a workspace or server admin"):
@@ -179,6 +204,61 @@ async def test_channel_admin_sets_only_their_own_channels_default(
     assert await get_scope(db_session, scope=TenantScopeRef(tenant_id=tenant_id)) is None, (
         "the tenant scope was never written"
     )
+
+
+@pytest.mark.parametrize("other_admin", [False, True], ids=["theirs-alone", "shared-hold"])
+async def test_channel_admin_never_sets_a_default_another_channel_admin_would_lose(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    other_admin: bool,
+) -> None:
+    """helper was made for OTHER_CHANNEL and answers there. USER administers both
+    channels; when another user administers OTHER_CHANNEL too, making helper
+    CHANNEL's default would take it out of their channels, as a handoff would."""
+    monkeypatch.setattr(
+        propagation,
+        "resolve_setup_agent",
+        AsyncMock(return_value=SimpleNamespace(id="agent_helper", name="helper", metadata={})),
+    )
+    tenant_id = await _tenant(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    admin = _auth(tenant_id, admin=True)
+    await _set_channel_admins_impl(runtime, admin, channel_id=CHANNEL, role_ids=[], user_ids=[USER])
+    others = ["555555555555555555"] if other_admin else []
+    await _set_channel_admins_impl(
+        runtime, admin, channel_id=OTHER_CHANNEL, role_ids=[], user_ids=[USER, *others]
+    )
+    async with committing_sessionmaker.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=OTHER_CHANNEL),
+            tenant_id=tenant_id,
+            agent_name="helper",
+        )
+        await record_creation_channel(
+            session,
+            tenant_id=tenant_id,
+            ma_agent_id="agent_helper",
+            platform="discord",
+            channel_id=OTHER_CHANNEL,
+        )
+    member = _auth(tenant_id)
+    if other_admin:
+        with pytest.raises(ToolError, match="another channel admin holds it"):
+            await propagation._set_agent_default_impl(runtime, member, "helper", CHANNEL)  # pyright: ignore[reportPrivateUsage]
+        return
+    await propagation._set_agent_default_impl(runtime, member, "helper", CHANNEL)  # pyright: ignore[reportPrivateUsage]
+    async with committing_sessionmaker() as session:
+        row = await get_scope(
+            session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL)
+        )
+    assert row is not None and row.agent_name == "helper", "USER alone holds helper, so it binds"
+
+
+def _agent(tenant_id: uuid.UUID, name: str) -> BetaManagedAgentsAgent:
+    """The resolved agent the edit tools pass, so sharing reads its routines and sessions."""
+    metadata = {"daimon_tenant": str(tenant_id), "daimon_name": name}
+    return ma_agent(id=f"agent_{name}", name=name, metadata=metadata)
 
 
 async def test_channel_admin_may_edit_an_agent_local_to_their_channel(
@@ -204,14 +284,33 @@ async def test_channel_admin_may_edit_an_agent_local_to_their_channel(
         platform_role_ids=(ROLE,),
     )
     with pytest.raises(ToolError, match="an admin must change its setup"):
-        await require_admin_for_reachable_agent(runtime, role_member, agent_name="helper")
+        await require_admin_for_reachable_agent(
+            runtime, role_member, agent_name="helper", agent=_agent(tenant_id, "helper")
+        )
 
     await _set_channel_admins_impl(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[ROLE], user_ids=[]
     )
-    await require_admin_for_reachable_agent(runtime, role_member, agent_name="helper")
+    with pytest.raises(ToolError, match="not made for, pinned to or given to"):
+        await require_admin_for_reachable_agent(
+            runtime, role_member, agent_name="helper", agent=_agent(tenant_id, "helper")
+        )
+    async with committing_sessionmaker.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL),
+            tenant_id=tenant_id,
+            agent_name="helper",
+            mode="agent",
+            set_by_admin=True,
+        )
+    await require_admin_for_reachable_agent(
+        runtime, role_member, agent_name="helper", agent=_agent(tenant_id, "helper")
+    )
     with pytest.raises(ToolError, match="is currently a default agent here .* an admin must"):
-        await require_admin_for_reachable_agent(runtime, role_member, agent_name="shared")
+        await require_admin_for_reachable_agent(
+            runtime, role_member, agent_name="shared", agent=_agent(tenant_id, "shared")
+        )
 
 
 async def test_a_channel_admin_refusal_names_a_conversation_in_no_known_channel(
@@ -245,6 +344,7 @@ async def test_a_channel_admin_refusal_names_a_conversation_in_no_known_channel(
             tenant_id=tenant_id,
             agent_name="helper",
             mode="agent",
+            set_by_admin=True,
         )
     await _set_channel_admins_impl(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
@@ -282,7 +382,7 @@ async def test_channel_admin_cannot_bind_another_channels_own_agent(
     )
     member = _auth(tenant_id)
 
-    with pytest.raises(ToolError, match="does not administer"):
+    with pytest.raises(ToolError, match="was not made for or pinned to"):
         await propagation._set_agent_default_impl(runtime, member, "other-own", CHANNEL)  # pyright: ignore[reportPrivateUsage]
     assert (
         await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
@@ -337,12 +437,15 @@ async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
             tenant_id=tenant_id,
             agent_name="helper",
             mode="agent",
+            set_by_admin=True,
         )
     await _set_channel_admins_impl(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
     )
     member = _auth(tenant_id)
-    await require_admin_for_reachable_agent(runtime, member, agent_name="helper")
+    await require_admin_for_reachable_agent(
+        runtime, member, agent_name="helper", agent=_agent(tenant_id, "helper")
+    )
 
     async with committing_sessionmaker.begin() as session:
         tenant = await get_tenant(session, tenant_id)
@@ -354,7 +457,9 @@ async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
             agent_name="helper",
             channel_id=CHANNEL,
         )
-    await require_admin_for_reachable_agent(runtime, member, agent_name="helper")
+    await require_admin_for_reachable_agent(
+        runtime, member, agent_name="helper", agent=_agent(tenant_id, "helper")
+    )
 
     async with committing_sessionmaker.begin() as session:
         tenant = await get_tenant(session, tenant_id)
@@ -372,7 +477,9 @@ async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
             session, tenant=tenant, created_by_user_id="666666666666666666", agent_name="helper"
         )
     with pytest.raises(ToolError, match="runs unattended .* so an admin must change its setup"):
-        await require_admin_for_reachable_agent(runtime, member, agent_name="helper")
+        await require_admin_for_reachable_agent(
+            runtime, member, agent_name="helper", agent=_agent(tenant_id, "helper")
+        )
 
 
 async def test_channel_admin_repoints_a_server_only_on_an_agent_local_to_them(
@@ -388,6 +495,7 @@ async def test_channel_admin_repoints_a_server_only_on_an_agent_local_to_them(
             tenant_id=tenant_id,
             agent_name="helper",
             mode="agent",
+            set_by_admin=True,
         )
     agent = ma_agent(
         id="agent_helper",

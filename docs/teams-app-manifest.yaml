@@ -41,7 +41,7 @@
 
 manifestVersion: "1.16"
 id: "${DAIMON_TEAMS__CLIENT_ID}"        # must equal the Entra app id
-version: "0.2.0"                       # bump on every change, then re-upload
+version: "0.3.0"                       # bump on every change, then re-upload
 developer:
   name: daimon
   websiteUrl: https://DAIMON_HOST
@@ -97,4 +97,7 @@ authorization:
     resourceSpecific:
       # Read the channel threads the bot is mentioned in, and their images.
       - name: ChannelMessage.Read.Group
+        type: Application
+      # List the team's owners, for channel admin grants that name the team.
+      - name: TeamMember.Read.Group
         type: Application

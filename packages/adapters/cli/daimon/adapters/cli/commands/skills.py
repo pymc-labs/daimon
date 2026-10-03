@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import uuid
+from pathlib import Path
 from typing import Annotated
 
 import httpx
 import typer
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import GUILD_OPTION, JSON_OPTION, TENANT_OPTION, YES_OPTION
 from daimon.adapters.cli.output import emit_rows
@@ -17,14 +20,33 @@ from daimon.adapters.cli.tenant import (
     resolve_tenant_display,
     resolve_tenant_override,
 )
+from daimon.core.agent_pins import pin_refusal
+from daimon.core.authz import Place, Subject
 from daimon.core.config import load_settings
-from daimon.core.defaults.ma_index import find_skill_by_display_title, list_skills_lenient
-from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_display_title
+from daimon.core.defaults.ma_index import (
+    find_agent_by_daimon_tag,
+    find_skill_by_display_title,
+    list_skills_lenient,
+)
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_MANAGED,
+    strip_tenant_prefix,
+    tenant_scoped_display_title,
+)
 from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.errors import StoreError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma import delete_skill_and_versions
+from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.skill_sync import PATMissingError, SyncReport, sync_agent_skills
+from daimon.core.skills.add import (
+    add_agent_skill,
+    fetch_repo_skill,
+    read_local_skill,
+    repo_origin,
+)
+from daimon.core.skills.ingest import SkillBundle
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.specs import SkillRepo
 from daimon.core.stores.identity import get_or_create_cli_principal
@@ -32,7 +54,7 @@ from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from rich.console import Console
 from rich.table import Table
 
-skills_app = typer.Typer(help="Skills: sync, list, get, delete.")
+skills_app = typer.Typer(help="Skills: sync, add, list, get, delete.")
 
 
 @skills_app.callback()
@@ -411,6 +433,168 @@ async def delete_skill(
         raise StoreError(f"no skill named {name!r} in your account.")
     await delete_skill_and_versions(rt.anthropic, skill.id)
     console.print(f"[green]✓ deleted skill {name!r}[/green]")
+
+
+# ---------------------------------------------------------------------------
+# add
+# ---------------------------------------------------------------------------
+
+
+@skills_app.command("add")
+def skills_add_command(
+    ctx: typer.Context,
+    source: Annotated[
+        str,
+        typer.Argument(help="A skill folder, a SKILL.md or .zip file, or a GitHub repo URL."),
+    ],
+    agent: Annotated[str, typer.Option("--agent", help="The agent to add the skill to.")],
+    branch: Annotated[str, typer.Option("--branch", help="Repo URL only.")] = "main",
+    path: Annotated[str, typer.Option("--path", help="Repo URL only: the skill's folder.")] = "",
+    yes: Annotated[bool, YES_OPTION] = False,
+) -> None:
+    """Add one skill to one agent as its own skill; adding it again updates it."""
+    settings = load_settings()
+    console = Console(highlight=False)
+    selector = ctx.obj
+
+    async def _with_defaults() -> None:
+        async with build_runtime(settings) as rt:
+            await add_skill(
+                rt,
+                console,
+                agent_name=agent,
+                source=source,
+                branch=branch,
+                path=path,
+                yes=yes,
+                selector=selector,
+            )
+
+    run_cli(_with_defaults(), console=console)
+
+
+def _is_repo_url(source: str) -> bool:
+    return source.startswith(("https://", "http://"))
+
+
+async def _skill_add_refusal(
+    rt: CliRuntime, *, tenant_id: uuid.UUID, agent: BetaManagedAgentsAgent
+) -> str | None:
+    """Why the CLI may not add a skill to `agent`, else None.
+
+    The CLI acts as a server admin, so it follows the admin path of the same
+    rules the chat tool and the panels apply: a built-in agent never takes a
+    skill (its skills come from defaults), and the pin rule is asked rather
+    than assumed.
+    """
+    managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+    target = TargetFacts(is_daimon_managed=managed, is_reachable_in_tenant=False)
+    if (
+        decide_operation("skill_add", is_admin=True, target=target) != "allow"
+        or agent.metadata.get(MA_METADATA_KEY_ACCOUNT) is None
+    ):
+        return (
+            f"'{agent.name}' is a built-in agent; its skills come from defaults. "
+            "Fork it with `daimon agents fork` and add the skill to the copy."
+        )
+
+    async def admin() -> Subject:
+        return Subject(is_admin=True)
+
+    async def this_agent() -> BetaManagedAgentsAgent:
+        return agent
+
+    async with rt.sessionmaker() as session:
+        return await pin_refusal(
+            session, tenant_id=tenant_id, load_subject=admin, load_agent=this_agent, place=Place()
+        )
+
+
+async def _load_skill(
+    rt: CliRuntime, http: httpx.AsyncClient, *, source: str, branch: str, path: str
+) -> tuple[SkillBundle, str]:
+    """The checked skill and a short origin for the ledger."""
+    if not _is_repo_url(source):
+        local = Path(source).expanduser()
+        return await read_local_skill(local), f"cli {local.name}"
+    # Public repos only: the deployment's fallback token is for repo bindings.
+    bundle = await fetch_repo_skill(
+        http,
+        url=source,
+        branch=branch,
+        path=path,
+        token=None,
+        max_tarball_bytes=rt.settings.github.max_tarball_bytes,
+        max_tarball_decompressed_bytes=rt.settings.github.max_tarball_decompressed_bytes,
+    )
+    return bundle, repo_origin(source, path=path, branch=branch)
+
+
+async def add_skill(
+    rt: CliRuntime,
+    console: Console,
+    *,
+    agent_name: str,
+    source: str,
+    branch: str = "main",
+    path: str = "",
+    yes: bool,
+    selector: TenantSelector | None = None,
+    http_client: httpx.AsyncClient | None = None,
+) -> None:
+    """Preview the skill, confirm, then upload it agent-scoped and attach it.
+
+    `http_client` is a test seam for the repo fetch; None opens a client.
+    """
+    if not _is_repo_url(source) and (branch != "main" or path):
+        raise StoreError("--branch and --path apply to a repo URL only.")
+    async with rt.sessionmaker() as session, session.begin():
+        override = await resolve_tenant_override(session, selector)
+        tenant_id = await discover_tenant(session, override=override)
+        tenant_label = await resolve_tenant_display(session, tenant_id)
+        principal = await get_or_create_cli_principal(
+            session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+        )
+    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=agent_name)
+    if agent is None:
+        raise StoreError(f"no agent named {agent_name!r} in {tenant_label}.")
+
+    async def recheck(fresh: BetaManagedAgentsAgent) -> None:
+        refusal = await _skill_add_refusal(rt, tenant_id=tenant_id, agent=fresh)
+        if refusal is not None:
+            raise StoreError(f"{refusal} Nothing was changed.")
+
+    await recheck(agent)
+    if http_client is not None:
+        bundle, origin = await _load_skill(rt, http_client, source=source, branch=branch, path=path)
+    else:
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            bundle, origin = await _load_skill(rt, http, source=source, branch=branch, path=path)
+    preview = bundle.preview
+    console.print(f"[bold]{preview.name}[/bold]: {preview.description}")
+    console.print(f"files: {', '.join(preview.files)} ({preview.total_bytes} bytes)")
+    if preview.scripts:
+        console.print(f"[yellow]runnable: {', '.join(preview.scripts)}[/yellow]")
+    confirm_or_abort(
+        console, f"add skill {preview.name!r} to {agent_name!r} in {tenant_label}?", yes=yes
+    )
+    added = await add_agent_skill(
+        rt.anthropic,
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        agent=agent,
+        agent_name=agent_name,
+        bundle=bundle,
+        origin=origin,
+        added_by_account_id=principal.account_id,
+        recheck=recheck,
+    )
+    done = {
+        "created": f"added skill {preview.name!r} to {agent_name!r}",
+        "updated": f"updated skill {preview.name!r} on {agent_name!r}",
+        "unchanged": f"{agent_name!r} already had this {preview.name!r}",
+    }[added.action]
+    console.print(f"[green]✓ {done}[/green]")
 
 
 # Register backfill command on skills_app (defined above, so no circular import).

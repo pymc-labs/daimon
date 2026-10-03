@@ -1124,6 +1124,15 @@ class Settings(BaseSettings):
             "Configure DAIMON_COMPLETION_PINGS as a JSON object."
         ),
     )
+    budget_notices: dict[uuid.UUID, bool] = Field(
+        default_factory=dict[uuid.UUID, bool],
+        description=(
+            "Per-tenant switch for the channel budget notice, keyed by tenant UUID. "
+            "When a channel's budget is used up, its channel admins (else the server admins) "
+            "get one DM per budget window on Discord, Slack and Teams. Missing/true sends it; "
+            "false turns it off. Configure DAIMON_BUDGET_NOTICES as a JSON object."
+        ),
+    )
     direct_message_policies: dict[uuid.UUID, DirectMessagePolicy] = Field(
         default_factory=dict[uuid.UUID, DirectMessagePolicy],
         description=(

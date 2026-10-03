@@ -17,13 +17,19 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._isolation import load_caller_hidden_environments
+from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.channel_environments import build_archive_environment_note
 from daimon.core.defaults.ma_index import (
     find_environment_by_daimon_tag,
     find_environments_by_daimon_tag,
     list_environments_by_tenant,
 )
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, build_metadata
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
+    build_metadata,
+)
 from daimon.core.specs import EnvironmentSpec
 from daimon.core.stores.scoped_config_write import clear_environment_references
 from fastmcp import Context, FastMCP
@@ -53,8 +59,14 @@ async def _list_environments_impl(
     page: str | None,
 ) -> list[EnvironmentInfo]:
     del page
+    require_scope(auth, "tenant:read")
     rows = await list_environments_by_tenant(runtime.client, tenant_id=auth.tenant_id)
-    return [EnvironmentInfo.from_ma(e) for e in rows]
+    hidden = await load_caller_hidden_environments(runtime, auth)
+    return [
+        EnvironmentInfo.from_ma(e)
+        for e in rows
+        if e.metadata.get(MA_METADATA_KEY_NAME) not in hidden
+    ]
 
 
 async def _get_environment_impl(
@@ -63,7 +75,7 @@ async def _get_environment_impl(
     name: str,
 ) -> EnvironmentInfo:
     env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
-    if env is None:
+    if env is None or name in await load_caller_hidden_environments(runtime, auth):
         raise ToolError(f"environment '{name}' not found")
     return EnvironmentInfo.from_ma(env)
 
@@ -131,7 +143,7 @@ async def _update_environment_impl(
     if not patch:
         raise ToolError("update_environment: at least one field is required")
     env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
-    if env is None:
+    if env is None or name in await load_caller_hidden_environments(runtime, auth):
         raise ToolError(f"environment '{name}' not found")
     _reject_managed_environment(
         env,
@@ -160,7 +172,7 @@ async def _archive_environment_impl(
     """Archive the environment, then clear every pick of it so those channels fall through."""
     _require_admin(auth)
     env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
-    if env is None:
+    if env is None or name in await load_caller_hidden_environments(runtime, auth):
         raise ToolError(f"environment '{name}' not found")
     _reject_managed_environment(
         env,
@@ -179,17 +191,23 @@ async def _archive_environment_impl(
 
 
 def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    # Reads are untagged and ungated — full visibility for every session,
-    # matching the agents/skills read tools. Mutations carry tags={"admin"} plus
-    # the _require_admin impl gate, with one deliberate exception:
+    # Reads are ungated — full visibility for every session, matching the
+    # agents/skills read tools. list_environments also opens to operator tokens
+    # with tenant:read, so an integration can pick one for set_channel_environment.
+    # Other callers don't see names only isolated channels across their line pick.
+    # Mutations carry tags={"admin"} plus the _require_admin impl gate, with one
+    # deliberate exception:
     # create_environment is ungated, because a new environment is inert until an
     # admin or a channel's admin picks it. See the comment on _create_environment_impl.
-    @mcp.tool
+    @mcp.tool(tags=scope_tags("tenant:read"))
     async def list_environments(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         page: str | None = None,
     ) -> list[EnvironmentInfo]:
-        """List environments in the tenant pool. ``page`` is reserved for future pagination."""
+        """List environments in the tenant pool. ``page`` is reserved for future pagination.
+
+        Operator tokens need the ``tenant:read`` scope.
+        """
         return await _list_environments_impl(runtime, await _auth(ctx), page)
 
     @mcp.tool

@@ -42,9 +42,14 @@ async def set_fields(
     environment_name: str | None = None,
     mode: PropagationMode | None = None,
     actor_account_id: uuid.UUID | None = None,
+    set_by_admin: bool = False,
 ) -> None:
-    """Upsert config fields for a scope. Fields left as None are not touched."""
-    updates: dict[str, str | uuid.UUID | None | ColumnElement[datetime]] = {}
+    """Upsert config fields for a scope. Fields left as None are not touched.
+
+    `set_by_admin` records that a server admin set a channel's `agent_name`;
+    it is read only at channel scope, and every channel agent write rewrites it.
+    """
+    updates: dict[str, str | bool | uuid.UUID | None | ColumnElement[datetime]] = {}
     if agent_name is not None:
         if agent_name == "":
             raise StoreError("agent_name must not be empty")
@@ -52,6 +57,8 @@ async def set_fields(
         if isinstance(scope, (ChannelScopeRef, TenantScopeRef)):
             updates["agent_name_set_by_account_id"] = actor_account_id
             updates["agent_name_set_at"] = func.now()  # pyright: ignore[reportUnknownMemberType]  # sqlalchemy.func.now() is dynamically typed by dialect
+        if isinstance(scope, ChannelScopeRef):
+            updates["agent_name_set_by_admin"] = set_by_admin
     if environment_name is not None:
         if environment_name == "":
             raise StoreError("environment_name must not be empty")
@@ -143,6 +150,8 @@ async def unset_fields(
     if "agent_name" in fields and isinstance(orm, (ChannelConfig, TenantConfig)):
         orm.agent_name_set_by_account_id = actor_account_id
         orm.agent_name_set_at = func.now()  # pyright: ignore[reportUnknownMemberType]  # sqlalchemy.func.now() is dynamically typed by dialect
+        if isinstance(orm, ChannelConfig):
+            orm.agent_name_set_by_admin = False
 
     await session.flush()
 
@@ -292,8 +301,9 @@ async def propagate(
     fields: list[ConfigField] | None,
     reset: bool,
     actor_account_id: uuid.UUID | None = None,
+    set_by_admin: bool = False,
 ) -> PropagateResult:
-    """Copy or reset config fields from source to targets."""
+    """Copy or reset config fields from source to targets (`set_fields` for `set_by_admin`)."""
     source_row = await get_scope(session, scope=source)
     outcomes: list[PropagateOutcome] = []
 
@@ -327,6 +337,7 @@ async def propagate(
                     agent_name=agent_name_val,
                     environment_name=environment_name_val,
                     actor_account_id=actor_account_id,
+                    set_by_admin=set_by_admin,
                 )
             outcomes.append(PropagateOutcome(scope=t, fields_written=written))
 

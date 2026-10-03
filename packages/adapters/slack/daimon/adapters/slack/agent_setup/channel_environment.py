@@ -3,36 +3,42 @@
 Workspace admins and this channel's admins get a select there. A pick
 re-checks both live through `authorize` (which keeps an unrestricted network
 out of a channel admin's reach in a sealed channel), and checks that the
-environment still exists before anything is written. Slack has no roles, so a
-channel admin is a member the channel's grant names.
+environment still exists before anything is written. A channel admin is a
+member the channel's grant names, directly or through a user group.
 """
 
 from __future__ import annotations
 
+import functools
 import uuid
 from typing import Final
 
 import anthropic
 import structlog
+from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.authz import Subject
-from daimon.core.channel_admins import ChannelAdminCaller, load_live_subject
+from daimon.core.channel_admins import load_live_subject
 from daimon.core.channel_environments import (
     NOT_OFFERED_NOTE,
     EnvironmentPicker,
     authorize_environment_pick,
     build_clear_environment_note,
     build_missing_environment_note,
+    build_sealed_network_confirm,
     build_sealed_network_refusal,
     build_set_environment_note,
     list_environment_names,
+    load_panel_hidden_environment_names,
     may_pick_environment_in,
     parse_environment_option,
     plan_environment_picker,
     save_scope_environment,
 )
+from daimon.core.panel_audit import record_panel_write
 from daimon.core.stores.identity import get_or_create_platform_principal
+from slack_sdk.web.async_client import AsyncWebClient
 
 log = structlog.get_logger()
 
@@ -46,15 +52,20 @@ ENVIRONMENT_NEED_ADMIN_MESSAGE: Final = (
 
 
 async def load_picker_subject(
-    runtime: SlackRuntime, *, tenant_id: uuid.UUID, user_id: str, is_admin: bool
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: str,
+    is_admin: bool,
 ) -> Subject:
     """The caller as `authorize` sees them. `is_admin` is resolved live."""
+    caller = await channel_admin_caller(
+        runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
+    )
     async with runtime.sessionmaker() as session:
         return await load_live_subject(
-            session,
-            tenant_id=tenant_id,
-            platform="slack",
-            caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
+            session, tenant_id=tenant_id, platform="slack", caller=caller
         )
 
 
@@ -70,6 +81,7 @@ async def may_pick_environment(
 
 async def load_environment_picker(
     runtime: SlackRuntime,
+    client: AsyncWebClient,
     *,
     tenant_id: uuid.UUID,
     answering_map: AnsweringMap,
@@ -90,13 +102,22 @@ async def load_environment_picker(
             tenant_id=tenant_id,
             channel_id=channel_id,
             subject=await load_picker_subject(
-                runtime, tenant_id=tenant_id, user_id=user_id, is_admin=False
+                runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=False
             ),
         )
     ):
         return None
     try:
-        names = await list_environment_names(runtime.anthropic, tenant_id=tenant_id)
+        async with runtime.sessionmaker() as session:
+            hidden = await load_panel_hidden_environment_names(
+                session,
+                runtime.anthropic,
+                tenant_id=tenant_id,
+                channel_id=channel_id,
+                is_admin=is_admin,
+                default=runtime.deployment_default,
+            )
+        names = await list_environment_names(runtime.anthropic, tenant_id=tenant_id, hidden=hidden)
     except anthropic.APIError:
         log.warning("slack.agent_setup.environment_picker.list_failed", exc_info=True)
         return None
@@ -138,12 +159,24 @@ async def save_environment_choice(
             environment_name=name,
             default=runtime.deployment_default,
         )
-    if pick.decision.reason == "sealed":
-        return build_sealed_network_refusal(environment_name=name)
+    audit = functools.partial(
+        record_panel_write,
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="slack",
+        platform_user_id=user_id,
+        op="environment",
+    )
     if not pick.decision:
+        await audit(outcome="denied", reason=f"authz:{pick.decision.reason}")
+        if pick.decision.reason == "sealed":
+            return build_sealed_network_refusal(environment_name=name)
         return ENVIRONMENT_NEED_ADMIN_MESSAGE
     if name is not None and pick.missing:
         return build_missing_environment_note(name)
+    if pick.needs_confirm:
+        await audit(outcome="denied", reason="needs_confirm")
+        return build_sealed_network_confirm(environment_name=name, panel=True)
     # The environment the network rule judged, not a second lookup by name.
     name = pick.environment_name or name
     async with runtime.sessionmaker.begin() as session:
@@ -157,6 +190,7 @@ async def save_environment_choice(
             environment_name=name,
             actor_account_id=actor.account_id,
         )
+    await audit(outcome="allowed", reason="completed")
     log.info(
         "slack.agent_setup.channel_environment.saved",
         tenant_id=str(tenant_id),

@@ -319,7 +319,8 @@ async def test_shared_gate_refusal_uses_followup_when_already_acked() -> None:
 async def test_both_gates_let_a_channel_admin_edit_an_agent_local_to_their_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Locality reaches the panel gates as it reaches Slack's: own channel yes, server default no."""
+    """Locality reaches the panel gates as it reaches Slack's, on an agent a server admin
+    gave their channel: own channel yes, server default no, a member's binding no."""
     guild_id = 222006
     async with db_session_factory() as session, session.begin():
         tenant = await make_tenant(session, platform="discord", workspace_id=str(guild_id))
@@ -332,18 +333,33 @@ async def test_both_gates_let_a_channel_admin_edit_an_agent_local_to_their_chann
             user_ids=["2"],
             actor_account_id=None,
         )
-        await set_fields(
+        for channel, name, by_admin in (("500", "local-bot", True), ("501", "bound-bot", False)):
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel),
+                tenant_id=tenant.id,
+                agent_name=name,
+                mode="agent",
+                set_by_admin=by_admin,
+            )
+        await set_channel_admins(
             session,
-            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="500"),
             tenant_id=tenant.id,
-            agent_name="local-bot",
-            mode="agent",
+            platform="discord",
+            channel_id="501",
+            role_ids=[],
+            user_ids=["2"],
+            actor_account_id=None,
         )
     runtime = _runtime(
         sessionmaker=db_session_factory,
         deployment_default=DeploymentDefault(agent_name="wide-bot"),
     )
     for gate in (refuse_if_reachable_and_not_admin, refuse_if_shared_and_not_admin):
+        bound = await gate(
+            _member_interaction(guild_id=guild_id), runtime=runtime, entry=_entry("bound-bot")
+        )
+        assert bound is True, f"{gate.__name__}: a member's binding does not make it the admin's"
         local = await gate(
             _member_interaction(guild_id=guild_id), runtime=runtime, entry=_entry("local-bot")
         )

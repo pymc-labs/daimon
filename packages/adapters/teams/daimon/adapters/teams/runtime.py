@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 import httpx
 from anthropic import AsyncAnthropic
 from daimon.core.billing import BillingConfig, load_billing_config
+from daimon.core.channel_admins import GroupMembers, GroupMembersCache
+from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -37,6 +39,10 @@ class TeamsRuntime:
     deployment_default: DeploymentDefault = field(default_factory=DeploymentDefault)
     # Pre-save check of a pasted MCP token; production wires `probe_bearer_token`.
     mcp_token_probe: McpTokenProbe | None = None
+    # A team's owners by Entra group id, for channel admin grants; None (no
+    # Graph) admits nobody by team. Production wires `fetch_team_owner_ids`.
+    team_owners: GroupMembers | None = None
+    group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
 
 
 @asynccontextmanager
@@ -88,4 +94,5 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
             )
         finally:
             await drain_outcomes()
+            await drain_budget_notices()
             await engine.dispose()

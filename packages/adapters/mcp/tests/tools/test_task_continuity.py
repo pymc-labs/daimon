@@ -21,8 +21,13 @@ from daimon.adapters.mcp.tools.task_continuity import (
 )
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_TENANT,
+)
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.security_audit import capture_decision
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Platform, Role
@@ -65,7 +70,9 @@ def _runtime(
     )
 
 
-def _destination(tenant_id: uuid.UUID, *, agent_id: str = _DESTINATION_ID) -> dict[str, object]:
+def _destination(
+    tenant_id: uuid.UUID, *, agent_id: str = _DESTINATION_ID, managed: bool = False
+) -> dict[str, object]:
     agent = ma_agent(
         id=agent_id,
         name=_DESTINATION_NAME,
@@ -73,7 +80,8 @@ def _destination(tenant_id: uuid.UUID, *, agent_id: str = _DESTINATION_ID) -> di
         metadata={
             MA_METADATA_KEY_TENANT: str(tenant_id),
             MA_METADATA_KEY_NAME: _DESTINATION_NAME,
-        },
+        }
+        | ({MA_METADATA_KEY_MANAGED: "true"} if managed else {}),
     )
     return agent.model_dump(mode="json")
 
@@ -1133,7 +1141,7 @@ async def test_handoff_to_another_channels_agent_is_admin_only(
         role=role,
     ) as origin:
         if role is Role.USER:
-            with pytest.raises(ToolError, match="only a server admin or a channel admin"):
+            with pytest.raises(ToolError, match="only a server admin can do it"):
                 await _hand_off_task_impl(
                     runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
                 )
@@ -1252,12 +1260,17 @@ async def _switch_as(
     *,
     policy: TenantAccessPolicy | None,
     channel_admin: bool = False,
+    administers_acme: bool = False,
+    managed: bool = False,
 ) -> tuple[uuid.UUID, ToolError | None]:
     """A member (optionally a channel admin of C_PARENT) hands T_THREAD to research-bot.
 
-    research-bot answers in C_ACME, not in C_PARENT, so it is reachable but not
-    the agent this channel answers with.
+    research-bot was made for C_ACME and answers there, not in C_PARENT, so it is
+    reachable but not the agent this channel answers with. `administers_acme`
+    makes the caller a channel admin of C_ACME too, so research-bot is theirs;
+    `managed` makes it a defaults-managed agent.
     """
+    from daimon.core.stores.agent_creation_channels import record_creation_channel
     from daimon.core.stores.channel_admins import set_channel_admins
 
     tenant = await make_tenant(db_session)
@@ -1271,19 +1284,29 @@ async def _switch_as(
     )
     if policy is not None:
         await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
-    if channel_admin:
+    await record_creation_channel(
+        db_session,
+        tenant_id=tenant.id,
+        ma_agent_id=_DESTINATION_ID,
+        platform="discord",
+        channel_id="C_ACME",
+    )
+    granted = (("C_PARENT",) if channel_admin else ()) + (("C_ACME",) if administers_acme else ())
+    for channel_id in granted:
         await set_channel_admins(
             db_session,
             tenant_id=tenant.id,
             platform="discord",
-            channel_id="C_PARENT",
+            channel_id=channel_id,
             role_ids=(),
             user_ids=("42",),
             actor_account_id=None,
         )
     await db_session.commit()
     runtime = _runtime(
-        committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
+        committing_sessionmaker,
+        _client([_destination(tenant.id, managed=managed)]),
+        default_agent_name="daimon",
     )
     auth = AuthIdentity(
         account_id=caller.id,
@@ -1339,14 +1362,41 @@ async def test_a_member_hands_the_thread_to_an_agent_pinned_to_this_channel(
     assert await _bound_to(committing_sessionmaker, tenant_id) == _DESTINATION_ID
 
 
-async def test_a_channel_admin_hands_the_thread_to_any_reachable_agent(
+@pytest.mark.parametrize("administers_acme", [True, False], ids=["their-own", "c-acmes-own"])
+async def test_a_channel_admin_hands_the_thread_only_to_an_agent_of_theirs(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    administers_acme: bool,
+) -> None:
+    """research-bot was made for C_ACME. Unless the caller administers C_ACME too,
+    it is that channel's own agent, so bringing it into C_PARENT is a server admin's."""
+    tenant_id, error = await _switch_as(
+        db_session,
+        committing_sessionmaker,
+        policy=None,
+        channel_admin=True,
+        administers_acme=administers_acme,
+    )
+    if administers_acme:
+        assert error is None, "a channel admin may hand the thread to their own agent"
+        assert await _bound_to(committing_sessionmaker, tenant_id) == _DESTINATION_ID
+    else:
+        assert error is not None and "only a server admin can do it" in str(error), (
+            "another channel's own agent needs a server admin"
+        )
+        assert await _bound_to(committing_sessionmaker, tenant_id) is None, "nothing switched"
+
+
+async def test_a_channel_admin_hands_the_thread_to_a_defaults_managed_agent(
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
+    """The MA metadata marks research-bot defaults-managed, so it is shared by design
+    and C_PARENT's channel admin may bring it in though it was made for C_ACME."""
     tenant_id, error = await _switch_as(
-        db_session, committing_sessionmaker, policy=None, channel_admin=True
+        db_session, committing_sessionmaker, policy=None, channel_admin=True, managed=True
     )
-    assert error is None
+    assert error is None, "a managed agent is a channel admin's to hand a thread to"
     assert await _bound_to(committing_sessionmaker, tenant_id) == _DESTINATION_ID
 
 
@@ -1472,3 +1522,46 @@ async def test_queued_work_follows_the_carry_rule_for_the_callers_old_session(
     assert ("churn writeup" in result.confirmation) is queued, (
         "no continuation text reaches a destination outside the old session's seal"
     )
+
+
+async def test_a_policy_refused_handoff_is_audited_as_an_authz_denial(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A handoff the access policy refuses is recorded as an `authorize` denial."""
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={_DESTINATION_NAME: ("C_RX",)}),
+    )
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="42",
+    )
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+    ) as origin:
+        with capture_decision() as decision, pytest.raises(ToolError):
+            await _hand_off_task_impl(
+                runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+            )
+    assert (decision.operation, decision.denied, decision.reason) == (
+        "hand_off",
+        True,
+        "authz:agent_pinned_elsewhere",
+    ), "the refusal is audited as the policy's denial, not a tool error"

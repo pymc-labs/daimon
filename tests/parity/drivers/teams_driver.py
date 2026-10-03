@@ -90,7 +90,7 @@ _BALANCE_BLOCKED_TEXT = (
     "This organisation's credit is depleted. An admin can top up with `billing` in a 1:1 "
     "chat with me."
 )
-_CAP_BLOCKED_TEXT = "Monthly usage cap reached for this organisation. Ask an admin to adjust it."
+_CAP_BLOCKED_TEXT = "You've reached your monthly usage cap. An operator can raise it."
 
 #: The label each `PanelAction` wears on the Teams card, once emoji are stripped.
 #: The Details lists have no Show more on Teams (test_teams_deliberate_gaps.py).

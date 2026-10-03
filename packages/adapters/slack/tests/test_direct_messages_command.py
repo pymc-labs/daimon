@@ -21,6 +21,7 @@ async def test_dm_move_from_a_sealed_channel_refuses_before_history(
     monkeypatch.setattr(direct_messages, "require_dm_enabled", AsyncMock())
     admission = MagicMock(source_sealed=True, memory_read_only=True)
     monkeypatch.setattr(direct_messages, "admit", AsyncMock(return_value=admission))
+    monkeypatch.setattr(direct_messages, "user_group_ids", AsyncMock(return_value=frozenset()))
     start_dm = AsyncMock()
     monkeypatch.setattr(direct_messages, "start_dm", start_dm)
 

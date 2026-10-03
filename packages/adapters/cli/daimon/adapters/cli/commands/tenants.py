@@ -66,6 +66,8 @@ _VALID_PLATFORMS = ("discord", "cli", "slack", "teams")
 _ENTRA_OBJECT_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 # A Teams channel thread is its channel id plus ";messageid=<root post>".
 _TEAMS_CHANNEL_ID = r"19:[^\s;]+@thread\.[a-z0-9]+(?:;messageid=[0-9]+)?"
+# What a pin or isolation names: a whole team channel, never a thread or group chat.
+_TEAMS_WHOLE_CHANNEL_ID = r"19:[^\s;]+@thread\.(?:tacv2|skype)"
 
 
 def _validate_platform(value: str) -> Platform:
@@ -462,8 +464,9 @@ async def _require_isolatable(
         if channel_id in added:
             console.print(
                 f"[red]{channel_id}: {escape(str(refused))} Seal it and pin its own agent to it "
-                "alone in the same command, or use the setup panel's Isolate or "
-                "set_channel_isolation, which do both. Nothing was changed.[/red]"
+                "alone in the same command, or use daimon channels isolate, the setup "
+                "panel's Isolate or set_channel_isolation, which do both. Nothing was "
+                "changed.[/red]"
             )
         else:
             console.print(
@@ -578,7 +581,7 @@ def tenants_access_policy_set_command(
             help=(
                 "Channel id whose own agents stay inside it (repeatable). Each must be sealed "
                 "and its default agent pinned to it alone, answering nowhere else. Ending one "
-                "keeps its seal and pins."
+                "keeps its seal and pins. A Teams id names the whole channel, never a thread."
             )
         ),
     ] = None,
@@ -687,7 +690,13 @@ def _parse_agent_pins(
     parsed: dict[str, list[str]] = {}
     whole: set[str] = set()
     # A Slack DM (D…) is never a workspace channel an agent can be pinned to.
-    pattern = r"[0-9]{15,21}" if platform == "discord" else r"[CG][A-Z0-9]+"
+    pattern = (
+        r"[0-9]{15,21}"
+        if platform == "discord"
+        else _TEAMS_WHOLE_CHANNEL_ID
+        if platform == "teams"
+        else r"[CG][A-Z0-9]+"
+    )
     for value in pins:
         name, sep, channel = (part.strip() for part in value.partition("="))
         if channel_optional and name and not sep:
@@ -823,7 +832,12 @@ async def tenants_access_policy_set(
                 pattern = (
                     r"[0-9]{15,21}"
                     if validated_platform == "discord"
-                    else (_ENTRA_OBJECT_ID if field == "invoker_user_ids" else _TEAMS_CHANNEL_ID)
+                    else _ENTRA_OBJECT_ID
+                    if validated_platform == "teams" and field == "invoker_user_ids"
+                    # An isolated channel is a whole channel, never a thread.
+                    else _TEAMS_WHOLE_CHANNEL_ID
+                    if validated_platform == "teams" and field == "isolated_channel_ids"
+                    else _TEAMS_CHANNEL_ID
                     if validated_platform == "teams"
                     else r"[UW][A-Z0-9]+"
                     if field == "invoker_user_ids"

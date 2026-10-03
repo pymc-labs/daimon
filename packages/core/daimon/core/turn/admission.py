@@ -29,12 +29,18 @@ from typing import Literal
 
 import structlog
 from anthropic import APIStatusError
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
+from anthropic.types.beta import (
+    BetaEnvironment,
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsCustomSkill,
+)
 from daimon.core.access_policy import (
     TenantAccessPolicy,
     is_dm_source_sealed,
+    is_own_isolated_agent,
     isolated_channel_of,
     isolation_owner,
+    source_seal_ids,
 )
 from daimon.core.authz import (
     Action,
@@ -50,6 +56,8 @@ from daimon.core.authz import (
 from daimon.core.billing import is_over_cap
 from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.channel_budget_notice import spawn_budget_notice
+from daimon.core.channel_skills import turn_channel_skills
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
 from daimon.core.scope import ResolvedConfig, ScopeContext
@@ -145,6 +153,9 @@ class Admission:
     # was moved from, or None. Apart from `origin_channel_id`, which drives the
     # seal: a DM is budgeted to its source channel but never runs there.
     budget_channel_id: str | None = None
+    # The channel's extra skills (`daimon.core.channel_skills`), decided once
+    # so creating the session and checking it for drift add the same ones.
+    channel_skills: tuple[BetaManagedAgentsCustomSkill, ...] = ()
     # What admission was decided on; `reauthorize` decides it again at the
     # moment the session is built. None only for hand-built test admissions.
     grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
@@ -438,8 +449,12 @@ async def admit_impl(
         raise AdmissionDenied(reason="cap_exceeded")
     mark("user_cap")
 
-    # --- Admission gate: channel budget; a DM counts toward the channel it came from ---
-    budget_channel_id = dm_source_channel_id if is_dm else channel_id
+    # --- Admission gate: channel budget; a DM counts toward the channel it came from,
+    # and an isolated channel's own agent toward that channel wherever an exempt
+    # caller (an admin, or that channel's admin) runs it ---
+    budget_channel_id = isolation_owner(policy, grant.agent.names) or (
+        dm_source_channel_id if is_dm else channel_id
+    )
     if await is_over_channel_budget(
         sessionmaker=deps.sessionmaker,
         tenant_id=tenant_id,
@@ -447,17 +462,43 @@ async def admit_impl(
         channel_id=budget_channel_id,
         now=now,
     ):
+        if tenant_id not in deps.budget_notices_off:
+            spawn_budget_notice(
+                sessionmaker=deps.sessionmaker,
+                notifier=deps.budget_notifier,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=budget_channel_id,
+                now=now,
+                group_members=deps.group_members,
+            )
         raise AdmissionDenied(reason="channel_budget_exceeded")
     mark("channel_budget")
 
     # Every id that seals the turn: its channel, and the thread sealed on its
     # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
     # them are recorded, so unsealing one later leaves the others holding.
-    seal_ids = _seal_ids(policy, channel_id=channel_id, thread_id=thread_id)
+    seal_ids = source_seal_ids(policy, channel_id=channel_id, thread_id=thread_id)
     source_sealed = bool(seal_ids)
     memory_read_only = (source_sealed and not _is_own_agent(policy, grant)) or (
         is_dm and policy.dm_memory_read_only
     )
+
+    channel_skills = (
+        ()
+        if is_dm
+        else await turn_channel_skills(
+            deps.sessionmaker,
+            deps.anthropic,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            agent=agent,
+            agent_names=grant.agent.names,
+        )
+    )
+
+    mark("channel_skills")
 
     result = Admission(
         memory_read_only=memory_read_only,
@@ -474,6 +515,7 @@ async def admit_impl(
         environment=environment,
         config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
         budget_channel_id=budget_channel_id,
+        channel_skills=channel_skills,
         grant=grant,
     )
     mark("result")
@@ -520,28 +562,11 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
 
 def _is_own_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
     """An isolated channel's own agent at work there, whose memory stays writable."""
-    inside = isolated_channel_of(
-        policy, grant.run_place.channel_id, grant.run_place.parent_channel_id
-    )
-    return inside is not None and isolation_owner(policy, grant.agent.names) == inside
-
-
-def _seal_ids(
-    policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None
-) -> frozenset[str]:
-    """Every id that seals a turn: its channel and a thread sealed on its own.
-
-    A Discord thread is sealed by its id, a Slack one as channel_id:thread_ts.
-    All of them are recorded, so unsealing one later leaves the others holding.
-    """
-    return frozenset(
-        candidate
-        for candidate in (
-            channel_id,
-            thread_id,
-            f"{channel_id}:{thread_id}" if thread_id is not None else None,
-        )
-        if candidate is not None and candidate in policy.sealed_channel_ids
+    return is_own_isolated_agent(
+        policy,
+        grant.agent.names,
+        channel_id=grant.run_place.channel_id,
+        parent_channel_id=grant.run_place.parent_channel_id,
     )
 
 
@@ -573,7 +598,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         source_thread_keys=grant.dm_source.thread_keys,
     ):
         raise DmSourceSealedError("dm_source_sealed")
-    seal_ids = admission.origin_seal_ids | _seal_ids(
+    seal_ids = admission.origin_seal_ids | source_seal_ids(
         policy, channel_id=grant.channel_id, thread_id=grant.thread_id
     )
     # Memory posture is decided from the policy as it is now, not only from

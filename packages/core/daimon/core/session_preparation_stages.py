@@ -14,13 +14,17 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
 import structlog
 from anthropic import APIStatusError, AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
+from anthropic.types.beta import (
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsCustomSkill,
+    BetaManagedAgentsSession,
+)
 from anthropic.types.beta.beta_managed_agents_system_content_block_param import (
     BetaManagedAgentsSystemContentBlockParam,
 )
@@ -244,6 +248,7 @@ async def desired_snapshot_for(
     tool_safety: ToolSafetyPolicy,
     public_url: str | None,
     memory_read_only: bool = False,
+    channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would freeze.
 
@@ -296,6 +301,7 @@ async def desired_snapshot_for(
         env_file_id=None if recorded is None else recorded.env_file_id,
         repo_mount_path=None if recorded is None else recorded.repo_mount_path,
         repo_token_issued_at=None if recorded is None else recorded.repo_token_issued_at,
+        channel_skills=channel_skills,
         tool_safety=tool_safety,
         public_url=public_url,
     )

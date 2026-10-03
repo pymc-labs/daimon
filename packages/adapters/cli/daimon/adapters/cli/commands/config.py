@@ -395,6 +395,8 @@ async def _config_set_entry(
             tenant_id=tenant_id,
             agent_name=value,
             actor_account_id=account_id,
+            # The CLI runs with the deployment's own database access: an operator.
+            set_by_admin=True,
         )
     else:
         await set_fields(
@@ -569,6 +571,7 @@ async def _config_propagate_entry(
         fields=fields,
         reset=reset,
         actor_account_id=account_id,
+        set_by_admin=True,
     )
     # When all outcomes have no fields written, the source had nothing to copy.
     if all(not outcome.fields_written for outcome in result.outcomes):

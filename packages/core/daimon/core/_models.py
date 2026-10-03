@@ -278,6 +278,11 @@ class ChannelConfig(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    # A server admin set `agent_name`, as decided when it was set: that makes the
+    # agent this channel's admins' to administer (`daimon.core.authz.channel_admin_holds`).
+    agent_name_set_by_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'agent'"))
 
 
@@ -952,6 +957,75 @@ class TenantLedger(Base):
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class ChannelSkill(Base):
+    """One extra skill a channel's sessions add to the agent's own, at a pinned version.
+
+    `owner_agent_name` is set for a skill uploaded to one agent: it applies
+    only while that agent answers. No rows means nothing extra.
+    """
+
+    __tablename__ = "channel_skills"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "platform", "channel_id", "skill_id", name="pk_channel_skills"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_channel_skills_tenants"
+        ),
+        ForeignKeyConstraint(
+            ["added_by_account_id"],
+            ["accounts.id"],
+            ondelete="SET NULL",
+            name="fk_channel_skills_added_by_account_id",
+        ),
+        CheckConstraint(
+            "platform IN ('discord', 'slack', 'teams')", name="ck_channel_skills_platform"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    platform: Mapped[str] = mapped_column(Text)
+    channel_id: Mapped[str] = mapped_column(Text)
+    skill_id: Mapped[str] = mapped_column(Text)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    added_by_account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AgentCreationChannel(Base):
+    """The channel an agent was created for, by a channel admin of it, from there.
+
+    Its admins administer the agent while it stays local to their channels
+    (`daimon.core.authz.channel_admin_holds`). No row: nobody's but server admins'.
+    """
+
+    __tablename__ = "agent_creation_channels"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "ma_agent_id", name="pk_agent_creation_channels"),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            ondelete="CASCADE",
+            name="fk_agent_creation_channels_tenants",
+        ),
+        CheckConstraint(
+            "platform IN ('discord', 'slack', 'teams')", name="ck_agent_creation_channels_platform"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    ma_agent_id: Mapped[str] = mapped_column(Text)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ChannelBudget(Base):
     """A spend limit on one channel. No row = no limit.
 
@@ -993,6 +1067,8 @@ class ChannelBudget(Base):
     set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
     )
+    # The window whose exhausted notice went out; cleared when the budget is set or raised.
+    exhausted_notice_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -2271,7 +2347,9 @@ class TurnOutcome(Base):
             "'mcp_degraded_empty', 'retrying_unsettled', 'requires_action', 'ceiling', "
             "'recovery_cancelled', 'recovery_failed', 'reducer_bug', "
             "'admission_balance_depleted', 'admission_cap_exceeded', "
-            "'admission_channel_budget_exceeded', 'admission_denied', "
+            "'admission_channel_budget_exceeded', 'admission_channel_protected', "
+            "'admission_agent_pinned_elsewhere', 'admission_channel_isolated', "
+            "'admission_denied', "
             "'admission_concurrency_shed', 'missing_config', 'resolver_miss', "
             "'session_preparation_failed', 'session_busy', 'session_agent_mismatch', "
             "'unknown')",

@@ -58,3 +58,16 @@ def record_denial(reason: str) -> None:
     if decision is not None and not decision.denied:
         decision.denied = True
         decision.reason = reason
+
+
+def record_authz_denial(action: str, reason: str | None) -> None:
+    """Deny the current request for an `authorize` refusal a tool raises.
+
+    Called at the tool's raise site, not inside `authorize`: list filters ask it
+    for denials on purpose, and those are not refused calls.
+    """
+    decision = _current.get()
+    if decision is not None and not decision.denied:
+        decision.operation = action
+        decision.denied = True
+        decision.reason = f"authz:{reason or 'denied'}"

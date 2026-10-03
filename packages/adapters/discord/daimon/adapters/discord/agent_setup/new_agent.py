@@ -7,7 +7,8 @@ that cannot afford a turn can still create and inspect an agent.
 
 Submitting returns to Details rather than to the roster, because the honest next
 step lives there: a brand-new agent answers nowhere, and Details carries the
-sentence that says so plus the exact routing request to hand an admin.
+sentence that says so plus the exact routing request to hand an admin. An agent
+a channel admin creates from their channel's panel is that channel's to set up.
 """
 
 from __future__ import annotations
@@ -21,8 +22,10 @@ from daimon.adapters.discord.agent_setup.hydrate import load_details_for, panel_
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.agent_setup.write import create_blank_agent, validate_model_id
+from daimon.adapters.discord.checks import channel_admin_caller
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
 from daimon.core.models_catalog import list_model_choices
@@ -153,6 +156,15 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                 raise DaimonError(
                     "Could not confirm the new agent. "
                     "Reopen `/agent-setup` to check before retrying."
+                )
+            async with self.runtime.sessionmaker.begin() as session:
+                await record_created_for_channel(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    ma_agent_id=created.anthropic_id,
+                    channel_id=str(self.state.channel_id),
+                    caller=channel_admin_caller(interaction.user),
                 )
             async with self.runtime.sessionmaker() as session:
                 roster = await load_roster(

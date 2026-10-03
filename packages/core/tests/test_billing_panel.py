@@ -12,6 +12,7 @@ import httpx
 import jwt as pyjwt
 import pytest
 from daimon.core.billing_panel import (
+    BillingPanelState,
     create_checkout,
     estimate_turns,
     fmt_usd,
@@ -20,9 +21,9 @@ from daimon.core.billing_panel import (
 from daimon.core.errors import DaimonError
 from daimon.core.promo_codes import build_promo_code_terms
 from daimon.core.stores import promo_codes as promo_store
-from daimon.core.stores import usage_events
+from daimon.core.stores import tenants, usage_events
 from daimon.testing import ma_model_usage
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -266,3 +267,43 @@ async def test_load_billing_snapshot_hides_redemption_when_the_lookup_fails(
     assert state.is_admin and not state.has_redeemable_promo_code, (
         "a failed lookup should still load the admin panel, without the redeem button"
     )
+
+
+async def test_load_billing_snapshot_lists_channel_budgets_for_admins_only(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = await _tenant_with_usage(db_session)
+    tenant = await tenants.get_tenant(db_session, tenant_id)
+    assert tenant is not None
+    for channel, limit, spent in (("low", "10", "1"), ("high", "10", "9"), ("zero", "0", "0")):
+        await make_channel_budget(
+            db_session, tenant=tenant, channel_id=channel, limit_usd=Decimal(limit)
+        )
+        if spent != "0":
+            await make_ledger_entry(
+                db_session,
+                tenant=tenant,
+                delta_usd=-Decimal(spent),
+                channel_id=channel,
+                occurred_at=_NOW,
+            )
+    await make_channel_budget(db_session, tenant=tenant, platform="discord", channel_id="other")
+    await db_session.commit()
+
+    async def snapshot(is_admin: bool) -> BillingPanelState:
+        return await load_billing_snapshot(
+            db_session,
+            tenant_id=tenant_id,
+            platform_user_id=_CALLER_ID,
+            is_admin=is_admin,
+            since=_SINCE,
+            now=_NOW,
+            platform="slack",
+        )
+
+    admin = await snapshot(True)
+    assert [s.budget.channel_id for s in admin.channel_budgets] == ["zero", "high", "low"], (
+        "this platform's budgets, the most used first"
+    )
+    assert [s.percent_used for s in admin.channel_budgets] == [100, 90, 10], "share of the limit"
+    assert (await snapshot(False)).channel_budgets == (), "a member sees no other channel"
