@@ -1,124 +1,3 @@
-"""Slack /routines slash handler + overflow pause/resume/output actions.
-
-Shell module: all I/O lives here. Pure builders (views.py) and reducers
-(state.py) are called but never catch exceptions — failures propagate to the
-listener-boundary catch in this module (S3 pattern).
-
-Handler contract:
-  handle_routines_command(runtime, payload)
-    Slash command entry: open loading modal → background-fetch routines
-    → views.update with the content view. No TRY/EXCEPT in the pure callers.
-
-  handle_routine_action(runtime, payload)
-    Block-action entry for action_id matching ``routine_action:{uuid}`` or
-    ``routines_refresh``. TOCTOU-safe write for pause/resume (re-fetch +
-    tenant/authority check inside session.begin()). Ephemeral for output.
-"""
-
-from __future__ import annotations
-
-import uuid
-from datetime import UTC, datetime
-from typing import Any
-
-import anthropic
-import structlog
-from cryptography.fernet import InvalidToken
-from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.errors import generate_request_id, surface_command_error
-from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.routines_panel.read import load_routines, routines_viewer
-from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
-from daimon.adapters.slack.routines_panel.views import (
-    build_content_view,
-    build_create_routine_modal,
-    build_delete_confirm_modal,
-    build_last_output_view,
-    build_loading_view,
-)
-from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.defaults.ma_index import list_agents_by_tenant
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.errors import DaimonError
-from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.observability import capture_exception_with_scope
-from daimon.core.posted_controls.routines import apply_routine_action
-from daimon.core.routines import can_manage_routine, routine_label
-from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.routines import get_routine, pause_routine, resume_routine
-from slack_sdk.errors import SlackApiError
-from sqlalchemy.exc import SQLAlchemyError
-
-log = structlog.get_logger()
-
-
-async def handle_routines_command(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
-    """Slash command handler for /routines (loading-modal pattern).
-
-    Immediately opens a "Loading…" modal with the fresh trigger_id (beats the
-    ~3s expiry), then background-fetches routines and updates the modal in place.
-
-    Args:
-        runtime: Injected SlackRuntime (sessionmaker, anthropic, settings).
-        payload: Slash-command payload from the Socket Mode envelope.
-    """
-    team_id: str = payload.get("team_id") or ""
-    user_id: str = payload.get("user_id") or ""
-    trigger_id: str = payload.get("trigger_id") or ""
-    channel_id: str = payload.get("channel_id") or ""
-
-    client = await resolve_web_client(runtime, team_id=team_id)
-    if client is None:
-        log.warning("slack.routines_command.no_token", team_id=team_id)
-        return
-
-    view_id: str = ""
-    try:
-        # Open loading modal immediately — must beat the ~3s trigger_id TTL.
-        resp = await client.views_open(  # pyright: ignore[reportUnknownMemberType]
-            trigger_id=trigger_id,
-            view=build_loading_view(channel_id=channel_id),
-        )
-        opened_view: dict[str, str] = resp["view"]  # pyright: ignore[reportUnknownVariableType, reportAssignmentType, reportOptionalSubscript]  # SlackResponse subscript is untyped
-        view_id = opened_view.get("id") or ""
-
-        # Slow path (off the 3s window): resolve tenant + fetch routines.
-        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-        async with runtime.sessionmaker() as session:
-            entries, over_cap_count, agent_name_map = await load_routines(
-                session,
-                runtime.anthropic,
-                tenant_id=tenant_id,
-                viewer_user_id=await routines_viewer(client, user_id=user_id),
-            )
-        state = RoutinesPanelState(
-            rows=entries,
-            over_cap_count=over_cap_count,
-            agent_name_map=agent_name_map,
-        )
-        # No hash — single updater, Pitfall 3.
-        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-            view_id=view_id,
-            view=build_content_view(state, channel_id=channel_id),
-        )
-
-    except (DaimonError, anthropic.APIError, SlackApiError, InvalidToken, SQLAlchemyError) as exc:
-        request_id = generate_request_id()
-        log.error(
-            "slack.routines_command_failed", team_id=team_id, request_id=request_id, exc_info=exc
-        )
-        capture_exception_with_scope(exc)
-        await surface_command_error(
-            client,
-            exc,
-            request_id=request_id,
-            title="Routines",
-            view_id=view_id,
-            channel_id=channel_id,
-            user_id=user_id,
-        )
-
-
 async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     """Block-action handler for overflow (⋯) and Refresh actions in the routines panel.
 
@@ -182,35 +61,34 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 return
 
             async with runtime.sessionmaker() as session, session.begin():
-
-                async def allowed(row: RoutineRow) -> bool:
-                    is_admin = await resolve_is_admin(client, user_id=user_id)
-                    return can_manage_routine(row, user_id=user_id, is_admin=is_admin)
-
-                result = await apply_routine_action(
-                    session,
-                    routine_id,
-                    tenant_id=tenant_id,
-                    op=action_value,
-                    allowed=allowed,
-                    load=get_routine,
-                    pause=pause_routine,
-                    resume=resume_routine,
-                    now=lambda: datetime.now(UTC),
-                )
-                if result != "changed":
-                    text = (
-                        "This routine no longer exists."
-                        if result == "gone"
-                        else "Only the routine's creator or a workspace admin "
-                        "can pause or resume this routine."
-                    )
+                # TOCTOU-safe: re-fetch and validate inside session.begin().
+                # Tenant scoping is enforced by the store (tenant_id kwarg).
+                row = await get_routine(session, routine_id, tenant_id=tenant_id)
+                if row is None:
                     await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                         channel=channel_id or user_id,
                         user=user_id,
-                        text=text,
+                        text="This routine no longer exists.",
                     )
                     return
+                # T-82-06: authority check at click time (TOCTOU-safe).
+                is_admin = await resolve_is_admin(client, user_id=user_id)
+                if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
+                    await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                        channel=channel_id or user_id,
+                        user=user_id,
+                        text=(
+                            "Only the routine's creator or a workspace admin "
+                            "can pause or resume this routine."
+                        ),
+                    )
+                    return
+
+                now = datetime.now(UTC)
+                if action_value == "pause":
+                    await pause_routine(session, routine_id, tenant_id=tenant_id)
+                else:
+                    await resume_routine(session, routine_id, tenant_id=tenant_id, now=now)
 
             # Re-render after successful write.
             async with runtime.sessionmaker() as session:
