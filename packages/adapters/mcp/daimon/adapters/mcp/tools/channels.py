@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy, load_read_policy
+from daimon.adapters.mcp.tools._channel_policy import (
+    OPEN_READ_POLICY,
+    ChannelReadPolicy,
+    load_read_policy,
+)
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.direct_messages import DirectMessageResult, send_direct_message_impl
 from daimon.adapters.mcp.tools.discord import (
@@ -156,7 +160,8 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         For threads use read_thread. Each platform takes only its own
         pagination parameter — the other is rejected. Discord: at most 200
         messages per call; use before to fetch older messages. Slack: use
-        cursor to fetch the next page; at most 15 messages are returned.
+        cursor to fetch the next page; at most 200 messages per call, and
+        Slack may return a smaller page according to the workspace limits.
         Teams: channel_id is the channel (parent_channel_id in turn_controls);
         returns up to 50 posts with their replies, ordered by latest activity;
         pass next_cursor as cursor for less recently active posts. A 1:1 chat
@@ -195,7 +200,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 read_policy=read_policy,
             )
         if cursor is not None:
-            raise ToolError("cursor is Slack-only — pass before to paginate on Discord")
+            raise ToolError("cursor is Slack/Teams-only — pass before to paginate on Discord")
         return await _read_channel_impl(
             runtime,
             auth,
@@ -217,12 +222,12 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Read messages from a thread, oldest-first.
 
         Discord: thread_id is the thread's channel id; use before for older messages.
-        Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456);
-        before is rejected — Slack threads read one page of at most 15 messages
-        from the thread root, and has_more=true means the newest replies were
-        not returned. Teams: thread_id is <channel>;messageid=<root> (thread_id
+        Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456).
+        Pages start at the root; pass next_cursor as cursor to read newer replies.
+        At most 200 messages per call; Slack may return a smaller page.
+        Teams: thread_id is <channel>;messageid=<root> (thread_id
         in turn_controls); returns the root and the newest 50 replies; pass
-        next_cursor as cursor for older ones. cursor is Teams-only. Threads
+        next_cursor as cursor for older ones. cursor is Slack/Teams-only. Threads
         under a sealed channel need origin_context_id, as read_channel does.
         """
         auth = await _auth(ctx)
@@ -240,14 +245,19 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 cursor=cursor,
                 read_policy=read_policy,
             )
-        if cursor is not None:
-            raise ToolError("cursor is Teams-only on read_thread")
         if auth.platform == "slack":
             if before is not None:
-                raise ToolError("before is Discord-only — slack read_thread has no pagination")
+                raise ToolError("before is Discord-only — slack read_thread pages with cursor")
             return await _slack_read_thread_impl(
-                runtime, auth, thread_id=thread_id, limit=limit, read_policy=read_policy
+                runtime,
+                auth,
+                thread_id=thread_id,
+                limit=limit,
+                cursor=cursor,
+                read_policy=read_policy,
             )
+        if cursor is not None:
+            raise ToolError("cursor is Slack/Teams-only — discord read_thread pages with before")
         return await _read_thread_impl(
             runtime,
             auth,
@@ -475,8 +485,12 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         returns — never base64 a file into a tool argument. Discord also
         takes ``attachments=[{url, filename}]``, fetched over https from
         Discord's own CDN hosts only (<=25 MiB each). Combined cap of 10
-        files per message. Slack takes no files: that needs a scope this
-        install does not have.
+        files per message. Slack accepts file_handles and signed file-proxy
+        links from its read tools in attachments (<=20 MiB each), for files
+        the requester can read where they were shared. Other URLs are
+        refused. Include a short caption: the text posts first, then files
+        upload into that thread. If upload fails, the text remains posted;
+        do not send it again. Requires the bot's files:write scope.
 
         Slack: ``channel_id`` may be ``channel_id:thread_ts`` (e.g.
         ``C0123456789:1717171717.123456``) to post into a thread. Content is
@@ -515,6 +529,9 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 content=content,
                 attachments=attachments,
                 file_handles=file_handles,
+                read_policy=(
+                    await _read_policy(runtime, auth, None) if attachments else OPEN_READ_POLICY
+                ),
             )
         return await _send_message_impl(
             runtime,

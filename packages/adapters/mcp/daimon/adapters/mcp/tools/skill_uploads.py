@@ -19,7 +19,7 @@ the fresh agent right before the upload and the attach.
 from __future__ import annotations
 
 import asyncio
-import time
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 from urllib.parse import unquote, urlparse
@@ -28,10 +28,10 @@ import anthropic
 import httpx
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
-from cryptography.fernet import InvalidToken
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
+from daimon.adapters.mcp.tools._channel_policy import load_read_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools._session_gate import session_asks_first
@@ -46,10 +46,12 @@ from daimon.adapters.mcp.tools.setup_target import (
 from daimon.adapters.mcp.tools.skills import (
     _resolve_sync_token,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.slack._client import slack_web_client
+from daimon.adapters.mcp.tools.slack._files import require_file_source, resolve_file_link
+from daimon.adapters.mcp.tools.slack._leak_policy import get_destination, is_dm_destination
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
-from daimon.core.github_credentials import decrypt_token
 from daimon.core.operation_policy import OperationKind, decide_operation
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.add import (
@@ -71,7 +73,6 @@ from daimon.core.skills.ingest import (
     confirmation_hash,
     require_upload_suffix,
 )
-from daimon.core.slack_file_token import verify_file_token
 from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from fastmcp import Context, FastMCP
@@ -82,7 +83,6 @@ __all__ = ["AddSkillResult", "register_skill_upload_tools", "require_skill_chang
 
 #: The only hosts Discord serves attachments from (as `discord_send`'s allowlist).
 _DISCORD_ATTACHMENT_HOSTS = frozenset({"cdn.discordapp.com", "media.discordapp.net"})
-_SLACK_FILE_PATH = "/slack/file/"
 
 
 class AddSkillResult(BaseModel):
@@ -172,12 +172,15 @@ async def _load_bundle(
     repo_url: str | None,
     branch: str,
     path: str,
+    origin_context_id: str | None,
 ) -> tuple[SkillBundle, str]:
     """The checked skill and a short origin for the ledger."""
     if skill_md is not None:
         return await asyncio.to_thread(bundle_from_markdown, skill_md), "pasted"
     if attachment_url is not None:
-        data, filename = await _fetch_platform_attachment(runtime, auth, http, attachment_url)
+        data, filename = await _fetch_platform_attachment(
+            runtime, auth, http, attachment_url, origin_context_id=origin_context_id
+        )
         bundle = await asyncio.to_thread(bundle_from_upload, data, filename=filename)
         return bundle, f"attachment {filename}"
     if repo_url is None:
@@ -202,7 +205,12 @@ async def _load_bundle(
 
 
 async def _fetch_platform_attachment(
-    runtime: McpRuntime, auth: AuthIdentity, http: httpx.AsyncClient, url: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    http: httpx.AsyncClient,
+    url: str,
+    *,
+    origin_context_id: str | None,
 ) -> tuple[bytes, str]:
     """Bytes and filename of a file attached in the caller's own chat platform.
 
@@ -224,7 +232,9 @@ async def _fetch_platform_attachment(
             raise ToolError(f"Could not download the attachment: {exc}") from exc
         return data, filename
     if auth.platform == "slack":
-        return await _fetch_slack_attachment(runtime, auth, http, url)
+        return await _fetch_slack_attachment(
+            runtime, auth, http, url, origin_context_id=origin_context_id
+        )
     if auth.platform == "teams":
         try:
             allowed = is_teams_download_url(httpx.URL(url))
@@ -242,32 +252,49 @@ async def _fetch_platform_attachment(
 
 
 async def _fetch_slack_attachment(
-    runtime: McpRuntime, auth: AuthIdentity, http: httpx.AsyncClient, url: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    http: httpx.AsyncClient,
+    url: str,
+    *,
+    origin_context_id: str | None,
 ) -> tuple[bytes, str]:
-    root = runtime.settings.mcp.app_root_url
-    secret = runtime.settings.mcp.jwt_secret
-    prefix = f"{root}{_SLACK_FILE_PATH}" if root else None
-    if prefix is None or secret is None or runtime.fernet is None or not url.startswith(prefix):
-        raise ToolError("attachment_url must be the link Daimon gave for a Slack file.")
-    ref = verify_file_token(
-        url.removeprefix(prefix), secret=secret.get_secret_value(), now=int(time.time())
+    """The linked file, once the caller is shown to be able to read it.
+
+    The link alone is a bearer token any turn in the workspace may hold, so
+    the file must be shared where this caller can read from this turn.
+    """
+    ref = (
+        resolve_file_link(runtime, url, team_id=auth.external_id)
+        if auth.external_id is not None
+        else "not_a_link"
     )
-    if ref is None or ref.team_id != auth.external_id:
+    if ref == "rejected":
         raise ToolError("That Slack file link has expired or is not from this workspace.")
+    if isinstance(ref, str) or runtime.fernet is None or auth.platform_user_id is None:
+        raise ToolError("attachment_url must be the link Daimon gave for a Slack file.")
     async with runtime.session_factory() as session:
         row = await get_slack_bot_token(session, team_id=ref.team_id)
     if row is None:
         raise ToolError("Daimon is not installed in this Slack workspace any more.")
+    client = await slack_web_client(runtime, team_id=ref.team_id)
+    destination = await get_destination(runtime, auth, now=datetime.now(tz=UTC))
+    await require_file_source(
+        client,
+        file_id=ref.file_id,
+        requester_id=auth.platform_user_id,
+        read_policy=await load_read_policy(runtime, auth, origin_context_id=origin_context_id),
+        dm_ok=is_dm_destination(destination),
+    )
     try:
-        bot_token = decrypt_token(runtime.fernet, row.encrypted_token)
         data, _type, filename = await fetch_slack_file(
             http,
-            bot_token=bot_token,
+            bot_token=str(client.token),
             file_id=ref.file_id,
             max_bytes=MAX_UNCOMPRESSED_BYTES,
             suffixes=UPLOAD_SUFFIXES,
         )
-    except (InvalidToken, httpx.HTTPError) as exc:
+    except httpx.HTTPError as exc:
         raise ToolError(f"Could not download the Slack file: {exc}") from exc
     return data, filename
 
@@ -323,6 +350,7 @@ async def _add_skill_impl(
                 repo_url=repo_url,
                 branch=branch,
                 path=path,
+                origin_context_id=origin_context_id,
             )
         bound = confirmation_hash(bundle.preview, agent_id=agent.id)
         preview = bundle.preview.model_copy(update={"content_hash": bound})

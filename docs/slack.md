@@ -29,11 +29,47 @@ DMs) a group counts only while a fresh lookup, cached for a minute, still lists
 the person. A workspace that has hit its Slack file-storage
 limit gets one in-thread notice and no deliveries until space is freed.
 
+### Files in message tools
+
+`read_channel`, `read_thread`, `get_message` and `search_messages` include attached
+file names, MIME types and sizes. Download URLs are signed and use daimon's file
+proxy; private Slack download URLs are never exposed. Anyone holding a URL can
+download the file, so these expire after an hour, with the turn grant, rather than
+the 24 hours a turn's own attachment links last. Without a configured public MCP
+URL and signing secret, metadata is still returned with no download URL. Deleted
+and retention-hidden placeholders are omitted.
+
+`send_message` accepts staged `file_handles` and signed file links from those read
+tools in `attachments`. Links must be valid and belong to the same workspace;
+arbitrary URLs are refused. A link is a bearer token, so it is not proof the
+requester may see the file: Slack's list of where the file is shared must include
+a channel the requester can view and the channel policy lets the call read. A file
+in a sealed thread can be reposted only into that same thread, since
+`send_message` carries no turn origin, and a file shared only in a 1:1 DM can be
+reposted only into a DM. The combined limit is ten files, and each
+file is capped at 20 MiB. A caption is required. The caption posts
+first; files upload into its new thread or the existing target thread. The upload
+messages are recorded for tidying when Slack reports their share in the upload
+response. An upload failure leaves the caption posted, and the error
+says not to send it again. The bot needs `files:write`; reinstall only when Slack
+reports the installed token lacks it.
+
+### History pages
+
+Thread context requests one page of `DAIMON_SLACK__HISTORY_PAGE_LIMIT` messages
+(default 100, range 1–1000). Slack may grant fewer depending on the app's rate
+limits; `has_more` still marks the replay as truncated. Message tools return at
+most 200 messages per call. `read_channel` returns a cursor for older messages;
+`read_thread` returns a cursor for newer replies, starting from the root. No
+automatic multi-page sweep runs during a turn.
+
 ### Skill files
 
 A `.md` or `.zip` attached in a message reaches `add_skill` as the file link
-Daimon gave the turn. Daimon reads it with the bot token only when the link's
-signature checks and it names this workspace, and refuses a file over the
+Daimon gave the turn, or as a link from a read tool. Daimon reads it with the bot
+token only when the link's signature checks, it names this workspace, and the file
+passes the same sharing check as a repost: it is shared in a channel the caller can
+view and this turn may read, or in a 1:1 DM only when the turn is in a DM. It refuses a file over the
 skill size cap or not named `.md` or `.zip` before downloading it. Adding it
 needs the person's Approve on a confirmation card, which only tool safety
 shows; without it, use the setup panel's Add skill form, which takes a paste

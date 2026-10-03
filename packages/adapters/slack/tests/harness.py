@@ -80,6 +80,7 @@ def make_orchestrate_app(
     settings = MagicMock()
     settings.crypto.keys = (SecretStr(crypto_key),) if crypto_key is not None else ()
     settings.slack.max_concurrent_turns_per_tenant = max_concurrent_turns_per_tenant
+    settings.slack.history_page_limit = 100
     settings.slack.bot_display_name = "daimon"
     settings.mcp.public_url = None
     settings.mcp.app_root_url = connect_nudge_url

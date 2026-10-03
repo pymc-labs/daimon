@@ -33,6 +33,7 @@ from daimon.adapters.mcp.tools.slack._client import (
     slack_read_client,
     slack_web_client,
 )
+from daimon.adapters.mcp.tools.slack._files import FileUrlMinter, file_url_minter, to_file_rows
 from daimon.adapters.mcp.tools.slack._leak_policy import (
     DM_REDIRECT_MSG,
     get_destination,
@@ -56,11 +57,18 @@ from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
-# Slack's ceiling for non-Marketplace apps on conversations.history and
-# conversations.replies: at most 15 objects per call and one call per minute.
-# Larger limits are clamped server-side, so asking for more only misleads the
-# caller about how much of the channel or thread they were shown.
-_HISTORY_LIMIT_CAP = 15
+# Per-call page bound for both reads, matching Discord's read_channel. Slack
+# accepts up to 999 on conversations.history, but a page that size can fill
+# the model's context in one tool result. Slack's per-workspace 15-object
+# clamp still applies below it, silently, and is reported through has_more.
+_HISTORY_PAGE_CEILING = 200
+
+# Page size for the replies lookup that locates one message by ts.
+_MESSAGE_LOOKUP_PAGE = 200
+
+
+def _bounded_page(limit: int) -> int:
+    return max(1, min(limit, _HISTORY_PAGE_CEILING))
 
 
 def _reraise_mapped(err: SlackApiError, *, as_user: bool = False) -> ToolError:
@@ -150,7 +158,7 @@ async def _resolve_usernames(client: AsyncWebClient, user_ids: set[str]) -> dict
 
 
 def _to_message_rows(
-    raw_messages: list[dict[str, Any]], usernames: dict[str, str]
+    raw_messages: list[dict[str, Any]], usernames: dict[str, str], *, files: FileUrlMinter | None
 ) -> list[SlackMessageRow]:
     rows: list[SlackMessageRow] = []
     for msg in raw_messages:
@@ -163,6 +171,7 @@ def _to_message_rows(
                 text=str(msg.get("text", "")),
                 thread_ts=str(msg["thread_ts"]) if msg.get("thread_ts") else None,
                 reply_count=int(msg["reply_count"]) if msg.get("reply_count") else None,
+                files=to_file_rows(cast(list[dict[str, Any]], msg.get("files") or []), files),
             )
         )
     return rows
@@ -249,10 +258,15 @@ async def _slack_list_channels_impl(  # pyright: ignore[reportUnusedFunction]  #
 
 
 async def _fetch_channel_history(
-    client: AsyncWebClient, *, channel_id: str, limit: int, cursor: str | None
+    client: AsyncWebClient,
+    *,
+    channel_id: str,
+    limit: int,
+    cursor: str | None,
+    files: FileUrlMinter | None,
 ) -> SlackChannelResult:
     resp = await client.conversations_history(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-        channel=channel_id, limit=max(1, min(limit, _HISTORY_LIMIT_CAP)), cursor=cursor
+        channel=channel_id, limit=_bounded_page(limit), cursor=cursor
     )
     raw = cast(list[dict[str, Any]], resp["messages"])
     raw.reverse()  # Slack returns newest-first; tools return oldest-first
@@ -270,7 +284,7 @@ async def _fetch_channel_history(
     else:
         hint = None
     return SlackChannelResult(
-        messages=_to_message_rows(raw, usernames), next_cursor=next_cursor, hint=hint
+        messages=_to_message_rows(raw, usernames, files=files), next_cursor=next_cursor, hint=hint
     )
 
 
@@ -302,6 +316,7 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
     user_id = _require_slack_identity(auth)
     team_id = _require_team_id(auth)
     rc = await slack_read_client(runtime, team_id=team_id, slack_user_id=user_id)
+    files = file_url_minter(runtime, team_id=team_id, now=int(time.time()))
 
     if rc.runs_as_user:
         try:
@@ -312,7 +327,7 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
                 read_policy,
                 channel_id,
                 await _fetch_channel_history(
-                    rc.client, channel_id=channel_id, limit=limit, cursor=cursor
+                    rc.client, channel_id=channel_id, limit=limit, cursor=cursor, files=files
                 ),
             )
         except SlackApiError as err:
@@ -334,7 +349,7 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
             read_policy,
             channel_id,
             await _fetch_channel_history(
-                bot_client, channel_id=channel_id, limit=limit, cursor=cursor
+                bot_client, channel_id=channel_id, limit=limit, cursor=cursor, files=files
             ),
         )
     except ToolError as terr:
@@ -361,13 +376,18 @@ def _split_thread_id(thread_id: str) -> tuple[str, str]:
 
 
 async def _fetch_thread_replies(
-    client: AsyncWebClient, *, channel_id: str, thread_ts: str, limit: int
+    client: AsyncWebClient,
+    *,
+    channel_id: str,
+    thread_ts: str,
+    limit: int,
+    cursor: str | None,
+    files: FileUrlMinter | None,
 ) -> SlackThreadResult:
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-        channel=channel_id, ts=thread_ts, limit=max(1, min(limit, _HISTORY_LIMIT_CAP))
+        channel=channel_id, ts=thread_ts, limit=_bounded_page(limit), cursor=cursor
     )
     raw = cast(list[dict[str, Any]], resp["messages"])  # already oldest-first
-    has_more = bool(resp.get("has_more"))
     result_thread_ts = thread_ts
 
     # A reply's ts identifies its thread, matching how send treats a thread
@@ -380,17 +400,35 @@ async def _fetch_thread_replies(
             resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                 channel=channel_id,
                 ts=result_thread_ts,
-                limit=max(1, min(limit, _HISTORY_LIMIT_CAP)),
+                limit=_bounded_page(limit),
+                cursor=cursor,
             )
             raw = cast(list[dict[str, Any]], resp["messages"])
-            has_more = bool(resp.get("has_more"))
+
+    # Replies page oldest-first, so the continuation reaches NEWER messages.
+    # has_more stays the authority: Slack can send a next_cursor that only
+    # points past the end, and (rarely) report has_more without a cursor.
+    has_more = bool(resp.get("has_more"))
+    metadata = cast(dict[str, Any], resp.get("response_metadata") or {})
+    next_cursor = (str(metadata.get("next_cursor") or "") or None) if has_more else None
+    if next_cursor is not None:
+        hint = (
+            f"more replies available — pass thread_id={channel_id}:{result_thread_ts} "
+            f"and cursor={next_cursor} to read newer messages"
+        )
+    elif has_more:
+        hint = "more replies exist, but Slack returned no continuation cursor"
+    else:
+        hint = None
 
     usernames = await _resolve_usernames(client, _author_ids(raw))
     return SlackThreadResult(
         channel_id=channel_id,
         thread_ts=result_thread_ts,
-        messages=_to_message_rows(raw, usernames),
+        messages=_to_message_rows(raw, usernames, files=files),
         has_more=has_more,
+        next_cursor=next_cursor,
+        hint=hint,
     )
 
 
@@ -400,21 +438,30 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
     *,
     thread_id: str,
     limit: int,
+    cursor: str | None = None,
     read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> SlackThreadResult:
     channel_id, thread_ts = _split_thread_id(thread_id)
     user_id = _require_slack_identity(auth)
     team_id = _require_team_id(auth)
     rc = await slack_read_client(runtime, team_id=team_id, slack_user_id=user_id)
+    files = file_url_minter(runtime, team_id=team_id, now=int(time.time()))
 
     if rc.runs_as_user:
         try:
             channel = await _channel_info(rc.client, channel_id=channel_id)
             await _gate_user_source(runtime, auth, channel=channel)
             read_policy.require(f"{channel_id}:{thread_ts}", channel_id)
-            return await _fetch_thread_replies(
-                rc.client, channel_id=channel_id, thread_ts=thread_ts, limit=limit
+            result = await _fetch_thread_replies(
+                rc.client,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                limit=limit,
+                files=files,
+                cursor=cursor,
             )
+            read_policy.require(f"{channel_id}:{result.thread_ts}", channel_id)
+            return result
         except SlackApiError as err:
             # Any not_in_channel from the user token (typically a public channel
             # the user never joined) falls back to the bot path, which
@@ -430,9 +477,16 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
         channel = await _channel_info(bot_client, channel_id=channel_id)
         await check_channel_access(bot_client, channel=channel, user_id=user_id)
         read_policy.require(f"{channel_id}:{thread_ts}", channel_id)
-        return await _fetch_thread_replies(
-            bot_client, channel_id=channel_id, thread_ts=thread_ts, limit=limit
+        result = await _fetch_thread_replies(
+            bot_client,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            limit=limit,
+            files=files,
+            cursor=cursor,
         )
+        read_policy.require(f"{channel_id}:{result.thread_ts}", channel_id)
+        return result
     except ToolError as terr:
         if rc.runs_as_user or isinstance(terr, ChannelReadRefused):
             raise
@@ -447,7 +501,7 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
 
 
 async def _fetch_single_message(
-    client: AsyncWebClient, *, channel_id: str, message_id: str
+    client: AsyncWebClient, *, channel_id: str, message_id: str, files: FileUrlMinter | None
 ) -> SlackMessageRow:
     resp = await client.conversations_history(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
         channel=channel_id, latest=message_id, inclusive=True, limit=1
@@ -463,7 +517,7 @@ async def _fetch_single_message(
         # mapping (or an opaque raw SlackApiError).
         try:
             resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                channel=channel_id, ts=message_id, limit=_HISTORY_LIMIT_CAP
+                channel=channel_id, ts=message_id, limit=_MESSAGE_LOOKUP_PAGE
             )
         except SlackApiError as err:
             error_code = _slack_error_code(err)
@@ -475,7 +529,9 @@ async def _fetch_single_message(
     if match is None:
         raise ToolError("message not found")
     usernames = await _resolve_usernames(client, _author_ids([match]))
-    return _to_message_rows([match], usernames)[0].model_copy(update={"trust": "untrusted"})
+    return _to_message_rows([match], usernames, files=files)[0].model_copy(
+        update={"trust": "untrusted"}
+    )
 
 
 def _require_thread_readable(
@@ -498,6 +554,7 @@ async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
     user_id = _require_slack_identity(auth)
     team_id = _require_team_id(auth)
     rc = await slack_read_client(runtime, team_id=team_id, slack_user_id=user_id)
+    files = file_url_minter(runtime, team_id=team_id, now=int(time.time()))
 
     if rc.runs_as_user:
         try:
@@ -508,7 +565,7 @@ async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
                 read_policy,
                 channel_id,
                 await _fetch_single_message(
-                    rc.client, channel_id=channel_id, message_id=message_id
+                    rc.client, channel_id=channel_id, message_id=message_id, files=files
                 ),
             )
         except SlackApiError as err:
@@ -529,7 +586,9 @@ async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
         return _require_thread_readable(
             read_policy,
             channel_id,
-            await _fetch_single_message(bot_client, channel_id=channel_id, message_id=message_id),
+            await _fetch_single_message(
+                bot_client, channel_id=channel_id, message_id=message_id, files=files
+            ),
         )
     except ToolError as terr:
         if rc.runs_as_user or isinstance(terr, ChannelReadRefused):

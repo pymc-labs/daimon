@@ -776,6 +776,32 @@ async def test_terminal_success_bounds_notification_text_on_long_answers(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("partial_text", ["", "Partial analysis before cancellation."])
+async def test_interrupted_tool_turn_shows_cancelled_and_preserves_partial_answer(
+    fake_slack_web_client: Any, partial_text: str
+) -> None:
+    lc, _, _, deregistered = _make_lifecycle(fake_slack_web_client, notify_on_completion=True)
+    await lc.post_initial()
+    content = [
+        ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
+    ]
+    if partial_text:
+        content.append(TextBlock(kind="text", text=partial_text))
+
+    await lc.on_terminal_success(
+        TurnState(content=content, termination=TerminationReason.INTERRUPTED)
+    )
+
+    rendered = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "Turn cancelled." in rendered
+    if partial_text:
+        assert partial_text in rendered
+    assert "cancel_turn" not in _action_ids(_last_update_blocks(fake_slack_web_client))
+    assert _post_count(fake_slack_web_client) == 1, "cancellation must not send a completion ping"
+    assert lc.final_ts == lc.status_ts
+    assert lc.status_ts in deregistered
+
+
 async def test_terminal_success_tool_only_leaves_collapsed_done(
     fake_slack_web_client: Any,
 ) -> None:
