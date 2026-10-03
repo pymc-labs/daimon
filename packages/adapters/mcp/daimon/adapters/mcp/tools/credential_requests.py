@@ -78,6 +78,7 @@ from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_attach import decide_mcp_connect
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
+from daimon.core.mcp_server_url import same_mcp_url
 from daimon.core.operation_policy import (
     OperationKind,
     PolicyOutcome,
@@ -754,6 +755,18 @@ async def _request_mcp_oauth_impl(
     agent_id, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin
     )
+    attached = any(
+        server.name == server_name and same_mcp_url(server.url, url)
+        for server in ma_agent.mcp_servers or []
+    )
+    if auth.is_external and not attached:
+        # Their own sign-in to a server the agent already has is theirs; a new server is setup.
+        raise ToolError(
+            f"'{ma_agent.name}' has no MCP server '{server_name}' at {url}, and the caller is an "
+            "external participant from another organisation, who can only sign in to servers "
+            "the agent already has. Nothing changed and no card was posted. Tell them someone "
+            "in the organisation that runs this agent can add the server."
+        )
     await _require_mcp_replacement_allowed(
         runtime,
         auth,

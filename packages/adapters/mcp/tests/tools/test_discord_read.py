@@ -20,6 +20,9 @@ import discord.http
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import AgentRef
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -544,6 +547,40 @@ async def test_list_channels_filters_by_view_permission(
     assert {r.id for r in rows} == {"222", "444"}
     for row in rows:
         assert row.type == "text", "channel type should be 'text'"
+
+
+async def test_list_channels_held_to_an_isolated_channel_lists_only_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An isolated channel's own agent names no other channel, and reads none."""
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/guilds/{guild_id}/channels":
+            return [
+                _text_channel_payload(channel_id="222"),
+                _text_channel_payload(channel_id="444"),
+            ]
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    held = ChannelReadPolicy(
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("444",),
+            isolated_channel_ids=("444",),
+            agent_channel_pins={"own": ("444",)},
+        ),
+        agent=AgentRef.of("own"),
+    )
+    rows = await _list_channels_impl(_runtime_with_discord_token(), _auth(), held)
+    assert [r.id for r in rows] == ["444"], "only its own channel is listed"
+    with pytest.raises(ToolError, match="nothing outside it is read"):
+        held.require("222")
 
 
 async def test_list_channels_includes_category_id(

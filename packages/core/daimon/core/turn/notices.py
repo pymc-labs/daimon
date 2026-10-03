@@ -250,6 +250,10 @@ _REFUSALS: dict[AdmissionDenialReason, str] = {
         "{Admin} must set the channel's agent."
     ),
     "channel_protected": "This channel is protected, so the agent can't answer in it.",
+    # Only Teams marks people from another organisation (shared channels).
+    "external_participant": (
+        "People from another organisation can use this agent only in its isolated channel."
+    ),
 }
 # The place-bound refusals, worded for a conversation moved to or held in a DM.
 _DM_REFUSALS: dict[AdmissionDenialReason, str] = {
@@ -261,6 +265,7 @@ _DM_REFUSALS: dict[AdmissionDenialReason, str] = {
         "This channel is isolated, so its conversations stay in it and can't move to a DM."
     ),
     "channel_protected": "This channel is protected, so it can't be moved to a DM.",
+    "external_participant": "People from another organisation can't move a conversation to a DM.",
 }
 
 

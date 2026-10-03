@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
 import time
@@ -32,6 +33,7 @@ _GROUP = "00000000-0000-4000-8000-0000000000aa"
 _CHANNEL = "19:chan@thread.tacv2"
 _THREAD = f"{_CHANNEL};messageid=1700000000000"
 _PRIVATE = "19:secret@thread.tacv2"
+_SHARED = "19:shared@thread.tacv2"
 _CHAT = "a:chat-1"
 _WEB_URL = "https://contoso.sharepoint.com/sites/Lab/Shared%20Documents/research/chart.png"
 
@@ -51,6 +53,7 @@ class _Fake:
                 {"id": _TEAM},
                 {"id": _CHANNEL, "name": "research", "type": "standard"},
                 {"id": _PRIVATE, "name": "secret", "type": "private"},
+                {"id": _SHARED, "name": "client", "type": "shared"},
             ]
             return httpx.Response(200, json={"conversations": channels})
         if "/members/" in path:
@@ -227,3 +230,18 @@ async def test_files_refused_where_teams_takes_none_or_the_handle_is_unknown(
             file_handles=handles or [handle],
         )
     assert fake.posts() == []
+
+
+async def test_an_external_participant_in_a_shared_channel_gets_the_tool_error(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    (auth, handle), fake = await _setup(db_session), _Fake()
+    with pytest.raises(ToolError, match="private or shared"):
+        await _teams_send_message_impl(
+            _runtime(fake, sessionmaker),
+            dataclasses.replace(auth, is_external=True),
+            channel_id=_SHARED,
+            content="x",
+            file_handles=[handle],
+        )
+    assert fake.graph() == [] and fake.posts() == [], "refused before anything is saved"

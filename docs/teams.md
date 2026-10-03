@@ -25,8 +25,9 @@ profile) publishes the port; the messaging endpoint must reach it.
 A deployment serves one Entra organisation, `DAIMON_TEAMS__TENANT_ID`. At boot
 the adapter provisions that tenant and reconciles its defaults; turns are
 denied until the reconcile succeeds. The adapter fails closed unless the
-conversation tenant and the channel-data tenant both equal the configured one
-and the sender has a well-formed `aad_object_id`. Users need no setup: their
+conversation tenant equals the configured one and the sender has a well-formed
+`aad_object_id`; in a 1:1 chat the channel-data tenant must match too. A
+channel sender from another tenant, or a guest, is from another organisation (below). Users need no setup: their
 principal is created on first contact. Only the commercial Microsoft 365 cloud
 is supported; government and China clouds use other Bot Framework hosts.
 
@@ -40,6 +41,10 @@ is supported; government and China clouds use other Bot Framework hosts.
   thread. A bare @mention asks about the thread; if the thread cannot be
   read, the bot says so instead of starting a turn. A followed thread also
   gets unprompted replies (below).
+- **Private and shared channels** work like standard ones once the app is in
+  them. The package declares `supportsChannelFeatures: tier1` (manifest
+  1.25), but adding the app to a team does not add it to these channels: each
+  one's owner adds it from the channel.
 - **Group chats** get a short refusal.
 - **Protected channels** (tenant access policy; ids look like
   `19:…@thread.tacv2`) and their threads get no reply, notice or tool post.
@@ -54,6 +59,47 @@ runs are queued and run as one follow-up per author. Work an agent hands off
 refuses that work, it is dropped without a notice, as on Slack. Retried
 deliveries are deduplicated in memory only, so a retry that lands after a
 restart runs again.
+
+### People from another organisation
+
+Two kinds of people count as from another organisation: a shared channel's
+external participants, who join through B2B direct connect and stay in their
+home tenant, and guests (Entra B2B guest accounts in ours), who can be in
+standard and private channels and 1:1 chats. daimon answers them only inside
+an isolated channel and its threads. Anywhere else an addressed message gets
+one line saying so and runs no turn, and their unmentioned replies are never
+judged for a followed thread. Their turns run as a member (never an admin or
+a channel admin, whatever is configured, a grant naming a team they own
+included), commands go to the agent as plain text, and the agent sees
+`external="true"` on their message. Their tool calls get only the
+conversation's tools: reading, searching and posting in it, files into it,
+their own sessions and timers, and signing in to an MCP server the agent
+already has. Anything else, including tools added later, returns a tool
+error the agent relays. Files can't be saved in a shared channel.
+
+A sender is placed from these signals, cheapest first: a foreign tenant on
+the activity (`channelData.tenant.id`, `from.tenantId`,
+`from.properties.tenantId`); their Bot Framework roster entry (`tenantId`,
+and `userRole` "guest"); then, in a channel, Graph's member list
+(`allMembers`: `tenantId` and the "guest" role), which needs the
+`ChannelMember.Read.Group` permission in the manifest. A foreign tenant is
+external; a guest is too, unless the tenant access policy lists them as a
+member (`daimon tenants access-policy --add-member-guest <object id>`). The
+list never overrides a foreign tenant. Our tenant with a member's role is
+internal.
+
+Without either, the sender is unknown and nothing is stored. In a channel
+not known to be standard or private (the activity, an earlier activity
+there or the team's channel list says) they are held as external for that
+turn. Elsewhere they are answered as before, unless the account is already
+marked external. Positive evidence is stored on the account, so queued work,
+routines and MCP tokens see it; a held turn's MCP calls are held too.
+Answers are cached in memory (an hour for an external, ten minutes for ours,
+a minute after a failure) and each lookup times out after a few seconds.
+
+`DAIMON_TEAMS__RESTRICT_GUESTS` and `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS`
+(both on) switch these rules off per kind: those people are then treated as
+members, and the lookups only their kind needs are skipped.
 
 ### Commands and admins
 

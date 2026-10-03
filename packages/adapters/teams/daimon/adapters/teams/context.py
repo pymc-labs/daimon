@@ -350,7 +350,7 @@ def render_user_message(
     `set_thread_participation` key on, and says with `files` whether a file
     saved now reaches the channel (`channel_files`; None in a chat).
     `unprompted="true"` marks a message nobody addressed to the bot (organic
-    thread participation).
+    thread participation); `external="true"` a sender from another organisation.
     """
     context = [f'<channel platform="teams" id={quoteattr(inbound.channel_id)}/>']
     if inbound.kind == "channel":
@@ -376,6 +376,7 @@ def render_user_message(
     query = (
         f"<user_query{author} author_id={quoteattr(inbound.user_id)}{sent} "
         f'is_admin="{str(is_admin).lower()}"'
+        + (' external="true"' if inbound.is_external else "")
         + (' unprompted="true"' if inbound.unprompted else "")
         + f">{escape(inbound.text)}</user_query>"
     )

@@ -580,6 +580,25 @@ class TeamsSettings(BaseModel):
             "Everyone else is a regular user."
         ),
     )
+    restrict_guests: bool = Field(
+        default=True,
+        description=(
+            "When True, guests (Entra B2B guest accounts in this tenant) are "
+            "treated as people from another organisation: answered only in an "
+            "isolated channel, with a few conversation tools and no commands or "
+            "admin role. The tenant access policy's member guest list exempts "
+            "some. When False, guests are treated as team members."
+        ),
+    )
+    restrict_external_participants: bool = Field(
+        default=True,
+        description=(
+            "When True, a shared channel's external participants (people from "
+            "another tenant, via B2B direct connect) are answered only in an "
+            "isolated channel, with a few conversation tools and no commands or "
+            "admin role. When False, they are treated as team members."
+        ),
+    )
 
     @field_validator("admin_user_ids")
     @classmethod

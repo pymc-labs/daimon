@@ -29,7 +29,13 @@ from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.stores.thread_agent_bindings import upsert_responder_binding
-from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.admission import (
+    Admission,
+    AdmissionDenied,
+    ExternalFinding,
+    MissingTurnConfigError,
+    admit,
+)
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing.ma import (
     MARouter,
@@ -1910,3 +1916,222 @@ async def test_an_admins_dm_with_an_isolated_channels_agent_is_held_to_its_budge
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(deps, **args, now=_NOW)
     assert exc_info.value.reason == "channel_budget_exceeded", "a $0 channel budget stops it"
+
+
+async def _admit_as(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    tenant: TenantRow,
+    *,
+    channel_id: str = "chan-1",
+    thread_id: str | None = None,
+    is_external: bool | None,
+    is_known: bool = True,
+    is_dm: bool = False,
+    role: Role = Role.USER,
+    platform_role_ids: list[str] | None = None,
+) -> Admission:
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_own", name="own", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+    return await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="teams",
+        external_user_id="guest-1",
+        channel_id=channel_id,
+        thread_id=thread_id,
+        now=_NOW,
+        role=role,
+        is_dm=is_dm,
+        external=None if is_external is None else ExternalFinding(is_external, is_known),
+        platform_role_ids=platform_role_ids,
+    )
+
+
+async def _stored(db_session: AsyncSession, admission: Admission) -> tuple[bool, str]:
+    row = await db_session.execute(
+        text("SELECT is_external, role FROM accounts WHERE id = :id"),
+        {"id": admission.account_id},
+    )
+    is_external, role = row.one()
+    return is_external, role
+
+
+@pytest.mark.parametrize("thread_id", [None, "thr-1"], ids=["channel", "thread"])
+async def test_an_external_participant_is_answered_inside_an_isolated_channel_as_a_user(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    thread_id: str | None,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
+    await _answer_in(db_session, tenant, "chan-1", "own")
+    admission = await _admit_as(
+        db_session_factory, tmp_path, tenant, thread_id=thread_id, is_external=True, role=Role.ADMIN
+    )
+    assert admission.is_external and admission.grant.is_external
+    assert not admission.grant.subject.is_admin, "an admin role is ignored"
+    assert await _stored(db_session, admission) == (True, Role.USER.value), "stored, demoted"
+
+
+@pytest.mark.parametrize(
+    ("channel_id", "is_dm"),
+    [("chan-2", False), ("dm-1", True)],
+    ids=["open-channel", "dm"],
+)
+async def test_an_external_participant_is_refused_outside_an_isolated_channel(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    channel_id: str,
+    is_dm: bool,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await _admit_as(
+            db_session_factory,
+            tmp_path,
+            tenant,
+            channel_id=channel_id,
+            is_dm=is_dm,
+            is_external=True,
+        )
+    assert exc_info.value.reason == "external_participant"
+
+
+async def test_a_continuation_that_cannot_tell_keeps_the_stored_external_flag(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
+    await _answer_in(db_session, tenant, "chan-1", "own")
+    await _admit_as(db_session_factory, tmp_path, tenant, is_external=True)
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await _admit_as(db_session_factory, tmp_path, tenant, channel_id="chan-2", is_external=None)
+    assert exc_info.value.reason == "external_participant", "still external"
+
+
+async def test_an_external_participant_is_refused_in_an_isolated_channels_setup_thread(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The built-in agent answers a setup thread, with wider reads than the channel's own."""
+    from daimon.core.stores.thread_agent_bindings import create_binding
+
+    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
+    await _answer_in(db_session, tenant, "chan-1", "own")
+    await create_binding(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        parent_channel_id="chan-1",
+        thread_id="setup-1",
+        responder_ma_agent_id="ag_daimon",
+        responder_name="daimon",
+        kind="setup",
+    )
+    await db_session.commit()
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await _admit_as(db_session_factory, tmp_path, tenant, thread_id="setup-1", is_external=True)
+    assert exc_info.value.reason == "external_participant", "refused before the setup agent"
+
+
+async def test_a_finding_without_evidence_holds_for_the_turn_and_stores_nothing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A fail-closed guess makes this turn an external's, but never demotes the account."""
+    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
+    await _answer_in(db_session, tenant, "chan-1", "own")
+    first = await _admit_as(
+        db_session_factory, tmp_path, tenant, is_external=False, role=Role.ADMIN
+    )
+    guessed = await _admit_as(
+        db_session_factory,
+        tmp_path,
+        tenant,
+        is_external=True,
+        is_known=False,
+        role=Role.ADMIN,
+        platform_role_ids=["team-1"],
+    )
+    assert guessed.is_external and not guessed.grant.subject.is_admin, "external this turn"
+    assert await _stored(db_session, first) == (False, Role.ADMIN.value), "nothing stored"
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await _admit_as(
+            db_session_factory,
+            tmp_path,
+            tenant,
+            channel_id="chan-2",
+            is_external=True,
+            is_known=False,
+        )
+    assert exc_info.value.reason == "external_participant", "refused outside isolation"
+
+
+async def test_only_positive_internal_evidence_clears_a_stored_external_flag(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
+    await _answer_in(db_session, tenant, "chan-1", "own")
+    marked = await _admit_as(db_session_factory, tmp_path, tenant, is_external=True)
+    unsure = await _admit_as(
+        db_session_factory, tmp_path, tenant, is_external=False, is_known=False
+    )
+    assert unsure.is_external, "an unsure internal guess does not outweigh stored evidence"
+    assert await _stored(db_session, marked) == (True, Role.USER.value)
+    cleared = await _admit_as(db_session_factory, tmp_path, tenant, is_external=False)
+    assert not cleared.is_external
+    assert await _stored(db_session, marked) == (False, Role.USER.value), "cleared, still user"
+
+
+async def test_an_internal_caller_is_admitted_as_before_and_may_be_an_admin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
+    await _answer_in(db_session, tenant, "chan-1", "own")
+    admission = await _admit_as(
+        db_session_factory, tmp_path, tenant, is_external=False, role=Role.ADMIN
+    )
+    assert not admission.is_external and admission.grant.subject.is_admin
+    assert await _stored(db_session, admission) == (False, Role.ADMIN.value)
+
+
+async def test_an_external_participant_is_never_a_channel_admin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Neither a grant naming them nor one naming a team they own admits them."""
+    from daimon.core.stores.accounts import get_account_with_tenant
+    from daimon.core.stores.channel_admins import set_channel_admins
+
+    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
+    await _answer_in(db_session, tenant, "chan-1", "own")
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        channel_id="chan-1",
+        role_ids=["team-1"],
+        user_ids=["guest-1"],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    admission = await _admit_as(
+        db_session_factory, tmp_path, tenant, is_external=True, platform_role_ids=["team-1"]
+    )
+    assert admission.grant.subject.administered_channel_ids == frozenset(), "administers nothing"
+    async with db_session_factory() as session:
+        row = await get_account_with_tenant(session, account_id=admission.account_id)
+    assert row is not None and row.platform_role_ids == (), "no team is stored for MCP calls"

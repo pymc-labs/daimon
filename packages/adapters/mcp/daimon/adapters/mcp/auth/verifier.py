@@ -39,6 +39,7 @@ from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.domain import AccountIdentityRow, McpTokenRow, Role
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.stores.security_audit import append_event
+from daimon.core.stores.turn_origins import has_external_origin
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -48,6 +49,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 TOKEN_KIND_CLAIM = "daimon_token_kind"
 TOKEN_JTI_CLAIM = "daimon_token_jti"
 SCOPES_CLAIM = "daimon_scopes"
+# From the account row on every request, never from the token.
+EXTERNAL_CLAIM = "daimon_external"
 
 REFUSAL_AUDIT_TOOL = "auth/verify"
 """The audit row's tool name for a refusal: the verifier never sees the tool."""
@@ -149,11 +152,18 @@ class DaimonJWTVerifier(JWTVerifier):
                     return None
             elif access.claims.get("kind") is not None:
                 return None  # only registered tokens carry a kind
+            # A turn may hold its sender as external without storing it (no
+            # evidence either way): while it runs, every tool call is held too.
+            external = identity_row.is_external or (
+                identity_row.platform == "teams"
+                and await has_external_origin(session, account_id=account_id, now=datetime.now(UTC))
+            )
             grants = (
                 await list_channel_admins(
                     session, tenant_id=identity_row.tenant_id, platform=identity_row.platform
                 )
                 if identity_row.role is not Role.ADMIN
+                and not external
                 and identity_row.platform in CHANNEL_ADMIN_PLATFORMS
                 and identity_row.platform_user_id is not None
                 else []
@@ -183,7 +193,9 @@ class DaimonJWTVerifier(JWTVerifier):
             )
         )
         access.claims["tenant_id"] = str(identity_row.tenant_id)
-        access.claims["role"] = identity_row.role.value
+        # An external account is never an admin; the store keeps its role a user too.
+        access.claims["role"] = Role.USER.value if external else identity_row.role.value
+        access.claims[EXTERNAL_CLAIM] = external
         access.claims["platform"] = identity_row.platform
         access.claims["external_id"] = identity_row.external_id
         if identity_row.platform_user_id is not None:

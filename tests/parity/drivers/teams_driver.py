@@ -106,8 +106,10 @@ _PANEL_LABELS: dict[str, str] = {
 
 @dataclass
 class _TeamsApiFake:
-    """SDK middleware answering every Bot Framework call: POST mints `m-<n>`, PUT echoes."""
+    """SDK middleware answering every Bot Framework call: POST mints `m-<n>`, PUT echoes,
+    and a roster lookup answers as for one of `tenant_id`'s own members."""
 
+    tenant_id: str = ""
     #: (method, body, activity id) of every post and edit, in order.
     activities: list[tuple[str, dict[str, Any], str]] = field(
         default_factory=list[tuple[str, dict[str, Any], str]]
@@ -119,6 +121,14 @@ class _TeamsApiFake:
         del next
         request = httpx.Request(context.method, context.url)
         path = httpx.URL(context.url).path
+        if context.method == "GET" and "/members/" in path:
+            member = {
+                "id": "29:member",
+                "aadObjectId": path.rsplit("/", 1)[-1],
+                "tenantId": self.tenant_id,
+                "userRole": "user",
+            }
+            return httpx.Response(200, json=member, request=request)
         if "/activities" not in path:
             return httpx.Response(200, json={}, request=request)
         update = re.search(r"/activities/([^/]+)$", path)
@@ -145,7 +155,7 @@ async def _exchange(
     Ingress auth, MSAL, boot provisioning and timers are stubbed.
     """
     assert runtime.settings.teams is not None
-    fake = _TeamsApiFake()
+    fake = _TeamsApiFake(tenant_id=runtime.settings.teams.tenant_id)
     client = Client(ClientOptions())
     client.use(fake)
     with (

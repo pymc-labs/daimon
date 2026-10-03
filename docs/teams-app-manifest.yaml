@@ -38,10 +38,16 @@
 # is no install flow. The bot answers in 1:1 chat and when @mentioned in a
 # channel, replaying the thread it is in; group chats are refused, so the
 # manifest does not offer them.
+#
+# Private and shared channels: `supportsChannelFeatures: tier1` lets the app
+# be added to them (manifest 1.25 or later; never `supportedChannelTypes`,
+# which blocks the upload there). Installing the app in a team does not add
+# it to these channels: each one's owner adds it from the channel itself.
 
-manifestVersion: "1.16"
+manifestVersion: "1.25"
 id: "${DAIMON_TEAMS__CLIENT_ID}"        # must equal the Entra app id
-version: "0.3.0"                       # bump on every change, then re-upload
+version: "0.4.1"                       # bump on every change, then re-upload
+supportsChannelFeatures: tier1          # private and shared channels (see above)
 developer:
   name: daimon
   websiteUrl: https://DAIMON_HOST
@@ -100,4 +106,8 @@ authorization:
         type: Application
       # List the team's owners, for channel admin grants that name the team.
       - name: TeamMember.Read.Group
+        type: Application
+      # List a channel's members and their home tenants, to tell people from
+      # another organisation (shared channels' external participants, guests).
+      - name: ChannelMember.Read.Group
         type: Application

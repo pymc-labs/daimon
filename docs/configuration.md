@@ -614,6 +614,23 @@ no admin role to bots, so this list is the admin check: admins get the admin rol
 turns, create routines, replace shared keys, top up and see everyone's usage. Everyone
 else is a regular user.
 
+### `DAIMON_TEAMS__RESTRICT_GUESTS`
+
+`bool` · optional · default `True`
+
+When True, guests (Entra B2B guest accounts in this tenant) are treated as people from
+another organisation: answered only in an isolated channel, with a few conversation
+tools and no commands or admin role. The tenant access policy's member guest list
+exempts some. When False, guests are treated as team members.
+
+### `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS`
+
+`bool` · optional · default `True`
+
+When True, a shared channel's external participants (people from another tenant, via B2B
+direct connect) are answered only in an isolated channel, with a few conversation tools
+and no commands or admin role. When False, they are treated as team members.
+
 ## GitHub
 
 Read from `daimon.core.config.GithubSettings`. Prefix `DAIMON_GITHUB__`.

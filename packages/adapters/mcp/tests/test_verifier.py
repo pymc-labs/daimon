@@ -18,6 +18,7 @@ import uuid
 import jwt as pyjwt
 import pytest
 from daimon.adapters.mcp.auth.verifier import (
+    EXTERNAL_CLAIM,
     REFUSAL_AUDIT_TOOL,
     SCOPES_CLAIM,
     TOKEN_JTI_CLAIM,
@@ -607,3 +608,89 @@ async def test_verifier_rejects_a_binding_on_another_platform(
     assert [(e.reason, e.token_kind) for e in events] == [("platform_mismatch", "agent")], (
         "the refusal is audited like every other registry refusal"
     )
+
+
+async def test_verifier_reads_the_external_mark_live_and_drops_admin_rights(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Whatever the token says, an account marked external is a plain user."""
+    from daimon.core.stores.accounts import set_external
+    from daimon.core.stores.channel_admins import set_channel_admins
+    from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+
+    async with sessionmaker() as s, s.begin():
+        tenant = await make_tenant(s, platform="teams")
+        account = await make_account(s, tenant=tenant)
+        await make_platform_principal(
+            s, platform="teams", external_id="u1", tenant=tenant, account=account
+        )
+        await set_role(s, account.id, Role.ADMIN)
+        await set_channel_admins(
+            s,
+            tenant_id=tenant.id,
+            platform="teams",
+            channel_id="c1",
+            role_ids=[],
+            user_ids=["u1"],
+            actor_account_id=None,
+        )
+    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    claims = {"sub": str(account.id), "iat": 0, EXTERNAL_CLAIM: False}
+    token = pyjwt.encode(claims, SECRET, algorithm="HS256")
+
+    ours = await verifier.verify_token(token)
+    assert ours is not None and ours.claims[EXTERNAL_CLAIM] is False
+    assert ours.claims["role"] == Role.ADMIN.value
+    async with sessionmaker() as s, s.begin():
+        await set_external(s, account.id, True)
+    theirs = await verifier.verify_token(token)
+    assert theirs is not None and theirs.claims[EXTERNAL_CLAIM] is True, "the row, not the token"
+    assert theirs.claims["role"] == Role.USER.value
+    assert theirs.claims["administered_channel_ids"] == [], "no channel admin grant counts"
+
+
+async def test_a_turn_held_as_external_holds_its_tool_calls_while_it_runs(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """No evidence, nothing stored: the running turn's origin carries the hold."""
+    from daimon.core.stores.turn_origins import create_origin
+    from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+
+    now = dt.datetime.now(dt.UTC)
+    async with sessionmaker() as s, s.begin():
+        tenant = await make_tenant(s, platform="teams")
+        account = await make_account(s, tenant=tenant)
+        await make_platform_principal(
+            s, platform="teams", external_id="u1", tenant=tenant, account=account
+        )
+    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    token = pyjwt.encode({"sub": str(account.id), "iat": 0}, SECRET, algorithm="HS256")
+    before = await verifier.verify_token(token)
+    assert before is not None and before.claims[EXTERNAL_CLAIM] is False, "internal: unchanged"
+
+    async def _origin(*, is_external: bool, expires_at: dt.datetime) -> None:
+        async with sessionmaker() as s, s.begin():
+            await create_origin(
+                s,
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="teams",
+                parent_channel_id="c1",
+                thread_id="c1;messageid=1",
+                responder_ma_agent_id="agent_1",
+                responder_name="a",
+                configuration_target_ma_agent_id=None,
+                configuration_target_name=None,
+                role=Role.USER,
+                expires_at=expires_at,
+                now=now - dt.timedelta(hours=3),
+                is_external=is_external,
+            )
+
+    await _origin(is_external=False, expires_at=now + dt.timedelta(hours=1))
+    await _origin(is_external=True, expires_at=now - dt.timedelta(seconds=1))
+    still = await verifier.verify_token(token)
+    assert still is not None and still.claims[EXTERNAL_CLAIM] is False, "an ended hold is gone"
+    await _origin(is_external=True, expires_at=now + dt.timedelta(hours=1))
+    held = await verifier.verify_token(token)
+    assert held is not None and held.claims[EXTERNAL_CLAIM] is True

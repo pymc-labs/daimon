@@ -119,21 +119,30 @@ config). The order is load-bearing and documented as such in the module:
    start a turn. A refused user raises `AdmissionDenied("invoker_not_allowed")`
    before the cascade, so they learn nothing about the tenant's configuration
    and no MA call is made.
-4. Resolve config through the cascade
+4. External participant — a caller from another organisation (a Teams shared
+   channel's B2B direct connect participant or a guest,
+   `admit(external=ExternalFinding(…))`) raises
+   `AdmissionDenied("external_participant")` anywhere but an isolated channel
+   or a thread in one, and in its setup thread too. Only a finding on
+   positive evidence is stored on `accounts.is_external`; one without holds
+   that turn alone (`turn_origins.is_external`, which the MCP verifier reads)
+   and keeps the stored role. An external account's stored role is always
+   `user`, and it administers no channel. `reauthorize` checks it again.
+5. Resolve config through the cascade
    `thread → channel → tenant → deployment`, in
    `packages/core/daimon/core/stores/scoped_config_read.py`. The tiers are
    named by `ConfigTier` in `packages/core/daimon/core/scope.py`; the bottom
    one comes from `defaults/config.yaml`, see [defaults.md](defaults.md).
-5. Raise `MissingTurnConfigError` if no agent or environment resolved — before
+6. Raise `MissingTurnConfigError` if no agent or environment resolved — before
    any MA call, so a misconfigured tenant sees the config error rather than a
    billing one.
-6. Resolve the agent and environment to live MA ids via
+7. Resolve the agent and environment to live MA ids via
    `packages/core/daimon/core/ma_resolver.py`, which self-heals by re-running
    defaults reconciliation when a tag no longer resolves, and rejects an agent
    whose `archived_at` is set.
-7. Balance gate — `tenant_balance.is_over_balance`.
-8. Monthly cap gate — `billing.is_over_cap`.
-9. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
+8. Balance gate — `tenant_balance.is_over_balance`.
+9. Monthly cap gate — `billing.is_over_cap`.
+10. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
    parent channel, or for a DM the channel it was moved from with `/dm`
    (`dm_source_channel_id`); skipped in an older DM or where the channel has
    no budget. An isolated channel's own agent counts toward that channel
@@ -143,8 +152,10 @@ config). The order is load-bearing and documented as such in the module:
    DMs the channel's admins through the adapter's `TurnDeps.budget_notifier`
    (`daimon.core.channel_budget_notice`).
 
-The policy, protection, balance, cap and channel budget gates each raise `AdmissionDenied` with a
-reason literal; each adapter renders its own notice. See [billing.md](billing.md).
+The policy, protection, external participant, balance, cap and channel
+budget gates each raise `AdmissionDenied` with a reason literal, which
+`admission_refusal_text` words in each platform's nouns. See
+[billing.md](billing.md).
 
 A Slack `app_mention` runs a turn only when its text contains the bot's own
 `<@U…>` mention token, follow-ups in a thread included. Slack's docs say the
@@ -215,7 +226,12 @@ adapter passes; no role means non-admin. The MCP turn tools (`ask`,
 and routine fires have no live platform role, so they use the account's
 stored role (and role ids, for channel admins), refreshed on every chat turn. The operator path
 (`platform_user_id` unset: CLI and internal tokens) is not a platform member
-and skips the policy, as it skips billing. Ids are the platform's own (Discord snowflakes, Slack ids, Teams Entra object and
+and skips the policy, as it skips billing. An account marked external is
+never an admin or a channel admin on any path: admission stores no group ids
+for it, the MCP verifier reads the mark from the row on every request, and
+the identity middleware refuses it the setup, channel setup, credential and
+direct-message tools (`middleware/external_participants.py`). Ids are the
+platform's own (Discord snowflakes, Slack ids, Teams Entra object and
 conversation ids):
 
 | Field | Empty means | Enforced by |
@@ -309,6 +325,8 @@ daimon tenants access-policy set discord GUILD_ID --remove-pin-agent AGENT[=CHAN
 daimon tenants access-policy set discord GUILD_ID \
     --pin-agent AGENT=CHANNEL_ID [--replace-pins]   # replace every pin
 daimon tenants access-policy set discord GUILD_ID --clear   # back to open
+daimon tenants access-policy set teams ENTRA_TENANT_ID \
+    --add-member-guest OBJECT_ID [--remove-member-guest OBJECT_ID]   # guests as members
 ```
 
 A pinned agent runs only in its listed channels and the threads under them.
@@ -532,9 +550,16 @@ whose seal ids lie in C is read and continued only by C's own agents
 (`READ_SESSION`, `CONTINUE_SESSION`). A verified turn origin in C holds the
 call to C whatever agent runs it (`origin`): its posts, cards and routines
 stay in C and it sends no direct messages; only its setup thread may still
-configure C's own agent. A thread routine saved without its parent channel
-is treated as inside any isolated channel until delivery places it
-(`Place.parent_unresolved`). Isolation
+configure C's own agent. Held to C, by its own agent or such an origin, a
+call also reads only C and the sessions that ran there (`channel_isolated`
+on `READ_CHANNEL`, `READ_SESSION`, `CONTINUE_SESSION`; `isolation_hold`); a
+session with no channel stamp counts as outside C. A chat token names no
+turn, so while one of its turns runs in C a call is held there whatever
+origin it names (`_held_origin`; turns running in two isolated channels
+refuse it). Held, `list_channels` and the search tools name nothing else, so nothing read
+elsewhere, a prompt planted in C included, is reposted into C. A thread
+routine saved without its parent channel is treated as inside any isolated
+channel until delivery places it (`Place.parent_unresolved`). Isolation
 constrains agents: a caller with no executing agent (an operator token, the
 CLI) may still post into C, which is input, not a leak; the seal keeps reads
 inside.
@@ -866,7 +891,7 @@ but them:
 | "Use from your coding tools" | refused | allowed (a channel admin of every pinned channel: bound to one of them) |
 | Agent chat and any agent-scoped key or bearer token with no platform user | pin and seal apply | pin and seal apply |
 | An agent key minted in a sealed or pinned channel | runs inside that channel only | runs inside that channel only |
-| An isolated channel's own agent | runs, posts and reads only in its channel; sends no DMs | also runs in their own DM and hub (so does a channel admin of that channel), but still posts nowhere outside it |
+| An isolated channel's own agent, or any agent from a turn inside it | runs, posts, reads and lists only in its channel; sends no DMs | the own agent also runs in their own DM and hub (so does a channel admin of that channel), but still posts and reads channels nowhere outside it; the hub's conversation reads above still apply |
 
 The pin, seal, isolation, protection, invoker and fork rules are decided by one pure
 function, `daimon.core.authz.authorize` (who is acting, what they want to do,

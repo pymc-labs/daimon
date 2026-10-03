@@ -3107,13 +3107,26 @@
       'description': '''
         List channels in this server/workspace that you can view.
         
-        Teams: the channels of every team daimon is in that you belong to,
-        with each channel's team. A team appears once daimon has seen activity
-        in it since being added.
+        From inside an isolated channel (its own agent, or origin_context_id
+        placing this turn there) only that channel is listed. Teams: the
+        channels of every team daimon is in that you belong to, with each
+        channel's team. A team appears once daimon has seen activity in it
+        since being added.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
         }),
         'type': 'object',
       }),

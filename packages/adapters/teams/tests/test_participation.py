@@ -107,12 +107,12 @@ class _Rig:
         """Observe `inbound`; how many liveness reads it cost."""
         reads = 0
 
-        async def _is_live() -> bool:
+        async def _admitted() -> TeamsInbound | None:
             nonlocal reads
             reads += 1
-            return live
+            return inbound if live else None
 
-        await self.participation.observe(inbound, tenant_id, is_live=_is_live)
+        await self.participation.observe(inbound, tenant_id, admitted=_admitted)
         return reads
 
 
@@ -310,3 +310,21 @@ async def test_a_quiet_thread_is_judged_by_its_timer(
     await rig.observe(reply, tenant_id)
     await rig.timers[-1]
     assert rig.fired == [reply]
+
+
+async def test_a_followed_reply_is_batched_as_admitted_returns_it(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant_id = await _funded_tenant(db_session)
+    await _follow(db_session, tenant_id, ParticipationScope.THREAD, THREAD_ID)
+    rig = _Rig(db_session_factory)
+    reply = _reply("is the release on?")
+    classified = dataclasses.replace(reply, is_external=True, is_external_known=True)
+
+    async def _admitted() -> TeamsInbound | None:
+        return classified
+
+    await rig.participation.observe(reply, tenant_id, admitted=_admitted)
+    rig.timers[-1].cancel()
+    await rig.participation.judge(THREAD_ID, tenant_id)
+    assert rig.fired == [classified], "the turn runs as the sender was placed"

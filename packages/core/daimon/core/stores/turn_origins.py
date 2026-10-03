@@ -27,11 +27,13 @@ async def create_origin(
     expires_at: datetime,
     now: datetime,
     is_setup: bool = False,
+    is_external: bool = False,
 ) -> TurnOriginRow:
     await session.execute(delete(TurnOrigin).where(TurnOrigin.expires_at <= now))
     origin = TurnOrigin(
         id=uuid.uuid4(),
         is_setup=is_setup,
+        is_external=is_external,
         created_at=now,
         tenant_id=tenant_id,
         account_id=account_id,
@@ -71,6 +73,44 @@ async def get_active_origin(
         statement = statement.with_for_update()
     origin = await session.scalar(statement)
     return TurnOriginRow.model_validate(origin) if origin is not None else None
+
+
+async def list_active_origins(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str,
+    now: datetime,
+) -> list[TurnOriginRow]:
+    """Every turn of this caller running now, oldest first."""
+    rows = await session.scalars(
+        select(TurnOrigin)
+        .where(
+            TurnOrigin.tenant_id == tenant_id,
+            TurnOrigin.account_id == account_id,
+            TurnOrigin.platform == platform,
+            TurnOrigin.expires_at > now,
+        )
+        .order_by(TurnOrigin.created_at, TurnOrigin.id)
+    )
+    return [TurnOriginRow.model_validate(row) for row in rows]
+
+
+async def has_external_origin(
+    session: AsyncSession, *, account_id: uuid.UUID, now: datetime
+) -> bool:
+    """Whether a turn of this account runs now answered as from another organisation."""
+    found = await session.scalar(
+        select(TurnOrigin.id)
+        .where(
+            TurnOrigin.account_id == account_id,
+            TurnOrigin.is_external,
+            TurnOrigin.expires_at > now,
+        )
+        .limit(1)
+    )
+    return found is not None
 
 
 async def update_origin_target(

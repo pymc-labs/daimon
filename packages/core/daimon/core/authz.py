@@ -108,8 +108,11 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   C. Admins are exempt as for pins: a server admin in their own DM or hub,
   and a channel admin of C there too. A call whose verified turn origin lies
   in C is held to C the same way, whatever agent runs it, and only C's own
-  agents read C's sessions. A thread whose parent is unknown
-  (`Place.parent_unresolved`) may lie in C, so it fails closed.
+  agents read C's sessions. Held to C, a call also reads only C and the
+  sessions that ran in it (`isolation_hold`), so nothing from elsewhere is
+  carried into C; an admin's hub read is exempt, since only they see it. A
+  thread whose parent is unknown (`Place.parent_unresolved`) may lie in C, so
+  it fails closed.
 
 Nothing here does I/O: the callers load the policy and resolve the agent,
 and decide again at the moment of action (`daimon.core.turn.admission.reauthorize`
@@ -968,6 +971,11 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
 
     if req.action is Action.READ_CHANNEL:
+        # Held to C, a read stays in C as a post does: nothing read elsewhere,
+        # a prompt injected in C included, can be carried back into C.
+        held = _held_to(agent, req.origin) if agent.present else None
+        if held is not None and place.isolated_channel != held:
+            return _deny("channel_isolated")
         if place.channel_id is None:
             return ALLOW
         if not channel_readable(
@@ -1009,9 +1017,14 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return _deny("not_owner")
     if not _session_readable(policy, req.origin_channel_ids, facts):
         return _deny("sealed")
+    lies_in = _session_isolated_channels(policy, facts)
+    # Held to C, only a session that ran in C is read, as for READ_CHANNEL.
+    held = _held_to(agent, req.origin) if agent.present else None
+    if held is not None and held not in lies_in:
+        return _deny("channel_isolated")
     # Only C's own agents read what was said in C, even from a turn inside it
     # (the built-in answering C's setup thread is not one of them).
-    if any(channel != agent.confined_to for channel in _session_isolated_channels(policy, facts)):
+    if any(channel != agent.confined_to for channel in lies_in):
         return _deny("channel_isolated")
     return ALLOW
 
@@ -1089,6 +1102,25 @@ def build_agent_ref(
     return AgentRef.of(*extra_names, *agent_names(name, metadata))
 
 
+def _placed(policy: TenantAccessPolicy, at: Place) -> Place:
+    return replace(
+        at, isolated_channel=isolated_channel_of(policy, at.channel_id, at.parent_channel_id)
+    )
+
+
+def isolation_hold(policy: TenantAccessPolicy, agent: AgentRef, origin: Place | None) -> str | None:
+    """The isolated channel a call's reads and posts are held to (`_held_to`); None
+    when it is held nowhere. Pure.
+
+    The rule `READ_CHANNEL` applies; a channel list asks it directly, since a
+    sealed channel's name may be listed where its messages may not be read.
+    """
+    if not agent.present:
+        return None
+    confined = replace(agent, confined_to=isolation_owner(policy, agent.names))
+    return _held_to(confined, _placed(policy, origin) if origin is not None else None)
+
+
 def authorize(
     policy: TenantAccessPolicy,
     *,
@@ -1111,11 +1143,6 @@ def authorize(
     agent = agent if agent is not None else AgentRef.none()
     place = place if place is not None else Place()
 
-    def placed(at: Place) -> Place:
-        return replace(
-            at, isolated_channel=isolated_channel_of(policy, at.channel_id, at.parent_channel_id)
-        )
-
     return _decide(
         policy,
         Request(
@@ -1123,10 +1150,10 @@ def authorize(
             action=action,
             surface=surface,
             agent=replace(agent, confined_to=isolation_owner(policy, agent.names)),
-            place=placed(place),
+            place=_placed(policy, place),
             recipient_id=recipient_id,
             origin_channel_ids=origin_channel_ids,
-            origin=placed(origin) if origin is not None else None,
+            origin=_placed(policy, origin) if origin is not None else None,
             session=session,
             operation_family=operation_family,
             reach=reach,
@@ -1160,4 +1187,5 @@ __all__ = [
     "channel_admin_holds",
     "channel_readable",
     "holds_seal",
+    "isolation_hold",
 ]

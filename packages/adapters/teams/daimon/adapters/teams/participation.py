@@ -88,12 +88,13 @@ class TeamsParticipation:
         inbound: TeamsInbound,
         tenant_id: uuid.UUID,
         *,
-        is_live: Callable[[], Awaitable[bool]],
+        admitted: Callable[[], Awaitable[TeamsInbound | None]],
     ) -> None:
         """Add one unmentioned reply to its thread's batch, if the thread is followed.
 
         A thread the cascade resolves to anything but `on` costs one indexed
-        read: no liveness read, no timer, no classifier, no turn.
+        read: no liveness read, no sender lookup, no timer, no classifier, no
+        turn. `admitted` then gives the reply as classified, or None to drop it.
         """
         key = inbound.conversation_id
         if self._is_busy(key):
@@ -114,7 +115,8 @@ class TeamsParticipation:
                 # No Graph, no thread to judge: a followed thread stays mention-only.
                 log.info("thread_participation.skipped", reason="no_history", thread_id=key)
                 return
-            if not await is_live():
+            classified = await admitted()
+            if classified is None:
                 return
         except Exception as exc:  # unasked-for turn: log, stay silent
             log.exception("thread_participation.decision_failed", thread_id=key)
@@ -124,7 +126,7 @@ class TeamsParticipation:
         now = asyncio.get_running_loop().time()
         quiet_seconds = self._settings.quiet_seconds
         batch = self._pending.setdefault(key, _Batch(messages=[], first_at=now))
-        batch.messages.append(inbound)
+        batch.messages.append(classified)
         del batch.messages[:-BATCH_MAX_MESSAGES]
         if batch.timer is not None:
             if now - batch.first_at >= quiet_seconds * BATCH_MAX_QUIET_PERIODS:

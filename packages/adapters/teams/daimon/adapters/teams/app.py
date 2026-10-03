@@ -28,7 +28,7 @@ from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.budget_notice import with_budget_notifier
 from daimon.adapters.teams.card import enable_files_card
-from daimon.adapters.teams.card_actions import toast
+from daimon.adapters.teams.card_actions import stored_external, toast
 from daimon.adapters.teams.channel_admin_groups import owned_team_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.commands import (
@@ -76,6 +76,7 @@ from daimon.adapters.teams.site_grant import (
 )
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
+from daimon.core.access_policy import isolated_channel_of
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
@@ -92,6 +93,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import Role, TaskContinuationRow, TurnCardIntentRow
 from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.stores.tenants import get_tenant, get_turn_cap
@@ -109,7 +111,13 @@ from daimon.core.stores.turn_card_intents import (
 from daimon.core.teams_threads import conversation_of
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn import turn_deadline
-from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.admission import (
+    Admission,
+    AdmissionDenied,
+    ExternalFinding,
+    MissingTurnConfigError,
+    admit,
+)
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
     SessionAgentMismatch,
@@ -177,6 +185,7 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
     "channel_budget_exceeded": "turn.skipped.channel_budget_exceeded",
     "channel_protected": "turn.skipped.channel_protected",
     "channel_isolated": "turn.skipped.channel_isolated",
+    "external_participant": "turn.skipped.external_participant",
 }
 
 _NO_CONTEXT = (
@@ -413,7 +422,38 @@ class TeamsApp:
             await asyncio.gather(*pending, return_exceptions=True)
 
     def _role(self, inbound: TeamsInbound) -> Role:
+        # Someone from another organisation is never an admin, whatever ids are configured.
+        if inbound.is_external:
+            return Role.USER
         return Role.ADMIN if inbound.user_id in self._teams.admin_user_ids else Role.USER
+
+    async def _classified(self, inbound: TeamsInbound) -> TeamsInbound:
+        """`inbound` with what its member lists say about the sender (`externals`)."""
+        externals = self.runtime.externals
+        if externals is None:
+            return inbound
+        membership = await externals.classify(
+            foreign_tenant=inbound.home_tenant_id if inbound.is_external_known else None,
+            kind=inbound.kind,
+            conversation_id=inbound.channel_id,
+            user_id=inbound.user_id,
+            team_id=inbound.team_id,
+            team_group_id=inbound.team_group_id,
+            channel_type=inbound.channel_type,
+        )
+        return dataclasses.replace(
+            inbound,
+            is_external=membership.is_external,
+            is_external_known=membership.is_known,
+            home_tenant_id=membership.home_tenant_id,
+        )
+
+    async def _stored_external(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> TeamsInbound:
+        """`inbound` held as external when nothing placed them but their account says so."""
+        if inbound.is_external or inbound.is_external_known:
+            return inbound
+        stored = await stored_external(self.runtime.sessionmaker, tenant_id, inbound.user_id)
+        return dataclasses.replace(inbound, is_external=True) if stored else inbound
 
     def _first_delivery(self, conversation_id: str, activity_id: str) -> bool:
         key = (conversation_id, activity_id)
@@ -496,14 +536,28 @@ class TeamsApp:
     async def _observe(self, inbound: TeamsInbound) -> None:
         """An unmentioned thread reply: one cascade read, then maybe a batch."""
 
-        async def may_follow() -> bool:
+        async def admitted() -> TeamsInbound | None:
             # Only a followed thread pays these reads; a protected one is never judged.
             if not await self._may_post(inbound.channel_id, inbound.thread_id):
-                return False
+                return None
             live = await live_tenant_id(self.runtime.sessionmaker, inbound.entra_tenant_id)
-            return live is not None
+            if live is None:
+                return None
+            placed = await self._stored_external(await self._classified(inbound), live)
+            if placed.is_external and not await self._isolated(live, placed):
+                return None  # admission would refuse them: judge nothing they wrote
+            return placed
 
-        await self._participation_for(inbound).observe(inbound, self._tenant_id, is_live=may_follow)
+        await self._participation_for(inbound).observe(inbound, self._tenant_id, admitted=admitted)
+
+    async def _isolated(self, tenant_id: uuid.UUID, inbound: TeamsInbound) -> bool:
+        """Whether `inbound` lies in an isolated channel; an unreadable policy says no."""
+        try:
+            async with self.runtime.sessionmaker() as session:
+                policy = await load_access_policy(session, tenant_id=tenant_id)
+        except AccessPolicyUnreadable:
+            return False
+        return isolated_channel_of(policy, inbound.thread_id, inbound.channel_id) is not None
 
     async def _participate(self, trigger: TeamsInbound, tenant_id: uuid.UUID) -> None:
         """The classifier said reply: run one turn as the burst's author, silently shed.
@@ -572,6 +626,14 @@ class TeamsApp:
         """
         if not await self._may_post(inbound.channel_id, inbound.thread_id):
             return
+        inbound = await self._classified(inbound)
+        if inbound.is_external:
+            # Type and tenant only: who sent it stays out of the log.
+            log.info(
+                "teams.message.external",
+                channel_type=inbound.channel_type,
+                home_tenant_id=inbound.home_tenant_id,
+            )
         try:
             await self._route(inbound)
         except _TURN_ERRORS as exc:
@@ -587,7 +649,10 @@ class TeamsApp:
         if tenant_id is None:
             await self._say(inbound, DENIED)
             return
-        command = parse_command(inbound.text, self._commands)
+        inbound = await self._stored_external(inbound, tenant_id)
+        # Someone from another organisation gets no command: the agent hears their words,
+        # and a command's 1:1 chat cannot be opened across organisations.
+        command = None if inbound.is_external else parse_command(inbound.text, self._commands)
         if command is not None:
             name, args = command
             asked_in = None
@@ -783,10 +848,12 @@ class TeamsApp:
                 platform_role_ids=sorted(
                     await owned_team_ids(self.runtime, tenant_id=tenant_id, user_id=inbound.user_id)
                 )
-                if self._role(inbound) is not Role.ADMIN
+                # An admin needs no grant; someone from another organisation gets none.
+                if self._role(inbound) is not Role.ADMIN and not inbound.is_external
                 else (),
                 now=datetime.now(UTC),
                 is_dm=inbound.kind == "dm",
+                external=ExternalFinding(inbound.is_external, inbound.is_external_known),
             )
         except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
             refusal = _admission_refusal(err, tenant_id)
@@ -795,6 +862,8 @@ class TeamsApp:
             if reraise:
                 raise
             return
+        if admission.is_external and not inbound.is_external:
+            inbound = dataclasses.replace(inbound, is_external=True)
         if continuation is not None:
             # A wake runs only as the agent it was queued for: refused before any card.
             check_wake_responder(
@@ -1002,6 +1071,7 @@ class TeamsApp:
             configuration_target_ma_agent_id=config.configuration_target_ma_agent_id,
             configuration_target_name=config.configuration_target_name,
             is_setup=config.thread_binding_kind == "setup",
+            is_external=admission.is_external,
         ) as origin:
             notice = handoff(prepared.continuity) if handoff is not None else None
             quiet = notice is not None or prepared.continuity.state == "continued"
@@ -1306,6 +1376,7 @@ class TeamsApp:
             text=seed,
             service_url=service_url,
         )
+        inbound = await self._stored_external(await self._classified(inbound), tenant_id)
         await self._run_turn(inbound, tenant_id, handoff=handoff, reraise=True, continuation=row)
 
     async def _settle(

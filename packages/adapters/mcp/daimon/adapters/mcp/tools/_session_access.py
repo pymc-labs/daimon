@@ -232,7 +232,8 @@ def _seal_allows(
     is unknown: while the tenant seals anything it is shown only inside that
     same thread. An unstamped session no thread ran on is a
     headless one and carries no channel content. While a channel is isolated,
-    its sessions are shown only to its own agents (`read.agent`).
+    its sessions are shown only to its own agents (`read.agent`), and a call
+    held to it is shown only its sessions.
     """
     subject, surface, action = hub
     return bool(
@@ -241,9 +242,11 @@ def _seal_allows(
             subject=subject,
             action=action,
             surface=surface,
-            # Only an isolated channel's own agents read its sessions.
+            # Only an isolated channel's own agents read its sessions, and a
+            # call held to one reads only the sessions that ran there.
             agent=read.agent,
             origin_channel_ids=read.origin_channel_ids,
+            origin=read.origin_place,
             session=_session_facts(
                 session.metadata or {}, owned=True, legacy_thread_id=legacy_thread_id
             ),

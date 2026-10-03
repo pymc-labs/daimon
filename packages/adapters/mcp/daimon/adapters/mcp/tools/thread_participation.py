@@ -25,6 +25,7 @@ from typing import Final, Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import require_within_hold
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
@@ -256,6 +257,9 @@ async def _get_thread_participation_impl(
     parent_id = await _verify_scope(runtime, auth, scope, scope_id)
     if parent_id is not None:
         channel_id = parent_id
+    if scope_id is not None:
+        # The workspace's mode reveals no channel; a held call reads only its own.
+        await require_within_hold(runtime, auth, thread_id or scope_id, channel_id)
     async with runtime.session_factory() as session:
         modes = await get_participation_modes(
             session,

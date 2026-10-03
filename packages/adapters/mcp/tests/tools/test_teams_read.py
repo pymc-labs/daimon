@@ -22,6 +22,7 @@ from daimon.adapters.mcp.tools.teams._read import (
     _teams_search_messages_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.authz import AgentRef
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.teams_installations import record_teams_installation
@@ -291,6 +292,40 @@ async def test_list_channels_hides_private_channels_from_non_members(
         await _teams_list_channels_impl(_runtime(_Fake(members=frozenset()), sessionmaker), auth)
         == []
     )
+
+
+async def test_an_isolated_channels_agent_lists_searches_and_reads_only_there(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Held to its isolated channel, an agent names, searches and reads nothing else."""
+    auth = await _setup(db_session)
+    runtime = _runtime(_Fake(), sessionmaker)
+    held = ChannelReadPolicy(
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=(_PRIVATE,),
+            isolated_channel_ids=(_PRIVATE,),
+            agent_channel_pins={"own": (_PRIVATE,)},
+        ),
+        origin_channel_ids=frozenset({_PRIVATE}),
+        agent=AgentRef.of("own"),
+    )
+
+    rows = await _teams_list_channels_impl(runtime, auth, held)
+    assert [r.id for r in rows] == [_PRIVATE], "only its own channel is listed"
+    found = await _teams_search_messages_impl(
+        runtime,
+        auth,
+        content="reply",
+        channel_ids=None,
+        author_ids=None,
+        limit=5,
+        read_policy=held,
+    )
+    assert {m.channel_id for m in found.matches} == {_PRIVATE}, "no hits from elsewhere"
+    with pytest.raises(ToolError, match="nothing outside it is read"):
+        await _teams_read_channel_impl(
+            runtime, auth, channel_id=_CHANNEL, limit=5, cursor=None, read_policy=held
+        )
 
 
 async def test_list_threads_and_search_scan_recent_posts(
