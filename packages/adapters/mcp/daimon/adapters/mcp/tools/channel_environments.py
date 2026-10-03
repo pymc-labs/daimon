@@ -120,19 +120,20 @@ async def _require_pick_allowed(
             )
         except AccessPolicyUnreadable as exc:
             raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
-    hidden = await load_caller_hidden_environments(runtime, auth)
-    if environment_name in hidden:  # before any refusal that would name it
-        raise ToolError(_missing(environment_name))
     if not pick.decision:
         record_authz_denial(Action.SET_CHANNEL_ENVIRONMENT, pick.decision.reason)
-    if pick.decision.reason == "sealed":
-        raise ToolError(
-            build_sealed_network_refusal(environment_name=environment_name) + " Do not retry."
-        )
-    if not pick.decision:
+    if not pick.decision and pick.decision.reason != "sealed":
         if target.channel_id is None:
             _require_admin(auth)  # the workspace default's own copy
         raise ToolError(_NEEDS_ADMIN)
+    # Only a caller who may make the change learns whether a name exists, and never a hidden one.
+    hidden = await load_caller_hidden_environments(runtime, auth)
+    if environment_name in hidden:
+        raise ToolError(_missing(environment_name))
+    if not pick.decision:  # sealed
+        raise ToolError(
+            build_sealed_network_refusal(environment_name=environment_name) + " Do not retry."
+        )
     if pick.missing:
         raise ToolError(_missing(environment_name))
     if pick.needs_confirm and not confirm_open_network:
