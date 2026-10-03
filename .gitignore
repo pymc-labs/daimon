@@ -47,3 +47,6 @@ formal/tla2tools.jar
 
 # Operator backups contain credentials and private data.
 /backups/
+
+# Local first-reply timing; contains no credentials, but is per-run state.
+/.daimon-setup-timing.json

@@ -1,8 +1,8 @@
 # Self-hosting daimon
 
-This guide expands the README quickstart. It covers the full Docker Compose
-setup, running the processes by hand, Slack, Microsoft Teams, the Claude Code
-login mounts, chart storage and connecting MCP servers.
+This guide expands the [agent-driven setup](https://github.com/pymc-labs/daimon/blob/main/SETUP.md). It covers Docker
+Compose, chat-platform registration, running the processes by hand, the Claude
+Code login mounts, Microsoft Teams, chart storage and connecting MCP servers.
 
 ## Prerequisites
 
@@ -13,6 +13,16 @@ login mounts, chart storage and connecting MCP servers.
 
 ## 1. Configure the environment
 
+From a checkout, ask your coding agent to follow [SETUP.md](https://github.com/pymc-labs/daimon/blob/main/SETUP.md), or
+run its setup command yourself. The command creates `.env`, generates the MCP
+JWT secret, Postgres password, Fernet encryption key and a per-install CLI
+workspace identifier, and prints JSON with
+the next action. It preserves existing values when run again. Only the
+Anthropic API key needs to be supplied by you. Keep that key in a workspace
+dedicated to this deployment.
+
+The manual equivalent is:
+
 ```bash
 cp .env.example .env
 ```
@@ -21,8 +31,12 @@ Open `.env`, then uncomment and fill in:
 
 - `DAIMON_ANTHROPIC__API_KEY`: your Anthropic API key.
 - `DAIMON_MCP__JWT_SECRET`: any random string, e.g. `openssl rand -hex 32`.
-- `DAIMON_MCP__PUBLIC_URL`: `http://localhost:8765/mcp` is fine for local use.
+- `DAIMON_MCP__PUBLIC_URL`: leave unset for the first CLI reply. Set a public
+  HTTPS URL before enabling MCP tools or a chat platform; Managed Agents rejects
+  a localhost MCP URL.
 - `POSTGRES_PASSWORD`: a strong, URL-safe value (avoid `@ : / % #`).
+- `DAIMON_CLI__WORKSPACE_ID`: a stable, unique identifier for this install.
+  The setup command generates one; set one manually if you copy `.env.example`.
 - `DAIMON_CRYPTO__KEYS`: a Fernet key, from
   `uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
   Paste the key as is. During rotation, list several keys newest first,
@@ -32,9 +46,10 @@ Open `.env`, then uncomment and fill in:
   [Agent environment encryption](#agent-environment-encryption)). Back it up
   separately from the database.
 
-The first four must be set before the first `docker compose` command:
-`docker-compose.yml` interpolates them for every service with fail-fast
-`${VAR:?...}` guards. Set `DAIMON_CRYPTO__KEYS` at the same time; after the
+The Anthropic key, JWT secret and Postgres password must be set before the
+first `docker compose` command: `docker-compose.yml` interpolates them for
+every service with fail-fast `${VAR:?...}` guards. Set `DAIMON_CRYPTO__KEYS` at
+the same time; after the
 stack is up, `docker compose run --rm init "daimon crypto verify"` confirms it
 is set and that no agent key is stored in plaintext. `.env` is gitignored, so secrets never get committed.
 `.env.example` documents every other setting.
@@ -42,7 +57,32 @@ Set `DAIMON_OPS__ALERT_WEBHOOK_URL` to a private Discord channel webhook to
 receive short alerts for installs, Stripe top-ups, and Anthropic limits.
 Leave it unset to disable operator alerts.
 
-## 2. Create the Discord application
+## 2. Get a first reply locally
+
+Start only the services needed for the local CLI tenant. This does not need a
+Discord or Slack app:
+
+```bash
+docker compose up --build -d postgres init
+docker compose ps --all
+```
+
+`init` migrates the database and seeds the configured CLI tenant. Wait for it to
+exit successfully before creating a session. The CLI commands run in a one-off
+container with the same database and Anthropic settings:
+
+```bash
+docker compose run --rm --no-deps --entrypoint daimon init sessions create --json
+docker compose run --rm --no-deps --entrypoint daimon init run --session SESSION_ID "Say hello in one sentence."
+```
+
+Replace `SESSION_ID` with `session_id` from the first command's JSON. The second command streams
+newline-delimited JSON; a `terminal` event with `status: "end_turn"` confirms
+the turn completed. This verifies the agent before any chat-platform setup.
+The CLI tenant is local to this deployment and is separate from Discord and
+Slack tenants.
+
+## 3. Create the Discord application (optional)
 
 1. Create an application in the
    [Discord Developer Portal](https://discord.com/developers/applications).
@@ -52,21 +92,33 @@ Leave it unset to disable operator alerts.
    privileged intent; without it the bot cannot read mentions.
 4. Under **OAuth2 → URL Generator**, select the `bot` and
    `applications.commands` scopes, then under **Bot Permissions** select at
-   least `Send Messages`, `Send Messages in Threads`,
-   `Create Public Threads`, `Manage Threads` and `Read Message History`.
+   least `View Channels`, `Send Messages`, `Embed Links`,
+   `Read Message History`, `Manage Threads`, `Create Public Threads` and
+   `Send Messages in Threads`. `Attach Files` and `Add Reactions` are
+   recommended for charts, tables and reactions; the verifier can pass
+   without them.
 5. Open the generated URL and invite the bot to a test server you control.
+6. Run `docker compose run --rm --no-deps --entrypoint daimon init setup verify
+   discord --guild-id GUILD_ID`, replacing `GUILD_ID` with your server's ID.
+   Use its JSON result to fix any missing item before testing a mention.
 
 Setup and routines commands require Discord's `Manage Server` permission.
 
-## 3. Start the stack
+## 4. Start Discord
+
+Set `DAIMON_MCP__PUBLIC_URL` in `.env` to a publicly reachable HTTPS MCP
+endpoint (for example, `https://mcp.example.com/mcp`) routed to port 8765,
+before starting `mcp` or
+`scheduler`. The local CLI check in step 2 leaves this setting unset. Run
+`docker compose run --rm --no-deps --entrypoint daimon init defaults apply`
+after setting it so the managed agents receive the reachable URL.
 
 ```bash
-docker compose up --build -d
+docker compose up --build -d mcp scheduler discord
 ```
 
-This brings up Postgres, runs migrations and seeds the default agents,
-environments and skills (the `init` service does both), then starts the
-`mcp`, `discord` and `scheduler` services.
+Compose reuses the already running Postgres and `init` services. If you skipped
+step 2, the same command starts their dependencies.
 
 Set `DAIMON_DATABASE__POOL_SIZE`, `DAIMON_DATABASE__MAX_OVERFLOW` and
 `DAIMON_DATABASE__POOL_TIMEOUT` per process when sizing Postgres for more
@@ -137,20 +189,29 @@ counts its own.
 
 ## Slack (optional)
 
-Slack needs a publicly reachable `DAIMON_MCP__PUBLIC_URL`. The bot token is
+Slack needs a publicly reachable HTTPS `DAIMON_MCP__PUBLIC_URL`. The bot token is
 issued by an OAuth install callback served by the `mcp` process, not read
 from an env var, and Slack will not redirect to `localhost`.
 
 1. Create the Slack app from
    [`slack-app-manifest.yaml`](slack-app-manifest.yaml) and follow the steps
-   in its header comment. It fills in the scopes, slash commands, events and
-   Socket Mode toggles.
+   in its header comment. The manifest sets scopes, slash commands, events,
+   Socket Mode and the OAuth redirect. Slack still requires a human to create
+   the app, issue an app-level `connections:write` token and copy its app
+   credentials. Socket Mode needs no inbound event URL, but the install OAuth
+   callback needs a public HTTPS origin routed to the `mcp` service.
 2. Put the resulting `DAIMON_SLACK__SIGNING_SECRET`, `DAIMON_SLACK__APP_TOKEN`,
    `DAIMON_SLACK__CLIENT_ID` and `DAIMON_SLACK__CLIENT_SECRET` in `.env`, plus
    `DAIMON_CRYPTO__KEYS` (a Fernet key; the adapter stores workspace tokens
    encrypted and refuses to start without one).
-3. `docker compose --profile slack up --build -d`
+3. `docker compose --profile slack up --build -d postgres init mcp scheduler slack`
 4. Open `https://<your-host>/oauth/slack/install` and install to a workspace.
+
+For an install used across multiple workspaces, enable distribution in the
+Slack app settings. Socket Mode apps cannot be listed in Slack Marketplace.
+The [manifest documentation](https://docs.slack.dev/app-manifests/configuring-apps-with-app-manifests/)
+describes the supported registration fields. Check the install with
+`daimon tenants list --platform slack --json` inside the `init` container.
 
 [`slack.md`](slack.md) covers the trust model for per-user Slack access.
 Read it before enabling that feature.
