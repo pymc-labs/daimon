@@ -70,10 +70,13 @@ Managed Agents resources. Start with a clean clone and Docker Compose.
 
    The turn streams newline-delimited JSON. A `sse` event of type
    `agent.message` with nonempty text is the first reply; a `terminal` event with
-   `status: "end_turn"` means the turn completed. The timer prints a separate
+   `status: "end_turn"` means the turn completed. Here `--human-steps 1` is an
+   example: enter the number of owner actions you actually counted. The timer
+   starts before `.env` preparation and includes the wait for the owner to
+   enter the key, Docker builds and initialization. It prints a separate
    JSON metric on stderr with `seconds_to_first_text`,
    `seconds_to_terminal`, `human_steps` and the terminal status. Keep the
-   metric and a redacted turn transcript for the hackathon report. The timer
+   metric and a redacted turn transcript for the setup report. The timer
    stores timestamps only in `.daimon-setup-timing.json` and removes that file
    after the turn.
 
@@ -85,7 +88,14 @@ defaults apply` before testing charts, notebooks, OAuth, Discord or Slack.
 
 ## Discord, if wanted
 
-The owner does the browser steps in [the Discord checklist](docs/self-hosting.md#3-create-the-discord-application-optional): create an app and bot, enable Message Content Intent, select `bot` and `applications.commands`, grant the listed permissions, and invite the bot to a test server. Put the token in `.env`, then run:
+The owner does the browser steps in
+[the Discord checklist](docs/self-hosting.md#3-create-the-discord-application-optional):
+create an app and bot, enable Message Content Intent, select `bot` and
+`applications.commands`, grant the listed permissions, and invite the bot to a
+test server. Put the token in `.env`. Before starting `mcp` or `scheduler`, set
+`DAIMON_MCP__PUBLIC_URL` to a publicly reachable HTTPS MCP endpoint (for
+example, `https://mcp.example.com/mcp`) routed to port 8765
+and rerun `defaults apply` as described above. Then run:
 
 ```bash
 docker compose run --rm --no-deps --entrypoint daimon init setup verify discord --guild-id GUILD_ID
@@ -133,6 +143,11 @@ or create a PAT just to complete this setup.
 Tell the owner what replied, the elapsed seconds and the number of human
 steps. State any platform still unconfigured and the exact next browser step.
 Do not include `.env`, credentials or raw tokens in the report. For a manual
-baseline measurement, run the same timer with `--method manual` from the
-start of the old [self-hosting path](docs/self-hosting.md); record each manual
-step, then use `observe` on the same CLI turn.
+baseline measurement, use the self-hosting guide at the pinned pre-setup commit
+`7847a85a2` (`git show 7847a85a2:docs/self-hosting.md`), not the current guide.
+Start the timer before its `.env` preparation with
+`python3 scripts/measure_first_reply.py start --method manual`; record each
+owner action and enter that count in `--human-steps` when running `observe` on
+the same CLI turn. Report any changes needed to make that older path work.
+The timer includes human waiting time and builds. A local configuration check
+using a dummy key does not measure time to first reply.

@@ -11,11 +11,11 @@ it to work.
 ## What it is
 
 The plugin declares two HTTP MCP servers, `daimon-slack` and `daimon-discord`,
-and carries no credentials of its own. It adds one skill, `daimon-context`,
-which routes a question about team context to the right daimons and merges
-their answers, and one command, `/daimon:daimon-status`, which lists what is
-connected without asking anything. Both are built from the eight tools
-registered by
+and carries no credentials of its own. It adds two skills: `daimon-context`
+routes a question about team context to the right daimons and merges their
+answers; `setup` guides a local self-hosted install. One command,
+`/daimon:daimon-status`, lists what is connected without asking anything.
+`daimon-context` and the status command use the eight tools registered by
 `packages/adapters/mcp/daimon/adapters/mcp/tools/hub.py`, catalogued in
 [mcp-tools.md](mcp-tools.md#hub-login-mounts-hub) — a surface separate from
 the main MCP tool set.

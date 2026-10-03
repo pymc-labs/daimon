@@ -94,7 +94,9 @@ Slack tenants.
    `applications.commands` scopes, then under **Bot Permissions** select at
    least `View Channels`, `Send Messages`, `Embed Links`,
    `Read Message History`, `Manage Threads`, `Create Public Threads` and
-   `Send Messages in Threads`.
+   `Send Messages in Threads`. `Attach Files` and `Add Reactions` are
+   recommended for charts, tables and reactions; the verifier can pass
+   without them.
 5. Open the generated URL and invite the bot to a test server you control.
 6. Run `docker compose run --rm --no-deps --entrypoint daimon init setup verify
    discord --guild-id GUILD_ID`, replacing `GUILD_ID` with your server's ID.
@@ -103,6 +105,13 @@ Slack tenants.
 Setup and routines commands require Discord's `Manage Server` permission.
 
 ## 4. Start Discord
+
+Set `DAIMON_MCP__PUBLIC_URL` in `.env` to a publicly reachable HTTPS MCP
+endpoint (for example, `https://mcp.example.com/mcp`) routed to port 8765,
+before starting `mcp` or
+`scheduler`. The local CLI check in step 2 leaves this setting unset. Run
+`docker compose run --rm --no-deps --entrypoint daimon init defaults apply`
+after setting it so the managed agents receive the reachable URL.
 
 ```bash
 docker compose up --build -d mcp scheduler discord

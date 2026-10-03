@@ -10,8 +10,9 @@ description: Use when the user asks Claude Code to self-host Daimon OS or set up
 2. Read `SETUP.md` in that checkout. Follow its commands in order and parse
    the JSON from each setup or verification command. Treat a missing step as
    work to do; do not assume that an exit code alone proves setup is complete.
-3. Ask the user for an Anthropic API key from a workspace dedicated to this
-   deployment. Put it only in the local `.env` file with restricted permissions.
+3. Tell the owner to enter an Anthropic API key from a workspace dedicated to
+   this deployment directly into the local `.env` file with restricted
+   permissions. Never ask for the key in chat or handle its value yourself.
    Never echo, log, commit or paste the key into a command argument.
 4. Start the local CLI path and get a first reply before asking the user to
    create a Discord or Slack app. Record the elapsed time and human steps as

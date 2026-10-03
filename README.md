@@ -92,7 +92,12 @@ Codex, give it [SETUP.md](SETUP.md) and ask it to get a local first reply.
    Use the returned `session_id` with `daimon run` as shown in
    [SETUP.md](SETUP.md#local-first-reply).
 
-3. If you want Discord, create a bot in the
+3. Before starting `mcp` or `scheduler`, set `DAIMON_MCP__PUBLIC_URL` in
+   `.env` to a publicly reachable HTTPS MCP endpoint (for example,
+   `https://mcp.example.com/mcp`) routed to port 8765. The initial local CLI
+   reply leaves this setting unset.
+   Rerun `docker compose run --rm --no-deps --entrypoint daimon init defaults
+   apply` after setting it. If you want Discord, create a bot in the
    [Developer Portal](https://discord.com/developers/applications), enable
    Message Content Intent, put its token in `.env`, invite it to your server,
    and follow the [Discord checklist](docs/self-hosting.md#3-create-the-discord-application-optional).
