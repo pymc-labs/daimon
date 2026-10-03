@@ -30,10 +30,12 @@ fields, or on `readers` with `writers: none`. A caller with no agent (the
 CLI, an operator token) may still post where `writers` is `own`: that is
 input, and the readers rule keeps it inside.
 
-A rule sits on a channel, a thread or a Discord category. A thread takes the
-strictest of its own rule, its channel's and its category's. A category only
-takes `writers: none`. A Slack thread (`channel:ts`) only takes
-`readers: inside`; Teams channel ids take any rule.
+A rule sits on a channel or a Discord category, and a thread follows both; a
+category only takes `writers: none`. Chat and the Permissions screens set
+channel rules only: a thread id names its channel. The operator can still keep
+one Slack or Discord thread to turns inside it (`daimon channels rule set
+--thread ID --readers inside`); a thread takes the strictest of that, its
+channel's and its category's rule.
 
 ## What a channel rule limits
 

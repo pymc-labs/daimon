@@ -873,10 +873,7 @@ def channels_rule_set_command(
     workspace_id: str,
     channel_id: Annotated[
         str,
-        typer.Argument(
-            help="The channel's id, or a Slack thread's channel_id:thread_ts; "
-            "a Teams thread id names its channel."
-        ),
+        typer.Argument(help="The channel's id; a Slack or Teams thread id names its channel."),
     ],
     readers: Annotated[
         str | None,
@@ -907,6 +904,14 @@ def channels_rule_set_command(
         bool,
         typer.Option("--category", help="CHANNEL_ID is a Discord category; only --writers."),
     ] = False,
+    thread: Annotated[
+        bool,
+        typer.Option(
+            "--thread",
+            help="CHANNEL_ID is one thread (Slack channel_id:thread_ts or a Discord thread id); "
+            "only --readers inside or any.",
+        ),
+    ] = False,
 ) -> None:
     """Set who can read a channel and who can post there; a value left out is kept."""
     console = Console(highlight=False)
@@ -924,6 +929,7 @@ def channels_rule_set_command(
                 copy_from=copy_from,
                 release_agents=release_agents,
                 category=category,
+                thread=thread,
             )
 
     run_cli(_run(), console=console)
@@ -951,6 +957,7 @@ async def channels_rule_set(
     copy_from: str | None = None,
     release_agents: bool = False,
     category: bool = False,
+    thread: bool = False,
     discord_transport: httpx.AsyncBaseTransport | None = None,
     slack_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
@@ -961,8 +968,11 @@ async def channels_rule_set(
         raise typer.BadParameter("pass --readers, --writers or --release-agents")
     if category and (platform != "discord" or readers or copy_from or release_agents):
         raise typer.BadParameter("--category is a Discord category, and takes only --writers")
+    if thread and (category or writers or copy_from or release_agents or wanted_readers == "own"):
+        raise typer.BadParameter("--thread takes only --readers inside or any")
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-    where = f"{platform}:{workspace_id} {'category' if category else 'channel'}"
+    kind = "category" if category else "thread" if thread else "channel"
+    where = f"{platform}:{workspace_id} {kind}"
     # The CLI is the deployment operator.
     subject = Subject(is_admin=True)
     if category:
@@ -981,10 +991,13 @@ async def channels_rule_set(
         console.print(f"{where} {channel_id.strip()}: {status} writers {wanted_writers}.")
         return
     try:
-        thread = thread_rule_key(platform, channel_id)
+        channel = (
+            thread_rule_key(platform, channel_id)
+            if thread
+            else _ids(platform, channel_id, roles=[], users=[])[0]
+        )
     except RuleRefused as exc:
         raise typer.BadParameter(str(exc)) from exc
-    channel = thread or _ids(platform, channel_id, roles=[], users=[])[0]
     label = (
         await _channel_label(
             rt,

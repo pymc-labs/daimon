@@ -564,6 +564,30 @@ async def test_rule_set_refuses_bad_flag_mixes(
         await channels_rule_set(**base, platform="discord", readers="inside", category=True)
 
 
+async def test_rule_set_keeps_a_thread_rule_to_the_thread_flag(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Only `--thread` sets one thread's rule; a thread id alone names its channel."""
+    tenant_id = await _isolatable(db_session_factory, "slack", "T1", ("C01AB", "C02CD"))
+    rt = build_cli_runtime(
+        db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_isolate_settings()
+    )
+    args = {"rt": rt, "console": _console(), "platform": "slack", "workspace_id": "T1"}
+    thread = "C01AB:1700000000.000200"
+    with pytest.raises(typer.BadParameter, match="--thread takes only --readers inside or any"):
+        await channels_rule_set(**args, channel_id=thread, readers="own", thread=True)
+    with pytest.raises(typer.BadParameter, match="not a Slack channel_id:thread_ts"):
+        await channels_rule_set(**args, channel_id="C01AB", readers="inside", thread=True)
+    await channels_rule_set(**args, channel_id=thread, readers="inside", thread=True)
+    await channels_rule_set(**args, channel_id="C02CD:1700000000.000300", writers="none")
+    async with db_session_factory() as s:
+        policy = await load_access_policy(s, tenant_id=tenant_id)
+    assert policy.channel_rules == {
+        thread: ChannelRule(readers="inside"),
+        "C02CD": ChannelRule(writers="none"),
+    }
+
+
 async def test_rule_set_writers_on_a_teams_channel_and_refusals_write_nothing(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

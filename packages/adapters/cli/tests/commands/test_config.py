@@ -424,7 +424,7 @@ def test_config_get_with_guild_override_resolves_that_guilds_config(
 
 
 @pytest.mark.asyncio
-async def test_config_keeps_an_isolated_channels_agent_inside_it(db_session: AsyncSession) -> None:
+async def test_config_keeps_a_channels_own_agent_inside_it(db_session: AsyncSession) -> None:
     """Routing that would break channel isolation exits and writes nothing."""
     from daimon.adapters.cli.commands.config import _config_set_entry, _config_unset_entry
     from daimon.core.access_policy import TenantAccessPolicy
@@ -476,6 +476,8 @@ async def test_config_keeps_an_isolated_channels_agent_inside_it(db_session: Asy
     assert "another channel's own agent" in await run("set", "tenant", "local")
     assert "own agents answer here" in await run("set", "channel:room", "shared")
     assert "so its default stays one of them" in await run("unset", "channel:room")
-    assert "belongs to another" in await run("propagate", "channel:elsewhere", "channel:room")
+    assert "another channel's own agent" in await run(
+        "propagate", "channel:elsewhere", "channel:room"
+    )
     row = await get_scope(db_session, scope=room)
     assert row is not None and row.agent_name == "local", "every refusal writes nothing"

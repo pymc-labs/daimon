@@ -41,6 +41,7 @@ none, its agent rule names other channels, or a channel kept to its own agents
 would be crossed."""
 
 _SLACK_THREAD_KEY = re.compile(r"[CGD][A-Z0-9]+:\d+\.\d+")
+_DISCORD_ID = re.compile(r"[0-9]+")
 
 
 class RuleRefused(DaimonError, ValueError):
@@ -79,17 +80,16 @@ def with_channel_rule(
     return _rebuilt(policy, channel_rules=_with(policy.channel_rules, channel_id, rule))
 
 
-def thread_rule_key(platform: str, raw: str) -> str | None:
-    """`raw` when it names a Slack thread (``channel:ts``), which keeps a rule of
-    its own; None for any other id (a Teams thread id names its channel). Raise
-    `RuleRefused` for a malformed Slack one rather than setting its channel.
+def thread_rule_key(platform: str, raw: str) -> str:
+    """The key one thread's rule goes under: a Slack ``channel:ts`` or a Discord
+    thread id. Raise `RuleRefused` for anything else; a Teams thread keeps none.
     """
     value = raw.strip()
-    if platform != "slack" or ":" not in value:
-        return None
-    if _SLACK_THREAD_KEY.fullmatch(value):
+    if (platform == "slack" and _SLACK_THREAD_KEY.fullmatch(value)) or (
+        platform == "discord" and _DISCORD_ID.fullmatch(value)
+    ):
         return value
-    raise RuleRefused(f"{value} is not a Slack channel id or channel:thread_ts")
+    raise RuleRefused(f"{value} is not a Slack channel_id:thread_ts or a Discord thread id")
 
 
 def check_channel_rule(channel_id: str, rule: ChannelRule) -> None:

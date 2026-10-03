@@ -5100,8 +5100,8 @@
         agent, without credentials, as the channel's default. To make agent X the only
         agent in a channel, set the channel's default to X first. ``release_agents``
         drops the rules of the agents kept to the channel, once readers aren't ``own``.
-        ``channel_id`` is the channel's id, or a Slack thread's ``channel:ts`` (readers only);
-        a Teams thread id names its channel.
+        Rules are per channel: ``channel_id`` names a channel, never a thread (a Slack or
+        Teams thread id names its channel; on Discord pass ``<channel role="parent_channel">``).
       ''',
       'parameters': dict({
         'additionalProperties': False,
