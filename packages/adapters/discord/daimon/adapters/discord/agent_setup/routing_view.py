@@ -42,16 +42,16 @@ from daimon.adapters.discord.agent_setup.channel_skills_view import (
     ChannelSkillsView,
     load_channel_skills,
 )
-from daimon.adapters.discord.agent_setup.isolation_view import (
-    ISOLATION_LABEL,
-    IsolationView,
-    load_isolation_status,
-)
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.operator_tokens_view import (
     OPERATOR_TOKENS_LABEL,
     OperatorTokensView,
     load_operator_tokens,
+)
+from daimon.adapters.discord.agent_setup.permissions_view import (
+    PERMISSIONS_LABEL,
+    PermissionsView,
+    load_rule_status,
 )
 from daimon.adapters.discord.agent_setup.scope_default import resolve_account_display
 from daimon.adapters.discord.agent_setup.state import PanelState
@@ -424,11 +424,11 @@ class RoutingView(PanelViewBase):
             admins_button.callback = self._on_channel_admins  # type: ignore[method-assign]  # per-instance callback
             nav_row.add_item(admins_button)
             if state.channel_id:
-                isolation_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
-                    label=ISOLATION_LABEL, style=discord.ButtonStyle.secondary
+                permissions_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                    label=PERMISSIONS_LABEL, style=discord.ButtonStyle.secondary
                 )
-                isolation_button.callback = self._on_isolation  # type: ignore[method-assign]  # per-instance callback
-                nav_row.add_item(isolation_button)
+                permissions_button.callback = self._on_permissions  # type: ignore[method-assign]  # per-instance callback
+                nav_row.add_item(permissions_button)
             tokens_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 label=OPERATOR_TOKENS_LABEL, style=discord.ButtonStyle.secondary
             )
@@ -540,15 +540,15 @@ class RoutingView(PanelViewBase):
             note, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
         )
 
-    async def _on_isolation(self, interaction: discord.Interaction) -> None:
-        """Open this channel's isolation screen; Manage Server is re-checked live."""
+    async def _on_permissions(self, interaction: discord.Interaction) -> None:
+        """Open this channel's permissions screen; Manage Server is re-checked live."""
         if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             return
         await interaction.response.defer()
-        status = await load_isolation_status(self.runtime, state=self.state)
+        status = await load_rule_status(self.runtime, state=self.state)
         await self.swap_to(
             interaction,
-            IsolationView(
+            PermissionsView(
                 self.state,
                 runtime=self.runtime,
                 allowed_user_id=self.allowed_user_id,

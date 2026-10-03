@@ -25,7 +25,7 @@ import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _tidy as tidy_module
-from daimon.adapters.mcp.tools._channel_policy import SealedChannelError
+from daimon.adapters.mcp.tools._channel_policy import ChannelReadRefused
 from daimon.adapters.mcp.tools.discord._send import (
     _send_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -585,7 +585,7 @@ async def test_a_protected_channel_refuses_tidying_decided_at_call_time(
     # Protected after the post: the decision uses the policy at call time.
     await world.set_policy(TenantAccessPolicy(protected_channel_ids=(_CHANNEL,)))
 
-    with pytest.raises(ToolError, match="protected"):
+    with pytest.raises(ToolError, match="writers to none"):
         await _delete_message_impl(
             world.runtime,
             auth,
@@ -604,7 +604,7 @@ async def test_a_pinned_agent_cannot_tidy_outside_its_channels(
     message_id = await _post(world, auth)
     await world.set_policy(TenantAccessPolicy(agent_channel_pins={_AGENT: (_OTHER_CHANNEL,)}))
 
-    with pytest.raises(ToolError, match="pinned to its own channels"):
+    with pytest.raises(ToolError, match="runs it only in certain channels"):
         await _edit_message_impl(
             world.runtime,
             auth,
@@ -633,7 +633,7 @@ async def test_no_other_agent_edits_into_an_isolated_channel(
     message_id = await _post(world, auth)
     await world.set_policy(_isolate(_CHANNEL, own_agent=_OTHER_AGENT))
 
-    with pytest.raises(ToolError, match="this channel is confidential"):
+    with pytest.raises(ToolError, match="kept to its own agents"):
         await _edit_message_impl(
             world.runtime,
             auth,
@@ -677,7 +677,7 @@ async def test_a_sealed_channel_is_tidied_only_from_a_turn_inside_it(
     await world.set_policy(TenantAccessPolicy(sealed_channel_ids=(_CHANNEL,)))
     outside_auth, outside = await world.turn(parent=_OTHER_CHANNEL, thread=_OTHER_CHANNEL)
 
-    with pytest.raises(SealedChannelError):
+    with pytest.raises(ChannelReadRefused):
         await _delete_message_impl(
             world.runtime,
             outside_auth,
@@ -876,7 +876,7 @@ async def test_a_policy_change_during_final_identity_io_stops_the_platform_call(
     message_id = await _post(world, auth)
     _commit_during_identity_io(monkeypatch, world, _POLICY_CHANGES[change])
 
-    with pytest.raises(ToolError, match="protected|pinned"):
+    with pytest.raises(ToolError, match="writers to none|runs it only in certain channels"):
         if action == "edit":
             await _edit_message_impl(
                 world.runtime,
@@ -921,7 +921,7 @@ async def test_a_policy_change_during_the_ownership_fetch_stops_the_delete(
         await world.set_policy(_POLICY_CHANGES[change])
 
     fake.on_fetch = commit_policy
-    with pytest.raises(ToolError, match="protected|pinned"):
+    with pytest.raises(ToolError, match="writers to none|runs it only in certain channels"):
         await _delete_message_impl(
             world.runtime,
             auth,

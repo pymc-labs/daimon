@@ -25,7 +25,6 @@ from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
-from daimon.core.channel_isolation import keeps_routine_inside
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
@@ -35,6 +34,7 @@ from daimon.core.routine_delivery import (
     render_fallback_post,
     teams_thread_id,
 )
+from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.domain import RoutineRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

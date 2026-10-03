@@ -21,7 +21,7 @@ from daimon.adapters.mcp.tools.teams._read import (
     _teams_read_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _teams_search_messages_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.access_policy import OPEN_ACCESS_POLICY, ChannelRule, TenantAccessPolicy
 from daimon.core.authz import AgentRef
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
@@ -251,7 +251,9 @@ async def test_a_sealed_channel_is_refused_from_outside(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     auth = await _setup(db_session)
-    sealed = ChannelReadPolicy(policy=TenantAccessPolicy(sealed_channel_ids=frozenset({_CHANNEL})))
+    sealed = ChannelReadPolicy(
+        policy=TenantAccessPolicy(channel_rules={_CHANNEL: ChannelRule(readers="inside")})
+    )
     with pytest.raises(ToolError):
         await _teams_get_message_impl(
             _runtime(_Fake(), sessionmaker),
@@ -267,7 +269,9 @@ async def test_a_sealed_thread_stays_out_of_its_channel_reads(
 ) -> None:
     auth = await _setup(db_session)
     runtime = _runtime(_Fake(), sessionmaker)
-    sealed = ChannelReadPolicy(policy=TenantAccessPolicy(sealed_channel_ids=frozenset({_THREAD})))
+    sealed = ChannelReadPolicy(
+        policy=TenantAccessPolicy(channel_rules={_THREAD: ChannelRule(readers="inside")})
+    )
     read = await _teams_read_channel_impl(
         runtime, auth, channel_id=_CHANNEL, limit=5, cursor=None, read_policy=sealed
     )

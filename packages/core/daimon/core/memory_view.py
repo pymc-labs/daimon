@@ -6,10 +6,10 @@ import uuid
 
 from anthropic import AsyncAnthropic
 from daimon.core.agent_pins import agent_pin_names
-from daimon.core.channel_isolation import is_memory_hidden
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.rule_views import is_memory_hidden
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_memory_stores import get_memory_store_id

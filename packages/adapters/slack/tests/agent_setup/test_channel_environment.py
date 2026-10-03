@@ -310,8 +310,8 @@ async def test_a_channel_admin_of_a_sealed_channel_is_refused_an_open_network(
         environment_option_value("science"),
     )
 
-    assert "sealed" in client.chat_postEphemeral.call_args.kwargs["text"], (
-        "the refusal names the seal"
+    assert "Only turns inside" in client.chat_postEphemeral.call_args.kwargs["text"], (
+        "the refusal names the rule"
     )
     assert (
         await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))

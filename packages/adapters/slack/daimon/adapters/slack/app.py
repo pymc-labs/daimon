@@ -1221,7 +1221,7 @@ class SlackApp:
         )
         if not post_state.may_post:
             log.info(
-                "turn.skipped.channel_protected",
+                "turn.skipped.writers_none",
                 team_id=team_id,
                 channel_id=channel,
                 state=post_state.value,
@@ -1530,7 +1530,7 @@ class SlackApp:
                 thread_id=thread_id,
             ):
                 log.info(
-                    "turn.skipped.channel_protected",
+                    "turn.skipped.writers_none",
                     tenant_id=str(tenant_id),
                     team_id=team_id,
                     channel_id=channel,
@@ -1810,11 +1810,11 @@ class SlackApp:
             )
             return
         except AdmissionDenied as err:
-            if err.reason == "channel_protected":
+            if err.reason == "writers_none":
                 # Nothing may be posted into a protected channel, a refusal
                 # included; the log is the only trace.
                 log.info(
-                    "turn.skipped.channel_protected",
+                    "turn.skipped.writers_none",
                     tenant_id=str(tenant_id),
                     team_id=team_id,
                     channel_id=channel,
@@ -1828,17 +1828,17 @@ class SlackApp:
                     team_id=team_id,
                     channel_id=channel,
                 )
-            elif err.reason == "agent_pinned_elsewhere":
+            elif err.reason == "runs_elsewhere":
                 log.info(
-                    "turn.skipped.agent_pinned_elsewhere",
+                    "turn.skipped.runs_elsewhere",
                     tenant_id=str(tenant_id),
                     team_id=team_id,
                     channel_id=channel,
                     thread_id=thread_id,
                 )
-            elif err.reason == "channel_isolated":
+            elif err.reason == "own_agents_only":
                 log.info(
-                    "turn.skipped.channel_isolated",
+                    "turn.skipped.own_agents_only",
                     tenant_id=str(tenant_id),
                     team_id=team_id,
                     channel_id=channel,
@@ -1869,7 +1869,7 @@ class SlackApp:
                     channel_id=channel,
                     thread_id=thread_id,
                 )
-            if err.reason != "channel_protected":
+            if err.reason != "writers_none":
                 await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel,
                     thread_ts=thread_id,

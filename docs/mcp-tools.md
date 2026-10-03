@@ -101,6 +101,14 @@ Channel budget tools: read a channel's spending budget; admins set, clear and li
 | `list_channel_budgets` | admin only, operator tokens with tenant:read | List every channel budget in this server or workspace with its spend. |
 | `set_channel_budget` | admin only, operator tokens with channels:write | Set or replace a channel's spending budget. |
 
+## `channel_copies`
+
+Channel copy tool: retire the copy a closing channel was given as its own agent.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `archive_channel_copy` | admin only, operator tokens with agents:archive | Archive the agent copied as a channel's own, when that channel closes. |
+
 ## `channel_environments`
 
 Channel environment tools: which environment a channel's turns run in.
@@ -110,21 +118,14 @@ Channel environment tools: which environment a channel's turns run in.
 | `clear_channel_environment` | admin only, channel admins too, operator tokens with channels:write | Stop a channel picking its own environment, so it uses the workspace default. |
 | `set_channel_environment` | admin only, channel admins too, operator tokens with channels:write | Choose the environment a channel's turns run in, or the workspace default. |
 
-## `channel_isolation`
+## `channel_rules`
 
-Confidential channel tool: keep a channel's own agents inside it.
-
-| Tool | Who can call it | Purpose |
-| --- | --- | --- |
-| `set_channel_isolation` | admin only, operator tokens with channels:write | Mark one channel confidential, or unmark it. |
-
-## `channel_protection`
-
-Channel protection tool: protect or seal one channel, or lift either.
+Rule tools: who reads a channel and who posts there, and where an agent runs.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `set_channel_protection` | admin only, operator tokens with channels:write | Protect or seal one channel, or lift either. |
+| `set_agent_rule` | admin only, operator tokens with channels:write | Set where an agent runs: only in the ``runs_in`` channels and their threads, or, with null, wherever it is set to answer; an empty list runs it nowhere. |
+| `set_channel_rule` | admin only, operator tokens with channels:write | Set who can read a channel and who can post there. |
 
 ## `channel_skills`
 
@@ -194,14 +195,6 @@ GitHub App install-link tool: post_github_app_install_link.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `post_github_app_install_link` | Discord callers, Slack callers, Teams callers | Install the GitHub App: post a link inviting the user to grant repository access. |
-
-## `isolation_copies`
-
-Confidential copy tool: retire a closing confidential channel's copy.
-
-| Tool | Who can call it | Purpose |
-| --- | --- | --- |
-| `archive_isolation_copy` | admin only, operator tokens with agents:archive | Archive the agent copied for a confidential channel, when that channel closes. |
 
 ## `media`
 

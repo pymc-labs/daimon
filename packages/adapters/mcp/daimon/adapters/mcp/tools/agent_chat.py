@@ -245,8 +245,8 @@ async def _resolve_environment_name(
 
 
 _SEALED_SINCE_START_MSG = (
-    "this conversation started before its channel was sealed, so it can't take "
-    "messages under the seal. Start a new one with start_turn. Tell the caller."
+    "this conversation started before its channel's readers were limited, so it can't "
+    "take messages under that rule. Start a new one with start_turn. Tell the caller."
 )
 
 _CHANNEL_BUDGET_SPENT_MSG = (
@@ -255,8 +255,7 @@ _CHANNEL_BUDGET_SPENT_MSG = (
 )
 
 _SEAL_CHANGED_DURING_START_MSG = (
-    "this conversation's channel was sealed or unsealed while it was starting. "
-    "Call start_turn again."
+    "this conversation's channel rule changed while it was starting. Call start_turn again."
 )
 
 

@@ -193,15 +193,15 @@ A routine with a destination sends its trigger message after a
 `packages/core/daimon/core/routine_delivery.py`): the routine's id, agent,
 schedule, timezone and destination, and one line saying that nobody is
 watching and that daimon posts the end of the final reply to the destination
-unless the agent posts there itself. If the destination has become a
-protected channel since the routine was made, the controls say so and tell
+unless the agent posts there itself. If the destination's rule has since
+become `writers: none`, the controls say so and tell
 the agent not to post there (the result goes to the creator instead). The
 scheduler has no Discord client, so it cannot see a thread's parent channel
-or a channel's category: on Discord, whenever the policy protects a parent
-channel or a category that could apply, the controls tell the agent not to
+or a channel's category: on Discord, whenever a parent channel or a category
+that could apply has `writers: none`, the controls tell the agent not to
 post to the destination itself at all, and the poster — which does resolve
 placement — delivers or falls back. These are instructions, not a guard:
-`send_message` itself does not yet check protected channels (that guard is
+`send_message` itself does not yet check the writers rule (that guard is
 SYS-048's), so the controls err on the side of not inviting a post. The
 controls grant nothing else. A routine without a destination sends its
 trigger message byte-for-byte as before.
@@ -240,9 +240,9 @@ next to their wake poller (Teams for its one organisation). Each poll claims `pe
   message. Everything below applies only to a cleared result.
 - **Policy, at post time.** The adapter resolves where the destination
   actually is and applies the tenant access policy
-  (`packages/core/daimon/core/access_policy.py`): a protected channel, a
-  thread under one, or a Discord channel in a protected category is refused
-  as `protected_channel`. A Discord thread whose parent is not in the bot's
+  ([permissions](permissions.md)): a channel with `writers: none`, a thread
+  under one, or a Discord channel in such a category is refused as
+  `protected_channel`. A Discord thread whose parent is not in the bot's
   cache has its parent fetched first; if that fails, nothing is posted there.
 - **Only where the creator could post.** A routine posts on its creator's
   behalf, so the poster re-checks, every time, the same caller rules as at
@@ -259,7 +259,7 @@ next to their wake poller (Teams for its one organisation). Each poll claims `pe
   team. Either way that, like a channel that no longer exists or that Slack
   refuses (`not_in_channel`, `channel_not_found`, archived), is
   `destination_unavailable`. An archived tenant's rows are not claimed at all.
-- **Never silently nowhere.** When the destination is protected or
+- **Never silently nowhere.** When nobody may write in the destination or it is
   unavailable, the result goes to the routine's creator by direct message
   instead, under the tenant's direct-message policy
   (`DAIMON_DIRECT_MESSAGE_POLICIES`) and only to a current human member —
@@ -325,18 +325,19 @@ client's work) stay private. A routine runs with its agent's repo, keys,
 connectors and memory, which is why a member may only schedule the agent they
 are talking to or the one the destination channel answers with.
 
-Confidential channels narrow the MCP tools. A routine of a confidential channel's own
-agent, or one whose `channel_id` is that channel, is visible (list, read,
-update, delete) only from inside it, and `authorize(SAVE_ROUTINE)` creates or
-moves a routine only where its agent may answer: a confidential channel's agent
-posts only into its channel, and other agents never post there. Routing can
+A channel kept to its own agents (`readers: own`) narrows the MCP tools. A
+routine of such a channel's own agent, or one whose `channel_id` is that
+channel, is visible (list, read, update, delete) only from inside it, and
+`authorize(SAVE_ROUTINE)` creates or moves a routine only where its agent may
+answer: a channel's own agent posts only into its channel, and other agents
+never post there. Routing can
 change after a routine is saved, so each fire asks again: after the agent is
 resolved (self-healing may pick a replacement), the scheduler runs
 `authorize(RUN_AGENT)` on that agent by every name it carries (the saved
 routine name, its MA name and its config name) at the routine's destination,
-and skips a run that would cross the line (`channel_isolated`). A routine of
-a confidential channel never falls back to a DM. See
-[architecture.md](architecture.md) (Confidential channels).
+and skips a run that would cross the line (`own_agents_only`). A routine of
+such a channel never falls back to a DM. See
+[permissions.md](permissions.md).
 
 ## When a run fails
 
@@ -373,7 +374,7 @@ the six `DAIMON_SCHEDULER__*` settings in
 Per run, four gates still apply — the tenant's invoker allowlist, checked
 against the creator, the tenant's credit balance, the per-person monthly cap
 and, for a routine with a `channel_id`, that channel's budget, checked last,
-after the agent's channel pin. See [billing.md](billing.md#channel-budgets).
+after the agent's rule. See [billing.md](billing.md#channel-budgets).
 A run refused by a budget records
 `channel_budget_exceeded` and the routine fires again at its next slot. A
 Discord thread destination saved before channel budgets existed has no
@@ -391,11 +392,11 @@ Routine sessions always mount persistent agent memory read-only, regardless of t
 tenant's chat or DM policy. They can use saved memory but cannot change it.
 
 A routine session is stamped like a turn in the channel it fires into: the
-destination's channel (a thread's parent), the thread, and the seal over
-them at fire time (`channel_isolation.routine_origin`). A routine with no
+destination's channel (a thread's parent), the thread, and the readers limits
+over them at fire time (`rule_views.routine_origin`). A routine with no
 destination is stamped with its saved channel: the channel it was made in,
-or for one made in a DM, the channel that DM came from. So a sealed or
-confidential channel's routine transcript is read only from inside that channel,
+or for one made in a DM, the channel that DM came from. So the routine
+transcript of a channel with limited readers is read only from inside it,
 as its conversations are, by its owner too (a server admin owner still reads
 it from the hub, as with their own DMs). A routine with neither is not
 stamped. Every stamped routine session also carries the private-DM stamp

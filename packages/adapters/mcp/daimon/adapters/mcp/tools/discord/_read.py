@@ -40,7 +40,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.permissions import any_sealed
+from daimon.core.permissions import any_readers_limited
 from fastmcp.exceptions import ToolError
 
 _MAX_HISTORY_LIMIT: int = 200
@@ -83,7 +83,7 @@ def _sealed_thread_named(
     reference = message.reference
     thread_id = reference.channel_id if reference is not None else None
     if thread_id is None:
-        return "" if any_sealed(read_policy.policy) else None
+        return "" if any_readers_limited(read_policy.policy) else None
     return None if read_policy.allows(str(thread_id), parent_id) else str(thread_id)
 
 

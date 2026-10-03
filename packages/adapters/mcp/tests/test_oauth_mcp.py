@@ -530,7 +530,7 @@ async def test_a_pin_added_between_the_click_and_the_callback_stops_the_connecti
         assert done.status_code == 200 and "Connected notion" in done.text, done.text
         assert created and updates
     else:
-        assert done.status_code == 403 and "pinned" in done.text, done.text
+        assert done.status_code == 403 and "runs only in certain channels" in done.text, done.text
         assert created == [], "no grant is stored"
         assert updates == [], "nothing is attached"
 
@@ -571,6 +571,6 @@ async def test_a_pin_added_during_the_code_exchange_stores_no_grant(
         await client.get(f"/oauth/mcp/start?state={flow.state}")
         done = await client.get(f"/oauth/mcp/callback?code=code123&state={flow.state}")
 
-    assert done.status_code == 403 and "pinned" in done.text, done.text
+    assert done.status_code == 403 and "runs only in certain channels" in done.text, done.text
     assert created == [], "no grant is stored"
     assert updates == [], "nothing is attached"

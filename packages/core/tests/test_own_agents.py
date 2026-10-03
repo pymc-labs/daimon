@@ -1,4 +1,4 @@
-"""Channel isolation: own agents by pin, refusals and visibility."""
+"""A channel kept to its own agents: own agents by rule, refusals and visibility."""
 
 from __future__ import annotations
 
@@ -6,21 +6,22 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from daimon.core.access_policy import TenantAccessPolicy, is_isolated, isolation_owner
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.answering_map import (
     AnsweringMap,
     ChannelAnswer,
     ChannelEnvironment,
     SetupThreadRef,
-    hide_across_isolation,
+    hide_across_homes,
 )
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
-from daimon.core.channel_isolation import (
-    ChannelIsolationStatus,
-    IsolationViewer,
+from daimon.core.channel_rules import ChannelRuleStatus, channel_rule_status
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.permissions import agent_permissions, channel_permissions
+from daimon.core.rule_views import (
     RoutineOrigin,
+    RuleViewer,
     binding_refusal,
-    channel_isolation_status,
     clear_refusal,
     is_routine_parent_unknown,
     is_thread_turn_refused,
@@ -29,7 +30,6 @@ from daimon.core.channel_isolation import (
     routine_destination_place,
     routine_origin,
 )
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.domain import RoutineRow
@@ -38,47 +38,43 @@ from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from daimon.testing.ma_models import ma_agent
-from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 DEFAULT = DeploymentDefault(agent_name="daimon")
 TENANT = uuid.uuid4()
+OWN = ChannelRule(readers="own", writers="own")
 POLICY = TenantAccessPolicy(
-    sealed_channel_ids=("c1",),
-    isolated_channel_ids=("c1",),
-    agent_channel_pins={"local": ("c1",), "roamer": ("c1", "c3")},
+    channel_rules={"c1": OWN},
+    agent_rules={"local": AgentRule(runs_in=("c1",)), "roamer": AgentRule(runs_in=("c1", "c3"))},
 )
+INSIDE_ONLY = POLICY.model_copy(update={"channel_rules": {"c1": ChannelRule(readers="inside")}})
 
 
-def test_an_isolated_channel_must_be_sealed() -> None:
-    with pytest.raises(ValidationError, match="must also be sealed"):
-        TenantAccessPolicy(isolated_channel_ids=("c1",))
+def test_own_agents_are_those_whose_rule_names_the_channel_alone() -> None:
+    def home(*names: str, policy: TenantAccessPolicy = POLICY) -> str | None:
+        return agent_permissions(policy, names).home
+
+    assert home("local") == "c1"
+    assert home("roamer") is None, "its rule names more than the channel"
+    assert home("shared") is None, "no rule"
+    assert home("local", "roamer") is None, "every name counts"
+    assert home("local", policy=INSIDE_ONLY) is None, "an agent rule alone keeps no channel"
 
 
-def test_own_agents_are_those_pinned_to_the_channel_alone() -> None:
-    assert isolation_owner(POLICY, ("local",)) == "c1"
-    assert isolation_owner(POLICY, ("roamer",)) is None, "pinned beyond the channel"
-    assert isolation_owner(POLICY, ("shared",)) is None, "unpinned"
-    assert isolation_owner(POLICY, ("local", "roamer")) is None, "every name counts"
-    sealed_only = POLICY.model_copy(update={"isolated_channel_ids": ()})
-    assert isolation_owner(sealed_only, ("local",)) is None, "a pin alone is no isolation"
-
-
-def test_status_shows_the_seal_the_dedicated_pins_and_the_marker() -> None:
-    assert channel_isolation_status(POLICY, "c1") == ChannelIsolationStatus(
-        is_private=True, dedicated_agent_names=("local",), is_hidden=True
-    ), "roamer is pinned beyond c1, so it is not dedicated"
-    ended = channel_isolation_status(POLICY.model_copy(update={"isolated_channel_ids": ()}), "c1")
-    assert (ended.is_hidden, ended.is_liftable) == (False, True), (
-        "after ending, the seal and the pin are still there to lift"
+def test_status_shows_the_rule_and_the_agents_kept_there() -> None:
+    assert channel_rule_status(POLICY, "c1") == ChannelRuleStatus(OWN, ("local",)), (
+        "roamer's rule names more than c1, so it is not kept there"
     )
-    assert not channel_isolation_status(POLICY, "c3").is_liftable, "c3 has no seal of its own"
+    assert channel_rule_status(INSIDE_ONLY, "c1").agents == ("local",), (
+        "readers inside, the agent rule is still there to release"
+    )
+    assert channel_rule_status(POLICY, "c3").agents == (), "c3 keeps no agent"
 
 
-def test_isolated_location_counts_threads_under_the_channel() -> None:
-    assert is_isolated(POLICY, channel_id="t1", parent_channel_id="c1")
-    assert not is_isolated(POLICY, channel_id="c2"), "other channels stay open"
-    assert not is_isolated(TenantAccessPolicy(), channel_id="c1"), "default policy isolates none"
+def test_a_thread_lies_in_its_channel() -> None:
+    assert channel_permissions(POLICY, channel_id="t1", parent_channel_id="c1").home == "c1"
+    assert channel_permissions(POLICY, channel_id="c2").home is None, "other channels stay open"
+    assert channel_permissions(TenantAccessPolicy(), channel_id="c1").home is None
 
 
 def test_only_own_agents_answer_inside() -> None:
@@ -93,12 +89,12 @@ def test_only_own_agents_answer_inside() -> None:
         ).reason
 
     assert refused("local", channel="c1") is None
-    assert refused("shared", channel="c1") == "channel_isolated"
-    assert refused("roamer", channel="c1") == "channel_isolated", "pinned beyond the channel"
+    assert refused("shared", channel="c1") == "own_agents_only"
+    assert refused("roamer", channel="c1") == "own_agents_only", "its rule names more"
     assert refused("alias", "local", channel="c1") is None, "any of its names makes it own"
     assert refused("daimon", channel="c1", setup=True) is None, "setup answers as the built-in"
-    assert refused("shared", channel="c2") is None, "outside is the pin's to judge"
-    assert refused("local", channel="c2") == "agent_pinned_elsewhere"
+    assert refused("shared", channel="c2") is None, "outside, its rule judges"
+    assert refused("local", channel="c2") == "runs_elsewhere"
 
 
 def test_an_own_agent_never_posts_or_messages_outside() -> None:
@@ -112,19 +108,17 @@ def test_an_own_agent_never_posts_or_messages_outside() -> None:
         ).reason
 
     assert reason(Action.POST, "c1") is None
-    assert reason(Action.POST, "c2") == "channel_isolated"
-    assert reason(Action.DIRECT_MESSAGE, None) == "channel_isolated"
+    assert reason(Action.POST, "c2") == "own_agents_only"
+    assert reason(Action.DIRECT_MESSAGE, None) == "own_agents_only"
 
 
 def test_binding_refusals_keep_own_agents_in_and_others_out() -> None:
     assert binding_refusal(POLICY, agent_names=("local",), channel_id="c1") is None
-    assert binding_refusal(POLICY, agent_names=("local",), channel_id="c2") == "agent_confined"
-    assert binding_refusal(POLICY, agent_names=("local",), channel_id=None) == "agent_confined"
-    assert binding_refusal(POLICY, agent_names=("shared",), channel_id="c1") == (
-        "channel_needs_own_agent"
-    )
+    assert binding_refusal(POLICY, agent_names=("local",), channel_id="c2") == "agent_has_home"
+    assert binding_refusal(POLICY, agent_names=("local",), channel_id=None) == "agent_has_home"
+    assert binding_refusal(POLICY, agent_names=("shared",), channel_id="c1") == "not_own_agent"
     assert binding_refusal(POLICY, agent_names=("shared",), channel_id="c2") is None
-    assert clear_refusal(POLICY, channel_id="c1") == "channel_isolated"
+    assert clear_refusal(POLICY, channel_id="c1") == "keeps_own"
     assert clear_refusal(POLICY, channel_id="c2") is None
 
 
@@ -160,12 +154,12 @@ def test_a_routine_of_an_own_agent_or_into_the_channel_stays_inside() -> None:
 
 def test_a_thread_routine_saved_without_its_parent_stays_inside_until_placed() -> None:
     """A Discord thread saved before its parent was recorded may lie under C: it
-    never goes by DM while anything is isolated, until its parent is resolved."""
+    never goes by DM while any channel is kept to its own agents, until its parent is resolved."""
     legacy = _routine("shared", "t9").model_copy(
         update={"destination_kind": "thread", "channel_id": None}
     )
     assert keeps_routine_inside(POLICY, legacy), "an unknown parent fails closed"
-    assert not keeps_routine_inside(TenantAccessPolicy(), legacy), "nothing isolated"
+    assert not keeps_routine_inside(TenantAccessPolicy(), legacy), "no channel kept"
     assert keeps_routine_inside(POLICY, legacy, parent_channel_id="c1"), "resolved under C"
     assert not keeps_routine_inside(POLICY, legacy, parent_channel_id="c2")
     assert routine_destination_place(legacy, channel_id="t9").parent_unresolved
@@ -189,20 +183,18 @@ def test_a_teams_routine_saved_without_its_channel_is_placed_by_its_id(
     kind: str, destination: str
 ) -> None:
     """Teams ids contain ":", so they are never split there: a legacy Teams row
-    without a saved channel lies in the channel its id names, which isolation sees."""
+    without a saved channel lies in the channel its id names, which the rule sees."""
     legacy = _routine("shared", destination).model_copy(
         update={"destination_kind": kind, "channel_id": None}
     )
     assert routine_destination_channel(legacy) == _TEAMS_CHANNEL, "the id names its channel"
     assert not is_routine_parent_unknown(legacy), "a Teams thread id carries its channel"
-    isolated = TenantAccessPolicy(
-        sealed_channel_ids=(_TEAMS_CHANNEL,), isolated_channel_ids=(_TEAMS_CHANNEL,)
-    )
-    assert keeps_routine_inside(isolated, legacy), "so its result never goes by DM"
+    kept = TenantAccessPolicy(channel_rules={_TEAMS_CHANNEL: OWN})
+    assert keeps_routine_inside(kept, legacy), "so its result never goes by DM"
 
 
-def test_a_routine_session_is_stamped_where_it_fires_with_the_seal_now() -> None:
-    """Channel, thread and seal follow the destination; Slack names a thread by its
+def test_a_routine_session_is_stamped_where_it_fires_with_the_rule_now() -> None:
+    """Channel, thread and readers limits follow the destination; Slack names a thread by its
     ts, Discord by its id; every stamp is private to the routine's owner; a routine
     with no channel at all is headless."""
     channel = _routine("local", "c1")
@@ -221,7 +213,7 @@ def test_a_routine_session_is_stamped_where_it_fires_with_the_seal_now() -> None
     open_channel = _routine("shared", "c2")
     assert routine_origin(POLICY, open_channel, platform="discord") == RoutineOrigin(
         "c2", None, frozenset(), f"routine:{open_channel.id}"
-    ), "an unsealed destination carries no seal"
+    ), "an open destination limits no readers"
     no_destination = _routine("shared", None).model_copy(update={"channel_id": "c1"})
     assert routine_origin(POLICY, no_destination, platform="discord") == RoutineOrigin(
         "c1", None, frozenset({"c1"}), f"routine:{no_destination.id}"
@@ -230,7 +222,7 @@ def test_a_routine_session_is_stamped_where_it_fires_with_the_seal_now() -> None
 
 
 def test_a_viewer_sees_only_its_side() -> None:
-    inside, outside = IsolationViewer(POLICY, "c1"), IsolationViewer(POLICY, None)
+    inside, outside = RuleViewer(POLICY, "c1"), RuleViewer(POLICY, None)
     assert inside.sees("local") and not inside.sees("shared")
     assert outside.sees("shared") and not outside.sees("local")
     assert inside.sees_place("c1") and not inside.sees_place(None)
@@ -254,11 +246,11 @@ def test_a_viewer_sees_only_its_side_of_the_routing() -> None:
             ),
         ),
     )
-    inside = hide_across_isolation(answering, IsolationViewer(POLICY, "c1"))
+    inside = hide_across_homes(answering, RuleViewer(POLICY, "c1"))
     assert [row.channel_id for row in inside.channel_overrides] == ["c1"]
     assert inside.deployment_default is None, "the shared fallback is across the line"
     assert [ref.thread_id for ref in inside.setup_threads] == ["t1"]
-    outside = hide_across_isolation(answering, IsolationViewer(POLICY, None))
+    outside = hide_across_homes(answering, RuleViewer(POLICY, None))
     assert [row.channel_id for row in outside.channel_overrides] == ["c2"]
     assert outside.deployment_default == "daimon"
     assert [ref.thread_id for ref in outside.setup_threads] == ["t2"]
@@ -274,16 +266,16 @@ def test_a_viewer_sees_only_its_side_of_the_environments() -> None:
         tenant_environment="workspace",
         deployment_environment="default",
     )
-    inside = hide_across_isolation(answering, IsolationViewer(POLICY, "c1"))
+    inside = hide_across_homes(answering, RuleViewer(POLICY, "c1"))
     assert [row.channel_id for row in inside.channel_environments] == ["c1"], (
         "an insider sees only its own channel's environment"
     )
     assert (inside.tenant_environment, inside.deployment_environment) == (None, None), (
         "the shared fallbacks are across the line, as the agent defaults are"
     )
-    outside = hide_across_isolation(answering, IsolationViewer(POLICY, None))
+    outside = hide_across_homes(answering, RuleViewer(POLICY, None))
     assert [row.channel_id for row in outside.channel_environments] == ["c2"], (
-        "an outsider never sees the isolated channel's environment"
+        "an outsider never sees the kept channel's environment"
     )
     assert (outside.tenant_environment, outside.deployment_environment) == (
         "workspace",
@@ -337,7 +329,7 @@ async def test_thread_precheck_refuses_a_handed_thread_inside(
             default=DEFAULT,
         )
 
-    assert not await refused("t1"), "nothing isolated yet"
+    assert not await refused("t1"), "no channel kept yet"
     await set_access_policy(db_session, tenant_id=tenant.id, policy=POLICY)
     await db_session.commit()
     assert (await load_access_policy(db_session, tenant_id=tenant.id)) == POLICY

@@ -45,7 +45,8 @@ UNPLACED_RUN_REASON: Final[str] = (
 """Refusal wording for `TargetFacts.has_unplaced_run`, after the agent's name."""
 
 NOT_HELD_REASON: Final[str] = (
-    "was not made for, pinned to or given to the channels this caller administers by a server admin"
+    "was not made for, limited by its rule to or given to the channels this caller administers "
+    "by a server admin"
 )
 """Refusal wording for a local agent that is not the channel admin's, after its name."""
 
@@ -139,17 +140,17 @@ async def require_bindable_as_channel_default(
         )
         if not decision:
             record_authz_denial(Action.BIND_CHANNEL_DEFAULT, decision.reason)
-        if decision.reason == "channel_isolated":
+        if decision.reason == "own_agents_only":
             raise ToolError(
-                "This channel is confidential, so only its own agents (pinned to it alone) can be "
-                f"its default, and '{agent_name}' is not one. Nothing was changed. Pick one of "
-                "its own agents, or ask a server admin. Do not retry."
+                "This channel is kept to its own agents (whose rule runs them here alone), so "
+                f"only they can be its default, and '{agent_name}' is not one. Nothing was "
+                "changed. Pick one of its own agents, or ask a server admin. Do not retry."
             )
         if not decision:
             raise ToolError(
-                f"An operator pinned '{agent_name}' to other channels, so it would refuse "
+                f"'{agent_name}'s rule runs it only in other channels, so it would refuse "
                 "every turn here and cannot be this channel's default. Nothing was changed. "
-                "Pick another agent, or ask an operator to change the pin. Do not retry."
+                "Pick another agent, or ask an admin to change its rule. Do not retry."
             )
         if await may_bind_as_channel_default(
             session,
@@ -165,13 +166,13 @@ async def require_bindable_as_channel_default(
         ):
             return
     raise ToolError(
-        f"'{agent_name}' was not made for or pinned to the channels this caller administers, "
-        "answers in channels they do not administer, has other people's conversations or "
-        "routines whose channel is unknown, runs unattended for someone with wider rights, "
-        "or another channel admin holds it in channels without this one, so only a workspace "
-        "or server admin can make it this channel's default. A channel admin may pick a "
-        "built-in agent, the workspace default, or an agent made for or pinned to their "
-        "channels that answers nowhere else. Nothing was changed. Do not retry."
+        f"'{agent_name}' was not made for or limited by its rule to the channels this caller "
+        "administers, answers in channels they do not administer, has other people's "
+        "conversations or routines whose channel is unknown, runs unattended for someone with "
+        "wider rights, or another channel admin holds it in channels without this one, so only "
+        "a workspace or server admin can make it this channel's default. A channel admin may "
+        "pick a built-in agent, the workspace default, or an agent made for or limited by its "
+        "rule to their channels that answers nowhere else. Nothing was changed. Do not retry."
     )
 
 

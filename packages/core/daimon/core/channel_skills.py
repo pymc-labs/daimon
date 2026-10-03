@@ -42,7 +42,7 @@ from daimon.core.defaults.metadata import (
     tenant_scoped_display_title,
 )
 from daimon.core.errors import SkillsListTruncatedError
-from daimon.core.permissions import agent_permissions, pinned_names
+from daimon.core.permissions import agent_permissions, ruled_agents
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_skills import add_channel_skill, list_channel_skills
@@ -147,13 +147,12 @@ async def choose_channel_skill(
     stored = next((u.agent_name for u in uploads if u.anthropic_id == found.id), None)
     names = {n for n in (agent_pin_names(agent.name, agent.metadata) if agent else ()) if n}
     owners = skill_owner_candidates(
-        body, stored_owner=stored, agent_names={*names, *pinned_names(policy)}
+        body, stored_owner=stored, agent_names={*names, *ruled_agents(policy)}
     )
     if not owners and "/" not in body and _TRUNCATED.search(body):
         return "not_usable"  # a cut title may have lost its agent part
     if owners and (
-        not owners <= names
-        or agent_permissions(policy, owners).own_channel not in (None, channel_id)
+        not owners <= names or agent_permissions(policy, owners).home not in (None, channel_id)
     ):
         return "not_usable"
     owner = min(owners) if owners else None

@@ -43,8 +43,7 @@ from daimon.core.channel_environments import (
     EnvironmentPicker,
     environment_option_value,
 )
-from daimon.core.channel_isolation import ChannelIsolationStatus
-from daimon.core.channel_isolation_setup import END_ISOLATION_WARNING
+from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleStatus
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
@@ -71,10 +70,6 @@ __all__ = [
     "ACTION_EXPAND_KEYS",
     "ACTION_EXPAND_SKILLS",
     "ACTION_EXPAND_CONNECTIONS",
-    "ACTION_END_ISOLATION",
-    "ACTION_ISOLATE",
-    "ACTION_ISOLATE_COPY",
-    "ACTION_LIFT_ISOLATION",
     "ACTION_NEW",
     "ACTION_OPERATOR_MINT",
     "ACTION_OPERATOR_REVOKE",
@@ -82,6 +77,10 @@ __all__ = [
     "ACTION_PAGE_PREV",
     "ACTION_REVOKE_TOKEN",
     "ACTION_ROUTING",
+    "ACTION_RULE_COPY",
+    "ACTION_RULE_READERS",
+    "ACTION_RULE_RELEASE",
+    "ACTION_RULE_WRITERS",
     "CALLBACK_AGENTS",
     "CALLBACK_CHANNEL_ADMINS",
     "CALLBACK_CHANNEL_SKILLS",
@@ -127,12 +126,12 @@ ACTION_CHANNEL_SKILLS: Final = "agent_setup__channel_skills"
 ACTION_ENVIRONMENT: Final = "agent_setup__environment"
 """This channel's environment select on Who answers where."""
 
-ACTION_ISOLATE: Final = "agent_setup__isolation:isolate"
-ACTION_ISOLATE_COPY: Final = "agent_setup__isolation:copy"
-ACTION_END_ISOLATION: Final = "agent_setup__isolation:end"
-ACTION_LIFT_ISOLATION: Final = "agent_setup__isolation:lift"
-"""Isolate this channel (with a copy of its agent when needed), end it, or lift its seal
-and pins too. Admins only."""
+ACTION_RULE_READERS: Final = "agent_setup__rule:readers"
+ACTION_RULE_WRITERS: Final = "agent_setup__rule:writers"
+ACTION_RULE_COPY: Final = "agent_setup__rule:copy"
+ACTION_RULE_RELEASE: Final = "agent_setup__rule:release"
+"""This channel's Permissions: who reads it, who posts, keep it to a copy of its
+agent, release its agents. Admins only."""
 
 ACTION_CODING_TOOLS: Final = "agent_setup__coding_tools"
 """Mint a coding-tool token for the agent named in the button's `value`."""
@@ -244,18 +243,19 @@ OPERATOR_TOKENS_NOTE: Final = (
     f"{PANEL_TTL_DAYS} days. It is shown once; revoke it here or with "
     "`daimon mcp revoke-token`."
 )
-LIFT_ISOLATION_LABEL: Final = "Lift seal and pins"
-ISOLATION_NOTE: Final = (
-    "Marking this channel confidential makes it private, so its messages read only from "
-    "inside it, gives it a dedicated agent pinned to it alone, so that agent answers only "
-    "here, and hides that agent everywhere else, while inside only the channel's own agents "
-    "show. It needs an agent that answers only here; *Mark confidential with a copy* makes "
-    "one from the agent answering now."
+PERMISSIONS_LABEL: Final = "Permissions"
+RULE_COPY_LABEL: Final = "Keep it to a copy"
+RULE_RELEASE_LABEL: Final = "Release its agents"
+PERMISSIONS_NOTE: Final = (
+    "*Who can read it*: anyone; only this channel, so only turns here read its messages "
+    "and conversations; or only its own agents, so also only agents kept here run and show "
+    "here, and nowhere else. Its default agent becomes one; "
+    f"*{RULE_COPY_LABEL}* makes one from the agent answering now. *Who can post*: anyone; "
+    "only its own agents; or nobody, daimon included."
 )
-LIFT_ISOLATION_NOTE: Final = (
-    f"*{LIFT_ISOLATION_LABEL}* also unmarks it confidential, makes its messages readable "
-    "from elsewhere and unpins its dedicated agents, so they can answer elsewhere, bringing "
-    "what they remembered here."
+RULE_RELEASE_NOTE: Final = (
+    f"*{RULE_RELEASE_LABEL}* drops the rules keeping its agents here, so they can run "
+    "elsewhere, bringing what they remembered here."
 )
 
 CODING_TOOLS_UNAVAILABLE_NOTE: Final = "Coding-tool access is not configured for this deployment."
@@ -626,7 +626,7 @@ def build_routing_view(
     unrouted_agent_name: str | None,
     channel_admins: Sequence[ChannelAdminsRow] | None = None,
     environment_picker: EnvironmentPicker | None = None,
-    isolation: ChannelIsolationStatus | None = None,
+    rule_status: ChannelRuleStatus | None = None,
     operator_tokens: Sequence[McpTokenRow] | None = None,
     channel_skills: Sequence[ChannelSkillRow] | None = None,
 ) -> dict[str, Any]:
@@ -635,8 +635,8 @@ def build_routing_view(
     No setup button: this view answers where mentions go, and the change it
     describes is a sentence to say to Daimon rather than a control here.
     `channel_admins` is passed for workspace admins only, who also see every
-    channel's admins and a button to edit this channel's. `isolation` is too,
-    when the panel has a channel, not a DM: it adds that channel's isolation buttons.
+    channel's admins and a button to edit this channel's. `rule_status` is too,
+    when the panel has a channel, not a DM: it adds that channel's permissions.
     `operator_tokens` is too: the workspace's live operator tokens, with Mint and Revoke.
     `channel_skills` is too, with a channel: its extra skills, with Edit.
     The environment each channel runs in resolves on its own and gets its own
@@ -688,8 +688,8 @@ def build_routing_view(
     blocks.append({"type": "divider"})
     if channel_admins is not None:
         blocks.extend(_channel_admins_blocks(channel_admins, channel_id=channel_id))
-    if isolation is not None and _is_channel(channel_id):
-        blocks.extend(_isolation_blocks(channel_id=channel_id, status=isolation))
+    if rule_status is not None and _is_channel(channel_id):
+        blocks.extend(_permissions_blocks(channel_id=channel_id, status=rule_status))
     if channel_skills is not None and _is_channel(channel_id):
         blocks.extend(_channel_skills_blocks(channel_skills, channel_id=channel_id))
     if operator_tokens is not None:
@@ -783,7 +783,7 @@ def _environment_select(picker: EnvironmentPicker) -> dict[str, Any]:
 
 
 def _is_channel(channel_id: str) -> bool:
-    """A DM (`D…`) has no channel admins and can't be isolated."""
+    """A DM (`D…`) has no channel admins and takes no channel rule."""
     return bool(channel_id) and not channel_id.startswith("D")
 
 
@@ -828,36 +828,38 @@ def _channel_skills_blocks(
     ]
 
 
-def isolation_status_line(status: ChannelIsolationStatus) -> str:
-    """Private, dedicated agent and confidential, on one line. Pure."""
-    dedicated = ", ".join(f"*{escape_mrkdwn(name)}*" for name in status.dedicated_agent_names)
-    return (
-        f"Private: {'yes' if status.is_private else 'no'} · Dedicated agent: "
-        f"{dedicated or 'none'} · Confidential: {'yes' if status.is_hidden else 'no'}"
-    )
+def _rule_select[T: str](
+    action_id: str, labels: Mapping[T, str], current: T, text: str
+) -> dict[str, Any]:
+    options = [
+        {"text": {"type": "plain_text", "text": f"{text}: {label}"}, "value": value}
+        for value, label in labels.items()
+    ]
+    return {
+        "type": "static_select",
+        "action_id": action_id,
+        "placeholder": {"type": "plain_text", "text": text},
+        "options": options,
+        "initial_option": next(opt for opt in options if opt["value"] == current),
+    }
 
 
-def _isolation_blocks(*, channel_id: str, status: ChannelIsolationStatus) -> list[dict[str, Any]]:
-    state = "is confidential" if status.is_hidden else "is not confidential"
-    buttons = (
-        [_button(action_id=ACTION_END_ISOLATION, label="Unmark confidential", style="danger")]
-        if status.is_hidden
-        else [
-            _button(action_id=ACTION_ISOLATE, label="Mark confidential", style="primary"),
-            _button(action_id=ACTION_ISOLATE_COPY, label="Mark confidential with a copy"),
-        ]
-    )
-    notes = [ISOLATION_NOTE]
-    if status.is_hidden:
-        notes.append(f"*Unmark confidential*: {END_ISOLATION_WARNING}")
-    if status.is_liftable:
-        buttons.append(
-            _button(action_id=ACTION_LIFT_ISOLATION, label=LIFT_ISOLATION_LABEL, style="danger")
-        )
-        notes.append(LIFT_ISOLATION_NOTE)
+def _permissions_blocks(*, channel_id: str, status: ChannelRuleStatus) -> list[dict[str, Any]]:
+    elements: list[dict[str, Any]] = [
+        _rule_select(ACTION_RULE_READERS, READERS_LABELS, status.rule.readers, "Who can read it"),
+        _rule_select(ACTION_RULE_WRITERS, WRITERS_LABELS, status.rule.writers, "Who can post"),
+    ]
+    notes = [PERMISSIONS_NOTE]
+    if status.rule.readers != "own":
+        elements.append(_button(action_id=ACTION_RULE_COPY, label=RULE_COPY_LABEL))
+        if status.agents:
+            elements.append(
+                _button(action_id=ACTION_RULE_RELEASE, label=RULE_RELEASE_LABEL, style="danger")
+            )
+            notes.append(RULE_RELEASE_NOTE)
     return [
-        _section(f"*Confidential*\n<#{channel_id}> {state}.\n{isolation_status_line(status)}"),
-        {"type": "actions", "elements": buttons},
+        _section(f"*{PERMISSIONS_LABEL}* of <#{channel_id}>\n{escape_mrkdwn(status.line)}"),
+        {"type": "actions", "elements": elements},
         _context(" ".join(notes)),
         {"type": "divider"},
     ]
@@ -1237,8 +1239,8 @@ def build_created_view(
     """What the placeholder becomes when the new agent can't be shown to its creator here."""
     name = escape_mrkdwn(agent_name)
     text = (
-        f"*{name}* was created. This channel is confidential, so it shows here once it is set "
-        "as the channel's agent."
+        f"*{name}* was created. This channel is kept to its own agents, so it shows here once it "
+        "is set as the channel's agent."
         if isolated_here
         else f"*{name}* was created but is not listed yet. Reopen setup to see it."
     )

@@ -2,7 +2,7 @@
 
 The setup panel lives in the 1:1 chat, so the dialog first asks which
 channel, then shows that channel's environment and, for server admins, its
-isolation and channel admins. Every submit names its `op` and the channel.
+permissions and channel admins. Every submit names its `op` and the channel.
 """
 
 from __future__ import annotations
@@ -17,8 +17,7 @@ from daimon.core.channel_environments import (
     EnvironmentPicker,
     environment_option_value,
 )
-from daimon.core.channel_isolation import ChannelIsolationStatus
-from daimon.core.channel_isolation_setup import END_ISOLATION_WARNING
+from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleStatus
 from microsoft_teams.cards import (
     Action,
     AdaptiveCard,
@@ -35,19 +34,19 @@ CHANNEL_DIALOG: Final = "channel_settings"
 MAX_CHANNEL_CHOICES: Final = 100
 """Channels the picker lists; a server admin with more types the id instead."""
 
-ChannelOp = Literal["pick", "environment", "isolation", "admins"]
-IsolationChoice = Literal["isolate", "copy", "end", "lift"]
-ISOLATION_CHOICES: Final[Mapping[IsolationChoice, str]] = {
-    "isolate": "Mark confidential",
-    "copy": "Mark confidential with a copy",
-    "end": "Unmark confidential",
-    "lift": "Lift seal and pins",
+ChannelOp = Literal["pick", "environment", "rule", "admins"]
+RuleExtra = Literal["none", "copy", "release"]
+RULE_EXTRAS: Final[Mapping[RuleExtra, str]] = {
+    "none": "Nothing else",
+    "copy": "Keep it to a copy of the agent answering now",
+    "release": "Release its agents",
 }
-ISOLATION_NOTE: Final = (
-    "Marking the channel confidential makes it private, gives it an agent pinned to it alone "
-    "and hides that agent everywhere else. Mark confidential with a copy makes that agent "
-    "from the one answering now. Lift seal and pins also unmarks it confidential and lets "
-    "its agents answer elsewhere."
+PERMISSIONS_NOTE: Final = (
+    "Who can read it: anyone; only this channel, so only turns here read its messages and "
+    "conversations; or only its own agents, so also only agents kept here run and show here, "
+    "and nowhere else. Its default agent becomes one, or a copy of the agent answering now. "
+    "Who can post: anyone; only its own agents; or nobody, daimon included. Releasing its "
+    "agents lets them run elsewhere, bringing what they remembered here."
 )
 CHANNEL_ADMINS_NOTE: Final = (
     "Channel admins pick their channels' environment and default agent. Server admins run "
@@ -63,7 +62,7 @@ class ChannelSettings:
     label: str
     picker: EnvironmentPicker | None
     """None when there is nothing to pick, or the caller may not."""
-    isolation: ChannelIsolationStatus | None
+    rule: ChannelRuleStatus | None
     """None for a caller who is not a server admin."""
     admin_user_ids: tuple[str, ...] | None
     """None for a caller who is not a server admin."""
@@ -129,40 +128,37 @@ def _environment_section(settings: ChannelSettings) -> tuple[list[CardElement], 
     return body, [_submit("Save environment", "environment", settings.channel_id)]
 
 
-def _isolation_section(status: ChannelIsolationStatus) -> list[CardElement]:
-    dedicated = ", ".join(status.dedicated_agent_names) or "none"
-    state = "is confidential" if status.is_hidden else "is not confidential"
-    offered: list[IsolationChoice] = ["end"] if status.is_hidden else ["isolate", "copy"]
-    if status.is_liftable:
-        offered.append("lift")
-    notes = [ISOLATION_NOTE]
-    if status.is_hidden:
-        notes.append(f"Unmark confidential: {END_ISOLATION_WARNING}")
-    return [
-        _text(
-            f"**Confidential**\n\nThe channel {state}. Private: "
-            f"{'yes' if status.is_private else 'no'} · Dedicated agent: {dedicated}"
-        ),
-        ChoiceSetInput(
-            id="isolation",
-            label="Change",
-            value=offered[0],
-            choices=[Choice(title=ISOLATION_CHOICES[c], value=c) for c in offered],
-        ),
-        _text(" ".join(notes), subtle=True),
+def _labelled[T: str](id_: str, label: str, labels: Mapping[T, str], value: T) -> ChoiceSetInput:
+    choices = [Choice(title=title, value=key) for key, title in labels.items()]
+    return ChoiceSetInput(id=id_, label=label, value=value, choices=choices)
+
+
+def _rule_section(status: ChannelRuleStatus) -> list[CardElement]:
+    extras: list[RuleExtra] = ["none"]
+    if status.rule.readers != "own":
+        extras.append("copy")
+        if status.agents:
+            extras.append("release")
+    body: list[CardElement] = [
+        _text(f"**Permissions**\n\n{status.line}"),
+        _labelled("readers", "Who can read it", READERS_LABELS, status.rule.readers),
+        _labelled("writers", "Who can post", WRITERS_LABELS, status.rule.writers),
     ]
+    if len(extras) > 1:
+        body.append(_labelled("extra", "And", {e: RULE_EXTRAS[e] for e in extras}, "none"))
+    return [*body, _text(PERMISSIONS_NOTE, subtle=True)]
 
 
 def channel_settings_form(settings: ChannelSettings, *, notice: str | None = None) -> AdaptiveCard:
-    """The channel's settings, each with its own save; isolation and admins for server admins."""
+    """The channel's settings, each with its own save; permissions and admins for server admins."""
     body: list[CardElement] = [_text(notice)] if notice else []
     body.append(_text(settings.label, bold=True))
     environment, actions = _environment_section(settings)
     body += environment
     channel = settings.channel_id
-    if settings.isolation is not None:
-        body += _isolation_section(settings.isolation)
-        actions.append(_submit("Apply confidential change", "isolation", channel))
+    if settings.rule is not None:
+        body += _rule_section(settings.rule)
+        actions.append(_submit("Save permissions", "rule", channel))
     if settings.admin_user_ids is not None:
         body += [
             _text("**Channel admins**"),

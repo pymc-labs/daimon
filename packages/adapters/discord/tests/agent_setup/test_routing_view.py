@@ -381,11 +381,11 @@ def test_routing_offers_channel_admins_to_server_admins(account_id: uuid.UUID) -
     assert labels == {
         "◀ Back",
         "Channel admins",
-        "Confidential",
+        "Permissions",
         "🔑 Operator tokens",
         "Channel skills",
         "Done",
-    }, "a server admin is also offered Channel admins, Confidential, Operator tokens and skills"
+    }, "a server admin is also offered Channel admins, Permissions, Operator tokens and skills"
 
 
 async def test_back_returns_to_the_roster_page_the_reader_left(account_id: uuid.UUID) -> None:

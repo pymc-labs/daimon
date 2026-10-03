@@ -19,7 +19,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _tidy as tidy_module
-from daimon.adapters.mcp.tools._channel_policy import SealedChannelError
+from daimon.adapters.mcp.tools._channel_policy import ChannelReadRefused
 from daimon.adapters.mcp.tools.slack._send import (  # pyright: ignore[reportPrivateUsage]
     _slack_create_thread_impl,
     _slack_send_message_impl,
@@ -308,7 +308,7 @@ async def test_protected_and_sealed_channels_refuse_tidying(
                 tenant_id=world.tenant_id,
                 policy=TenantAccessPolicy(sealed_channel_ids=(_CHANNEL,)),
             )
-        with pytest.raises(SealedChannelError):
+        with pytest.raises(ChannelReadRefused):
             await _slack_delete_message_impl(
                 world.runtime,
                 outside_auth,
@@ -323,7 +323,7 @@ async def test_protected_and_sealed_channels_refuse_tidying(
                 policy=TenantAccessPolicy(protected_channel_ids=(_CHANNEL,)),
             )
         _, origin = await world.turn()
-        with pytest.raises(ToolError, match="protected"):
+        with pytest.raises(ToolError, match="writers to none"):
             await _slack_delete_message_impl(
                 world.runtime, auth, channel_id=_CHANNEL, message_id=ts, origin_context_id=origin
             )
@@ -401,7 +401,7 @@ async def test_a_policy_change_during_final_identity_io_stops_the_slack_call(
             _CONVERSATIONS_REPLIES, payload={"ok": True, "messages": [{"ts": ts}]}
         )
         monkeypatch.setattr(tidy_module, "find_agent_by_derived_uuid", wrapped)
-        with pytest.raises(ToolError, match="protected|pinned"):
+        with pytest.raises(ToolError, match="writers to none|runs it only in certain channels"):
             if action == "edit":
                 await _slack_edit_message_impl(
                     world.runtime,

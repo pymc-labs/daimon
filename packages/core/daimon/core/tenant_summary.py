@@ -1,12 +1,12 @@
 """Tenant summary: the balance, funding mode and every configured channel in one read.
 
 A channel is listed when it has its own agent or environment setting, a
-budget, channel admins or isolation. The private channels DM conversations
+budget, channel admins or only its own agents running there. The private channels DM conversations
 run in are left out. The MCP `get_tenant_summary` tool and `daimon channels
 list` both read it, as a server admin sees each channel
-(`daimon.core.channel_overview`): its `sealed` and `protected` flags are
-filled only for a caller that can already read the access policy (the CLI);
-for everyone else they are omitted, never sent as false.
+(`daimon.core.channel_overview`): its `readers` and `writers` are filled
+only for a caller that can already read the access policy (the CLI); for
+everyone else they are omitted.
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import ChannelReaders, ChannelWriters, TenantAccessPolicy
 from daimon.core.channel_budget import ChannelBudgetStatus, load_budget_status
 from daimon.core.channel_overview import ChannelAdminSet, ChannelViewer, build_channel_overview
 from daimon.core.errors import StoreError
-from daimon.core.permissions import confidential_channels
+from daimon.core.permissions import own_reader_channels
 from daimon.core.promo_credit import get_active_timed_credit
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow, merge
 from daimon.core.stores.access_policy import load_access_policy
@@ -63,14 +63,15 @@ class ChannelSummary:
     """The agent answering there: the channel's own, else the default."""
     environment_name: str | None
     """The environment its sessions run in, resolved the same way."""
-    isolated: bool
+    own_agents_only: bool
+    """Only its own agents run there (readers ``own``)."""
     admins: ChannelAdmins
     """Who administers the channel on top of the server admins; both lists empty for nobody."""
     budget: ChannelBudgetSummary | None
-    sealed: bool | None = Field(default=None, exclude_if=_omitted)
-    """Read only from inside it; omitted unless the caller may read the access policy."""
-    protected: bool | None = Field(default=None, exclude_if=_omitted)
-    """Closed to members' turns; omitted unless the caller may read the access policy."""
+    readers: ChannelReaders | None = Field(default=None, exclude_if=_omitted)
+    """Whose turns read it; omitted unless the caller may read the access policy."""
+    writers: ChannelWriters | None = Field(default=None, exclude_if=_omitted)
+    """Who posts there; omitted unless the caller may read the access policy."""
 
 
 @dataclass(frozen=True)
@@ -112,7 +113,7 @@ def build_channel_summaries(
     policy: TenantAccessPolicy,
     viewer: ChannelViewer,
 ) -> list[ChannelSummary]:
-    """One entry per channel with a setting, a budget, admins or isolation, by channel id.
+    """One entry per channel with a setting, a budget, admins or own agents, by channel id.
 
     A DM's channel gets a config row when the DM starts; it is not a channel
     of the workspace, so ``dm_channel_ids`` are skipped. Each entry carries
@@ -120,7 +121,7 @@ def build_channel_summaries(
     """
     configs = {row.channel_id: row for row in channel_rows}
     summaries: list[ChannelSummary] = []
-    listed = configs.keys() | budgets.keys() | admins.keys() | set(confidential_channels(policy))
+    listed = configs.keys() | budgets.keys() | admins.keys() | set(own_reader_channels(policy))
     for channel_id in sorted(listed - dm_channel_ids):
         resolved = merge(channel=configs.get(channel_id), tenant=tenant_row, default=default)
         overview = build_channel_overview(
@@ -137,13 +138,13 @@ def build_channel_summaries(
                 channel_id=channel_id,
                 agent_name=resolved.agent_name,
                 environment_name=overview.environment_name,
-                isolated=overview.isolated is True,
+                own_agents_only=overview.own_agents_only is True,
                 admins=ChannelAdmins(
                     role_ids=list(granted.role_ids), user_ids=list(granted.user_ids)
                 ),
                 budget=_budget_summary(overview.budget) if overview.budget is not None else None,
-                sealed=overview.sealed,
-                protected=overview.protected,
+                readers=overview.readers,
+                writers=overview.writers,
             )
         )
     return summaries
@@ -160,7 +161,7 @@ async def load_tenant_summary(
     """The tenant's summary; raises `StoreError` for an unknown tenant and
     `AccessPolicyUnreadable` when its access policy can't be read.
 
-    ``with_access`` fills each channel's seal and protection: only for a
+    ``with_access`` fills each channel's readers and writers: only for a
     caller that can already read the whole access policy."""
     tenant = await get_tenant(session, tenant_id)
     if tenant is None:

@@ -24,7 +24,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import (
     OPEN_READ_POLICY,
     ChannelReadPolicy,
-    SealedChannelError,
+    ChannelReadRefused,
 )
 from daimon.adapters.mcp.tools.slack._client import (
     _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
@@ -338,7 +338,7 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
             ),
         )
     except ToolError as terr:
-        if rc.runs_as_user or isinstance(terr, SealedChannelError):
+        if rc.runs_as_user or isinstance(terr, ChannelReadRefused):
             raise  # user already has a token — a connect hint would be noise
         raise _with_connect_hint(runtime, terr, team_id=team_id, slack_user_id=user_id) from terr
     except SlackApiError as err:
@@ -434,7 +434,7 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
             bot_client, channel_id=channel_id, thread_ts=thread_ts, limit=limit
         )
     except ToolError as terr:
-        if rc.runs_as_user or isinstance(terr, SealedChannelError):
+        if rc.runs_as_user or isinstance(terr, ChannelReadRefused):
             raise
         raise _with_connect_hint(runtime, terr, team_id=team_id, slack_user_id=user_id) from terr
     except SlackApiError as err:
@@ -532,7 +532,7 @@ async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
             await _fetch_single_message(bot_client, channel_id=channel_id, message_id=message_id),
         )
     except ToolError as terr:
-        if rc.runs_as_user or isinstance(terr, SealedChannelError):
+        if rc.runs_as_user or isinstance(terr, ChannelReadRefused):
             raise
         raise _with_connect_hint(runtime, terr, team_id=team_id, slack_user_id=user_id) from terr
     except SlackApiError as err:

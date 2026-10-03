@@ -177,7 +177,7 @@ async def test_channel_admin_sets_only_their_own_channels_default(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
     )
 
-    with pytest.raises(ToolError, match="was not made for or pinned to"):
+    with pytest.raises(ToolError, match="was not made for or limited by its rule to"):
         await propagation._set_agent_default_impl(runtime, member, "helper", CHANNEL)  # pyright: ignore[reportPrivateUsage]
     async with committing_sessionmaker.begin() as session:
         await record_creation_channel(
@@ -291,7 +291,7 @@ async def test_channel_admin_may_edit_an_agent_local_to_their_channel(
     await _set_channel_admins_impl(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[ROLE], user_ids=[]
     )
-    with pytest.raises(ToolError, match="not made for, pinned to or given to"):
+    with pytest.raises(ToolError, match="not made for, limited by its rule to or given to"):
         await require_admin_for_reachable_agent(
             runtime, role_member, agent_name="helper", agent=_agent(tenant_id, "helper")
         )
@@ -382,7 +382,7 @@ async def test_channel_admin_cannot_bind_another_channels_own_agent(
     )
     member = _auth(tenant_id)
 
-    with pytest.raises(ToolError, match="was not made for or pinned to"):
+    with pytest.raises(ToolError, match="was not made for or limited by its rule to"):
         await propagation._set_agent_default_impl(runtime, member, "other-own", CHANNEL)  # pyright: ignore[reportPrivateUsage]
     assert (
         await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
@@ -416,7 +416,7 @@ async def test_nobody_binds_a_pinned_agent_as_another_channels_default(
         )
     admin = _auth(tenant_id, admin=True)
 
-    with pytest.raises(ToolError, match="pinned 'pinned' to other channels"):
+    with pytest.raises(ToolError, match="'pinned's rule runs it only in other channels"):
         await propagation._set_agent_default_impl(runtime, admin, "pinned", CHANNEL)  # pyright: ignore[reportPrivateUsage]
     assert (
         await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))

@@ -66,7 +66,7 @@ def test_a_reader_answering_off_channel_is_refused_by_its_sources_pin(
         agent=AgentRef.of(*names),
         place=Place(),
     )
-    assert decision.reason == "agent_pinned_elsewhere"
+    assert decision.reason == "runs_elsewhere"
 
 
 def test_an_ordinary_agent_named_like_a_reader_gains_no_extra_pin() -> None:
@@ -123,7 +123,7 @@ async def test_a_member_cannot_publish_a_pinned_agents_reader_from_outside(
     runtime = _with_helper(runtime, tenant_id)
     monkeypatch.setattr("daimon.adapters.mcp.tools.publish.publish_report", _ok_publish({}))
 
-    with pytest.raises(ToolError, match="pinned this agent to its own channels"):
+    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
         await _publish_report_impl(
             runtime,
             tenant_id=tenant_id,

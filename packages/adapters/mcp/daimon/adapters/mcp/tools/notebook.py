@@ -173,11 +173,16 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         key, so share it only where the notebook belongs. Never paste large file
         contents into a tool argument.
 
-        Pass this turn's origin_context_id. A pinned agent, or a turn in a
-        confidential channel, publishes nothing.
+        Pass this turn's origin_context_id. An agent with a rule (where it runs)
+        publishes only once the requester approves the call on a card.
         """
         auth = await _auth(ctx)
-        await require_publishable(runtime, auth, origin_context_id=origin_context_id)
+        await require_publishable(
+            runtime,
+            auth,
+            tool_name="create_notebook_upload_url",
+            origin_context_id=origin_context_id,
+        )
         return await _create_notebook_upload_impl(
             runtime,
             slug=slug,
@@ -204,7 +209,12 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Pass this turn's origin_context_id, as for create_notebook_upload_url.
         """
         auth = await _auth(ctx)
-        await require_publishable(runtime, auth, origin_context_id=origin_context_id)
+        await require_publishable(
+            runtime,
+            auth,
+            tool_name="create_attachment_upload_url",
+            origin_context_id=origin_context_id,
+        )
         return await _create_attachment_upload_impl(
             runtime,
             slug=slug,

@@ -95,8 +95,8 @@ _ERROR_COPY: dict[_ErrorKind, tuple[str, str, int]] = {
         200,
     ),
     "pinned": (
-        "Not connected: this agent is pinned",
-        "An operator pinned this agent to its own channels, so connections to it can only "
+        "Not connected: this agent runs only in certain channels",
+        "This agent's rule runs it only in certain channels, so connections to it can only "
         "be added from a conversation inside them, or by an admin. Nothing was connected.",
         403,
     ),

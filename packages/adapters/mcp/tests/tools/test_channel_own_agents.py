@@ -1,8 +1,8 @@
-"""Channel isolation through the MCP tools: the admin tool and every filtered surface.
+"""A channel kept to its own agents through the MCP tools: the rule tool and every filtered surface.
 
-C (``ROOM``) is isolated: sealed, with its default agent ``local`` pinned to it.
-``shared`` answers in another channel. A call is inside C when it executes as
-``local``.
+C (``ROOM``) has readers and writers ``own``, with its default agent ``local``
+its own agent (an agent rule naming C alone). ``shared`` answers in another
+channel. A call is inside C when it executes as ``local``.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import uuid
 from dataclasses import replace
 from unittest.mock import MagicMock
 
+import daimon.adapters.mcp.tools._channel_policy as channel_policy_mod
 import daimon.adapters.mcp.tools.routines as routines_mod
 import httpx
 import pytest
@@ -44,8 +45,8 @@ from daimon.adapters.mcp.tools.channel_environments import (
     _clear_channel_environment_impl,  # pyright: ignore[reportPrivateUsage]
     _set_channel_environment_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.channel_isolation import (
-    _set_channel_isolation_impl,  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.channel_rules import (
+    _set_channel_rule_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
 from daimon.adapters.mcp.tools.environments import (
@@ -75,7 +76,7 @@ from daimon.adapters.mcp.tools.thread_participation import (
 from daimon.adapters.mcp.tools.timers import (
     _list_timers_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.channel_environments import save_scope_environment
 from daimon.core.continuity.timers import schedule_timer
 from daimon.core.defaults.metadata import tenant_scoped_display_title
@@ -107,6 +108,7 @@ ROOM = "111111111111111111"
 OTHER = "222222222222222222"
 NEW_ROOM = "333333333333333333"
 SETUP_THREAD = "555555555555555555"
+OWN = ChannelRule(readers="own", writers="own")
 
 
 class _World:
@@ -143,7 +145,7 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession], client: AsyncAnthro
 async def _world(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
-    isolate: bool = True,
+    keep_own: bool = True,
     local: str = "local",
     uploaded: bool = False,
 ) -> tuple[_World, McpRuntime]:
@@ -179,14 +181,12 @@ async def _world(
                 agent_name=agent,
                 mode="agent",
             )
-        if isolate:
+        if keep_own:
             await set_access_policy(
                 session,
                 tenant_id=tenant.id,
                 policy=TenantAccessPolicy(
-                    sealed_channel_ids=(ROOM,),
-                    isolated_channel_ids=(ROOM,),
-                    agent_channel_pins={local: (ROOM,)},
+                    channel_rules={ROOM: OWN}, agent_rules={local: AgentRule(runs_in=(ROOM,))}
                 ),
             )
     state = FakeMAState()
@@ -215,19 +215,19 @@ async def _world(
     return _World(tenant.id, account.id, state), _runtime(sessionmaker, client)
 
 
-async def test_nothing_changes_until_a_channel_is_isolated(
+async def test_nothing_changes_until_a_channel_is_kept_to_its_own_agents(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    world, runtime = await _world(committing_sessionmaker, isolate=False)
+    world, runtime = await _world(committing_sessionmaker, keep_own=False)
     names = {a.name for a in await _list_agents_impl(runtime, world.auth(), None)}
-    assert names == {"local", "shared"}, "with nothing isolated every agent is listed"
+    assert names == {"local", "shared"}, "with no rule every agent is listed"
     inside = {
         a.name for a in await _list_agents_impl(runtime, world.auth(executing="agent_local"), None)
     }
     assert inside == {"local", "shared"}, "and every caller sees the same"
 
 
-async def test_agents_and_skills_split_at_the_isolation_line(
+async def test_agents_and_skills_split_at_the_channels_line(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     world, runtime = await _world(committing_sessionmaker)
@@ -268,9 +268,9 @@ async def test_routing_writes_keep_local_agents_in_and_shared_ones_out(
 ) -> None:
     world, runtime = await _world(committing_sessionmaker)
     admin = world.auth()
-    with pytest.raises(ToolError, match="confidential"):
+    with pytest.raises(ToolError, match="own agents"):
         await _set_agent_default_impl(runtime, admin, "shared", ROOM, "agent_shared")
-    with pytest.raises(ToolError, match="confidential"):
+    with pytest.raises(ToolError, match="own agents"):
         await _clear_agent_default_impl(runtime, admin, ROOM)
     with pytest.raises(ToolError, match="missing"):
         await _set_agent_default_impl(runtime, admin, "local", OTHER, "agent_local")
@@ -281,7 +281,7 @@ async def test_routing_writes_keep_local_agents_in_and_shared_ones_out(
     assert scope is not None and scope.agent_name == "local", "a refusal writes nothing"
 
 
-async def test_routines_of_an_isolated_channel_show_only_inside_it(
+async def test_routines_of_a_channel_kept_to_its_own_agents_show_only_inside_it(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     world, runtime = await _world(committing_sessionmaker)
@@ -322,11 +322,11 @@ async def test_routines_of_an_isolated_channel_show_only_inside_it(
         )
 
 
-async def test_an_isolated_channels_routines_must_deliver_inside_it(
+async def test_routines_of_a_channel_kept_to_its_own_agents_deliver_inside_it(
     committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With no destination a routine reports by DM, outside every channel, so C's
-    pinned agent needs a destination in C, on create and on every update."""
+    own agent needs a destination in C, on create and on every update."""
     world, runtime = await _world(committing_sessionmaker)
 
     async def destination(
@@ -338,7 +338,7 @@ async def test_an_isolated_channels_routines_must_deliver_inside_it(
     inside = world.auth(admin=False, executing="agent_local")
     every_hour = {"cron_expr": "0 * * * *", "timezone": "UTC", "trigger_message": "hi"}
     for kind, target in ((None, None), ("channel", OTHER)):
-        with pytest.raises(ToolError, match="pinned to specific channels"):
+        with pytest.raises(ToolError, match="rule runs it only in certain channels"):
             await _create_routine_impl(
                 runtime,
                 inside,
@@ -359,47 +359,53 @@ async def test_an_isolated_channels_routines_must_deliver_inside_it(
         runtime, inside, routine_id=routine.id, trigger_message="hey"
     )
     assert updated.trigger_message == "hey", "a routine posting into C still updates"
-    with pytest.raises(ToolError, match="pinned to specific channels"):
+    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
         await _update_routine_impl(runtime, inside, routine_id=routine.id, clear_destination=True)
-    with pytest.raises(ToolError, match="pinned to specific channels"):
+    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
         await _update_routine_impl(
             runtime, inside, routine_id=routine.id, destination_kind="channel", destination_id=OTHER
         )
 
 
-async def test_set_channel_isolation_refuses_or_forks_and_ends(
+async def test_set_channel_rule_refuses_or_copies_and_releases(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    world, runtime = await _world(committing_sessionmaker, isolate=False)
-    with pytest.raises(ToolError, match="admin"):
-        await _set_channel_isolation_impl(
-            runtime, world.auth(admin=False), channel_id=ROOM, isolated=True
+    world, runtime = await _world(committing_sessionmaker, keep_own=False)
+    with pytest.raises(ToolError, match="Only a server or workspace admin"):
+        await _set_channel_rule_impl(
+            runtime, world.auth(admin=False), channel_id=ROOM, readers="own", writers="own"
         )
-    with pytest.raises(ToolError, match="no agent of its own"):
-        await _set_channel_isolation_impl(runtime, world.auth(), channel_id=NEW_ROOM, isolated=True)
+    with pytest.raises(ToolError, match="no default agent that could be its own"):
+        await _set_channel_rule_impl(
+            runtime, world.auth(), channel_id=NEW_ROOM, readers="own", writers="own"
+        )
 
-    kept = await _set_channel_isolation_impl(runtime, world.auth(), channel_id=ROOM, isolated=True)
-    assert (kept.agent_name, kept.forked_from, kept.changed) == ("local", None, True)
-
-    forked = await _set_channel_isolation_impl(
-        runtime, world.auth(), channel_id=NEW_ROOM, isolated=True, fork_from="shared"
+    kept = await _set_channel_rule_impl(
+        runtime, world.auth(), channel_id=ROOM, readers="own", writers="own"
     )
-    assert forked.forked_from == "shared" and forked.agent_name == "channel-333333", (
+    assert (kept.own_agent, kept.copied_from, kept.changed) == ("local", None, True)
+
+    copied = await _set_channel_rule_impl(
+        runtime, world.auth(), channel_id=NEW_ROOM, readers="own", writers="own", copy_from="shared"
+    )
+    assert copied.copied_from == "shared" and copied.own_agent == "channel-333333", (
         "without a readable channel name the copy is named from the id"
     )
     names = {str(agent["name"]) for agent in world.state.agents.values()}
     assert "channel-333333" in names, "the copy exists"
     async with committing_sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=world.tenant_id)
-    assert set(policy.isolated_channel_ids) == {ROOM, NEW_ROOM}
-    assert policy.agent_channel_pins == {"local": (ROOM,), "channel-333333": (NEW_ROOM,)}, (
-        "each channel's own agent is pinned to it"
-    )
+    assert policy.channel_rules == {ROOM: OWN, NEW_ROOM: OWN}
+    assert policy.agent_rules == {
+        "local": AgentRule(runs_in=(ROOM,)),
+        "channel-333333": AgentRule(runs_in=(NEW_ROOM,)),
+    }, "each channel's own agent runs only there"
 
-    ended = await _set_channel_isolation_impl(
-        runtime, world.auth(), channel_id=ROOM, isolated=False
+    opened = await _set_channel_rule_impl(
+        runtime, world.auth(), channel_id=ROOM, readers="any", release_agents=True
     )
-    assert ended.changed and not ended.isolated, "ending isolation reports the change"
+    assert (opened.changed, opened.readers, opened.writers) == (True, "any", "any")
+    assert opened.released_agents == ["local"], "releasing drops its agents' rules"
 
 
 async def test_explain_agent_resolution_stays_on_the_callers_side(
@@ -412,9 +418,9 @@ async def test_explain_agent_resolution_stays_on_the_callers_side(
     )
     outside, inside = world.auth(), world.auth(executing="agent_local")
 
-    with pytest.raises(ToolError, match="across a confidential channel's line"):
+    with pytest.raises(ToolError, match="other side of a channel kept to its own agents"):
         await _explain_agent_resolution_impl(runtime, outside, ROOM)
-    with pytest.raises(ToolError, match="across a confidential channel's line"):
+    with pytest.raises(ToolError, match="other side of a channel kept to its own agents"):
         await _explain_agent_resolution_impl(runtime, inside, OTHER)
     here = await _explain_agent_resolution_impl(runtime, inside, ROOM)
     assert (here.effective_agent_name, here.deployment_default) == ("local", None), (
@@ -432,11 +438,11 @@ async def test_posts_and_direct_messages_stay_on_their_side(
     world, runtime = await _world(committing_sessionmaker)
     outside, inside = world.auth(executing="agent_shared"), world.auth(executing="agent_local")
 
-    with pytest.raises(ToolError, match="only its own agents post"):
+    with pytest.raises(ToolError, match="only they post in it"):
         await require_channel_writable(runtime, outside, channel_id=ROOM)
-    with pytest.raises(ToolError, match="only its own agents post"):
+    with pytest.raises(ToolError, match="only they post in it"):
         await require_channel_writable(runtime, outside, channel_id="t1", parent_channel_id=ROOM)
-    with pytest.raises(ToolError, match="pinned to its own channels"):
+    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
         await require_channel_writable(runtime, inside, channel_id=OTHER)
     await require_channel_writable(runtime, inside, channel_id="t1", parent_channel_id=ROOM)
     await require_channel_writable(runtime, outside, channel_id=OTHER)
@@ -446,9 +452,14 @@ async def test_posts_and_direct_messages_stay_on_their_side(
 
 
 async def _setup_thread_origin(
-    sessionmaker: async_sessionmaker[AsyncSession], world: _World, *, channel: str = ROOM
+    sessionmaker: async_sessionmaker[AsyncSession],
+    world: _World,
+    *,
+    channel: str = ROOM,
+    responder: str = "shared",
 ) -> str:
-    """A setup conversation in C (or `channel`), answered by the built-in (``shared`` here)."""
+    """A setup conversation in C (or `channel`), answered by the built-in (``shared`` here);
+    with another `responder`, a plain conversation it answers there."""
     now = dt.datetime.now(dt.UTC)
     async with sessionmaker.begin() as session:
         origin = await create_origin(
@@ -458,14 +469,14 @@ async def _setup_thread_origin(
             platform="discord",
             parent_channel_id=channel,
             thread_id=SETUP_THREAD,
-            responder_ma_agent_id="agent_shared",
-            responder_name="shared",
+            responder_ma_agent_id=f"agent_{responder}",
+            responder_name=responder,
             configuration_target_ma_agent_id="agent_local",
             configuration_target_name="local",
             role=Role.USER,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
-            is_setup=True,
+            is_setup=responder == "shared",
         )
     return str(origin.id)
 
@@ -543,7 +554,7 @@ async def test_the_setup_thread_is_held_to_its_channel(
     await require_channel_writable(
         runtime, builtin, channel_id=SETUP_THREAD, parent_channel_id=ROOM, origin=origin
     )
-    with pytest.raises(ToolError, match="only its own agents post"):
+    with pytest.raises(ToolError, match="only they post in it"):
         await require_channel_writable(
             runtime, builtin, channel_id=SETUP_THREAD, parent_channel_id=ROOM
         )
@@ -597,7 +608,7 @@ async def test_a_chat_turn_naming_no_verified_origin_creates_no_agent(
         "Tell the caller to create the agent from a chat conversation. Do not retry."
     ), "nothing to retry with, so the model must not loop"
     await _setup_thread_origin(committing_sessionmaker, world)
-    with pytest.raises(ToolError, match="held to a confidential channel"):
+    with pytest.raises(ToolError, match="held to a channel kept to its own agents"):
         await _create_agent_impl(runtime, builtin, spec, origin_id)
 
     names = {str(agent["name"]) for agent in world.state.agents.values()}
@@ -640,7 +651,7 @@ async def test_an_own_agent_posts_and_messages_nowhere_outside_wherever_it_runs(
     world, runtime = await _world(committing_sessionmaker)
     for who, auth in _own_agent_callers(world).items():
         for channel, parent in ((OTHER, None), ("t9", OTHER), ("D123", None)):
-            with pytest.raises(ToolError, match="pinned to its own channels"):
+            with pytest.raises(ToolError, match="rule runs it only in certain channels"):
                 await require_channel_writable(
                     runtime, auth, channel_id=channel, parent_channel_id=parent
                 )
@@ -697,55 +708,95 @@ async def test_an_own_agent_creates_no_agent(
     assert names == {"local", "shared"}, "no agent was created"
 
 
-async def test_an_own_agent_publishes_and_renames_daimon_nowhere(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
+_PUBLISH = "publish_report"
+
+
+async def test_an_own_agent_publishes_only_once_approved_and_renames_daimon_nowhere(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A link, or daimon's server nickname, shows outside C: refused for every caller."""
+    """A link, or daimon's server nickname, shows outside C. Publishing waits for the
+    requester's Approve, which no caller here has; the nickname is refused outright."""
     world, runtime = await _world(committing_sessionmaker)
+    asked: list[str] = []
+
+    async def no_card(*args: object, tool_name: str) -> bool:
+        asked.append(tool_name)
+        return False
+
+    monkeypatch.setattr(channel_policy_mod, "session_asks_first", no_card)
     for auth in _own_agent_callers(world).values():
-        with pytest.raises(ToolError, match="confidential channel, so publishing is refused"):
-            await require_publishable(runtime, auth, origin_context_id=None)
+        with pytest.raises(ToolError, match="presses Approve"):
+            await require_publishable(runtime, auth, tool_name=_PUBLISH, origin_context_id=None)
         with pytest.raises(ToolError, match="server-wide name or avatar is refused"):
             await require_identity_changeable(runtime, auth, origin_context_id=None)
+    assert set(asked) == {_PUBLISH}, "the card asked about is this tool's"
+
+
+async def test_an_approved_call_publishes_from_inside(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the requester's Approve on the session, C's own agent and a call from C's
+    setup thread publish; an agent key never asks."""
+    world, runtime = await _world(committing_sessionmaker)
+
+    async def approved(
+        runtime: McpRuntime, auth: AuthIdentity, origin: object, *, tool_name: str
+    ) -> bool:
+        return origin is not None  # as `session_asks_first`: no origin, no card
+
+    monkeypatch.setattr(channel_policy_mod, "session_asks_first", approved)
+    local = world.auth(admin=False, executing="agent_local")
+    own = await _setup_thread_origin(committing_sessionmaker, world, responder="local")
+    await require_publishable(runtime, local, tool_name=_PUBLISH, origin_context_id=own)
+    inside = await _setup_thread_origin(committing_sessionmaker, world)
+    builtin = world.auth(executing="agent_shared")
+    await require_publishable(runtime, builtin, tool_name=_PUBLISH, origin_context_id=inside)
+    with pytest.raises(ToolError, match="presses Approve"):
+        await require_publishable(
+            runtime, _key(world, bound=ROOM), tool_name=_PUBLISH, origin_context_id=None
+        )
 
 
 async def test_publishing_is_held_by_the_turns_origin(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A shared agent publishes from outside C, not from C's setup thread, and not with no
-    origin while C is isolated. Once a turn of it runs in C, a call naming the outside
-    origin is held too. A call with no executing agent is held nowhere."""
+    """A shared agent publishes freely from outside C; from C's setup thread it waits
+    for Approve, and with no origin it is refused while C is kept to its own agents.
+    Once a turn of it runs in C, a call naming the outside origin waits too. A call with
+    no executing agent is held nowhere."""
     world, runtime = await _world(committing_sessionmaker)
     builtin = world.auth(executing="agent_shared")
     with pytest.raises(ToolError, match="origin_context_id"):
-        await require_publishable(runtime, builtin, origin_context_id=None)
+        await require_publishable(runtime, builtin, tool_name=_PUBLISH, origin_context_id=None)
     outside = await _setup_thread_origin(committing_sessionmaker, world, channel=OTHER)
-    await require_publishable(runtime, builtin, origin_context_id=outside)
+    await require_publishable(runtime, builtin, tool_name=_PUBLISH, origin_context_id=outside)
     inside = await _setup_thread_origin(committing_sessionmaker, world)
     for named in (inside, outside):
-        with pytest.raises(ToolError, match="confidential channel"):
-            await require_publishable(runtime, builtin, origin_context_id=named)
-    await require_publishable(runtime, world.auth(), origin_context_id=None)
+        with pytest.raises(ToolError, match="presses Approve"):
+            await require_publishable(runtime, builtin, tool_name=_PUBLISH, origin_context_id=named)
+    await require_publishable(runtime, world.auth(), tool_name=_PUBLISH, origin_context_id=None)
 
 
-async def test_a_pinned_agent_publishes_nothing_even_for_an_admin(
+async def test_an_agent_with_a_rule_publishes_only_once_approved_even_for_an_admin(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    world, runtime = await _world(committing_sessionmaker, isolate=False)
+    world, runtime = await _world(committing_sessionmaker, keep_own=False)
     async with committing_sessionmaker.begin() as session:
         await set_access_policy(
             session,
             tenant_id=world.tenant_id,
-            policy=TenantAccessPolicy(agent_channel_pins={"local": (ROOM,)}),
+            policy=TenantAccessPolicy(agent_rules={"local": AgentRule(runs_in=(ROOM,))}),
         )
-    with pytest.raises(ToolError, match="pinned to its own channels"):
+    with pytest.raises(ToolError, match="presses Approve"):
         await require_publishable(
-            runtime, world.auth(executing="agent_local"), origin_context_id=None
+            runtime, world.auth(executing="agent_local"), tool_name=_PUBLISH, origin_context_id=None
         )
-    await require_publishable(runtime, world.auth(executing="agent_shared"), origin_context_id=None)
+    await require_publishable(
+        runtime, world.auth(executing="agent_shared"), tool_name=_PUBLISH, origin_context_id=None
+    )
 
 
-async def test_a_chat_turn_whose_agent_is_gone_is_refused_while_a_channel_is_isolated(
+async def test_a_chat_turn_whose_agent_is_gone_is_refused_while_a_channel_keeps_its_own(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """It may have been C's own agent, so it must not be judged from outside."""
@@ -754,7 +805,7 @@ async def test_a_chat_turn_whose_agent_is_gone_is_refused_while_a_channel_is_iso
         await _list_agents_impl(runtime, world.auth(executing="agent_gone"), None)
 
 
-async def test_an_isolated_channels_environment_name_shows_only_inside_it(
+async def test_an_own_agents_channel_environment_name_shows_only_inside_it(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """A name only C picks could name its client, so only callers inside C see it. Names
@@ -831,7 +882,7 @@ async def test_no_one_publishes_an_own_agents_reader(
         ma_agent(id=f"agent_{name}", name=name, tenant_id=world.tenant_id)
         for name in ("local", "shared")
     )
-    with pytest.raises(ToolError, match="confidential channel's own agent"):
+    with pytest.raises(ToolError, match="is a channel's own agent"):
         await require_reader_source_publishable(runtime, world.auth(), own)
     await require_reader_source_publishable(runtime, world.auth(), shared)
 
@@ -884,7 +935,7 @@ async def test_an_own_agent_schedules_nothing_outside(
             )
 
 
-async def test_a_timer_set_in_an_isolated_channel_lists_only_inside_it(
+async def test_a_timer_set_in_a_channel_kept_to_its_own_agents_lists_only_inside_it(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """A timer's note is the agent's words about C, so listing it from outside, even
@@ -930,13 +981,13 @@ async def test_a_running_held_turn_holds_calls_that_name_no_origin(
     held = await load_read_policy(runtime, builtin, origin_context_id=None)
     with pytest.raises(ToolError, match="nothing outside it is read"):
         held.require(OTHER)
-    with pytest.raises(ToolError, match="only its own agents read it"):
+    with pytest.raises(ToolError, match="only they read it"):
         held.require(ROOM)
     with pytest.raises(ToolError, match="nothing said here is posted"):
         await require_channel_writable(runtime, builtin, channel_id=OTHER)
     with pytest.raises(ToolError, match="nothing said here is posted"):
         await require_channel_writable(runtime, builtin, channel_id="a:own-dm")
-    with pytest.raises(ToolError, match="only its own agents post"):
+    with pytest.raises(ToolError, match="only they post in it"):
         await require_channel_writable(runtime, builtin, channel_id=ROOM)  # nothing granted
     with pytest.raises(ToolError, match="sends no direct messages"):
         await require_dm_recipient_allowed(runtime, builtin, recipient_id="U_SOMEONE")
@@ -958,7 +1009,7 @@ async def test_a_running_held_turn_holds_calls_that_name_no_origin(
     (await load_read_policy(runtime, other_account, origin_context_id=None)).require(OTHER)
 
 
-async def test_turns_running_in_two_isolated_channels_refuse_an_unnamed_call(
+async def test_turns_running_in_two_own_agents_channels_refuse_an_unnamed_call(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     world, runtime = await _world(committing_sessionmaker)
@@ -967,9 +1018,8 @@ async def test_turns_running_in_two_isolated_channels_refuse_an_unnamed_call(
             session,
             tenant_id=world.tenant_id,
             policy=TenantAccessPolicy(
-                sealed_channel_ids=(ROOM, NEW_ROOM),
-                isolated_channel_ids=(ROOM, NEW_ROOM),
-                agent_channel_pins={"local": (ROOM,)},
+                channel_rules={ROOM: OWN, NEW_ROOM: OWN},
+                agent_rules={"local": AgentRule(runs_in=(ROOM,))},
             ),
         )
         now = dt.datetime.now(dt.UTC)
@@ -990,7 +1040,7 @@ async def test_turns_running_in_two_isolated_channels_refuse_an_unnamed_call(
         )
     origin_id = await _setup_thread_origin(committing_sessionmaker, world)
     builtin = world.auth(admin=False, executing="agent_shared")
-    with pytest.raises(ToolError, match="more than one confidential channel"):
+    with pytest.raises(ToolError, match="more than one channel kept to its own agents"):
         await load_read_policy(runtime, builtin, origin_context_id=None)
     named = await load_read_policy(runtime, builtin, origin_context_id=origin_id)
     with pytest.raises(ToolError, match="nothing outside it is read"):

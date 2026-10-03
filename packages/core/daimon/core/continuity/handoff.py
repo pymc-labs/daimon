@@ -10,10 +10,10 @@ The refusals are ordered, and the order is the point:
 1. `setup_thread` — a setup conversation must always answer as the built-in
    Daimon, so nothing can be handed over inside one. Nothing else matters
    once the location is a setup thread.
-2. The access policy, as `authorize(HAND_OFF)` decided it: `channel_protected`,
-   `invoker_not_allowed`, `pinned_elsewhere` and `channel_isolated`. Checked
-   before reachability: a pinned agent is reachable (it answers in its own
-   channels), and that is exactly what must not carry it here.
+2. The access policy, as `authorize(HAND_OFF)` decided it: `writers_none`,
+   `invoker_not_allowed`, `runs_elsewhere` and `own_agents_only`. Checked
+   before reachability: an agent with a rule is reachable (it answers in its
+   own channels), and that is exactly what must not carry it here.
 3. `unreachable` — an agent nobody can reach through the channel/workspace
    cascade cannot be handed a task, because the person could never talk to
    it afterwards.
@@ -52,21 +52,21 @@ HandoffRefusalReason = Literal[
     "unreachable",
     "setup_thread",
     "same_agent",
-    "pinned_elsewhere",
+    "runs_elsewhere",
     "admin_required",
-    "channel_protected",
+    "writers_none",
     "invoker_not_allowed",
-    "channel_isolated",
-    "sealed",
+    "own_agents_only",
+    "not_a_reader",
 ]
 
 # `authorize(HAND_OFF)` denials that refuse before reachability is looked at.
 _POLICY_REFUSALS: dict[str, HandoffRefusalReason] = {
-    "channel_protected": "channel_protected",
+    "writers_none": "writers_none",
     "invoker_not_allowed": "invoker_not_allowed",
-    "agent_pinned_elsewhere": "pinned_elsewhere",
+    "runs_elsewhere": "runs_elsewhere",
     "agent_unresolved": "unreachable",
-    "channel_isolated": "channel_isolated",
+    "own_agents_only": "own_agents_only",
 }
 
 
@@ -139,7 +139,7 @@ def decide_handoff(
         return HandoffRefused(reason="same_agent", destination_name=destination_name)
     if denied is not None:
         return HandoffRefused(
-            reason="sealed" if denied == "sealed" else "admin_required",
+            reason="not_a_reader" if denied == "not_a_reader" else "admin_required",
             destination_name=destination_name,
             authz_reason=denied,
         )

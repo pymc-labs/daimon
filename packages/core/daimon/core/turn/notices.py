@@ -160,21 +160,21 @@ _COPY: dict[TerminationReason, _Copy] = {
         "An admin can raise or clear the channel's budget.",
     ),
     TerminationReason.ADMISSION_CHANNEL_PROTECTED: _Copy(
-        "Channel protected",
-        "This channel is protected, so the agent can't answer in it.",
+        "Channel closed to daimon",
+        "This channel's rule lets nobody write in it, so the agent can't answer here.",
         _KEPT,
-        "Ask somewhere else, or ask an admin about the channel's protection.",
+        "Ask somewhere else, or ask an admin about the channel's rule.",
     ),
     TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE: _Copy(
-        "Agent pinned elsewhere",
-        "This agent only runs in the channels an operator pinned it to, so the turn did not run.",
+        "Agent runs elsewhere",
+        "This agent's rule runs it only in other channels, so the turn did not run.",
         _KEPT,
         "Ask it in one of those channels.",
     ),
     TerminationReason.ADMISSION_CHANNEL_ISOLATED: _Copy(
-        "Confidential channel",
-        "This channel is confidential and the agent that would answer isn't one of its own, "
-        "so the turn did not run.",
+        "Channel kept to its own agents",
+        "This channel is kept to its own agents and the one that would answer isn't one of "
+        "them, so the turn did not run.",
         _KEPT,
         "An admin must set the channel's agent.",
     ),
@@ -242,29 +242,31 @@ _REFUSALS: dict[AdmissionDenialReason, str] = {
     "invoker_not_allowed": (
         "You aren't on this {scope}'s list of people who can start a turn. {Admin} can add you."
     ),
-    "agent_pinned_elsewhere": (
-        "This agent only runs in the channels an operator pinned it to, so it can't answer here."
+    "runs_elsewhere": (
+        "This agent's rule runs it only in other channels, so it can't answer here."
     ),
-    "channel_isolated": (
-        "This channel is confidential and the agent that would answer isn't one of its own. "
-        "{Admin} must set the channel's agent."
+    "own_agents_only": (
+        "This channel is kept to its own agents and the one that would answer isn't one of "
+        "them. {Admin} must set the channel's agent."
     ),
-    "channel_protected": "This channel is protected, so the agent can't answer in it.",
+    "writers_none": "This channel's rule lets nobody write in it, so the agent can't answer.",
     # Only Teams marks people from another organisation (shared channels).
     "external_participant": (
-        "People from another organisation can use this agent only in its confidential channel."
+        "People from another organisation can use this agent only in a channel kept to its "
+        "own agents."
     ),
 }
 # The place-bound refusals, worded for a conversation moved to or held in a DM.
 _DM_REFUSALS: dict[AdmissionDenialReason, str] = {
-    "agent_pinned_elsewhere": (
-        "This channel's agent only runs in the channels an operator pinned it to, "
+    "runs_elsewhere": (
+        "This channel's agent has a rule running it only in certain channels, "
         "so it can't continue in a DM."
     ),
-    "channel_isolated": (
-        "This channel is confidential, so its conversations stay in it and can't move to a DM."
+    "own_agents_only": (
+        "This channel is kept to its own agents, so its conversations stay in it and can't "
+        "move to a DM."
     ),
-    "channel_protected": "This channel is protected, so it can't be moved to a DM.",
+    "writers_none": "This channel's rule lets nobody write in it, so it can't move to a DM.",
     "external_participant": "People from another organisation can't move a conversation to a DM.",
 }
 

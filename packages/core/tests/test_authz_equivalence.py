@@ -3,7 +3,7 @@
 Each `_old_*` function below is the decision a caller made before the checks
 were routed through `daimon.core.authz.authorize`, reconstructed, with their predicates unchanged, from the
 code it replaced (I/O and refusal copy stripped, the policy predicates
-unchanged). Every test runs the old and new decisions over a grid of pin maps,
+unchanged). Every test runs the old and new decisions over a grid of agent rules,
 agent names (including empty and missing names, and a display name that
 differs from the config name), places and callers, and asserts they agree on
 every point. A rule that drifts from what main did fails here with the
@@ -16,10 +16,10 @@ import itertools
 
 import pytest
 from daimon.core.access_policy import (
+    AgentRule,
+    ChannelRule,
     TenantAccessPolicy,
     is_invoker_allowed,
-    is_outside_agent_pin,
-    is_write_protected,
 )
 from daimon.core.authz import (
     Action,
@@ -49,7 +49,10 @@ def _pin_maps() -> list[dict[str, tuple[str, ...]]]:
     return maps
 
 
-POLICIES = [TenantAccessPolicy(agent_channel_pins=pins) for pins in _pin_maps()]
+POLICIES = [
+    TenantAccessPolicy(agent_rules={name: AgentRule(runs_in=pin) for name, pin in pins.items()})
+    for pins in _pin_maps()
+]
 NAME_SETS: list[tuple[str | None, ...]] = [
     (),
     (None,),
@@ -87,6 +90,54 @@ ORIGINS: list[tuple[str | None, str | None]] = [
 # --- the old decisions, reconstructed with their predicates unchanged -------------------------
 
 
+def _pins(policy: TenantAccessPolicy) -> dict[str, tuple[str, ...]]:
+    # The per-name channel lists agent rules replaced.
+    return {name: rule.runs_in or () for name, rule in policy.agent_rules.items()}
+
+
+def _sealed(policy: TenantAccessPolicy) -> tuple[str, ...]:
+    # The id list readers-limited rules replaced.
+    return tuple(i for i, rule in policy.channel_rules.items() if rule.readers != "any")
+
+
+def is_outside_agent_pin(
+    policy: TenantAccessPolicy,
+    *,
+    agent_names: tuple[str | None, ...],
+    channel_id: str | None,
+    parent_channel_id: str | None = None,
+) -> bool:
+    # access_policy.is_outside_agent_pin
+    pins = _pins(policy)
+    for name in agent_names:
+        if name is None or name not in pins:
+            continue
+        if channel_id is not None and channel_id in pins[name]:
+            continue
+        if parent_channel_id is not None and parent_channel_id in pins[name]:
+            continue
+        return True
+    return False
+
+
+def is_write_protected(
+    policy: TenantAccessPolicy,
+    *,
+    channel_id: str,
+    parent_channel_id: str | None,
+    category_id: str | None,
+    category_unresolved: bool,
+) -> bool:
+    # access_policy.is_write_protected
+    protected = {i for i, rule in policy.channel_rules.items() if rule.writers == "none"}
+    categories = {i for i, rule in policy.category_rules.items() if rule.writers == "none"}
+    if channel_id in protected or parent_channel_id in protected:
+        return True
+    if category_unresolved and categories:
+        return True
+    return category_id is not None and category_id in categories
+
+
 def _old_origin_pin_location(
     *, parent_channel_id: str | None, thread_id: str | None
 ) -> tuple[str | None, str | None]:
@@ -105,7 +156,7 @@ def _old_pin_write_refused(
     thread_id: str | None,
 ) -> bool:
     # agent_pins.pin_write_refused
-    if is_admin or not policy.agent_channel_pins:
+    if is_admin or not _pins(policy):
         return False
     if agent_names is None:
         return True
@@ -121,7 +172,7 @@ def _old_routine_save_refused(
     policy: TenantAccessPolicy, *, agent_names: tuple[str | None, ...], channel_id: str | None
 ) -> bool:
     # tools/routines._check_agent_pin
-    if not any(name in policy.agent_channel_pins for name in agent_names if name):
+    if not any(name in _pins(policy) for name in agent_names if name):
         return False
     return is_outside_agent_pin(policy, agent_names=agent_names, channel_id=channel_id)
 
@@ -154,7 +205,7 @@ def _old_mcp_pin_refused(
     # tools/_ctx._admit
     return (
         not (pin_exempt and platform_user_id is not None)
-        and bool(policy.agent_channel_pins)
+        and bool(_pins(policy))
         and is_outside_agent_pin(policy, agent_names=agent_names, channel_id=None)
     )
 
@@ -170,7 +221,7 @@ def _old_send_refused(
 ) -> bool:
     # tools/_channel_policy._require_send_inside_pin + _executing_agent_names
     # (agent_names None is an agent that could not be resolved: refused)
-    if not policy.agent_channel_pins:
+    if not _pins(policy):
         return False
     if own_dm:
         return False
@@ -178,7 +229,7 @@ def _old_send_refused(
         return False
     if agent_names is None:
         return True
-    if not any(name is not None and name in policy.agent_channel_pins for name in agent_names):
+    if not any(name is not None and name in _pins(policy) for name in agent_names):
         return False
     return is_outside_agent_pin(
         policy, agent_names=agent_names, channel_id=channel_id, parent_channel_id=parent_channel_id
@@ -196,18 +247,18 @@ def _old_dm_refused(
     # tools/_channel_policy.require_dm_recipient_allowed
     if not executing:
         return False
-    if not policy.agent_channel_pins:
+    if not _pins(policy):
         return False
     if agent_names is None:
         return True
-    if not any(name is not None and name in policy.agent_channel_pins for name in agent_names):
+    if not any(name is not None and name in _pins(policy) for name in agent_names):
         return False
     return recipient_id != requester_id
 
 
 def _old_fork_pinned(policy: TenantAccessPolicy, *, names: tuple[str | None, ...]) -> bool:
     # tools/agents._fork_agent_impl and cli commands/agents (after the admin check)
-    return any(name in policy.agent_channel_pins for name in names if name is not None)
+    return any(name in _pins(policy) for name in names if name is not None)
 
 
 def _old_channel_allows(
@@ -217,7 +268,7 @@ def _old_channel_allows(
     parent_channel_id: str | None,
 ) -> bool:
     # tools/_channel_policy.ChannelReadPolicy.allows
-    sealed = policy.sealed_channel_ids
+    sealed = _sealed(policy)
     if channel_id in sealed:
         return channel_id in origin
     if parent_channel_id is not None and parent_channel_id in sealed:
@@ -243,7 +294,7 @@ def _old_seal_allows(
         return _old_channel_allows(policy, origin, thread, channel) and _old_channel_allows(
             policy, origin, f"{channel}:{thread}", channel
         )
-    if legacy_thread_id is None or not policy.sealed_channel_ids:
+    if legacy_thread_id is None or not _sealed(policy):
         return True
     return legacy_thread_id in origin
 
@@ -272,7 +323,7 @@ def test_configuration_writes_match() -> None:
             place=Place.from_origin(parent_channel_id=parent, thread_id=thread),
         )
         if old != new:
-            mismatches.append((policy.agent_channel_pins, names, parent, thread, is_admin))
+            mismatches.append((_pins(policy), names, parent, thread, is_admin))
     assert mismatches == []
 
 
@@ -290,7 +341,7 @@ def test_routine_saves_match(surface: Surface) -> None:
             place=Place(channel_id=channel),
         )
         if old != new:
-            mismatches.append((policy.agent_channel_pins, names, channel))
+            mismatches.append((_pins(policy), names, channel))
     assert mismatches == []
 
 
@@ -313,7 +364,7 @@ def test_routine_fires_and_handoffs_match() -> None:
                 place=Place.from_origin(parent_channel_id=parent, thread_id=thread),
             )
             if old != new:
-                mismatches.append((policy.agent_channel_pins, names, parent, thread, surface))
+                mismatches.append((_pins(policy), names, parent, thread, surface))
     assert mismatches == []
 
 
@@ -345,7 +396,7 @@ def test_turn_admission_pins_match() -> None:
             ),
         )
         if old != new:
-            mismatches.append((policy.agent_channel_pins, names, thread, channel, is_dm, is_admin))
+            mismatches.append((_pins(policy), names, thread, channel, is_dm, is_admin))
     assert mismatches == []
 
 
@@ -360,7 +411,7 @@ def test_mcp_and_hub_turn_pins_match() -> None:
         # _ctx._admit: the hub admin skips the check; otherwise pins must exist.
         hub_admin = pin_exempt and user is not None
         new = (
-            bool(policy.agent_channel_pins)
+            bool(_pins(policy))
             and not hub_admin
             and not authorize(
                 policy,
@@ -371,7 +422,7 @@ def test_mcp_and_hub_turn_pins_match() -> None:
             )
         )
         if old != new:
-            mismatches.append((policy.agent_channel_pins, names, pin_exempt, user))
+            mismatches.append((_pins(policy), names, pin_exempt, user))
     assert mismatches == []
 
 
@@ -404,7 +455,7 @@ def test_pinned_sends_and_direct_messages_match() -> None:
                 place=Place(channel_id=channel, parent_channel_id=parent, own_dm=own_dm),
             )
             if old != new:
-                mismatches.append(("post", policy.agent_channel_pins, names, channel, own_dm))
+                mismatches.append(("post", _pins(policy), names, channel, own_dm))
         for recipient in ("U1", "U2"):
             old = _old_dm_refused(
                 policy,
@@ -427,7 +478,7 @@ def test_pinned_sends_and_direct_messages_match() -> None:
                 recipient_id=recipient,
             )
             if old != new:
-                mismatches.append(("dm", policy.agent_channel_pins, names, recipient))
+                mismatches.append(("dm", _pins(policy), names, recipient))
     assert mismatches == []
 
 
@@ -442,19 +493,19 @@ def test_fork_pin_refusal_matches() -> None:
                 action=Action.FORK,
                 agent=AgentRef.of(*names),
             ).reason
-            == "agent_pinned"
+            == "agent_has_rule"
         )
         if old != new:
-            mismatches.append((policy.agent_channel_pins, names))
+            mismatches.append((_pins(policy), names))
     assert mismatches == []
 
 
 _SEAL_POLICIES = [
     TenantAccessPolicy(),
-    TenantAccessPolicy(sealed_channel_ids=("C1",)),
-    TenantAccessPolicy(sealed_channel_ids=("T1",)),
-    TenantAccessPolicy(sealed_channel_ids=("C1:T1",)),
-    TenantAccessPolicy(sealed_channel_ids=("C1", "T1", "C3")),
+    *(
+        TenantAccessPolicy(channel_rules=dict.fromkeys(ids, ChannelRule(readers="inside")))
+        for ids in (("C1",), ("T1",), ("C1:T1",), ("C1", "T1", "C3"))
+    ),
 ]
 _ORIGIN_SETS = [
     frozenset(),
@@ -482,7 +533,7 @@ def test_channel_reads_match() -> None:
             )
         )
         if old != new:
-            mismatches.append((policy.sealed_channel_ids, origin, channel, parent))
+            mismatches.append((_sealed(policy), origin, channel, parent))
     assert mismatches == []
 
 
@@ -524,17 +575,20 @@ def test_session_seal_reads_match() -> None:
             )
         )
         if old != new:
-            mismatches.append((policy.sealed_channel_ids, origin, channel, thread, seals, legacy))
+            mismatches.append((_sealed(policy), origin, channel, thread, seals, legacy))
     assert mismatches == []
+
+
+_NO_WRITERS = ChannelRule(writers="none")
 
 
 def test_turn_caller_gates_match() -> None:
     policies = [
         TenantAccessPolicy(),
-        TenantAccessPolicy(protected_channel_ids=("C1",)),
-        TenantAccessPolicy(protected_category_ids=("K1",)),
+        TenantAccessPolicy(channel_rules={"C1": _NO_WRITERS}),
+        TenantAccessPolicy(category_rules={"K1": _NO_WRITERS}),
         TenantAccessPolicy(invoker_user_ids=("U_OK",)),
-        TenantAccessPolicy(protected_channel_ids=("C1",), invoker_user_ids=("U_OK",)),
+        TenantAccessPolicy(channel_rules={"C1": _NO_WRITERS}, invoker_user_ids=("U_OK",)),
     ]
     mismatches = []
     for policy, (thread, channel), (category, unresolved), user, is_admin in itertools.product(
@@ -552,7 +606,7 @@ def test_turn_caller_gates_match() -> None:
             category_id=category,
             category_unresolved=unresolved,
         ):
-            old: str | None = "channel_protected"
+            old: str | None = "writers_none"
         elif not is_invoker_allowed(policy, external_user_id=user, is_admin=is_admin):
             old = "invoker_not_allowed"
         else:

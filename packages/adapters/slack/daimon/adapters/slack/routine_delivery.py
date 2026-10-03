@@ -26,7 +26,6 @@ from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
-from daimon.core.channel_isolation import keeps_routine_inside
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
@@ -37,6 +36,7 @@ from daimon.core.routine_delivery import (
     render_fallback_post,
     slack_creator_may_post,
 )
+from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.tenants import get_tenant
 from slack_sdk.errors import SlackApiError

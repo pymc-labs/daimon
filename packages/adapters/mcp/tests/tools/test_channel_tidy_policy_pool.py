@@ -5,7 +5,7 @@ import dataclasses
 
 import pytest
 from daimon.adapters.mcp.tools import _tidy
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.stores import access_policy
 from daimon.testing.db import build_test_engine
 from sqlalchemy import text
@@ -229,12 +229,10 @@ async def test_caller_owned_store_transaction_fails_fast_on_busy(
                         await access_policy.clear_access_policy(session, tenant_id=world.tenant_id)
 
 
-@pytest.mark.parametrize("isolated", [True, False], ids=["enable", "end"])
-async def test_isolation_writer_waits_for_tidy_effect(
-    committing_sessionmaker, monkeypatch, isolated
-):
+@pytest.mark.parametrize("own", [True, False], ids=["keep", "release"])
+async def test_channel_rule_writer_waits_for_tidy_effect(committing_sessionmaker, monkeypatch, own):
     from daimon.core.authz import Subject
-    from daimon.core.channel_isolation_setup import set_channel_isolation
+    from daimon.core.channel_rules import set_channel_rule
     from daimon.core.scope import ChannelScopeRef, DeploymentDefault
     from daimon.core.stores.scoped_config_write import set_fields
 
@@ -251,14 +249,13 @@ async def test_isolation_writer_waits_for_tidy_effect(
             agent_name=d._AGENT,
             mode="agent",
         )
-        if not isolated:
+        if not own:
             await access_policy.set_access_policy(
                 session,
                 tenant_id=world.tenant_id,
                 policy=TenantAccessPolicy(
-                    agent_channel_pins={d._AGENT: (d._CHANNEL,)},
-                    sealed_channel_ids=(d._CHANNEL,),
-                    isolated_channel_ids=(d._CHANNEL,),
+                    channel_rules={d._CHANNEL: ChannelRule(readers="own", writers="own")},
+                    agent_rules={d._AGENT: AgentRule(runs_in=(d._CHANNEL,))},
                 ),
             )
     entered, release, backoff = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -291,32 +288,33 @@ async def test_isolation_writer_waits_for_tidy_effect(
     try:
         await asyncio.wait_for(entered.wait(), 5)
         writer = asyncio.create_task(
-            set_channel_isolation(
+            set_channel_rule(
                 world.runtime.client,
                 committing_sessionmaker,
                 tenant_id=world.tenant_id,
                 platform="discord",
                 channel_id=d._CHANNEL,
-                isolated=isolated,
+                readers="own" if own else "any",
+                release_agents=not own,
                 default=DeploymentDefault(agent_name="daimon"),
                 actor_account_id=None,
                 subject=Subject(is_admin=True),
             )
         )
         await asyncio.wait_for(backoff.wait(), 2)
-        assert not writer.done(), "isolation committed during tidy's protected effect"
+        assert not writer.done(), "the rule committed during tidy's guarded effect"
         async with committing_sessionmaker() as observer:
             policy = await access_policy.load_access_policy(observer, tenant_id=world.tenant_id)
-        assert (d._CHANNEL in policy.isolated_channel_ids) is not isolated
+        assert (d._CHANNEL in policy.channel_rules) is not own
         release.set()
         await asyncio.wait_for(edit, 2)
         change = await asyncio.wait_for(writer, 5)
-        assert change.isolated is isolated
+        assert (change.rule.readers == "own") is own
         assert change.changed
         assert fake.messages[mid]["content"] == "after"
         async with committing_sessionmaker() as observer:
             policy = await access_policy.load_access_policy(observer, tenant_id=world.tenant_id)
-        assert (d._CHANNEL in policy.isolated_channel_ids) is isolated
+        assert (d._CHANNEL in policy.channel_rules) is own
     finally:
         release.set()
         for task in [edit, writer]:

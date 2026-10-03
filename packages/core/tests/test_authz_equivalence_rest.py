@@ -41,13 +41,13 @@ def _old_is_write_protected(
     category_unresolved: bool = False,
 ) -> bool:
     # access_policy.is_write_protected
-    if channel_id in policy.protected_channel_ids:
+    closed = {c for c, r in policy.channel_rules.items() if r.writers == "none"}
+    closed_categories = {c for c, r in policy.category_rules.items() if r.writers == "none"}
+    if channel_id in closed or (parent_channel_id is not None and parent_channel_id in closed):
         return True
-    if parent_channel_id is not None and parent_channel_id in policy.protected_channel_ids:
+    if category_unresolved and closed_categories:
         return True
-    if category_unresolved and policy.protected_category_ids:
-        return True
-    return category_id is not None and category_id in policy.protected_category_ids
+    return category_id is not None and category_id in closed_categories
 
 
 def _old_creator_refusal(
@@ -165,7 +165,7 @@ def test_protection_decisions_match() -> None:
                 policy, subject=Subject(), action=Action.POST, surface=surface, place=place
             )
             assert bool(new) is not old, (policy, place, surface)
-            assert old is (new.reason == "channel_protected")
+            assert old is (new.reason == "writers_none")
 
 
 def test_creator_decisions_match() -> None:

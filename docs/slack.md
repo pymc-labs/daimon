@@ -119,14 +119,16 @@ once.
   is looked up again first.
 
 Who may ask: anyone who could start a turn in that thread (the invoker allowlist and
-channel protection, checked on click and again on send). External Slack Connect
-members are refused. A protected escalation channel refuses the post; the request
+the channel's writers rule, checked on click and again on send). External Slack
+Connect members are refused. An escalation channel whose rule lets nobody write
+refuses the post; the request
 stays recorded as undelivered.
 
 What is posted: the requester (mention, username, user and workspace id), a link to
 the answer, and their note. No answer text or conversation content, the same as
 Discord, and link previews are off, so the link shows nothing to anyone who can't
-already open the channel. When the answer is in a sealed channel or thread, the form
+already open the channel. When the answer is in a channel or thread with limited
+readers, the form
 tells the person their note leaves the channel, and the post says to answer there.
 
 ### Private conversations
@@ -135,8 +137,8 @@ Workspace admins opt in with `/dm enable` (and disable with `/dm disable`). Then
 `/dm` in a channel to continue privately with its recent text context and a back-link.
 Send later messages directly to the app. Run `/dm` again to reset the private scope.
 Only current workspace members allowed by the tenant access policy can invoke it.
-`/dm` refuses in a sealed channel and leaves threads sealed on their own out of the copied
-history, so sealed content never moves into a DM.
+`/dm` refuses in a channel with limited readers and leaves threads with their own
+rule out of the copied history, so their content never moves into a DM.
 
 Update the app from `docs/slack-app-manifest.yaml` and reinstall it to grant the new
 bot scopes `im:history` and `im:write`, subscribe to `message.im`, and enable the App

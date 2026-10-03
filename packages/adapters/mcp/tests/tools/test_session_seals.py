@@ -219,13 +219,13 @@ async def test_sealed_transcript_is_refused_from_another_channel(world: _World) 
     world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
     outside = await world.origin(_OPEN, "thr-b")
 
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _list_session_events_impl(
             world.runtime(), world.auth(), "ses_acme", None, None, None, outside
         )
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _list_session_events_impl(world.runtime(), world.auth(), "ses_acme", None, None, None)
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _get_session_impl(world.runtime(), world.auth(), "ses_acme", outside)
 
 
@@ -285,7 +285,7 @@ async def test_an_isolated_channels_sessions_are_read_only_by_its_own_agents(
     await isolate("local")
     listed = await _list_sessions_impl(world.runtime(), world.auth(), None, None, setup_thread)
     assert listed == [], "an outside agent inside C reads neither C's sessions nor others'"
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _list_session_events_impl(
             world.runtime(), world.auth(), "ses_acme", None, None, None, setup_thread
         )
@@ -305,7 +305,7 @@ async def test_sealing_a_channel_later_covers_its_old_conversations(world: _Worl
 
     await world.seal(_SEALED)
 
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _list_session_events_impl(world.runtime(), world.auth(), "ses_acme", None, None, None)
 
 
@@ -321,7 +321,7 @@ async def test_unsealing_does_not_open_a_transcript_written_under_the_seal(
 
     await world.seal("some-other-channel")
 
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _list_session_events_impl(
             world.runtime(), world.auth(), "ses_acme", None, None, None, outside
         )
@@ -344,7 +344,7 @@ async def test_a_thread_sealed_on_its_own_stays_its_own_after_unseal(
 
     await world.seal("some-other-channel")
 
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _list_session_events_impl(
             world.runtime(), world.auth(), "ses_thread", None, None, None, sibling
         )
@@ -379,7 +379,7 @@ async def test_an_agent_key_cannot_claim_a_turn_origin_on_the_session_tools(
     world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
     inside = await world.origin(_SEALED, "thr-2")
 
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _list_session_events_impl(
             world.runtime(), world.agent_key_auth(), "ses_acme", None, None, None, inside
         )
@@ -441,9 +441,9 @@ async def test_agent_key_cannot_read_or_continue_a_sealed_conversation(world: _W
     runtime = world.runtime()
     auth = world.agent_key_auth()
 
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _list_events_impl(runtime, auth, "ses_acme", None, None, None)
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _continue_turn_impl(runtime, auth, "ses_acme", "what did they say?")
     assert world.sent == [], "a refused follow-up must never reach the session"
     assert [s.id for s in await _list_my_sessions_impl(runtime, auth)] == ["ses_mine"]
@@ -480,7 +480,7 @@ async def test_a_bound_key_cannot_continue_a_conversation_opened_before_the_seal
     auth = world.agent_key_auth(bound_channel_id=_SEALED)
 
     page = await _list_events_impl(runtime, auth, "ses_acme", None, None, None)
-    with pytest.raises(ToolError, match="before its channel was sealed"):
+    with pytest.raises(ToolError, match="before its channel.s readers were limited"):
         await _continue_turn_impl(runtime, auth, "ses_acme", "and now?")
 
     assert _SEALED_TOPIC in _events_text(page), "reading it from inside stays allowed"
@@ -494,7 +494,7 @@ async def test_an_agent_key_minted_in_another_channel_stays_outside_the_seal(
     world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
     auth = world.agent_key_auth(bound_channel_id=_OPEN)
 
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _list_events_impl(world.runtime(), auth, "ses_acme", None, None, None)
 
 
@@ -591,7 +591,7 @@ async def test_with_every_seal_removed_the_recorded_seal_still_decides(world: _W
     )
     assert _SEALED_TOPIC in _events_text(page)
     for origin in (sibling, outside, None):
-        with pytest.raises(ToolError, match="sealed channel"):
+        with pytest.raises(ToolError, match="read only from inside"):
             await _list_session_events_impl(
                 world.runtime(), world.auth(), "ses_acme", None, None, None, origin
             )
@@ -611,13 +611,13 @@ async def test_a_successor_stamped_with_an_inherited_seal_is_refused_outside(
     runtime = world.runtime()
 
     assert await _list_sessions_impl(runtime, world.auth(), None, None, outside) == []
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _get_session_impl(runtime, world.auth(), "ses_successor", outside)
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _list_session_events_impl(
             runtime, world.auth(), "ses_successor", None, None, None, outside
         )
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _continue_turn_impl(runtime, world.agent_key_auth(), "ses_successor", "hi")
     assert world.sent == []
 
@@ -637,7 +637,7 @@ async def test_a_session_stamped_sealed_by_the_first_release_stays_sealed_to_its
         world.runtime(), world.auth(), "ses_acme", None, None, None, same
     )
     for origin in (sibling, outside):
-        with pytest.raises(ToolError, match="sealed channel"):
+        with pytest.raises(ToolError, match="read only from inside"):
             await _list_session_events_impl(
                 world.runtime(), world.auth(), "ses_acme", None, None, None, origin
             )
@@ -661,7 +661,7 @@ async def test_unsealing_the_parent_keeps_a_thread_sealed_on_its_own_sealed(
     sibling = await world.origin(_SEALED, "thr-2")
     await world.seal("thr-1")
 
-    with pytest.raises(ToolError, match="sealed channel"):
+    with pytest.raises(ToolError, match="read only from inside"):
         await _list_session_events_impl(
             world.runtime(), world.auth(), "ses_thread", None, None, None, sibling
         )
@@ -743,7 +743,7 @@ async def test_unsealing_the_thread_keeps_the_parent_seal(world: _World) -> None
     await world.seal(_SEALED)
 
     for origin in (sibling, outside):
-        with pytest.raises(ToolError, match="sealed channel"):
+        with pytest.raises(ToolError, match="read only from inside"):
             await _list_session_events_impl(
                 world.runtime(), world.auth(), "ses_thread", None, None, None, origin
             )
@@ -815,7 +815,7 @@ async def test_a_signed_bearer_with_no_platform_user_is_held_to_a_pin(
     result = await call_mcp_tool(_bearer_app(world), token=token, name=tool, arguments=arguments)
 
     assert result["result"].get("isError"), result
-    assert "pinned this agent" in str(result)
+    assert "rule runs it only in certain channels" in str(result)
     assert world.sent == [], "a refused turn must never reach the session"
 
 
@@ -831,7 +831,9 @@ async def test_a_signed_bearer_new_turn_on_a_pinned_agent_is_refused(world: _Wor
             _bearer_app(world), token=token, name="start_turn", arguments={"message": "hi"}
         )
 
-    assert result["result"].get("isError") and "pinned this agent" in str(result), result
+    assert result["result"].get("isError") and "rule runs it only in certain channels" in str(
+        result
+    ), result
     create.assert_not_awaited()
 
 

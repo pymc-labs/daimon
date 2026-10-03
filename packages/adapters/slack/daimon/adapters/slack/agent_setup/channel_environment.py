@@ -25,9 +25,9 @@ from daimon.core.channel_environments import (
     EnvironmentPicker,
     authorize_environment_pick,
     build_clear_environment_note,
+    build_limited_network_confirm,
+    build_limited_network_refusal,
     build_missing_environment_note,
-    build_sealed_network_confirm,
-    build_sealed_network_refusal,
     build_set_environment_note,
     list_environment_names,
     load_panel_hidden_environment_names,
@@ -169,14 +169,14 @@ async def save_environment_choice(
     )
     if not pick.decision:
         await audit(outcome="denied", reason=f"authz:{pick.decision.reason}")
-        if pick.decision.reason == "sealed":
-            return build_sealed_network_refusal(environment_name=name)
+        if pick.decision.reason == "not_a_reader":
+            return build_limited_network_refusal(environment_name=name)
         return ENVIRONMENT_NEED_ADMIN_MESSAGE
     if name is not None and pick.missing:
         return build_missing_environment_note(name)
     if pick.needs_confirm:
         await audit(outcome="denied", reason="needs_confirm")
-        return build_sealed_network_confirm(environment_name=name, panel=True)
+        return build_limited_network_confirm(environment_name=name, panel=True)
     # The environment the network rule judged, not a second lookup by name.
     name = pick.environment_name or name
     async with runtime.sessionmaker.begin() as session:

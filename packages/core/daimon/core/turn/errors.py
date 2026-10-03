@@ -20,9 +20,9 @@ AdmissionDenialReason = Literal[
     "cap_exceeded",
     "channel_budget_exceeded",
     "invoker_not_allowed",
-    "channel_protected",
-    "agent_pinned_elsewhere",
-    "channel_isolated",
+    "writers_none",
+    "runs_elsewhere",
+    "own_agents_only",
     "external_participant",
 ]
 MissingConfigPart = Literal["agent", "environment"]

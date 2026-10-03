@@ -3370,13 +3370,13 @@ async def test_turn_tools_refuse_a_pinned_agent_before_creating_session(
     assert isinstance(payload, dict) and payload.get("isError"), (
         f"{tool_name} must refuse a pinned agent; got {result!r}"
     )
-    assert "pinned this agent" in str(payload.get("content"))
+    assert "rule runs it only in certain channels" in str(payload.get("content"))
     mock_create_session.assert_not_awaited()
     assert sends == []
     async with db_session_factory() as session:
         audited = await list_events(session, tenant_id=tenant_id)
     assert [(row.operation, row.reason) for row in audited if row.tool_name == tool_name] == [
-        ("run_agent", "authz:agent_pinned_elsewhere")
+        ("run_agent", "authz:runs_elsewhere")
     ], "the refusal is audited as a pin denial"
 
 
@@ -3679,7 +3679,7 @@ async def test_start_turn_refuses_a_bound_keys_session_sealed_inside_session_cre
 
     with (
         patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create_with_inner_work),
-        pytest.raises(ToolError, match="sealed or unsealed while it was starting"),
+        pytest.raises(ToolError, match="channel rule changed while it was starting"),
     ):
         await _start_turn_impl(runtime, _bound_auth("c-1"), "hi")
     assert created == [], "no session is created under a stale seal stamp"

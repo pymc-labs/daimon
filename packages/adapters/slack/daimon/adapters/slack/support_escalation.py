@@ -62,7 +62,7 @@ from daimon.core.authz import Action, Place, Subject, authorize, build_turn_plac
 from daimon.core.channel_admins import StoredAdmin, confirm_stored_subject, read_stored_admin
 from daimon.core.config import DirectMessagePolicy, SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.permissions import sealed_at
+from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import (
@@ -116,7 +116,7 @@ POLICY_UNREADABLE: Final = (
     "Ask an admin to check it."
 )
 SEALED_NOTE_HINT: Final = (
-    "This channel is sealed. Your note goes to the support team outside it, so "
+    "Only turns inside this channel read it. Your note goes to the support team outside it, so "
     "don't paste anything that has to stay here. They get a link to this answer, "
     "not its content."
 )
@@ -402,7 +402,7 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
             message_ts=message_ts,
             thread_ts=thread_ts,
             remaining=remaining_credits(allowance=allowance, used=used),
-            sealed=sealed_at(policy, channel_id=channel_id, thread_id=thread_ts),
+            sealed=readers_limited_at(policy, channel_id=channel_id, thread_id=thread_ts),
         ),
     )
 
@@ -457,7 +457,9 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
             except AccessPolicyUnreadable:
                 decided["refusal"] = POLICY_UNREADABLE
                 return False
-            decided["sealed"] = sealed_at(policy, channel_id=s.channel_id, thread_id=s.thread_ts)
+            decided["sealed"] = readers_limited_at(
+                policy, channel_id=s.channel_id, thread_id=s.thread_ts
+            )
             if not _may_ask(policy, subject, channel_id=s.channel_id, thread_ts=s.thread_ts):
                 decided["refusal"] = NOT_ALLOWED
                 return False
@@ -540,7 +542,9 @@ def render_escalation_post(*, submission: SupportSubmission, link: str | None, s
     where = link if link is not None else f"message {s.message_ts} in channel {s.channel_id}"
     lines = [f"*Human support requested* by {who}", where]
     if sealed:
-        lines.append("_From a sealed channel: answer there, the conversation stays in it._")
+        lines.append(
+            "_From a channel read only from inside: answer there, the conversation stays in it._"
+        )
     return "\n".join(lines) + "\n\n" + escape_mrkdwn(s.note)
 
 

@@ -116,7 +116,7 @@ async def test_a_pinned_agent_posts_only_into_its_pinned_channels(
     await require_channel_writable(
         runtime, auth, channel_id=inside, parent_channel_id=inside_parent
     )
-    with pytest.raises(ToolError, match="pinned to its own channels"):
+    with pytest.raises(ToolError, match="runs it only in certain channels"):
         await require_channel_writable(
             runtime, auth, channel_id=outside, parent_channel_id=outside_parent
         )
@@ -147,7 +147,7 @@ async def test_unpinned_agents_and_the_operator_post_anywhere_unknown_agents_fai
         platform="discord",
         chat_agent_id=uuid.uuid4(),
     )
-    with pytest.raises(ToolError, match="pinned to its own channels"):
+    with pytest.raises(ToolError, match="runs it only in certain channels"):
         # An agent that can't be resolved while pins exist fails closed.
         await require_channel_writable(runtime, other_agent, channel_id="999")
 
@@ -213,7 +213,7 @@ async def test_direct_messages_from_unpinned_agents_pass_and_unknown_agents_fail
         platform_user_id="u1",
         chat_agent_id=uuid.uuid4(),
     )
-    with pytest.raises(ToolError, match="pinned to its own channels"):
+    with pytest.raises(ToolError, match="runs it only in certain channels"):
         await require_dm_recipient_allowed(runtime, unknown, recipient_id="u2")
 
 
@@ -347,7 +347,7 @@ async def test_every_pinned_name_binds_the_send(
     auth = _turn(tenant_id, "slack")
 
     for channel in ("C111", "C222"):
-        with pytest.raises(ToolError, match="pinned to its own channels"):
+        with pytest.raises(ToolError, match="runs it only in certain channels"):
             await require_channel_writable(runtime, auth, channel_id=channel)
 
 
@@ -393,7 +393,7 @@ async def test_overlapping_alias_pins_bind_the_slack_send_to_their_intersection(
     await _send._slack_send_message_impl(  # pyright: ignore[reportPrivateUsage]
         runtime, auth, channel_id="C111", content="ok", attachments=None, file_handles=None
     )
-    with pytest.raises(ToolError, match="pinned to its own channels"):
+    with pytest.raises(ToolError, match="runs it only in certain channels"):
         await _send._slack_send_message_impl(  # pyright: ignore[reportPrivateUsage]
             runtime,
             auth,
@@ -417,7 +417,7 @@ async def test_an_empty_stored_pin_fails_closed_for_sends_and_dms(
     auth = dataclasses.replace(_turn(tenant_id, "slack"), platform_user_id="U1001")
 
     for channel in ("C111", "C999"):
-        with pytest.raises(ToolError, match="pinned to its own channels"):
+        with pytest.raises(ToolError, match="runs it only in certain channels"):
             await require_channel_writable(runtime, auth, channel_id=channel)
     with pytest.raises(ToolError, match="only send a direct message to the person"):
         await require_dm_recipient_allowed(runtime, auth, recipient_id="U1002")

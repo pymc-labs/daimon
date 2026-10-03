@@ -1,6 +1,6 @@
-"""Teams channel isolation: the admin tool by thread id, and every way out of the channel.
+"""A Teams channel kept to its own agents: the rule tool by thread id, and every way out.
 
-``ROOM`` is isolated with ``local`` pinned to it; ``shared`` answers in ``OTHER``.
+``ROOM``'s readers and writers are ``own``, ``local`` its own agent; ``shared`` answers in ``OTHER``.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy, load_read_policy
-from daimon.adapters.mcp.tools.channel_isolation import (
-    _set_channel_isolation_impl,  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.channel_rules import (
+    _set_channel_rule_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
@@ -24,7 +24,7 @@ from daimon.adapters.mcp.tools.teams._read import (
 from daimon.adapters.mcp.tools.teams._send import (
     _teams_send_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
@@ -90,7 +90,7 @@ class _World:
 
 
 async def _world(
-    sessionmaker: async_sessionmaker[AsyncSession], *, isolate: bool = True
+    sessionmaker: async_sessionmaker[AsyncSession], *, keep_own: bool = True
 ) -> tuple[_World, McpRuntime, _Fake]:
     async with sessionmaker.begin() as session:
         tenant = await make_tenant(session, platform="teams", workspace_id=_ENTRA)
@@ -106,11 +106,10 @@ async def _world(
                 agent_name=agent,
                 mode="agent",
             )
-        if isolate:
+        if keep_own:
             policy = TenantAccessPolicy(
-                sealed_channel_ids=(ROOM,),
-                isolated_channel_ids=(ROOM,),
-                agent_channel_pins={"local": (ROOM,)},
+                channel_rules={ROOM: ChannelRule(readers="own", writers="own")},
+                agent_rules={"local": AgentRule(runs_in=(ROOM,))},
             )
             await set_access_policy(session, tenant_id=tenant.id, policy=policy)
     state = FakeMAState()
@@ -136,31 +135,41 @@ async def _world(
     return _World(tenant.id, account.id, state), runtime, fake
 
 
-async def test_a_teams_thread_isolates_its_channel_with_a_named_copy(
+async def test_a_teams_thread_keeps_its_channel_to_a_named_copy(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    world, runtime, _ = await _world(committing_sessionmaker, isolate=False)
-    named = await _set_channel_isolation_impl(
+    world, runtime, _ = await _world(committing_sessionmaker, keep_own=False)
+    named = await _set_channel_rule_impl(
         runtime,
         world.auth(admin=True),
         channel_id=f"{NAMED};messageid=1700000000000",
-        isolated=True,
-        fork_from="shared",
+        readers="own",
+        writers="own",
+        copy_from="shared",
     )
-    assert (named.channel_id, named.agent_name) == (NAMED, "growth-team"), (
+    assert (named.channel_id, named.own_agent) == (NAMED, "growth-team"), (
         "a thread names its channel, and the copy is named after the channel"
     )
-    unlisted = await _set_channel_isolation_impl(
-        runtime, world.auth(admin=True), channel_id=UNLISTED, isolated=True, fork_from="shared"
+    unlisted = await _set_channel_rule_impl(
+        runtime,
+        world.auth(admin=True),
+        channel_id=UNLISTED,
+        readers="own",
+        writers="own",
+        copy_from="shared",
     )
-    assert unlisted.agent_name == "channel-d4e5f6", "an unreadable name falls back to the id"
+    assert unlisted.own_agent == "channel-d4e5f6", "an unreadable name falls back to the id"
     async with committing_sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=world.tenant_id)
-    assert set(policy.isolated_channel_ids) == {NAMED, UNLISTED}, "stored under the channel"
-    assert policy.agent_channel_pins == {"growth-team": (NAMED,), "channel-d4e5f6": (UNLISTED,)}
+    own = ChannelRule(readers="own", writers="own")
+    assert policy.channel_rules == {NAMED: own, UNLISTED: own}, "stored under the channel"
+    assert policy.agent_rules == {
+        "growth-team": AgentRule(runs_in=(NAMED,)),
+        "channel-d4e5f6": AgentRule(runs_in=(UNLISTED,)),
+    }
 
 
-async def test_an_isolated_teams_agent_posts_and_sends_nowhere_else(
+async def test_a_teams_own_agent_posts_and_sends_nowhere_else(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     world, runtime, fake = await _world(committing_sessionmaker)
@@ -170,11 +179,11 @@ async def test_an_isolated_teams_agent_posts_and_sends_nowhere_else(
     )
     assert len(fake.posts) == 1, "its own agent posts in the channel's threads"
     for target in (OTHER, f"{OTHER};messageid=1", _CHAT):
-        with pytest.raises(ToolError, match="pinned to its own channels"):
+        with pytest.raises(ToolError, match="rule runs it only in certain channels"):
             await _teams_send_message_impl(runtime, local, channel_id=target, content="leak")
     with pytest.raises(ToolError, match="sends no direct messages"):
         await send_direct_message_impl(runtime, local, recipient_id=_RECIPIENT, content="leak")
-    with pytest.raises(ToolError, match="only its own agents post"):
+    with pytest.raises(ToolError, match="only they post in it"):
         await _teams_send_message_impl(
             runtime,
             world.auth(executing="agent_shared"),
@@ -184,7 +193,7 @@ async def test_an_isolated_teams_agent_posts_and_sends_nowhere_else(
     assert len(fake.posts) == 1, "no refused send reaches Teams"
 
 
-async def test_an_isolated_teams_channel_is_read_only_by_its_own_agents(
+async def test_a_teams_channel_kept_to_its_own_agents_is_read_only_by_them(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     world, runtime, _ = await _world(committing_sessionmaker)

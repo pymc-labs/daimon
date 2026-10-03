@@ -570,7 +570,7 @@ async def test_send_message_into_a_protected_channel_is_refused_and_posts_nothin
     auth = await _auth_for_protected_tenant(committing_sessionmaker, protected=("C1",))
     with aioresponses() as m:
         _mock_public_channel_access(m)
-        with pytest.raises(ToolError, match="protected"):
+        with pytest.raises(ToolError, match="writers to none"):
             await _slack_send_message_impl(
                 runtime, auth, channel_id=target, content="hi", attachments=None, file_handles=None
             )
@@ -585,7 +585,7 @@ async def test_create_thread_in_a_protected_channel_is_refused_and_posts_nothing
     auth = await _auth_for_protected_tenant(committing_sessionmaker, protected=("C1",))
     with aioresponses() as m:
         _mock_public_channel_access(m)
-        with pytest.raises(ToolError, match="protected"):
+        with pytest.raises(ToolError, match="writers to none"):
             await _slack_create_thread_impl(runtime, auth, channel_id="C1", content="hi")
         assert _POST_KEY not in m.requests, "a protected channel must receive no thread root"
 

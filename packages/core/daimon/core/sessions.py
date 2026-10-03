@@ -121,6 +121,7 @@ async def create_session(
     billing_exempt: ExemptReason | None = None,
     memory_read_only: bool = False,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    asks_before_publishing: bool = False,
     slack_turn_context_id: uuid.UUID | None = None,
     private_dm_id: str | None = None,
     budget_channel_id: str | None = None,
@@ -426,7 +427,13 @@ async def create_session(
         if mcp_settings is not None and mcp_settings.public_url is not None
         else None
     )
-    tools = session_tools(agent, hidden, tool_safety=tool_safety, public_url=public_url)
+    tools = session_tools(
+        agent,
+        hidden,
+        tool_safety=tool_safety,
+        public_url=public_url,
+        asks_before_publishing=asks_before_publishing,
+    )
     servers = session_mcp_servers(agent, hidden, tool_safety=tool_safety, public_url=public_url)
     gated = list(tools) != list(visible_tools(agent, hidden))
     healed = list(servers) != list(visible_mcp_servers(agent, hidden))

@@ -16,7 +16,7 @@ from daimon.core.access_policy import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
-from daimon.core.permissions import dm_source_sealed, sealed_ids
+from daimon.core.permissions import dm_source_limited, limited_ids
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import (
@@ -61,7 +61,8 @@ def bounded_turns(turns: Sequence[TranscriptTurn]) -> list[TranscriptTurn]:
 
 
 SEALED_SOURCE_MESSAGE = (
-    "This channel is sealed, so its conversation can't be moved to a DM. Keep working here instead."
+    "Only turns inside this channel read it, so its conversation can't be moved to a DM. "
+    "Keep working here instead."
 )
 
 
@@ -76,7 +77,7 @@ async def sealed_channel_ids(deps: TurnDeps, *, tenant_id: uuid.UUID) -> frozens
     """The tenant's current seal list, for filtering history a /dm move copies."""
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-    return sealed_ids(policy)
+    return limited_ids(policy)
 
 
 def is_sealed_slack_message(
@@ -93,7 +94,7 @@ def is_sealed_slack_message(
 
 def _source_is_sealed(policy: TenantAccessPolicy, conversation: DirectMessageRow) -> bool:
     """Whether any recorded source of this conversation is sealed now (fails closed)."""
-    return dm_source_sealed(
+    return dm_source_limited(
         policy,
         source_channel_id=conversation.source_channel_id,
         source_thread_id=conversation.source_thread_id,

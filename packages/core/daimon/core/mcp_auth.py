@@ -283,10 +283,10 @@ def coding_token_channel(
     """The channel a coding-tool token minted in `channel_id` is bound to, or None.
 
     `channel_id` is where the panel was opened (a thread's parent channel).
-    The token is bound there when the channel is sealed, or when the agent is
-    pinned and the channel is inside its pin: those are the places where an
-    agent key from outside every channel could not reach what the channel's
-    own turns do. Anywhere else the token stays unbound, as before. The pin
+    The token is bound there when the channel's readers are limited, or when
+    the agent has a rule and the channel is inside it: those are the places
+    where an agent key from outside every channel could not reach what the
+    channel's own turns do. Anywhere else the token stays unbound. The rule
     is decided as the key's own turns will be (`build_subject` with
     ``via_agent_key``, the channel as a `build_turn_place`).
     """
@@ -294,8 +294,8 @@ def coding_token_channel(
         return None
     if channel_rule(policy, channel_id).readers != "any":
         return channel_id
-    pinned = bool(agent_permissions(policy, agent.names).pins)
-    if pinned and authorize(
+    ruled = bool(agent_permissions(policy, agent.names).runs_in)
+    if ruled and authorize(
         policy,
         subject=build_subject(is_admin=False, platform_user_id=None, via_agent_key=True),
         action=Action.RUN_AGENT,

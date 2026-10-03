@@ -95,7 +95,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         "G_pin_turn member outside",
         PINNED,
         {"subject": MEMBER, "action": Action.RUN_AGENT, "agent": ACME, "place": OUTSIDE},
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "G_pin_turn member inside",
@@ -113,13 +113,13 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         "G_pin_turn admin in a channel is still held",
         PINNED,
         {"subject": ADMIN, "action": Action.RUN_AGENT, "agent": ACME, "place": OUTSIDE},
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "G_pin_turn empty pin list fails closed",
         NOWHERE,
         {"subject": MEMBER, "action": Action.RUN_AGENT, "agent": ACME, "place": INSIDE},
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "G_pin_turn unpinned agent runs anywhere",
@@ -136,7 +136,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         "G_pin_offchannel member DM is outside every pin",
         PINNED,
         {"subject": MEMBER, "action": Action.RUN_AGENT, "surface": Surface.DM, "agent": ACME},
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     # --- admin trust model: admins exempt where only they see the output ---
     (
@@ -155,7 +155,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         "admin trust model: member hub turn is held",
         PINNED,
         {"subject": MEMBER, "action": Action.RUN_AGENT, "surface": Surface.HUB, "agent": ACME},
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     # --- G_operator_bypass_closed: no-platform bearers are never exempt ---
     (
@@ -167,13 +167,13 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.AGENT_CHAT,
             "agent": ACME,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "G_operator_bypass_closed bearer on the hub surface",
         PINNED,
         {"subject": BEARER, "action": Action.RUN_AGENT, "surface": Surface.HUB, "agent": ACME},
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     # --- G_pin_routine(_names) / G_pin_handoff(_names): every name, no admin ---
     (
@@ -186,7 +186,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME_DISPLAY,
             "place": Place(),
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "G_pin_routine into the pinned channel",
@@ -210,14 +210,14 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME_DISPLAY,
             "place": Place.from_origin(parent_channel_id="C_ACME", thread_id="dm:abc"),
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     # --- G_pin_write / G_pin_write_submit: configuring a pinned agent ---
     (
         "G_pin_write member outside",
         PINNED,
         {"subject": MEMBER, "action": Action.CONFIGURE, "agent": ACME, "place": OUTSIDE},
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "G_pin_write member inside",
@@ -264,7 +264,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "place": OUTSIDE,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "channel admin needs every pinned name's channels",
@@ -277,7 +277,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME_DISPLAY,
             "place": OUTSIDE,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "channel admin and a pin to no channel fails closed",
@@ -288,7 +288,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "place": INSIDE,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "channel admin and a vanished target fails closed",
@@ -309,7 +309,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.HUB,
             "agent": ACME,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "channel admin never forks",
@@ -355,7 +355,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "place": INSIDE,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "channel admin of one pinned channel of two mints nothing",
@@ -366,7 +366,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "place": INSIDE,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "channel admin of two channels mints nothing outside the agent's pin",
@@ -379,7 +379,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "place": OUTSIDE,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "channel admin mints nothing for an unpinned agent, which may answer anywhere",
@@ -401,7 +401,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "place": INSIDE,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "channel admin and a vanished agent mints nothing",
@@ -453,7 +453,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "place": Place(channel_id="C_OTHER"),
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "bind default under a display-name pin",
@@ -464,7 +464,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME_DISPLAY,
             "place": Place(channel_id="C_OTHER"),
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "bind default of an agent pinned nowhere",
@@ -475,7 +475,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "place": Place(channel_id="C_ACME"),
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "bind default inside the pin",
@@ -504,7 +504,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         "pinned send outside",
         PINNED,
         {"subject": ADMIN, "action": Action.POST, "agent": ACME, "place": OUTSIDE},
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "pinned send into the requester's own DM",
@@ -538,7 +538,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         "protection holds for everyone",
         PROTECTED,
         {"subject": ADMIN, "action": Action.POST, "place": Place(channel_id="C_PROT")},
-        _deny("channel_protected"),
+        _deny("writers_none"),
     ),
     (
         "pinned DM to someone else",
@@ -568,7 +568,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         "G_pin_fork admin forking a pinned agent",
         DISPLAY_PINNED,
         {"subject": ADMIN, "action": Action.FORK, "agent": ACME_DISPLAY},
-        _deny("agent_pinned"),
+        _deny("agent_has_rule"),
     ),
     (
         "G_pin_fork admin forking an unpinned agent",
@@ -581,7 +581,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         "protected reply target refuses the turn",
         PROTECTED,
         {"subject": ADMIN, "action": Action.START_TURN, "place": Place(channel_id="C_PROT")},
-        _deny("channel_protected"),
+        _deny("writers_none"),
     ),
     (
         "invoker allowlist refuses a member",
@@ -600,7 +600,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         "sealed channel read from outside",
         SEALED,
         {"subject": MEMBER, "action": Action.READ_CHANNEL, "place": Place(channel_id="C_SEAL")},
-        _deny("sealed"),
+        _deny("not_a_reader"),
     ),
     (
         "sealed channel read from inside",
@@ -621,7 +621,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "action": Action.READ_SESSION,
             "session": SessionFacts(channel="C_SEAL", seal_ids=frozenset({"C_SEAL"})),
         },
-        _deny("sealed"),
+        _deny("not_a_reader"),
     ),
     (
         "G_seal_session_read inside the thread that sealed it",
@@ -643,7 +643,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "session": SessionFacts(legacy_thread_id="T7"),
             "origin_channel_ids": frozenset({"C9"}),
         },
-        _deny("sealed"),
+        _deny("not_a_reader"),
     ),
     (
         "G_seal_session_read a headless session",
@@ -661,7 +661,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.CONFIG,
             "agent": ACME,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "admin_trust admin's agent key on the hub is held to the pin",
@@ -672,7 +672,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.HUB,
             "agent": ACME,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "G_fork_admin an admin's agent key cannot fork",
@@ -690,7 +690,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.AGENT_CHAT,
             "agent": READER,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     # --- Session reads (G_seal_session_read, admin trust model) ---
     (
@@ -737,7 +737,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.HUB,
             "session": SessionFacts(channel="C_SEAL", seal_ids=frozenset({"C_SEAL"})),
         },
-        _deny("sealed"),
+        _deny("not_a_reader"),
     ),
     (
         "G_seal_session_read member never reads another account's session",
@@ -838,7 +838,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.HUB,
             "session": SessionFacts(channel="C_ACME", seal_ids=frozenset({"C_OTHER"})),
         },
-        _deny("sealed"),
+        _deny("not_a_reader"),
     ),
     (
         "channel_admin never reads mixed seal ids with one outside their channels",
@@ -911,7 +911,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.HUB,
             "session": SessionFacts(channel="C_ACME", seal_ids=frozenset({"C_ACME"})),
         },
-        _deny("sealed"),
+        _deny("not_a_reader"),
     ),
     (
         "channel_admin read is the hub's only",
@@ -944,14 +944,14 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.CONFIG,
             "agent": ACME,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     # --- Isolation: an isolated channel's own agents stay in, others stay out ---
     (
         "isolation shared agent inside",
         ISOLATED,
         {"subject": MEMBER, "action": Action.RUN_AGENT, "agent": SHARED, "place": THREAD_INSIDE},
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation own agent inside",
@@ -979,7 +979,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": AgentRef.unresolved(),
             "place": INSIDE,
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation setup thread answers as the built-in",
@@ -1020,7 +1020,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.HUB,
             "agent": ACME,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "isolation channel admin on an agent key is held",
@@ -1031,19 +1031,19 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.HUB,
             "agent": ACME,
         },
-        _deny("agent_pinned_elsewhere"),
+        _deny("runs_elsewhere"),
     ),
     (
         "isolation own agent never posts outside",
         ISOLATED,
         {"subject": ADMIN, "action": Action.POST, "agent": ACME, "place": Place(own_dm=True)},
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation shared agent never posts inside",
         ISOLATED,
         {"subject": MEMBER, "action": Action.POST, "agent": SHARED, "place": THREAD_INSIDE},
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation own agent sends no DM",
@@ -1054,7 +1054,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "recipient_id": "U_MEM",
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation shared agent reads nothing inside",
@@ -1066,7 +1066,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "place": INSIDE,
             "origin_channel_ids": frozenset({"C_ACME"}),
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation own agent reads inside",
@@ -1085,7 +1085,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         "isolation own agent reads nothing outside",
         ISOLATED,
         {"subject": MEMBER, "action": Action.READ_CHANNEL, "agent": ACME, "place": OUTSIDE},
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation own agent reads a thread inside",
@@ -1109,7 +1109,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "place": OUTSIDE,
             "origin": SETUP_ORIGIN,
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation an origin outside leaves a shared agent's reads alone",
@@ -1132,7 +1132,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "session": SessionFacts(channel="C_OTHER"),
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation own agent reads no DM session",
@@ -1143,7 +1143,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "session": SessionFacts(private=True),
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation an origin inside holds a shared agent's session reads",
@@ -1155,7 +1155,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "origin": THREAD_INSIDE,
             "session": SessionFacts(channel="C_OTHER"),
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation an admin's hub read through the own agent is not held",
@@ -1173,13 +1173,13 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         "isolation shared agent saves no routine into a thread inside",
         ISOLATED,
         {"subject": MEMBER, "action": Action.SAVE_ROUTINE, "agent": SHARED, "place": THREAD_INSIDE},
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation shared agent is no channel default inside",
         ISOLATED,
         {"subject": ADMIN, "action": Action.BIND_CHANNEL_DEFAULT, "agent": SHARED, "place": INSIDE},
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     # --- Isolation: C's setup thread and the sessions that ran in C ---
     (
@@ -1192,7 +1192,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "origin_channel_ids": frozenset({"C_ACME", "T_SETUP"}),
             "session": SessionFacts(channel="C_ACME", thread="T1", seal_ids=frozenset({"C_ACME"})),
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation built-in continues no session of the channel",
@@ -1204,7 +1204,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "origin_channel_ids": frozenset({"C_ACME", "T1"}),
             "session": SessionFacts(channel="C_ACME", thread="T1", seal_ids=frozenset({"T1"})),
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation own agent reads the channel's sessions",
@@ -1227,7 +1227,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "origin_channel_ids": frozenset({"C_ACME", "C_ACME:1.2"}),
             "session": SessionFacts(seal_ids=frozenset({"C_ACME:1.2"}), channel="C_X"),
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation setup thread holds the built-in to the channel",
@@ -1239,7 +1239,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "place": OUTSIDE,
             "origin": SETUP_ORIGIN,
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation setup thread built-in posts into its own thread",
@@ -1263,7 +1263,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "place": THREAD_INSIDE,
             "origin": THREAD_INSIDE,
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation setup thread built-in sends no DM",
@@ -1275,19 +1275,19 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "recipient_id": "U_MEM",
             "origin": SETUP_ORIGIN,
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation an own agent creates no agent, even for an admin",
         ISOLATED,
         {"subject": ADMIN, "action": Action.CREATE_AGENT, "agent": ACME},
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation a call from inside creates no agent, whatever agent runs it",
         ISOLATED,
         {"subject": ADMIN, "action": Action.CREATE_AGENT, "agent": SHARED, "origin": SETUP_ORIGIN},
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation an unresolved agent creates no agent",
@@ -1308,22 +1308,52 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ALLOW,
     ),
     (
-        "a pinned agent publishes nothing, even for an admin",
+        "an agent with a rule publishes only once approved, even for an admin",
         PINNED,
         {"subject": ADMIN, "action": Action.PUBLISH, "agent": ACME, "origin": INSIDE},
-        _deny("agent_pinned"),
+        _deny("needs_approval"),
     ),
     (
-        "isolation an own agent publishes nothing, even for an admin",
+        "an agent with a rule publishes once approved, even for an admin",
+        PINNED,
+        {
+            "subject": ADMIN,
+            "action": Action.PUBLISH,
+            "agent": ACME,
+            "origin": INSIDE,
+            "approved": True,
+        },
+        ALLOW,
+    ),
+    (
+        "isolation an own agent publishes only once approved, even for an admin",
         ISOLATED,
         {"subject": ADMIN, "action": Action.PUBLISH, "agent": ACME},
-        _deny("channel_isolated"),
+        _deny("needs_approval"),
     ),
     (
-        "isolation a call from inside publishes nothing, whatever agent runs it",
+        "isolation an own agent publishes once approved, even for an admin",
+        ISOLATED,
+        {"subject": ADMIN, "action": Action.PUBLISH, "agent": ACME, "approved": True},
+        ALLOW,
+    ),
+    (
+        "isolation a call from inside publishes only once approved, whatever agent runs it",
         ISOLATED,
         {"subject": ADMIN, "action": Action.PUBLISH, "agent": SHARED, "origin": SETUP_ORIGIN},
-        _deny("channel_isolated"),
+        _deny("needs_approval"),
+    ),
+    (
+        "isolation a call from inside publishes once approved, whatever agent runs it",
+        ISOLATED,
+        {
+            "subject": ADMIN,
+            "action": Action.PUBLISH,
+            "agent": SHARED,
+            "origin": SETUP_ORIGIN,
+            "approved": True,
+        },
+        ALLOW,
     ),
     (
         "an unresolved agent publishes nothing while an agent is pinned",
@@ -1353,7 +1383,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "place": OUTSIDE,
             "origin": SETUP_ORIGIN,
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "isolation a routine saved in the setup thread for the own agent",
@@ -1377,7 +1407,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": SHARED,
             "place": Place(channel_id="T9", parent_channel_id="T9", parent_unresolved=True),
         },
-        _deny("channel_isolated"),
+        _deny("own_agents_only"),
     ),
     (
         "a thread with no known parent runs while nothing is isolated",
@@ -1402,7 +1432,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         "fork of a pinned agent",
         ISOLATED,
         {"subject": ADMIN, "action": Action.FORK, "agent": ACME},
-        _deny("agent_pinned"),
+        _deny("agent_has_rule"),
     ),
     (
         "fork of a shared agent by an admin",
@@ -1463,7 +1493,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "place": Place(channel_id="C_ACME"),
             "open_network": True,
         },
-        _deny("sealed"),
+        _deny("not_a_reader"),
     ),
     (
         "server admin opens the network of a sealed channel",
@@ -1485,7 +1515,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "place": Place(channel_id="C_ACME"),
             "open_network": True,
         },
-        _deny("sealed"),
+        _deny("not_a_reader"),
     ),
     (
         "channel admin never opens the network of a sealed discord thread it names",
@@ -1496,7 +1526,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "place": Place(channel_id="T_ACME", parent_channel_id="C_ACME"),
             "open_network": True,
         },
-        _deny("sealed"),
+        _deny("not_a_reader"),
     ),
     (
         "channel admin never opens the network from inside a sealed discord thread",
@@ -1508,7 +1538,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "origin": Place(channel_id="T_ACME", parent_channel_id="C_ACME"),
             "open_network": True,
         },
-        _deny("sealed"),
+        _deny("not_a_reader"),
     ),
     (
         "a thread sealed under another channel leaves the channel admin's pick open",
@@ -1528,7 +1558,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         SEALED,
         {
             "subject": ADMIN,
-            "action": Action.SET_CHANNEL_PROTECTION,
+            "action": Action.SET_CHANNEL_RULE,
             "place": Place(channel_id="C_OTHER"),
         },
         ALLOW,
@@ -1538,7 +1568,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ACME_SEALED,
         {
             "subject": ACME_CHANNEL_ADMIN,
-            "action": Action.SET_CHANNEL_PROTECTION,
+            "action": Action.SET_CHANNEL_RULE,
             "place": Place(channel_id="C_ACME"),
         },
         _deny("admin_required"),
@@ -1548,7 +1578,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         PINNED,
         {
             "subject": AGENT_KEY_CHANNEL_ADMIN,
-            "action": Action.SET_CHANNEL_PROTECTION,
+            "action": Action.SET_CHANNEL_RULE,
             "place": Place(channel_id="C_ACME"),
         },
         _deny("admin_required"),
@@ -1556,19 +1586,19 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
     (
         "server admin archives an isolation copy",
         OPEN,
-        {"subject": ADMIN, "action": Action.ARCHIVE_ISOLATION_COPY},
+        {"subject": ADMIN, "action": Action.ARCHIVE_CHANNEL_COPY},
         ALLOW,
     ),
     (
         "a channel admin archives no isolation copy",
         OPEN,
-        {"subject": ACME_CHANNEL_ADMIN, "action": Action.ARCHIVE_ISOLATION_COPY},
+        {"subject": ACME_CHANNEL_ADMIN, "action": Action.ARCHIVE_CHANNEL_COPY},
         _deny("admin_required"),
     ),
     (
         "an admin's agent key archives no isolation copy",
         OPEN,
-        {"subject": AGENT_KEY_ADMIN, "action": Action.ARCHIVE_ISOLATION_COPY},
+        {"subject": AGENT_KEY_ADMIN, "action": Action.ARCHIVE_CHANNEL_COPY},
         _deny("admin_required"),
     ),
     (

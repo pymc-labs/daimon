@@ -120,7 +120,7 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
 
     interaction.channel.send.assert_not_awaited()
     interaction.followup.send.assert_awaited_once()
-    assert "pinned to other channels" in interaction.followup.send.call_args.args[0]
+    assert "only runs in other channels" in interaction.followup.send.call_args.args[0]
     assert interaction.followup.send.call_args.kwargs["ephemeral"] is True
     async with db_session_factory() as session:
         binding = await get_binding(

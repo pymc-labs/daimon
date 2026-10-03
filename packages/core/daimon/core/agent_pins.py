@@ -1,10 +1,10 @@
-"""Whether a member may change what a pinned agent reaches, from where they are.
+"""Whether a member may change what an agent with a rule reaches, from where they are.
 
 One rule for every path that adds to or edits an agent's configuration (keys,
 connector tokens, MCP servers, prompt, tools, skills): an admin always may, and
-so does a channel admin of every channel the agent is pinned to; on an agent
-the operator pinned to channels, anyone else may only act from a conversation
-inside those channels; an unpinned agent is unaffected. The request tools,
+so does a channel admin of every channel the agent's rule runs it in; anyone
+else may only act from a conversation inside those channels. An agent without
+a rule is unaffected. The request tools,
 the direct configuration tools, the private forms' submit paths and the setup
 panels' Add skill all decide it with `daimon.core.authz.authorize(CONFIGURE)`,
 so the rule and its names can't drift.
@@ -28,7 +28,7 @@ from daimon.core.authz import (
     build_agent_ref,
 )
 from daimon.core.channel_admins import load_stored_subject
-from daimon.core.permissions import any_pinned
+from daimon.core.permissions import any_agent_rules
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     load_access_policy,
@@ -39,7 +39,7 @@ from daimon.core.stores.domain import CredentialRequestRow
 from sqlalchemy.ext.asyncio import AsyncSession
 
 PIN_WRITE_REFUSAL = (
-    "An operator pinned this agent to its own channels, so its keys, connections and "
+    "This agent's rule runs it only in certain channels, so its keys, connections and "
     "configuration can only be changed from a conversation inside them, by an admin of "
     "all of them, or by a server or workspace admin. Nothing was changed."
 )
@@ -88,7 +88,7 @@ async def pin_refusal(
         policy = await load_access_policy(session, tenant_id=tenant_id)
     except AccessPolicyUnreadable:
         return POLICY_UNREADABLE_REFUSAL
-    if not any_pinned(policy):
+    if not any_agent_rules(policy):
         return None
     agent = await load_agent()
     decision = authorize(

@@ -75,7 +75,7 @@ from daimon.core.channel_admins import confirm_stored_subject, read_stored_admin
 from daimon.core.defaults.ma_index import list_agents_by_tenants
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.permissions import agent_permissions, any_confidential
+from daimon.core.permissions import agent_permissions, any_own_readers
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
@@ -142,7 +142,7 @@ async def _agents_by_tenant(
                         account_id=tenant.account_id,
                         platform_user_id=hub.platform_user_id,
                     )
-                    if any_confidential(policy)
+                    if any_own_readers(policy)
                     else None
                 )
         except AccessPolicyUnreadable:
@@ -162,7 +162,7 @@ async def _agents_by_tenant(
 
 
 def _hub_sees(policy: TenantAccessPolicy, subject: Subject, agent: BetaManagedAgentsAgent) -> bool:
-    owner = agent_permissions(policy, agent_pin_names(agent)).own_channel
+    owner = agent_permissions(policy, agent_pin_names(agent)).home
     return owner is None or subject.is_admin or owner in subject.administered_channel_ids
 
 

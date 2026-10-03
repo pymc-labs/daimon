@@ -371,7 +371,9 @@ async def test_run_new_agent_inside_an_isolated_channel_says_why_it_is_not_shown
 
     form = _views(client_fake, "views.update")[0]
     assert form["view_id"] == _FORM_VIEW_ID
-    assert "This channel is confidential" in json.dumps(form["view"]), "not left on the placeholder"
+    assert "This channel is kept to its own agents" in json.dumps(form["view"]), (
+        "not left on the placeholder"
+    )
 
 
 @pytest.mark.asyncio

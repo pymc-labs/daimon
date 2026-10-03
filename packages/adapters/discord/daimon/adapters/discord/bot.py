@@ -1379,7 +1379,7 @@ class DaimonBot(commands.Bot):
         if not post_state.may_post:
             log.info(
                 "thread_participation.skipped",
-                reason="channel_protected",
+                reason="writers_none",
                 state=post_state.value,
                 thread_id=str(thread_id),
             )
@@ -1498,7 +1498,7 @@ class DaimonBot(commands.Bot):
         )
         if not post_state.may_post:
             log.info(
-                "turn.skipped.channel_protected",
+                "turn.skipped.writers_none",
                 guild_id=guild_id,
                 channel_id=str(message.channel.id),
                 user_id=str(message.author.id),
@@ -2021,7 +2021,7 @@ class DaimonBot(commands.Bot):
             self.runtime.sessionmaker, tenant_id=tenant_id, channel=thread
         )
         if not post_state.may_post:
-            raise AdmissionDenied(reason="channel_protected")
+            raise AdmissionDenied(reason="writers_none")
         category_id, category_unresolved = await _resolve_category(thread, fetch=False)
         admission = await admit(
             self.runtime.turn_deps,
@@ -2460,11 +2460,11 @@ class DaimonBot(commands.Bot):
                 )
                 return
             target = thread or message.channel
-            if err.reason == "channel_protected":
+            if err.reason == "writers_none":
                 # Nothing may be posted into a protected channel, a refusal
                 # included; the log is the only trace.
                 log.info(
-                    "turn.skipped.channel_protected",
+                    "turn.skipped.writers_none",
                     guild_id=guild_id,
                     channel_id=parent_channel_id,
                     user_id=str(message.author.id),
@@ -2475,16 +2475,16 @@ class DaimonBot(commands.Bot):
                     guild_id=guild_id,
                     user_id=str(message.author.id),
                 )
-            elif err.reason == "agent_pinned_elsewhere":
+            elif err.reason == "runs_elsewhere":
                 log.info(
-                    "turn.skipped.agent_pinned_elsewhere",
+                    "turn.skipped.runs_elsewhere",
                     guild_id=guild_id,
                     channel_id=parent_channel_id,
                     user_id=str(message.author.id),
                 )
-            elif err.reason == "channel_isolated":
+            elif err.reason == "own_agents_only":
                 log.info(
-                    "turn.skipped.channel_isolated",
+                    "turn.skipped.own_agents_only",
                     guild_id=guild_id,
                     channel_id=parent_channel_id,
                     user_id=str(message.author.id),
@@ -2503,7 +2503,7 @@ class DaimonBot(commands.Bot):
                     guild_id=guild_id,
                     user_id=str(message.author.id),
                 )
-            if err.reason != "channel_protected":
+            if err.reason != "writers_none":
                 await target.send(admission_refusal_message(err.reason, self.runtime.settings))
             return
 
