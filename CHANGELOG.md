@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- A thread can move to another agent without opening a new thread. Ask the agent in the thread to hand it over (`hand_off_task`), or, when a channel's agent changed under an existing thread, press Hand over on the notice that thread shows (Discord and Slack). The new agent gets the conversation and working files from the next message, and the old session is archived with its history still readable. Inherited seals keep memory read-only. A member may hand a thread to an agent of that channel: the one it answers with, one pinned to it, or one of an isolated channel's own agents. Other agents need a server admin, or a channel admin of the channel when the thread is not sealed.
+- A thread can move to another agent without opening a new thread. Ask the agent in the thread to hand it over (`hand_off_task`), or, when a channel's agent changed under an existing thread, press Hand over on the notice that thread shows (Discord and Slack). The new agent gets the conversation and working files from the next message, and the old session is archived with its history still readable. Inherited seals keep memory read-only. A member may hand a thread to an agent of that channel: the one it answers with, one pinned to it, or one of an isolated channel's own agents. Other agents need a server admin, or a channel admin of the channel when the thread is not sealed and the agent is one they could make its default.
 - Agents can tidy their own posts on Discord and Slack. `edit_message` and `delete_message` change one message the agent posted with `send_message` or `create_thread`; `archive_thread` (Discord) and `delete_thread` close a thread it opened. An agent can change only what it posted itself, which daimon now records at send time; people's messages, other agents' and other bots' posts, turn replies and cards are refused. Each call is checked against the channel policy (protection, pins, isolation, seals), and checked again on a fresh policy right before the Discord or Slack call. Calls are refused in the support-escalation channels. Discord thread cleanup keeps the thread and other people's messages. Bulk deletes check and audit each message. Limits are 10 message actions per turn and 40 per hour per agent, and 20 refused calls in an hour pause tidying for that agent. Every edit or delete writes a security audit row with the channel and message ids, an HMAC of the replaced text keyed by a server secret, and the turn, never the text. Post records expire with `daimon audit prune`, and erasing an account clears the HMACs on its audit rows. A new seeded skill, `channel-tidy`, tells agents when to use them.
 
 ### Fixed
@@ -59,6 +59,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a server admin set before this are recognised by the setter's stored role,
   so a server admin re-sets any other default a channel admin should manage.
   That role is the one at upgrade, so a setter promoted since counts as one.
+- **Channel admins hand threads only to agents of theirs.** `hand_off_task`
+  and the Hand over button let a channel admin bring any agent into an
+  unsealed thread of their channel, lending it another channel's own agent's
+  keys, connectors and memory. They now may only for an agent they could make
+  that channel's default (a built-in agent, the workspace default, or one of
+  their own that answers only in their channels), and not when the move would
+  cost another channel's admin their hold on it; anything else needs a server
+  admin. Admin and refused Hand over clicks now record a `panel:handoff`
+  audit row, and a Slack channel admin granted through a user group can click.
 - **Slack user groups and Teams team owners can be channel admins.** A
   channel admin grant's `role_ids` now also takes Slack user group ids and a
   Teams team's Entra group id (whose owners it admits), from

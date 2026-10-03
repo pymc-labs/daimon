@@ -347,7 +347,9 @@ it:
   to an agent of that channel: the one it answers with, one pinned to it, or
   one of an isolated channel's own agents. Any other destination needs a
   server admin, or a channel admin of the parent channel when the thread is
-  not sealed (see [Same-thread handoff](#same-thread-handoff)).
+  not sealed and they could make the agent its default (below), unless the
+  thread binding would take it out of another channel admin's channels while
+  it is theirs (see [Same-thread handoff](#same-thread-handoff)).
 - `create_routine` and `update_routine` let a member schedule only the agent
   they are talking to, or the agent the destination channel answers with.
   Routines are listed and read only by their creator and admins.
@@ -444,7 +446,9 @@ form), when a server admin pinned it inside their channels only, or when a
 server admin set it as one of their channels' default
 (`channel_config.agent_name_set_by_admin`; migration 0045 backfilled it from
 each setter's role at upgrade time, not when they set it); any other agent needs a server
-admin on every surface (`channel_admin_holds`). A `/dm` conversation counts as the channel it was
+admin on every surface (`channel_admin_holds`). Handing a thread to an agent makes it answer
+there as a default would, so a channel admin may do it only for an agent they could bind
+(`authorize(HAND_OFF)` with `load_handoff_reach`). A `/dm` conversation counts as the channel it was
 started from. A session counts in the channel recorded when it was created
 (`thread_sessions.channel_id`) and in any its spend was attributed to, and a
 routine in the one its spend counts against; one with none recorded could run
@@ -1029,7 +1033,9 @@ takes the tenant policy lock (`lock_access_policy`), then the requester's
 account row FOR KEY SHARE, then the binding row FOR UPDATE, and reads the
 policy after the first lock. A policy edit committed before the switch refuses
 it; an edit that arrives later waits for the commit. The module docstring
-gives the order against every other lock holder.
+gives the order against every other lock holder. A Hand over click by an admin,
+or one `authorize` refuses, records a `panel:handoff` audit row, as
+`hand_off_task`'s refusals are audited.
 
 The switch writes only the binding. On the caller's next message the bind
 replaces the old session with one for the new agent: the old session's
