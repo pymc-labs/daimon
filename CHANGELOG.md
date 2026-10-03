@@ -64,9 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unsealed thread of their channel, lending it another channel's own agent's
   keys, connectors and memory. They now may only for an agent they could make
   that channel's default (a built-in agent, the workspace default, or one of
-  their own that answers only in their channels), and not when the move would
-  cost another channel's admin their hold on it; anything else needs a server
-  admin. Admin and refused Hand over clicks now record a `panel:handoff`
+  their own that answers only in their channels); anything else needs a server
+  admin. Both a handoff and a channel default set by a channel admin are now
+  refused when they would cost another channel's admin their hold on the
+  agent. Admin and refused Hand over clicks now record a `panel:handoff`
   audit row, and a Slack channel admin granted through a user group can click.
 - **Slack user groups and Teams team owners can be channel admins.** A
   channel admin grant's `role_ids` now also takes Slack user group ids and a

@@ -347,9 +347,10 @@ it:
   to an agent of that channel: the one it answers with, one pinned to it, or
   one of an isolated channel's own agents. Any other destination needs a
   server admin, or a channel admin of the parent channel when the thread is
-  not sealed and they could make the agent its default (below), unless the
-  thread binding would take it out of another channel admin's channels while
-  it is theirs (see [Same-thread handoff](#same-thread-handoff)).
+  not sealed and they could make the agent its default: the same rule, which
+  also refuses a move that would take it out of another channel admin's
+  channels while it is theirs (below, and
+  [Same-thread handoff](#same-thread-handoff)).
 - `create_routine` and `update_routine` let a member schedule only the agent
   they are talking to, or the agent the destination channel answers with.
   Routines are listed and read only by their creator and admins.
@@ -447,8 +448,11 @@ server admin set it as one of their channels' default
 (`channel_config.agent_name_set_by_admin`; migration 0045 backfilled it from
 each setter's role at upgrade time, not when they set it); any other agent needs a server
 admin on every surface (`channel_admin_holds`). Handing a thread to an agent makes it answer
-there as a default would, so a channel admin may do it only for an agent they could bind
-(`authorize(HAND_OFF)` with `load_handoff_reach`). A `/dm` conversation counts as the channel it was
+there as a default would, so binding and handoff are one rule
+(`authorize(BIND_CHANNEL_DEFAULT)` and `authorize(HAND_OFF)` with `load_binding_reach`):
+neither may take an agent out of another channel admin's channels while it is
+theirs, read over all their user and group grants together. It guards these two
+moves only; a member's routine, for one, still adds a channel to an agent's reach. A `/dm` conversation counts as the channel it was
 started from. A session counts in the channel recorded when it was created
 (`thread_sessions.channel_id`) and in any its spend was attributed to, and a
 routine in the one its spend counts against; one with none recorded could run
