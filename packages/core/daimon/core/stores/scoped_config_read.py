@@ -15,8 +15,8 @@ from daimon.core._models import (
     ThreadSession,
     UserConfig,
 )
-from daimon.core.access_policy import isolated_channel_of
 from daimon.core.errors import DaimonError
+from daimon.core.permissions import confidential_channel_of, confidential_channels
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -56,7 +56,7 @@ async def resolve(
     if context.channel_id is not None and default.channel_defaults == "confidential_only":
         policy = await load_access_policy(session, tenant_id=context.tenant_id)
         channel_isolated = (
-            isolated_channel_of(policy, context.thread_id, context.channel_id) is not None
+            confidential_channel_of(policy, context.thread_id, context.channel_id) is not None
         )
     config = merge(
         channel=channel_row,
@@ -165,7 +165,7 @@ async def is_agent_reachable_in_tenant(
     """
     tenant_row, channel_rows = await list_propagations_for_tenant(session, tenant_id=tenant_id)
     policy = await load_access_policy(session, tenant_id=tenant_id)
-    channel_rows = active_agent_channels(channel_rows, default, policy.isolated_channel_ids)
+    channel_rows = active_agent_channels(channel_rows, default, confidential_channels(policy))
     return is_agent_reachable(agent_name, tenant=tenant_row, channels=channel_rows, default=default)
 
 
@@ -302,7 +302,7 @@ async def is_agent_shared_for_key_changes(
         return True
     tenant_row, channel_rows = await list_propagations_for_tenant(session, tenant_id=tenant_id)
     policy = await load_access_policy(session, tenant_id=tenant_id)
-    channel_rows = active_agent_channels(channel_rows, default, policy.isolated_channel_ids)
+    channel_rows = active_agent_channels(channel_rows, default, confidential_channels(policy))
     if any(
         is_agent_reachable(name, tenant=tenant_row, channels=channel_rows, default=default)
         for name in names

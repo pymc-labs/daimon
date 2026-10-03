@@ -20,7 +20,8 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 
-from daimon.core.rule_views import RuleViewer
+from daimon.core.permissions import own_reader_channels
+from daimon.core.rule_views import RuleViewer (fix(routing): read confidential status through permissions)
 from daimon.core.scope import ChannelConfigRow, ConfigTier, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ThreadAgentBindingRow
@@ -239,6 +240,6 @@ async def load_answering_map(
         default=default,
         setup_threads=setup_threads,
         setup_threads_truncated=truncated,
-        isolated_channel_ids=policy.isolated_channel_ids,
+        isolated_channel_ids=confidential_channels(policy),
     )
     return answering if viewer is None else hide_across_homes(answering, viewer)

@@ -27,6 +27,7 @@ from daimon.core.answering_map import AnsweringMap, load_answering_map
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.permissions import confidential_channels
 from daimon.core.roster import RosterAgent, load_roster
 from daimon.core.rule_views import RuleViewer, load_rule_viewer
 from daimon.core.stores.access_policy import load_access_policy
@@ -181,7 +182,7 @@ async def load_roster_state(
         channel_id=int(channel_id),
         channel_name=channel_name,
         cascade_view=cascade,
-        isolated_channel_ids=policy.isolated_channel_ids,
+        isolated_channel_ids=confidential_channels(policy),
         deployment_default=runtime.deployment_default,
         roster_agents=roster.rows,
         answering=roster.answering,

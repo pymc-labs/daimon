@@ -11,13 +11,12 @@ from daimon.adapters.cli.flags import GUILD_OPTION, JSON_OPTION, TENANT_OPTION
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.runtime import build_runtime
 from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_tenant_override
-from daimon.core.access_policy import isolated_channel_of
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.permissions import any_agent_rules, any_own_readers
-from daimon.core.rule_views import binding_refusal, clear_refusal, render_binding_refusal
+from daimon.core.permissions import any_agent_rules, any_own_readers, own_reader_channels
+from daimon.core.rule_views import binding_refusal, clear_refusal, render_binding_refusal (fix(routing): read confidential status through permissions)
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -331,7 +330,7 @@ async def _refuse_shared_channel_default(
     if channel_defaults != "confidential_only" or not isinstance(scope, ChannelScopeRef):
         return
     policy = await load_access_policy(session, tenant_id=scope.tenant_id)
-    if isolated_channel_of(policy, scope.channel_id) is None:
+    if confidential_channel_of(policy, scope.channel_id) is None:
         console.print(
             "[red]Channel defaults are available only in confidential channels. "
             "Name the agent in a mention or mark the channel confidential.[/red]"
@@ -360,7 +359,7 @@ async def _config_ignored_defaults_entry(
         policy = await load_access_policy(session, tenant_id=tenant_id)
         rows = _ignored_default_rows(
             channels,
-            isolated_channel_ids=policy.isolated_channel_ids,
+            isolated_channel_ids=confidential_channels(policy),
             channel_defaults=rt.settings.routing.channel_defaults,
         )
         emit_rows(console, rows, columns=("channel_id", "agent_name"), as_json=False)
