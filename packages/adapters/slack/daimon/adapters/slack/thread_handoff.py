@@ -4,8 +4,9 @@ Slack's side of `daimon.adapters.discord.thread_handoff`: the responder-changed
 notice carries a button whose value is the agent the channel answers with now.
 A click hands the thread to that agent for the person who clicked, decided by
 `daimon.core.thread_handoff` under the tenant policy lock with their live
-admin status (`users.info`) and stored channel admin grants. The value is only
-a request; an external Slack Connect member's click is dropped.
+admin status (`users.info`) and channel admin grants, user groups confirmed
+live. The value is only a request; an external Slack Connect member's click is
+dropped.
 """
 
 from __future__ import annotations
@@ -15,10 +16,10 @@ from typing import Any, Final
 
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.thread_handoff import switch_thread_on_request
 from slack_sdk.errors import SlackApiError
@@ -72,17 +73,21 @@ async def handle_hand_over_click(runtime: SlackRuntime, payload: dict[str, Any])
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
     outcome = await switch_thread_on_request(
         runtime.anthropic,
         runtime.sessionmaker,
-        tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
+        tenant_id=tenant_id,
         platform="slack",
         parent_channel_id=channel_id,
         thread_id=thread_ts,
         ma_agent_id=agent_id,
-        caller=ChannelAdminCaller(
-            platform_user_id=user_id,
-            is_server_admin=await resolve_is_admin(client, user_id=user_id),
+        caller=await channel_admin_caller(
+            runtime,
+            client,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            is_admin=await resolve_is_admin(client, user_id=user_id),
         ),
         default=runtime.deployment_default,
         channel=f"<#{channel_id}>",
