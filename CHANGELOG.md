@@ -168,6 +168,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A Discord role taken away ends channel admin rights at once.** Outside a
+  chat turn (MCP calls, the hub, a connector sign-in, budget notices and ask a
+  human DMs), a channel admin matched by a stored Discord role counts only
+  while Discord still lists the role on them, read per member and cached for a
+  minute. A failed read grants nothing. Before, the stored role stood until
+  their next turn.
 - **Agents that only routines or threads run count as shared.** Editing an
   agent's prompt or setup, or binding a repo to it, now reads sharing as
   widely as a key change: a bound thread, someone's personal default, or

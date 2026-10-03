@@ -450,7 +450,10 @@ workspace should limit group management to admins; outside a turn (the MCP
 verifier, hub reads, an OAuth callback, channel admin DMs) a stored Slack
 group or Teams team counts only while a live lookup still admits the person
 (`confirm_stored_group_ids`), and a private form's submit, which runs under
-the policy lock, ignores them. A channel admin may do what a server admin may for
+the policy lock, ignores them. A stored Discord role is checked there against
+the member's current roles (`GET /guilds/{id}/members/{user}`, cached a
+minute), since listing a role's members needs a privileged intent; where no
+lookup runs it stands. A channel admin may do what a server admin may for
 an agent of theirs that is local to their channels -- not the tenant default or anyone's
 personal default, answering or running somewhere and only in channels they
 run (channel-scope rows, thread bindings, and other people's live sessions

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.core.billing import BillingConfig, load_billing_config
+from daimon.core.channel_admins import GroupMembersCache
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -37,6 +38,8 @@ class DiscordRuntime:
     # tests use so a form submit never leaves the process; production wires
     # `daimon.core.mcp_oauth.probe_bearer_token`.
     mcp_token_probe: McpTokenProbe | None = None
+    # Members' current roles, re-read outside their turns (`channel_admin_roles`).
+    group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
 
 
 @asynccontextmanager
