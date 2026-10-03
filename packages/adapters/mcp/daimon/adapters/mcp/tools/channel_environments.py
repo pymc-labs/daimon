@@ -24,12 +24,14 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._isolation import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools.environments import CONFIRM_OPEN_NETWORK_ASK
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import Action
 from daimon.core.channel_environments import (
     EnvironmentPick,
     authorize_environment_pick,
     build_clear_environment_note,
+    build_sealed_channels_confirm,
     build_sealed_network_confirm,
     build_sealed_network_refusal,
     build_set_environment_note,
@@ -137,11 +139,12 @@ async def _require_pick_allowed(
     if pick.missing:
         raise ToolError(_missing(environment_name))
     if pick.needs_confirm and not confirm_open_network:
-        raise ToolError(
+        confirm = (
             build_sealed_network_confirm(environment_name=environment_name)
-            + " Ask the caller whether to go ahead; only if they confirm, retry with "
-            "confirm_open_network=true. Never confirm on their behalf."
+            if target.channel_id is not None
+            else build_sealed_channels_confirm(environment_name=environment_name)
         )
+        raise ToolError(confirm + CONFIRM_OPEN_NETWORK_ASK)
     return pick, hidden
 
 
@@ -229,7 +232,8 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         (``list_environments``). Conversations pick it up from their next message.
         The workspace default requires Manage Server (admin); an admin of the channel
         may set that channel's environment, except one with unrestricted networking in
-        a sealed channel, which needs a server admin and their confirmation: pass
+        a sealed channel, which needs a server admin and their confirmation, as does a
+        workspace default sealed channels would run in: pass
         ``confirm_open_network=true`` only after the caller confirms it.
 
         Pass the parent channel's id: Discord
@@ -259,7 +263,9 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         default. The workspace default requires Manage Server (admin); an admin of the
         channel may clear that channel's environment, unless it is sealed and the
         default has unrestricted networking; then a server admin must confirm it, as
-        for ``set_channel_environment``. A thread id resolves to its parent channel.
+        for ``set_channel_environment``, and as when clearing the workspace default
+        leaves sealed channels on such a default. A thread id resolves to its parent
+        channel.
         """
         return await _clear_channel_environment_impl(
             runtime,

@@ -18,8 +18,10 @@ from daimon.adapters.mcp.tools.environments import (
     _list_environments_impl,
     _update_environment_impl,
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.specs import EnvironmentSpec
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant
@@ -383,3 +385,104 @@ async def test_update_and_archive_refuse_a_managed_environment(
     assert "create_environment" not in str(refused.value), "a new one does not replace it"
 
     assert writes == [], "neither the update nor the archive may reach the provider"
+
+
+_CLOSED_NETWORK: dict[str, object] = {
+    "type": "limited",
+    "allowed_hosts": [],
+    "allow_mcp_servers": False,
+    "allow_package_managers": False,
+}
+
+
+async def test_opening_or_archiving_a_sealed_channels_environment_needs_confirming(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A sealed channel's environment opened or archived onto an open fallback is the
+    same call as picking an open one there: a server admin confirms it first."""
+    async with committing_sessionmaker.begin() as session:
+        tenant_id = (await make_tenant(session)).id
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="c_sealed"),
+            tenant_id=tenant_id,
+            environment_name="closed",
+        )
+        await set_fields(
+            session,
+            scope=TenantScopeRef(tenant_id=tenant_id),
+            tenant_id=tenant_id,
+            environment_name="wide",
+        )
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(sealed_channel_ids=("c_sealed",)),
+        )
+    writes: list[str] = []
+
+    def on_write(req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        writes.append(req.url.path)
+        return httpx.Response(200, json=_ma_env(id=m.group(1)).model_dump(mode="json"))
+
+    def env(name: str, *, closed: bool) -> dict[str, Any]:
+        config = _ma_env().config.model_dump(mode="json")
+        if closed:
+            config["networking"] = _CLOSED_NETWORK
+        return _ma_env(
+            id=f"env_{name}",
+            name=name,
+            config=config,
+            metadata={"daimon_tenant": str(tenant_id), "daimon_name": name},
+        ).model_dump(mode="json")
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/environments",
+        lambda _req, _m: list_response(
+            [env("closed", closed=True), env("spare", closed=True), env("wide", closed=False)]
+        ),
+    )
+    router.add("POST", r"/v1/environments/([^/]+)/archive", on_write)
+    router.add("POST", r"/v1/environments/([^/]+)", on_write)
+    runtime = _runtime(build_fake_anthropic(router.dispatch), committing_sessionmaker)
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+    unrestricted: Any = {"type": "cloud", "networking": {"type": "unrestricted"}}
+    a_host: Any = {"type": "cloud", "networking": {**_CLOSED_NETWORK, "allowed_hosts": ["x.io"]}}
+    packages_only: Any = {"type": "cloud", "packages": {"pip": ["numpy"]}}
+
+    for config in (unrestricted, a_host):
+        with pytest.raises(
+            ToolError, match="Sealed channels would run in the closed.*confirm_open"
+        ):
+            await _update_environment_impl(
+                runtime, auth, name="closed", config=config, description=None
+            )
+    with pytest.raises(ToolError, match="the environment they would fall back to.*confirm_open"):
+        await _archive_environment_impl(runtime, auth, "closed")
+    assert writes == [], "nothing reaches the provider unconfirmed"
+
+    await _update_environment_impl(
+        runtime, auth, name="closed", config=packages_only, description=None
+    )
+    await _update_environment_impl(
+        runtime, auth, name="spare", config=unrestricted, description=None
+    )
+    assert writes == ["/v1/environments/env_closed", "/v1/environments/env_spare"], (
+        "a network left as it was, or an environment no sealed channel runs, needs no confirming"
+    )
+    await _update_environment_impl(
+        runtime,
+        auth,
+        name="closed",
+        config=unrestricted,
+        description=None,
+        confirm_open_network=True,
+    )
+    await _archive_environment_impl(runtime, auth, "closed", confirm_open_network=True)
+    assert writes[2:] == ["/v1/environments/env_closed", "/v1/environments/env_closed/archive"], (
+        "confirmed, both go through"
+    )

@@ -517,10 +517,10 @@ async def test_a_channel_admin_clears_a_sealed_pick_only_onto_a_limited_default(
     await _grant(runtime, tenant_id, account_id, user_ids=[USER])
     await _seal(committing_sessionmaker, tenant_id, CHANNEL)
     member = await _verified(runtime, _auth(tenant_id, account_id))
-    await _set_channel_environment_impl(runtime, admin, environment_name="open", channel_id=None)
     await _set_channel_environment_impl(
         runtime, admin, environment_name="closed", channel_id=CHANNEL
     )
+    await _set_channel_environment_impl(runtime, admin, environment_name="open", channel_id=None)
 
     with pytest.raises(ToolError, match="sealed.*the default it would fall back to"):
         await _clear_channel_environment_impl(runtime, member, channel_id=CHANNEL)
@@ -552,6 +552,49 @@ async def test_a_server_admin_confirms_clearing_a_sealed_channel_onto_an_open_de
         runtime, admin, environment_name="open", channel_id=OTHER_CHANNEL
     )
     assert unsealed.changed, "outside a seal an open network needs no confirmation"
+
+
+async def test_a_workspace_default_sealed_channels_follow_onto_an_open_network_is_confirmed(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Sealed channels with no environment of their own run the workspace default, so
+    moving it onto an open network is the same call as picking one in each of them."""
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "open", "default", limited=("closed",))
+    admin = _auth(tenant_id, account_id, admin=True)
+    await _set_channel_environment_impl(runtime, admin, environment_name="closed", channel_id=None)
+    await _seal(committing_sessionmaker, tenant_id, CHANNEL)
+
+    with pytest.raises(ToolError, match="Sealed channels would run in the open.*confirm_open"):
+        await _set_channel_environment_impl(
+            runtime, admin, environment_name="open", channel_id=None
+        )
+    with pytest.raises(ToolError, match="the environment they would fall back to.*confirm_open"):
+        await _clear_channel_environment_impl(runtime, admin, channel_id=None)
+    row = await _workspace_row(committing_sessionmaker, tenant_id)
+    assert row == "closed", "unconfirmed, the workspace default stays"
+
+    await _set_channel_environment_impl(
+        runtime, admin, environment_name="closed", channel_id=CHANNEL
+    )
+    moved = await _set_channel_environment_impl(
+        runtime, admin, environment_name="open", channel_id=None
+    )
+    assert moved.changed, "a sealed channel with its own pick doesn't follow the default"
+    await _set_channel_environment_impl(runtime, admin, environment_name="closed", channel_id=None)
+    await _clear_channel_environment_impl(runtime, admin, channel_id=CHANNEL)
+    confirmed = await _set_channel_environment_impl(
+        runtime, admin, environment_name="open", channel_id=None, confirm_open_network=True
+    )
+    assert confirmed.changed, "confirmed, the default moves"
+
+
+async def _workspace_row(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> str | None:
+    async with sessionmaker() as session:
+        row = await get_scope(session, scope=TenantScopeRef(tenant_id=tenant_id))
+    return row.environment_name if row is not None else None
 
 
 async def test_a_channel_admin_pick_looks_its_environment_up_once(

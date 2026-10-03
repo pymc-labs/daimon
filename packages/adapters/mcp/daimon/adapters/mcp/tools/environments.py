@@ -19,7 +19,12 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._isolation import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
-from daimon.core.channel_environments import build_archive_environment_note
+from daimon.core.channel_environments import (
+    archive_needs_confirm,
+    build_archive_environment_note,
+    build_sealed_channels_confirm,
+    update_needs_confirm,
+)
 from daimon.core.defaults.ma_index import (
     find_environment_by_daimon_tag,
     find_environments_by_daimon_tag,
@@ -35,6 +40,11 @@ from daimon.core.stores.scoped_config_write import clear_environment_references
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
+
+CONFIRM_OPEN_NETWORK_ASK = (
+    " Ask the caller whether to go ahead; only if they confirm, retry with "
+    "confirm_open_network=true. Never confirm on their behalf."
+)
 
 
 class EnvironmentInfo(BaseModel):
@@ -136,6 +146,7 @@ async def _update_environment_impl(
     *,
     config: BetaCloudConfigParams | None,
     description: str | None,
+    confirm_open_network: bool = False,
 ) -> EnvironmentInfo:
     _require_admin(auth)
     maybe_fields: dict[str, Any] = {"config": config, "description": description}
@@ -149,6 +160,19 @@ async def _update_environment_impl(
         env,
         refusal="chat tools cannot modify it. Use create_environment to make a new one instead.",
     )
+    if not confirm_open_network:
+        async with runtime.session_factory() as session:
+            confirm = await update_needs_confirm(
+                session,
+                tenant_id=auth.tenant_id,
+                environment=env,
+                config=config,
+                default=runtime.deployment_default,
+            )
+        if confirm:
+            raise ToolError(
+                build_sealed_channels_confirm(environment_name=name) + CONFIRM_OPEN_NETWORK_ASK
+            )
     updated = await runtime.client.beta.environments.update(env.id, **patch)
     return EnvironmentInfo.from_ma(updated)
 
@@ -168,6 +192,8 @@ async def _archive_environment_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     name: str,
+    *,
+    confirm_open_network: bool = False,
 ) -> ArchiveEnvironmentResult:
     """Archive the environment, then clear every pick of it so those channels fall through."""
     _require_admin(auth)
@@ -178,6 +204,19 @@ async def _archive_environment_impl(
         env,
         refusal="built-in agents run in it, so chat tools cannot archive it. Nothing changed.",
     )
+    if not confirm_open_network:
+        async with runtime.session_factory() as session:
+            confirm = await archive_needs_confirm(
+                session,
+                runtime.client,
+                tenant_id=auth.tenant_id,
+                environment_name=name,
+                default=runtime.deployment_default,
+            )
+        if confirm:
+            raise ToolError(
+                build_sealed_channels_confirm(environment_name=None) + CONFIRM_OPEN_NETWORK_ASK
+            )
     await runtime.client.beta.environments.archive(env.id)
     async with runtime.session_factory.begin() as session:
         cleared = await clear_environment_references(
@@ -246,21 +285,34 @@ def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         *,
         config: BetaCloudConfigParams | None = None,
         description: str | None = None,
+        confirm_open_network: bool = False,
     ) -> EnvironmentInfo:
-        """Patch-update an environment. Omitted (None) fields are preserved."""
+        """Patch-update an environment. Omitted (None) fields are preserved.
+
+        Opening the network of an environment a sealed channel runs in needs the
+        caller's confirmation: pass ``confirm_open_network=true`` only after they
+        confirm it.
+        """
         return await _update_environment_impl(
             runtime,
             await _auth(ctx),
             name,
             config=config,
             description=description,
+            confirm_open_network=confirm_open_network,
         )
 
     @mcp.tool(tags={"admin"})
-    async def archive_environment(ctx: Context, name: str) -> ArchiveEnvironmentResult:  # pyright: ignore[reportUnusedFunction]
+    async def archive_environment(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, name: str, confirm_open_network: bool = False
+    ) -> ArchiveEnvironmentResult:
         """Archive the MA environment and delete from the tenant pool.
 
         Channels and the workspace default that picked it are cleared, so they
-        fall through to the next tier; read ``note`` back to the user.
+        fall through to the next tier; read ``note`` back to the user. When that
+        leaves a sealed channel on an environment with unrestricted networking,
+        pass ``confirm_open_network=true`` only after the caller confirms it.
         """
-        return await _archive_environment_impl(runtime, await _auth(ctx), name)
+        return await _archive_environment_impl(
+            runtime, await _auth(ctx), name, confirm_open_network=confirm_open_network
+        )
