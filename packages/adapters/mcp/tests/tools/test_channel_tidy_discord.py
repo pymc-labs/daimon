@@ -610,6 +610,42 @@ async def test_a_pinned_agent_cannot_tidy_outside_its_channels(
     assert fake.messages[message_id]["content"] == "first draft", "nothing was edited"
 
 
+@pytest.mark.parametrize(
+    ("isolated", "own_agent"),
+    [(_OTHER_CHANNEL, _AGENT), (_CHANNEL, _OTHER_AGENT)],
+    ids=["own-agent-outside", "outsider-inside"],
+)
+async def test_isolation_holds_tidying_to_the_isolated_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: _FakeDiscord,
+    isolated: str,
+    own_agent: str,
+) -> None:
+    """An edit writes new text: an isolated channel's own agent edits nothing outside
+    it, and no other agent edits into it, whatever it posted before isolation."""
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    message_id = await _post(world, auth)
+    await world.set_policy(
+        TenantAccessPolicy(
+            agent_channel_pins={own_agent: (isolated,)},
+            sealed_channel_ids=(isolated,),
+            isolated_channel_ids=(isolated,),
+        )
+    )
+
+    with pytest.raises(ToolError, match="pinned to its own channels|this channel is isolated"):
+        await _edit_message_impl(
+            world.runtime,
+            auth,
+            channel_id=_CHANNEL,
+            message_id=message_id,
+            content="moved",
+            origin_context_id=origin,
+        )
+    assert fake.messages[message_id]["content"] == "first draft", "nothing was edited"
+
+
 async def test_a_sealed_channel_is_tidied_only_from_a_turn_inside_it(
     committing_sessionmaker: async_sessionmaker[AsyncSession], fake: _FakeDiscord
 ) -> None:
