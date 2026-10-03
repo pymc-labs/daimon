@@ -493,6 +493,20 @@ class SlackSettings(BaseModel):
             "starving others on the shared Anthropic key."
         ),
     )
+    history_page_limit: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+        description=(
+            "Messages requested per conversations.replies call when replaying "
+            "thread history. Slack clamps this per workspace: an app "
+            "commercially distributed outside the Marketplace gets 15 whatever "
+            "it asks for, an internal-app install gets the full page up to "
+            "1000, which is also the largest value Slack accepts. The default "
+            "matches the 100 messages Discord replays; every replayed message "
+            "is first-turn context the model pays for."
+        ),
+    )
     health_port: int = Field(
         default=8083,
         description=(

@@ -36,6 +36,24 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _TARGET_AGENT_ID = "agent_continuation_target"
 
 
+async def test_continuation_history_requests_the_configured_window(
+    fake_slack_web_client: Any,
+) -> None:
+    await continuation_dispatch._latest_human_message_at(  # pyright: ignore[reportPrivateUsage]
+        fake_slack_web_client.client,
+        channel="C_TEST",
+        thread_ts="100.0",
+        after=datetime.now(UTC),
+        page_limit=75,
+    )
+    queries = [
+        url.query["limit"]
+        for (method, url) in fake_slack_web_client.mock.requests
+        if method == "GET" and url.path == "/api/conversations.replies"
+    ]
+    assert queries == ["75"], "continuation decisions use the ordinary turn's history window"
+
+
 class _SimulatedProcessDeath(BaseException):
     """Bypass dispatcher error handling to model abrupt process termination."""
 

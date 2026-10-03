@@ -8,11 +8,10 @@ Mirrors ``packages/adapters/discord/daimon/adapters/discord/context.py``:
 - ``build_context_xml``: first-turn fetch, one page from the thread root.
 - ``build_delta_xml``: continuation fetch, delta since the watermark timestamp.
 
-Both fetch a single page. Slack caps non-Marketplace apps at
-``THREAD_PAGE_LIMIT`` objects per ``conversations.replies`` call and one call
-per minute, so paginating inside a turn is not viable; when Slack reports
-``has_more`` the block is marked ``truncated="true"`` so the model knows the
-window is partial.
+Both fetch a single page. Slack clamps apps commercially distributed outside
+the Marketplace to 15 messages and one call a minute; an internal install gets
+the page it requests. When Slack reports ``has_more`` the block is marked
+``truncated="true"`` so the model knows the window is partial.
 
 All message text is escaped via ``xml.sax.saxutils`` (T-80-XML mitigation).
 No try/except — exceptions propagate to the listener boundary.
@@ -30,11 +29,9 @@ from daimon.core.turn_keys import render_keys_element
 from daimon.core.untrusted import untrusted_block
 from slack_sdk.web.async_client import AsyncWebClient
 
-# Slack's ceiling for non-Marketplace apps on conversations.replies (both the
-# default and the maximum accepted value of ``limit``; larger values are clamped
-# server-side). Socket Mode apps cannot list on the Marketplace, so daimon is
-# always in this class.
-THREAD_PAGE_LIMIT = 15
+# Requested page size, matching the 100 messages Discord replays; Slack may
+# grant fewer and report has_more.
+DEFAULT_PAGE_LIMIT = 100
 
 
 def _history_attrs(*, truncated: bool) -> dict[str, str]:
@@ -112,10 +109,11 @@ async def build_context_xml(
     is_admin: bool = False,
     proxy: ProxyUrlContext | None = None,
     key_names: Sequence[str] = (),
+    page_limit: int = DEFAULT_PAGE_LIMIT,
 ) -> str:
     """Build XML context from thread history for the first turn.
 
-    Fetches one page of ``THREAD_PAGE_LIMIT`` messages via
+    Fetches one page of ``page_limit`` messages via
     ``conversations.replies``. Returns a string with a
     ``<context>/<thread_history>`` block containing the replayed messages
     followed by a ``<user_query>`` element.
@@ -125,13 +123,12 @@ async def build_context_xml(
     cannot be requested in one call. A thread longer than one page therefore
     replays the root and the first replies, and the block carries
     ``truncated="true"`` so the model knows the recent tail is missing.
-    Discord's equivalent replays 100 messages; the gap is Slack's rate policy.
 
     ``key_names`` names this agent's stored keys, names only (see
     `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
     """
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
-        channel=channel, ts=thread_ts, limit=THREAD_PAGE_LIMIT
+        channel=channel, ts=thread_ts, limit=page_limit
     )
     messages = cast(list[dict[str, Any]], resp["messages"])  # pyright: ignore[reportUnknownVariableType]
     truncated = bool(resp.get("has_more"))  # pyright: ignore[reportUnknownMemberType]
@@ -162,6 +159,7 @@ async def build_delta_xml(
     is_admin: bool = False,
     proxy: ProxyUrlContext | None = None,
     key_names: Sequence[str] = (),
+    page_limit: int = DEFAULT_PAGE_LIMIT,
 ) -> str:
     """Build XML context for a continuation turn (delta since watermark).
 
@@ -170,7 +168,7 @@ async def build_delta_xml(
     ``build_delta_xml``'s ``after_message_id`` path).  Returns a string with a
     ``<context>/<thread_delta>`` block and a ``<user_query>`` element.
 
-    One page of ``THREAD_PAGE_LIMIT`` messages, oldest-first from the
+    One page of ``page_limit`` messages, oldest-first from the
     watermark; a delta longer than that is marked ``truncated="true"``.
 
     ``key_names`` names this agent's stored keys, names only (see
@@ -181,7 +179,7 @@ async def build_delta_xml(
         ts=thread_ts,
         oldest=watermark_ts,
         inclusive=False,
-        limit=THREAD_PAGE_LIMIT,
+        limit=page_limit,
     )
     messages = cast(list[dict[str, Any]], resp["messages"])  # pyright: ignore[reportUnknownVariableType]
     truncated = bool(resp.get("has_more"))  # pyright: ignore[reportUnknownMemberType]

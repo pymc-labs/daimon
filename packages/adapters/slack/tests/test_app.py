@@ -158,6 +158,7 @@ def _make_app(
     else:
         settings.crypto.keys = ()
     settings.slack.max_concurrent_turns_per_tenant = 3
+    settings.slack.history_page_limit = 100
 
     if sessionmaker is None:
         # Provide a factory that returns an AsyncMock context manager when

@@ -1404,6 +1404,13 @@ class SlackApp:
             )
             await s.commit()
 
+    def _history_page_limit(self) -> int:
+        slack_settings = self.runtime.settings.slack
+        assert slack_settings is not None, (
+            "SlackApp requires slack settings (entrypoint validates at boot)"
+        )
+        return slack_settings.history_page_limit
+
     async def _orchestrate(
         self,
         event: dict[str, Any],
@@ -2229,6 +2236,7 @@ class SlackApp:
                     is_admin=is_admin,
                     proxy=proxy_ctx,
                     key_names=key_names,
+                    page_limit=self._history_page_limit(),
                 )
             elif watermark is not None:
                 # Continuation: replay only messages since the last watermark.
@@ -2242,6 +2250,7 @@ class SlackApp:
                     is_admin=is_admin,
                     proxy=proxy_ctx,
                     key_names=key_names,
+                    page_limit=self._history_page_limit(),
                 )
             else:
                 # Reused session with no watermark (prior turn's final_ts was None).
@@ -2307,6 +2316,7 @@ class SlackApp:
                     is_admin=is_admin,
                     proxy=proxy_ctx,
                     key_names=key_names,
+                    page_limit=self._history_page_limit(),
                 )
                 if synthetic_prefix:
                     full_message = synthetic_prefix + "\n" + full_message
@@ -2942,6 +2952,7 @@ class SlackApp:
             channel=channel,
             thread_id=thread_id,
             active_turn=live_row is not None and live_row.active_turn_message_id is not None,
+            page_limit=self._history_page_limit(),
             run_follow_up=lambda row, seed: self._run_continuation_turn(
                 row,
                 seed,

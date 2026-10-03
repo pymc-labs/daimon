@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.adapters.slack.context import THREAD_PAGE_LIMIT
+from daimon.adapters.slack.context import DEFAULT_PAGE_LIMIT
 from daimon.core.continuity.dispatch import dispatch_pending_continuations as dispatch_core
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.turn.protection import protection_state
@@ -23,12 +23,17 @@ RunFollowUp = Callable[[TaskContinuationRow, str], Awaitable[None]]
 
 
 async def _latest_human_message_at(
-    web_client: AsyncWebClient, *, channel: str, thread_ts: str, after: datetime
+    web_client: AsyncWebClient,
+    *,
+    channel: str,
+    thread_ts: str,
+    after: datetime,
+    page_limit: int = DEFAULT_PAGE_LIMIT,
 ) -> datetime | None:
     """The newest human (non-bot) message timestamp after `after`, one page.
 
     Mirrors `context.build_delta_xml`'s `conversations.replies` call exactly
-    (`oldest`, `inclusive=False`, `limit=THREAD_PAGE_LIMIT`): the dispatch
+    (`oldest`, `inclusive=False`, `limit=page_limit`): the dispatch
     decision must never depend on Slack history beyond what an ordinary turn
     would ever read.
     """
@@ -37,7 +42,7 @@ async def _latest_human_message_at(
         ts=thread_ts,
         oldest=f"{after.timestamp():.6f}",
         inclusive=False,
-        limit=THREAD_PAGE_LIMIT,
+        limit=page_limit,
     )
     messages = cast(list[dict[str, Any]], response["messages"])  # pyright: ignore[reportUnknownVariableType]
     latest: datetime | None = None
@@ -63,13 +68,18 @@ async def dispatch_pending_continuations(
     thread_id: str,
     active_turn: bool,
     run_follow_up: RunFollowUp,
+    page_limit: int = DEFAULT_PAGE_LIMIT,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
     """Dispatch under the caller's guard, preserving its active-turn check."""
 
     async def latest(row: TaskContinuationRow) -> datetime | None:
         return await _latest_human_message_at(
-            web_client, channel=channel, thread_ts=thread_id, after=row.created_at
+            web_client,
+            channel=channel,
+            thread_ts=thread_id,
+            after=row.created_at,
+            page_limit=page_limit,
         )
 
     async def context(row: TaskContinuationRow) -> tuple[datetime | None, bool]:

@@ -528,6 +528,16 @@ Slack OAuth app client secret, used during the 'Add to Slack' install flow.
 Maximum number of agent turns a single tenant (Slack workspace) may have in flight at
 once. Caps one noisy workspace from starving others on the shared Anthropic key.
 
+### `DAIMON_SLACK__HISTORY_PAGE_LIMIT`
+
+`int` · optional · default `100`
+
+Messages requested per conversations.replies call when replaying thread history. Slack
+clamps this per workspace: an app commercially distributed outside the Marketplace gets
+15 whatever it asks for, an internal-app install gets the full page up to 1000, which is
+also the largest value Slack accepts. The default matches the 100 messages Discord
+replays; every replayed message is first-turn context the model pays for.
+
 ### `DAIMON_SLACK__HEALTH_PORT`
 
 `int` · optional · default `8083`
