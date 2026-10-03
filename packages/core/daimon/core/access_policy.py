@@ -133,18 +133,6 @@ def isolation_owner(policy: TenantAccessPolicy, agent_names: tuple[str | None, .
     return channel if channel in policy.isolated_channel_ids else None
 
 
-def is_own_isolated_agent(
-    policy: TenantAccessPolicy,
-    agent_names: tuple[str | None, ...],
-    *,
-    channel_id: str | None,
-    parent_channel_id: str | None = None,
-) -> bool:
-    """Whether an isolated channel's own agent is at work in it; its memory stays writable."""
-    inside = isolated_channel_of(policy, channel_id, parent_channel_id)
-    return inside is not None and isolation_owner(policy, agent_names) == inside
-
-
 def source_seal_ids(
     policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None
 ) -> frozenset[str]:
