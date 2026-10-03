@@ -23,7 +23,7 @@ from typing import Literal
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.access_policy import TenantAccessPolicy, isolated_channel_of, source_seal_ids
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize, build_turn_place
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
@@ -31,10 +31,14 @@ from daimon.core.defaults.metadata import private_routine_stamp
 from daimon.core.errors import DaimonError
 from daimon.core.permissions import (
     agent_permissions,
+    any_confidential,
+    any_pinned,
     channel_permissions,
     channel_rule,
+    confidential_channel_of,
     listed_at,
     pinned_alone,
+    seal_ids_at,
 )
 from daimon.core.routine_delivery import delivery_target, teams_channel_of
 from daimon.core.scope import DeploymentDefault, ScopeContext
@@ -180,7 +184,7 @@ def routine_origin(
     return RoutineOrigin(
         channel_id=channel_id,
         thread_id=thread_id,
-        seal_ids=source_seal_ids(policy, channel_id=channel_id, thread_id=thread_id),
+        seal_ids=seal_ids_at(policy, channel_id=channel_id, thread_id=thread_id),
         private_dm_id=private_routine_stamp(row.id),
     )
 
@@ -266,7 +270,7 @@ class IsolationViewer:
 
     @property
     def is_active(self) -> bool:
-        return bool(self.policy.isolated_channel_ids)
+        return any_confidential(self.policy)
 
     def names_of(self, agent_name: str | None) -> tuple[str | None, ...]:
         """`agent_name` and every other name its agent carries."""
@@ -307,10 +311,12 @@ async def load_isolation_viewer(
     if is_admin:
         return None
     policy = await load_access_policy(session, tenant_id=tenant_id)
-    if not policy.isolated_channel_ids:
+    if not any_confidential(policy):
         return None
     agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
-    return IsolationViewer(policy, isolated_channel_of(policy, channel_id), agent_aliases(agents))
+    return IsolationViewer(
+        policy, confidential_channel_of(policy, channel_id), agent_aliases(agents)
+    )
 
 
 async def is_thread_turn_refused(
@@ -331,7 +337,7 @@ async def is_thread_turn_refused(
     """
     async with sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        if not (policy.agent_channel_pins or policy.isolated_channel_ids):
+        if not (any_pinned(policy) or any_confidential(policy)):
             return False
         context = ScopeContext(
             tenant_id=tenant_id, channel_id=channel_id, platform=platform, thread_id=thread_id
@@ -343,7 +349,7 @@ async def is_thread_turn_refused(
     if config.agent_name is None:
         return False
     names: tuple[str | None, ...] = (config.agent_name,)
-    if isolated_channel_of(policy, thread_id, channel_id) is not None:
+    if confidential_channel_of(policy, thread_id, channel_id) is not None:
         agent = await find_agent_by_daimon_tag(
             anthropic, tenant_id=tenant_id, name=config.agent_name
         )

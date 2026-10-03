@@ -57,11 +57,12 @@ from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.access_policy import TenantAccessPolicy, is_sealed_source
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, authorize, build_turn_place
 from daimon.core.channel_admins import StoredAdmin, confirm_stored_subject, read_stored_admin
 from daimon.core.config import DirectMessagePolicy, SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.permissions import sealed_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import (
@@ -401,7 +402,7 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
             message_ts=message_ts,
             thread_ts=thread_ts,
             remaining=remaining_credits(allowance=allowance, used=used),
-            sealed=is_sealed_source(policy, channel_id=channel_id, thread_id=thread_ts),
+            sealed=sealed_at(policy, channel_id=channel_id, thread_id=thread_ts),
         ),
     )
 
@@ -456,9 +457,7 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
             except AccessPolicyUnreadable:
                 decided["refusal"] = POLICY_UNREADABLE
                 return False
-            decided["sealed"] = is_sealed_source(
-                policy, channel_id=s.channel_id, thread_id=s.thread_ts
-            )
+            decided["sealed"] = sealed_at(policy, channel_id=s.channel_id, thread_id=s.thread_ts)
             if not _may_ask(policy, subject, channel_id=s.channel_id, thread_ts=s.thread_ts):
                 decided["refusal"] = NOT_ALLOWED
                 return False

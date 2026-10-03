@@ -153,10 +153,13 @@ from daimon.core.permissions import (
     ChannelPermissions,
     Refusal,
     agent_permissions,
+    any_confidential,
+    any_pinned,
     channel_permissions,
     crosses_confidential,
     held_to,
     outside_pins,
+    pinned_names,
     post_refusal,
     readable_from,
     run_refusal,
@@ -715,7 +718,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         if not agent.resolved:
             if place.permissions.confidential_channel is not None and not place.setup_thread:
                 return _deny("channel_isolated")
-            return _deny("agent_unresolved") if policy.agent_channel_pins else ALLOW
+            return _deny("agent_unresolved") if any_pinned(policy) else ALLOW
         refusal = run_refusal(agent.permissions, place.permissions, setup_thread=place.setup_thread)
         return ALLOW if refusal is None else _deny(_REFUSALS[refusal])
 
@@ -729,7 +732,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             here,
         ):
             return _deny("channel_isolated")
-        if not any(name in policy.agent_channel_pins for name in agent.names if name):
+        pinned = pinned_names(policy)
+        if not any(name in pinned for name in agent.names if name):
             return ALLOW
         # Straight into a pinned channel: a thread under one is refused, as a
         # fire can't always tell its parent.
@@ -738,7 +742,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
 
     if req.action is Action.CONFIGURE:
-        if (subject.is_admin and not subject.via_agent_key) or not policy.agent_channel_pins:
+        if (subject.is_admin and not subject.via_agent_key) or not any_pinned(policy):
             return ALLOW
         if not agent.resolved:
             return _deny("agent_unresolved")
@@ -822,7 +826,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             return _deny("channel_protected")
         if refusal == "confidential":
             return _deny("channel_isolated" if agent.resolved else "agent_unresolved")
-        if place.own_dm or not policy.agent_channel_pins:
+        if place.own_dm or not any_pinned(policy):
             return ALLOW
         if not agent.resolved:
             return _deny("agent_unresolved")
@@ -834,7 +838,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         recipients = agent.permissions.direct_messages(_origin_permissions(req))
         if recipients == "none":
             return _deny("channel_isolated")
-        if not policy.agent_channel_pins:
+        if not any_pinned(policy):
             return ALLOW
         if not agent.resolved:
             return _deny("agent_unresolved")
@@ -845,7 +849,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.action is Action.CREATE_AGENT:
         # A new agent is nobody's own: what a call held to C wrote into it would
         # answer outside C. An unresolved agent may be C's own, so it fails closed.
-        if not agent.resolved and policy.isolated_channel_ids:
+        if not agent.resolved and any_confidential(policy):
             return _deny("agent_unresolved")
         if not agent.permissions.creates_agents(_origin_permissions(req)):
             return _deny("channel_isolated")
@@ -854,7 +858,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.action is Action.PUBLISH:
         # Refused wherever a post outside the channel is, admins included: a
         # link is read by whoever holds it, never only the acting admin.
-        if not agent.resolved and (policy.agent_channel_pins or policy.isolated_channel_ids):
+        if not agent.resolved and (any_pinned(policy) or any_confidential(policy)):
             return _deny("agent_unresolved")
         if not agent.permissions.publishes(_origin_permissions(req)):
             held = _held_to(agent, req.origin) is not None

@@ -13,10 +13,10 @@ import anthropic
 from daimon.core.access_policy import (
     DM_SCOPE_PREFIX,
     TenantAccessPolicy,
-    is_dm_source_sealed,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
+from daimon.core.permissions import dm_source_sealed, sealed_ids
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import (
@@ -76,7 +76,7 @@ async def sealed_channel_ids(deps: TurnDeps, *, tenant_id: uuid.UUID) -> frozens
     """The tenant's current seal list, for filtering history a /dm move copies."""
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-    return frozenset(policy.sealed_channel_ids)
+    return sealed_ids(policy)
 
 
 def is_sealed_slack_message(
@@ -93,7 +93,7 @@ def is_sealed_slack_message(
 
 def _source_is_sealed(policy: TenantAccessPolicy, conversation: DirectMessageRow) -> bool:
     """Whether any recorded source of this conversation is sealed now (fails closed)."""
-    return is_dm_source_sealed(
+    return dm_source_sealed(
         policy,
         source_channel_id=conversation.source_channel_id,
         source_thread_id=conversation.source_thread_id,

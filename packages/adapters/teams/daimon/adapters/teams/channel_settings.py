@@ -59,6 +59,7 @@ from daimon.core.channel_isolation import channel_isolation_status
 from daimon.core.channel_isolation_setup import ChannelIsolationRefused, set_channel_isolation
 from daimon.core.errors import DaimonError
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
+from daimon.core.permissions import confidential_channels
 from daimon.core.routine_delivery import teams_channel_of
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import (
@@ -161,7 +162,7 @@ class ChannelSettingsDialog:
                     session, tenant_id=actor.tenant_id, platform="teams"
                 )
             # Channels already set up stay reachable when their team can't be listed.
-            extra = [*policy.isolated_channel_ids, *(grant.channel_id for grant in grants)]
+            extra = [*confidential_channels(policy), *(grant.channel_id for grant in grants)]
             channels = cards.visible_channels(listed, extra)
         else:
             mine = sorted(subject.administered_channel_ids)

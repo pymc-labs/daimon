@@ -75,6 +75,7 @@ from daimon.core.panel_operator_tokens import (
     mint_panel_operator_token,
     revoke_panel_operator_token,
 )
+from daimon.core.permissions import any_pinned
 from daimon.core.roster import Roster, load_roster, paginate
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
@@ -543,7 +544,7 @@ class SetupPanel:
         except AccessPolicyUnreadable:
             return dialog_message(POLICY_UNREADABLE_REFUSAL)
         agent = AgentRef.of(name)
-        if target is not None and channel_id is not None and policy.agent_channel_pins:
+        if target is not None and channel_id is not None and any_pinned(policy):
             ma_agent = await self._runtime.anthropic.beta.agents.retrieve(target.ma_agent_id)
             agent = build_agent_ref(ma_agent.name, ma_agent.metadata, target.name)
         decision, bound_channel_id = authorize_coding_token(

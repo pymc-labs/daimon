@@ -16,6 +16,7 @@ from daimon.core.channel_isolation_setup import render_isolation_refusal
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.permissions import any_confidential, any_pinned
 from daimon.core.scope import (
     ChannelScopeRef,
     ConfigField,
@@ -294,7 +295,7 @@ async def _refuse_breaking_isolation(
     if isinstance(scope, UserScopeRef):
         return  # the user tier never picks the agent
     policy = await load_access_policy(session, tenant_id=scope.tenant_id)
-    if not (policy.isolated_channel_ids or policy.agent_channel_pins):
+    if not (any_confidential(policy) or any_pinned(policy)):
         return
     channel_id = scope.channel_id if isinstance(scope, ChannelScopeRef) else None
     if agent_name is None:

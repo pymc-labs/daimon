@@ -21,15 +21,18 @@ shape: rules are read from its lists and written back through them
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 from daimon.core.access_policy import (
     TenantAccessPolicy,
+    is_dm_source_sealed,
+    is_sealed_source,
     is_write_protected,
     isolated_channel_of,
     isolation_owner,
+    source_seal_ids,
 )
 from daimon.core.errors import DaimonError
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -234,10 +237,89 @@ class ChannelPermissions:
     may lie in one, so it is treated as one with no own agents."""
 
     @property
+    def answers_external(self) -> bool:
+        """Whether people from another organisation (a Teams guest the tenant doesn't
+        list as a member) are answered here: only in a confidential channel, and
+        never in a setup conversation or a DM."""
+        return self.confidential_channel is not None
+
+    @property
     def keeps_content(self) -> bool:
         """Whether whatever a turn here writes stays here: posts, direct messages,
         publishing, new agents and routine results (`held_to`)."""
         return self.readers == "own" or self.confidential_unknown
+
+
+def any_confidential(policy: TenantAccessPolicy) -> bool:
+    """Whether any channel is confidential; isolation work is skipped when none is."""
+    return bool(policy.isolated_channel_ids)
+
+
+def any_sealed(policy: TenantAccessPolicy) -> bool:
+    return bool(policy.sealed_channel_ids)
+
+
+def any_pinned(policy: TenantAccessPolicy) -> bool:
+    return bool(policy.agent_channel_pins)
+
+
+def any_protected(policy: TenantAccessPolicy, *, categories_only: bool = False) -> bool:
+    """Whether any channel or Discord category (only categories: `categories_only`)
+    is protected."""
+    return bool(policy.protected_category_ids) or (
+        not categories_only and bool(policy.protected_channel_ids)
+    )
+
+
+def confidential_channels(policy: TenantAccessPolicy) -> tuple[str, ...]:
+    return policy.isolated_channel_ids
+
+
+def confidential_channel_of(
+    policy: TenantAccessPolicy, channel_id: str | None, parent_channel_id: str | None = None
+) -> str | None:
+    """The confidential channel a place lies in (a thread counts as its channel), or None."""
+    return isolated_channel_of(policy, channel_id, parent_channel_id)
+
+
+def pinned_names(policy: TenantAccessPolicy) -> frozenset[str]:
+    """Every agent name a pin is set on."""
+    return frozenset(policy.agent_channel_pins)
+
+
+def sealed_ids(policy: TenantAccessPolicy) -> frozenset[str]:
+    """Every sealed id: channels, Discord threads and Slack ``channel:ts`` keys."""
+    return frozenset(policy.sealed_channel_ids)
+
+
+def sealed_at(policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None) -> bool:
+    """Whether a turn in `channel_id` (or `thread_id` under it) is inside a seal."""
+    return is_sealed_source(policy, channel_id=channel_id, thread_id=thread_id)
+
+
+def seal_ids_at(
+    policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None
+) -> frozenset[str]:
+    """Every id that seals a turn there, recorded so a later unseal of one leaves
+    the others holding."""
+    return source_seal_ids(policy, channel_id=channel_id, thread_id=thread_id)
+
+
+def dm_source_sealed(
+    policy: TenantAccessPolicy,
+    *,
+    source_channel_id: str | None,
+    source_thread_id: str | None,
+    source_thread_keys: Sequence[str] = (),
+) -> bool:
+    """Whether any recorded source of a DM conversation is sealed now; one with no
+    recorded source fails closed while anything is sealed."""
+    return is_dm_source_sealed(
+        policy,
+        source_channel_id=source_channel_id,
+        source_thread_id=source_thread_id,
+        source_thread_keys=source_thread_keys,
+    )
 
 
 def channel_permissions(
@@ -537,10 +619,10 @@ def sealed_under(policy: TenantAccessPolicy, channel: str, thread_ids: Iterable[
 
 
 __all__ = [
-    "CHANNEL_PRESETS",
     "AgentKind",
     "AgentPermissions",
     "AgentRule",
+    "CHANNEL_PRESETS",
     "ChannelPermissions",
     "ChannelPreset",
     "ChannelReaders",
@@ -551,24 +633,35 @@ __all__ = [
     "RuleRefused",
     "agent_permissions",
     "agent_rules",
+    "any_confidential",
+    "any_pinned",
+    "any_protected",
+    "any_sealed",
     "at_home",
     "category_rules",
     "channel_permissions",
     "channel_rule",
     "channel_rules",
     "check_channel_rule",
+    "confidential_channel_of",
+    "confidential_channels",
     "crosses_confidential",
+    "dm_source_sealed",
     "held_to",
     "listed_at",
     "memory_writable",
     "outside_pins",
     "pinned_alone",
+    "pinned_names",
     "post_refusal",
     "posts_at",
     "preset_of",
     "readable_from",
     "run_refusal",
     "runs_at",
+    "seal_ids_at",
+    "sealed_at",
+    "sealed_ids",
     "sealed_under",
     "session_confidential_channels",
     "session_readable_from",

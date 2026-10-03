@@ -36,6 +36,7 @@ from daimon.core.authz import (
     build_turn_place,
 )
 from daimon.core.operator_tokens import OperatorScope
+from daimon.core.permissions import agent_permissions, channel_rule
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -291,9 +292,9 @@ def coding_token_channel(
     """
     if channel_id is None:
         return None
-    if channel_id in policy.sealed_channel_ids:
+    if channel_rule(policy, channel_id).readers != "any":
         return channel_id
-    pinned = any(name is not None and name in policy.agent_channel_pins for name in agent.names)
+    pinned = bool(agent_permissions(policy, agent.names).pins)
     if pinned and authorize(
         policy,
         subject=build_subject(is_admin=False, platform_user_id=None, via_agent_key=True),

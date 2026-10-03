@@ -38,6 +38,7 @@ from daimon.core.channel_environments import build_environment_resolution_note
 from daimon.core.channel_isolation import clear_refusal
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.permissions import any_pinned
 from daimon.core.routing_facts import (
     build_clear_default_note,
     build_resolution_note,
@@ -129,7 +130,7 @@ async def _set_agent_default_impl(
     else:
         # The workspace default answers everywhere, so no pinned agent can be it.
         policy = await load_isolation(runtime, auth.tenant_id)
-        if policy.agent_channel_pins:
+        if any_pinned(policy):
             if agent is None:
                 agent = await find_agent_by_daimon_tag(
                     runtime.client, tenant_id=auth.tenant_id, name=agent_name

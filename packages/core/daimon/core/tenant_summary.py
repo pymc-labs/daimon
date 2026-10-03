@@ -19,6 +19,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.channel_budget import ChannelBudgetStatus, load_budget_status
 from daimon.core.channel_overview import ChannelAdminSet, ChannelViewer, build_channel_overview
 from daimon.core.errors import StoreError
+from daimon.core.permissions import confidential_channels
 from daimon.core.promo_credit import get_active_timed_credit
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow, merge
 from daimon.core.stores.access_policy import load_access_policy
@@ -119,7 +120,7 @@ def build_channel_summaries(
     """
     configs = {row.channel_id: row for row in channel_rows}
     summaries: list[ChannelSummary] = []
-    listed = configs.keys() | budgets.keys() | admins.keys() | set(policy.isolated_channel_ids)
+    listed = configs.keys() | budgets.keys() | admins.keys() | set(confidential_channels(policy))
     for channel_id in sorted(listed - dm_channel_ids):
         resolved = merge(channel=configs.get(channel_id), tenant=tenant_row, default=default)
         overview = build_channel_overview(

@@ -24,8 +24,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from daimon.core.access_policy import TenantAccessPolicy, isolated_channel_of
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.channel_budget import ChannelBudgetStatus, get_channel_budget_status
+from daimon.core.permissions import channel_rule, confidential_channel_of
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins
@@ -84,7 +85,7 @@ def shown_facts(
         facts |= {"seal", "protection"}
     if viewer.sees_channel:
         facts.add("budget")
-    if isolated_channel_of(policy, channel_id) == viewer.inside_channel_id:
+    if confidential_channel_of(policy, channel_id) == viewer.inside_channel_id:
         facts.add("environment")
     return frozenset(facts)
 
@@ -100,12 +101,13 @@ def build_channel_overview(
 ) -> ChannelOverview:
     """`environment_name` is the one resolved for the channel; `admins` its grant row."""
     shown = shown_facts(viewer, policy=policy, channel_id=channel_id)
+    rule = channel_rule(policy, channel_id)
     return ChannelOverview(
         channel_id=channel_id,
         shown=shown,
-        isolated=channel_id in policy.isolated_channel_ids if "isolation" in shown else None,
-        sealed=channel_id in policy.sealed_channel_ids if "seal" in shown else None,
-        protected=channel_id in policy.protected_channel_ids if "protection" in shown else None,
+        isolated=rule.readers == "own" if "isolation" in shown else None,
+        sealed=rule.readers != "any" if "seal" in shown else None,
+        protected=rule.writers == "none" if "protection" in shown else None,
         budget=budget if "budget" in shown else None,
         environment_name=environment_name if "environment" in shown else None,
         admins=(

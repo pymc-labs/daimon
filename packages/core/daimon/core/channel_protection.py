@@ -98,9 +98,8 @@ async def set_channel_protection(
         updated = toggle_channel(policy, channel_id=channel_id, protected=protected, sealed=sealed)
         if updated != policy:
             await set_access_policy(session, tenant_id=tenant_id, policy=updated)
-    newly_sealed = channel_id in updated.sealed_channel_ids and (
-        channel_id not in policy.sealed_channel_ids
-    )
+    before, after = channel_rule(policy, channel_id), channel_rule(updated, channel_id)
+    newly_sealed = after.readers != "any" and before.readers == "any"
     warning = None
     if newly_sealed:
         async with sessionmaker() as session:
@@ -109,8 +108,8 @@ async def set_channel_protection(
             )
     return ProtectionChange(
         channel_id=channel_id,
-        protected=channel_id in updated.protected_channel_ids,
-        sealed=channel_id in updated.sealed_channel_ids,
+        protected=after.writers == "none",
+        sealed=after.readers != "any",
         changed=updated != policy,
         network_warning=warning,
     )

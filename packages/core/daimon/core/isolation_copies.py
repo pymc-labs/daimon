@@ -27,7 +27,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATION_COPY, MA_MET
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.memory_resource import archive_memory_store_for_agent
-from daimon.core.permissions import AgentRule, with_agent_rule
+from daimon.core.permissions import AgentRule, agent_rules, with_agent_rule
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.access_policy import (
     load_access_policy,
@@ -106,8 +106,9 @@ def archive_refusal(
     if names & {tenant.agent_name if tenant is not None else None, default.agent_name}:
         return "default_agent"
     closing: set[str] = {closing_channel_id} if closing_channel_id is not None else set()
+    rules = agent_rules(policy)
     for each in names:
-        pin = policy.agent_channel_pins.get(each)
+        pin = rules[each].runs_in if each in rules else None
         if pin is not None and (not closing or set(pin) - closing):
             return "pinned"
     if any(row.agent_name in names and row.channel_id not in closing for row in channels):

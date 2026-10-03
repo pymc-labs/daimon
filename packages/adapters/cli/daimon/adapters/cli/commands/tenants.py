@@ -36,9 +36,12 @@ from daimon.core.permissions import (
     ChannelWriters,
     agent_permissions,
     agent_rules,
+    any_confidential,
     category_rules,
     channel_rules,
+    confidential_channels,
     preset_of,
+    sealed_ids,
 )
 from daimon.core.stores import tenant_ledger, tenant_user_caps
 from daimon.core.stores.access_policy import (
@@ -449,10 +452,10 @@ async def _require_isolatable(
     every turn there, while the agent carries what it remembered there out.
     Run under the policy lock, in the transaction that writes.
     """
-    added = [c for c in policy.isolated_channel_ids if c not in current.isolated_channel_ids]
-    rechecks = (
-        policy.agent_channel_pins != current.agent_channel_pins
-        or policy.sealed_channel_ids != current.sealed_channel_ids
+    confidential = confidential_channels(policy)
+    added = [c for c in confidential if c not in confidential_channels(current)]
+    rechecks = agent_rules(policy) != agent_rules(current) or sealed_ids(policy) != sealed_ids(
+        current
     )
 
     async def refusal(channel_id: str, under: TenantAccessPolicy) -> ChannelIsolationRefused | None:
@@ -466,7 +469,7 @@ async def _require_isolatable(
             default=rt.deployment_default,
         )
 
-    for channel_id in policy.isolated_channel_ids:
+    for channel_id in confidential:
         if channel_id not in added and not rechecks:
             continue
         refused = await refusal(channel_id, policy)
@@ -503,7 +506,8 @@ def _ended_isolation_warning(policy: TenantAccessPolicy, channel_id: str) -> str
 
 def _warn_ended_isolation(previous: TenantAccessPolicy | None, policy: TenantAccessPolicy) -> None:
     ended = sorted(
-        set(previous.isolated_channel_ids if previous else ()) - set(policy.isolated_channel_ids)
+        set(confidential_channels(previous) if previous else ())
+        - set(confidential_channels(policy))
     )
     console = Console(stderr=True, highlight=False)
     for channel_id in ended:
@@ -520,7 +524,7 @@ async def _warn_sealed_open_network(
 ) -> None:
     """Warn of each newly sealed channel whose own pick has an open network: it was
     made before the seal, so its network rule never judged it."""
-    added = set(policy.sealed_channel_ids) - set(previous.sealed_channel_ids if previous else ())
+    added = sealed_ids(policy) - (sealed_ids(previous) if previous else frozenset())
     channels = sorted({seal_id.partition(":")[0] for seal_id in added})
     console = Console(stderr=True, highlight=False)
     async with rt.sessionmaker() as session:
@@ -1114,7 +1118,7 @@ async def tenants_access_policy_set(
             except ValidationError as exc:
                 message = "; ".join(str(error["msg"]) for error in exc.errors())
                 raise typer.BadParameter(f"{message}. Nothing was changed.") from None
-            if policy.isolated_channel_ids:
+            if any_confidential(policy):
                 await _require_isolatable(
                     rt,
                     console,

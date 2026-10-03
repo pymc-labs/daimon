@@ -30,6 +30,7 @@ from daimon.core.authz import (
     authorize,
     build_agent_ref,
 )
+from daimon.core.permissions import any_pinned
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
@@ -82,7 +83,7 @@ async def require_pin_write_access(
             policy = await load_access_policy(session, tenant_id=auth.tenant_id)
         except AccessPolicyUnreadable as exc:
             raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
-    if not policy.agent_channel_pins:
+    if not any_pinned(policy):
         return
     if callable(ma_agent):
         ma_agent = await ma_agent()

@@ -36,10 +36,6 @@ from anthropic.types.beta import (
 )
 from daimon.core.access_policy import (
     TenantAccessPolicy,
-    is_dm_source_sealed,
-    isolated_channel_of,
-    isolation_owner,
-    source_seal_ids,
 )
 from daimon.core.authz import (
     Action,
@@ -59,7 +55,14 @@ from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
-from daimon.core.permissions import agent_permissions, at_home, channel_permissions
+from daimon.core.permissions import (
+    agent_permissions,
+    at_home,
+    channel_permissions,
+    confidential_channel_of,
+    dm_source_sealed,
+    seal_ids_at,
+)
 from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
 from daimon.core.stores.access_policy import load_access_policy
@@ -536,7 +539,7 @@ async def admit_impl(
     # Every id that seals the turn: its channel, and the thread sealed on its
     # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
     # them are recorded, so unsealing one later leaves the others holding.
-    seal_ids = source_seal_ids(policy, channel_id=channel_id, thread_id=thread_id)
+    seal_ids = seal_ids_at(policy, channel_id=channel_id, thread_id=thread_id)
     source_sealed = bool(seal_ids)
     memory_read_only = (source_sealed and not _is_own_agent(policy, grant)) or (
         is_dm and policy.dm_memory_read_only
@@ -612,9 +615,14 @@ def _require_external_inside_isolation(
 ) -> None:
     """Refuse an external caller anywhere but an isolated channel or a thread in one,
     and in a setup conversation anywhere."""
-    if is_external and (
-        is_dm or setup_thread or isolated_channel_of(policy, thread_id, channel_id) is None
-    ):
+    if not is_external:
+        return
+    place = channel_permissions(
+        policy,
+        channel_id=thread_id or channel_id,
+        parent_channel_id=channel_id if thread_id is not None else None,
+    )
+    if is_dm or setup_thread or not place.answers_external:
         raise AdmissionDenied(reason="external_participant")
 
 
@@ -675,14 +683,14 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         setup_thread=grant.run_place.setup_thread,
     )
     _require_run_agent(policy, grant)
-    if grant.dm_source is not None and is_dm_source_sealed(
+    if grant.dm_source is not None and dm_source_sealed(
         policy,
         source_channel_id=grant.dm_source.channel_id,
         source_thread_id=grant.dm_source.thread_id,
         source_thread_keys=grant.dm_source.thread_keys,
     ):
         raise DmSourceSealedError("dm_source_sealed")
-    seal_ids = admission.origin_seal_ids | source_seal_ids(
+    seal_ids = admission.origin_seal_ids | seal_ids_at(
         policy, channel_id=grant.channel_id, thread_id=grant.thread_id
     )
     # Memory posture is decided from the policy as it is now, not only from
@@ -714,7 +722,7 @@ async def restrict_inherited_memory(
     if grant is not None:
         async with deps.sessionmaker() as db:
             policy = await load_access_policy(db, tenant_id=grant.tenant_id)
-        own_channel = isolation_owner(policy, grant.agent.names)
+        own_channel = agent_permissions(policy, grant.agent.names).own_channel
         own = _is_own_agent(policy, grant) and all(
             seal
             in {
@@ -722,7 +730,7 @@ async def restrict_inherited_memory(
                 grant.thread_id,
                 f"{own_channel}:{grant.thread_id}" if grant.thread_id is not None else None,
             }
-            or isolated_channel_of(policy, seal) == own_channel
+            or confidential_channel_of(policy, seal) == own_channel
             for seal in seals
         )
     return admission if own else replace(admission, memory_read_only=True)
