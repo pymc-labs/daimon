@@ -43,7 +43,7 @@ from daimon.core.continuity.tool_messages import (
     render_tool_unsaved_work_question,
 )
 from daimon.core.defaults.ma_index import list_agents_by_tenant
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ChatPlatform
@@ -223,6 +223,7 @@ async def _hand_off_task_impl(
         ma_agent_id=destination.id,
         name=destination_name,
         agent=build_agent_ref(destination.name, destination.metadata, destination_name),
+        is_daimon_managed=destination.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
     )
     work_withheld = False
 
@@ -340,7 +341,8 @@ def _refusal_text(refusal: HandoffRefused, *, channel: str) -> str:
                 f"{refusal.destination_name} is not one of this channel's agents (the one "
                 "it answers with, or one pinned to it), and handing a conversation to "
                 "another agent brings its repository, keys and connectors here, so only "
-                "a server admin or a channel admin of this channel can do it.",
+                "a server admin can do it, or a channel admin of this channel when the agent "
+                "is one of their own that answers only in their channels.",
                 "Tell the caller an admin can make the handoff, or ask in one of that "
                 "agent's own channels.",
                 "Nothing was changed. Do not retry.",

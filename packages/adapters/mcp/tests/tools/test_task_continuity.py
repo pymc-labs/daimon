@@ -1134,7 +1134,7 @@ async def test_handoff_to_another_channels_agent_is_admin_only(
         role=role,
     ) as origin:
         if role is Role.USER:
-            with pytest.raises(ToolError, match="only a server admin or a channel admin"):
+            with pytest.raises(ToolError, match="only a server admin can do it"):
                 await _hand_off_task_impl(
                     runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
                 )
@@ -1253,12 +1253,15 @@ async def _switch_as(
     *,
     policy: TenantAccessPolicy | None,
     channel_admin: bool = False,
+    administers_acme: bool = False,
 ) -> tuple[uuid.UUID, ToolError | None]:
     """A member (optionally a channel admin of C_PARENT) hands T_THREAD to research-bot.
 
-    research-bot answers in C_ACME, not in C_PARENT, so it is reachable but not
-    the agent this channel answers with.
+    research-bot was made for C_ACME and answers there, not in C_PARENT, so it is
+    reachable but not the agent this channel answers with. `administers_acme`
+    makes the caller a channel admin of C_ACME too, so research-bot is theirs.
     """
+    from daimon.core.stores.agent_creation_channels import record_creation_channel
     from daimon.core.stores.channel_admins import set_channel_admins
 
     tenant = await make_tenant(db_session)
@@ -1272,12 +1275,20 @@ async def _switch_as(
     )
     if policy is not None:
         await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
-    if channel_admin:
+    await record_creation_channel(
+        db_session,
+        tenant_id=tenant.id,
+        ma_agent_id=_DESTINATION_ID,
+        platform="discord",
+        channel_id="C_ACME",
+    )
+    granted = (("C_PARENT",) if channel_admin else ()) + (("C_ACME",) if administers_acme else ())
+    for channel_id in granted:
         await set_channel_admins(
             db_session,
             tenant_id=tenant.id,
             platform="discord",
-            channel_id="C_PARENT",
+            channel_id=channel_id,
             role_ids=(),
             user_ids=("42",),
             actor_account_id=None,
@@ -1340,15 +1351,29 @@ async def test_a_member_hands_the_thread_to_an_agent_pinned_to_this_channel(
     assert await _bound_to(committing_sessionmaker, tenant_id) == _DESTINATION_ID
 
 
-async def test_a_channel_admin_hands_the_thread_to_any_reachable_agent(
+@pytest.mark.parametrize("administers_acme", [True, False], ids=["their-own", "c-acmes-own"])
+async def test_a_channel_admin_hands_the_thread_only_to_an_agent_of_theirs(
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
+    administers_acme: bool,
 ) -> None:
+    """research-bot was made for C_ACME. Unless the caller administers C_ACME too,
+    it is that channel's own agent, so bringing it into C_PARENT is a server admin's."""
     tenant_id, error = await _switch_as(
-        db_session, committing_sessionmaker, policy=None, channel_admin=True
+        db_session,
+        committing_sessionmaker,
+        policy=None,
+        channel_admin=True,
+        administers_acme=administers_acme,
     )
-    assert error is None
-    assert await _bound_to(committing_sessionmaker, tenant_id) == _DESTINATION_ID
+    if administers_acme:
+        assert error is None, "a channel admin may hand the thread to their own agent"
+        assert await _bound_to(committing_sessionmaker, tenant_id) == _DESTINATION_ID
+    else:
+        assert error is not None and "only a server admin can do it" in str(error), (
+            "another channel's own agent needs a server admin"
+        )
+        assert await _bound_to(committing_sessionmaker, tenant_id) is None, "nothing switched"
 
 
 @pytest.mark.parametrize(
