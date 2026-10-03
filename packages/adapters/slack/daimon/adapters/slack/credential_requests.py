@@ -50,15 +50,15 @@ from daimon.adapters.slack.posted_controls import edit_posted_card
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_pins import (
     FormPinRefused,
-    consume_form_unless_pinned,
     request_pin_refusal,
 )
 from daimon.core.credential_requests import (
     CredentialRequestKind,
 )
+from daimon.core.credential_submit import begin_oauth_submit
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.mcp_oauth import INVITE_BUTTON_LABEL, begin_mcp_oauth_flow, invite_copy, start_url
+from daimon.core.mcp_oauth import INVITE_BUTTON_LABEL, invite_copy, start_url
 from daimon.core.posted_controls import (
     ALREADY_USED_MESSAGE,
     NO_LONGER_VALID_MESSAGE,
@@ -142,15 +142,9 @@ async def start_mcp_oauth_from_click(
         return
     now = datetime.now(UTC)
     try:
-        async with runtime.sessionmaker() as session, session.begin():
-            consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
-            flow = (
-                await begin_mcp_oauth_flow(
-                    session, request=consumed, app_root_url=app_root_url, now=now
-                )
-                if consumed is not None
-                else None
-            )
+        consumed, flow = await begin_oauth_submit(
+            runtime.sessionmaker, row=row, agent=agent, app_root_url=app_root_url, now=now
+        )
     except FormPinRefused as refused:
         await post_ephemeral(
             client,
