@@ -14,17 +14,15 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from datetime import UTC, datetime
 
 import structlog
 from daimon.adapters.discord.theme import COLOR_AMBER
 from daimon.core.confirmation import ConfirmationAnswer, ConfirmationHook, ConfirmationPrompt
 from daimon.core.posted_controls.confirmation import (
-    NO_LONGER_PENDING_MESSAGE,
-    NOT_YOURS_MESSAGE,
     ConfirmationCard,
     build_confirmation_card,
 )
+from daimon.core.posted_controls.lifecycle import settle_local_confirmation, wait_local_confirmation
 
 import discord
 
@@ -99,13 +97,12 @@ class _ConfirmationView(discord.ui.LayoutView):
         await self._settle(interaction, "denied")
 
     async def _settle(self, interaction: discord.Interaction, answer: ConfirmationAnswer) -> None:
-        if str(interaction.user.id) != self._prompt.requester_platform_user_id:
-            await interaction.response.send_message(NOT_YOURS_MESSAGE, ephemeral=True)
+        refusal = settle_local_confirmation(
+            self._prompt, self._answer, str(interaction.user.id), answer
+        )
+        if refusal is not None:
+            await interaction.response.send_message(refusal, ephemeral=True)
             return
-        if self._answer is None or self._answer.done():
-            await interaction.response.send_message(NO_LONGER_PENDING_MESSAGE, ephemeral=True)
-            return
-        self._answer.set_result(answer)
         # Answered: nothing on this card listens any more.
         self.stop()
         answered = build_confirmation_card(
@@ -134,22 +131,11 @@ def discord_confirmation_hook(channel: discord.abc.Messageable) -> ConfirmationH
         pending = build_confirmation_card(prompt, state="pending", token=secrets.token_urlsafe(12))
         view = _ConfirmationView(pending, prompt, answer)
         message = await channel.send(view=view)
-        timeout_s = max(0.0, (prompt.expires_at - datetime.now(UTC)).total_seconds())
-        try:
-            result = await asyncio.wait_for(asyncio.shield(answer), timeout=timeout_s)
-        except TimeoutError:
-            result = "expired"
-        except asyncio.CancelledError:
-            # The turn was stopped while the card was up: retire its buttons.
-            answer.cancel()
-            view.stop()
-            await _retire(message, prompt, "denied")
-            raise
-        if result == "expired":
-            answer.cancel()
-            view.stop()
-            await _retire(message, prompt, "expired")
-        return result
+
+        async def retire(state: ConfirmationAnswer) -> None:
+            await _retire(message, prompt, state)
+
+        return await wait_local_confirmation(prompt, answer, stop=view.stop, retire=retire)
 
     return _confirm
 

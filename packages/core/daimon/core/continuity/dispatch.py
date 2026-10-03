@@ -18,6 +18,7 @@ import anthropic as anthropic_pkg
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.continuity.continuation import (
+    ContinuationDecision,
     ContinuationRequest,
     ResponderChanged,
     decide_continuation,
@@ -49,16 +50,22 @@ RunFollowUp = Callable[[TaskContinuationRow, str], Awaitable[None]]
 LatestMessageAt = Callable[[TaskContinuationRow], Awaitable[datetime | None]]
 #: Posts a notice (a decision's skip copy, a changed responder) into the thread.
 PostNotice = Callable[[str], Awaitable[None]]
+DecisionContext = Callable[[TaskContinuationRow], Awaitable[tuple[datetime | None, bool]]]
+Notice = Callable[[TaskContinuationRow, str, str], Awaitable[None]]
+RunDecision = Callable[[TaskContinuationRow, ContinuationDecision], Awaitable[None]]
 
 
 async def _settle(
-    sessionmaker: async_sessionmaker[AsyncSession], claim: WakeClaim, skip_reason: str | None
+    sessionmaker: async_sessionmaker[AsyncSession],
+    claim: WakeClaim,
+    skip_reason: str | None,
+    now: Callable[[], datetime],
 ) -> None:
     await settle_wake(
         sessionmaker,
         claim,
         status="delivered" if skip_reason is None else "skipped",
-        now=datetime.now(UTC),
+        now=now(),
         skip_reason=skip_reason,
     )
 
@@ -70,10 +77,16 @@ async def dispatch_pending_continuations(
     tenant_id: uuid.UUID,
     platform: ChatPlatform,
     thread_id: str,
-    run_follow_up: RunFollowUp,
-    post_notice: PostNotice,
-    latest_user_message_at: LatestMessageAt,
+    run_follow_up: RunFollowUp | None = None,
+    post_notice: PostNotice | None = None,
+    latest_user_message_at: LatestMessageAt | None = None,
     dispatch_errors: tuple[type[Exception], ...] = (),
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    decision_context: DecisionContext | None = None,
+    notice: Notice | None = None,
+    settle_before_notice: bool = True,
+    run_decision: RunDecision | None = None,
+    notify_missing_seed: bool = True,
 ) -> None:
     """Claim and settle every continuation or due wake this thread may run now, oldest first.
 
@@ -85,9 +98,25 @@ async def dispatch_pending_continuations(
     refunded) for the next turn tail or, for a wake, a later poll; a
     `DaimonError`, `anthropic.APIError` or one of `dispatch_errors` settles
     `dispatch_failed`.
+
+    Adapter ports preserve their history/active-turn read order and may-post
+    checks. Discord runs the full decision; Slack and Teams run its seed.
+    Teams settles before notices; Discord and Slack settle after them.
+    The clock is read afresh at each queue transition.
     """
 
+    if run_follow_up is None and run_decision is None:
+        raise ValueError("A follow-up runner is required")
+
+    if notice is None and post_notice is None:
+        raise ValueError("A notice port is required")
+    if decision_context is None and latest_user_message_at is None:
+        raise ValueError("A history port is required")
+
     async def notify(row: TaskContinuationRow, text: str, *, reason: str) -> None:
+        if notice is not None:
+            await notice(row, text, reason)
+            return
         # Posted outside any gated turn (wake poller, saved input), so may-post is
         # asked right before each post; the row settles either way.
         state = await protection_state(
@@ -97,6 +126,7 @@ async def dispatch_pending_continuations(
             thread_id=row.thread_id,
         )
         if state.may_post:
+            assert post_notice is not None
             await post_notice(text)
             return
         log.info(
@@ -108,12 +138,10 @@ async def dispatch_pending_continuations(
         tenant_id=tenant_id,
         platform=platform,
         thread_id=thread_id,
-        now=datetime.now(UTC),
+        now=now(),
     )
     for row in rows:
-        claim = await claim_wake(
-            sessionmaker, idempotency_key=row.idempotency_key, now=datetime.now(UTC)
-        )
+        claim = await claim_wake(sessionmaker, idempotency_key=row.idempotency_key, now=now())
         if claim is None:
             continue
         request = ContinuationRequest(
@@ -129,53 +157,71 @@ async def dispatch_pending_continuations(
             reason=row.reason,
             idempotency_key=row.idempotency_key,
         )
-        async with sessionmaker() as session:
-            live = await get_live_thread_session(
-                session,
-                tenant_id=row.tenant_id,
-                platform=platform,
-                thread_id=row.thread_id,
-                account_id=row.requester_account_id,
-            )
+        if decision_context is None:
+            async with sessionmaker() as session:
+                live = await get_live_thread_session(
+                    session,
+                    tenant_id=row.tenant_id,
+                    platform=platform,
+                    thread_id=row.thread_id,
+                    account_id=row.requester_account_id,
+                )
+            # Preserve core's clock read before the history callback.
+            decision_now = now()
+            assert latest_user_message_at is not None
+            latest = await latest_user_message_at(row)
+            active_turn = live is not None and live.active_turn_message_id is not None
+        else:
+            latest, active_turn = await decision_context(row)
+            decision_now = now()
         decision = await decide_continuation(
             sessionmaker,
             anthropic,
             request=request,
-            now=datetime.now(UTC),
-            latest_user_message_at=await latest_user_message_at(row),
-            active_turn=live is not None and live.active_turn_message_id is not None,
+            now=decision_now,
+            latest_user_message_at=latest,
+            active_turn=active_turn,
         )
         if decision.action == "skip_turn_running" and row.available_at is not None:
             # A wake has nobody waiting to be told; it runs after the turn in progress.
-            await release_wake(sessionmaker, claim, retry_at=datetime.now(UTC) + WAKE_RETRY_DELAY)
+            await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
             continue
         seed = decision.seed_user_message
-        if decision.action != "dispatch" or seed is None:
-            # Settled before posting: a failed post must not leave the row claimed.
+        if decision.action != "dispatch" or (seed is None and run_decision is None):
             reason = decision.action if decision.action != "dispatch" else "missing_seed"
-            await _settle(sessionmaker, claim, reason)
-            if decision.message is not None:
+            if settle_before_notice:
+                await _settle(sessionmaker, claim, reason, now)
+            if decision.message is not None and (reason != "missing_seed" or notify_missing_seed):
                 await notify(row, decision.message, reason=reason)
+            if not settle_before_notice:
+                await _settle(sessionmaker, claim, reason, now)
             continue
-        if not await start_wake(sessionmaker, claim, now=datetime.now(UTC)):
+        if not await start_wake(sessionmaker, claim, now=now()):
             continue  # Another dispatcher took the row over while this one decided.
         try:
-            await run_follow_up(row, seed)
+            if run_decision is not None:
+                await run_decision(row, decision)
+            else:
+                assert run_follow_up is not None and seed is not None
+                await run_follow_up(row, seed)
         except SessionPreparationFailed:
-            await _settle(sessionmaker, claim, "blocked_preparation_failed")
+            await _settle(sessionmaker, claim, "blocked_preparation_failed", now)
         except ResponderChanged as exc:
             # A wake whose thread another agent answers now; the turn never started.
-            await _settle(sessionmaker, claim, "skip_target_changed")
+            if settle_before_notice:
+                await _settle(sessionmaker, claim, "skip_target_changed", now)
             await notify(row, exc.message, reason="skip_target_changed")
+            if not settle_before_notice:
+                await _settle(sessionmaker, claim, "skip_target_changed", now)
         except AdmissionDenied as exc:
             # Held to the same gates as a mention, and not retried.
-            await _settle(sessionmaker, claim, f"admission_denied:{exc.reason}")
+            await _settle(sessionmaker, claim, f"admission_denied:{exc.reason}", now)
         except SessionBusyError as busy:
             # Nothing ran: the same row goes back to pending with its claim refunded.
-            retry_at = busy_retry_at(row, now=datetime.now(UTC), not_before=busy.retry_after)
+            retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)
             await release_wake(sessionmaker, claim, retry_at=retry_at)
         except (DaimonError, anthropic_pkg.APIError, *dispatch_errors) as exc:
             log.warning("continuation.dispatch_failed", row_id=str(row.id), error=str(exc))
-            await _settle(sessionmaker, claim, "dispatch_failed")
+            await _settle(sessionmaker, claim, "dispatch_failed", now)
         else:
-            await _settle(sessionmaker, claim, None)
+            await _settle(sessionmaker, claim, None, now)

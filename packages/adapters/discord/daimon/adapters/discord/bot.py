@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, Final, Literal
 
 import anthropic as _anthropic
@@ -98,6 +99,7 @@ from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.thread_naming import strip_mentions
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.bookkeeping import recover_orphan_marker
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -113,6 +115,13 @@ from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
+from daimon.core.turn.thread_queue import (
+    ThreadQueue,
+    claim_dispatch,
+    dispatch_and_drain,
+    group_by_author,
+    release_thread,
+)
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from pydantic import SecretStr
@@ -999,20 +1008,13 @@ class DaimonBot(commands.Bot):
                     message_id=row.active_turn_message_id,
                     error=str(err),
                 )
-            async with self.runtime.sessionmaker() as session:
-                cleared = await clear_active_turn_if_message_id(
-                    session, id=row.id, expected_message_id=row.active_turn_message_id
-                )
-                await session.commit()
-            if cleared:
-                # Stop the turn MA is still running for this orphan, so it
-                # stops billing and the next mention's message is not sent
-                # into a running session (which MA ignores). A moved marker
-                # belongs to a live turn and is never interrupted.
-                await interrupt_orphaned_session(
-                    self.runtime.anthropic, session_id=row.ma_session_id
-                )
-            else:
+            cleared = await recover_orphan_marker(
+                self.runtime.sessionmaker,
+                row,
+                clear=clear_active_turn_if_message_id,
+                interrupt=partial(interrupt_orphaned_session, self.runtime.anthropic),
+            )
+            if not cleared:
                 log.info(
                     "turn.orphan_marker_moved",
                     thread_id=row.thread_id,
@@ -1670,7 +1672,7 @@ class DaimonBot(commands.Bot):
         retry) is logged and swallowed rather than dropping the queued message
         into the prologue error path.
         """
-        self._pending.setdefault(thread_id, []).append(message)
+        self._thread_queue.enqueue(thread_id, message)
         try:
             await message.add_reaction("⌛")
         except Exception as exc:
@@ -1708,40 +1710,27 @@ class DaimonBot(commands.Bot):
         except discord.HTTPException:
             log.exception("mention_prologue_error_send_failed", guild_id=guild_id)
 
+    @property
+    def _thread_queue(self) -> ThreadQueue[int, discord.Message]:
+        return ThreadQueue(self._processing, self._pending)
+
     async def _drain_pending_mentions(
         self, thread_id: int, guild_id: str, tenant_id: uuid.UUID
     ) -> None:
-        """Drain ``self._pending[thread_id]`` into composite per-author follow-up turns.
+        async def run(messages: list[discord.Message]) -> None:
+            await self._handle_mention(
+                messages[0],
+                guild_id,
+                tenant_id,
+                content_override=_compose_queued_content(messages),
+                attachments_override=[a for m in messages for a in m.attachments],
+            )
 
-        New mentions can arrive during a drain turn; they land in
-        ``self._pending`` and get picked up by the next iteration.
-
-        G1 (SCOPING §2c/§4): partition queued messages by author.id and run
-        one composite turn per author in first-seen arrival order. Under
-        per-caller sessions each author's turn resolves their own
-        account/session from ``msgs[0].author`` — coalescing distinct authors
-        onto one turn would route B's message onto A's session (the
-        confused-deputy hole relocated to the hot path). One turn = one caller.
-
-        Never raises: ``_handle_mention`` renders turn errors internally, so a
-        failed drain turn still returns normally and the loop continues.
-        """
-        while queued := self._pending.pop(thread_id, []):
-            by_author: dict[int, list[discord.Message]] = {}
-            for q_msg in queued:
-                by_author.setdefault(q_msg.author.id, []).append(q_msg)
-            for author_msgs in by_author.values():
-                await self._handle_mention(
-                    author_msgs[0],
-                    guild_id,
-                    tenant_id,
-                    content_override=_compose_queued_content(author_msgs),
-                    # merge attachments from ALL of this author's
-                    # queued messages (including author_msgs[0]'s own), in
-                    # first-seen arrival order -- author_msgs[0].attachments
-                    # alone would silently drop attachments on later messages.
-                    attachments_override=[a for m in author_msgs for a in m.attachments],
-                )
+        await self._thread_queue.drain(
+            thread_id,
+            compose=lambda queued: group_by_author(queued, lambda m: m.author.id),
+            run=run,
+        )
 
     async def _handle_mention(
         self,
@@ -1858,35 +1847,23 @@ class DaimonBot(commands.Bot):
     async def dispatch_continuations_in_thread(
         self, *, tenant_id: uuid.UUID, thread: discord.Thread, guild_id: str
     ) -> None:
-        """Claim and run any pending continuations for `thread`, from outside a turn.
-
-        Takes the same per-thread guard a mention turn takes, so a form
-        submission and a mention can never dispatch the same thread at once. A
-        thread already processing is skipped outright rather than queued: the
-        turn running there reaches `_dispatch_continuations` at its own tail
-        anyway, and will pick up whatever this call would have.
-        """
         await self._wait_for_orphan_recovery()
-        if thread.id in self._processing:
-            # The turn running there may already be past its own tail
-            # dispatch, so remember the call and re-run it on release.
-            self._deferred_dispatch[thread.id] = (tenant_id, thread, guild_id)
+        if not claim_dispatch(
+            self._processing,
+            thread.id,
+            self._deferred_dispatch,
+            thread.id,
+            (tenant_id, thread, guild_id),
+        ):
             return
-        self._processing.add(thread.id)
         try:
-            # A mention that arrived during the dispatch queued behind it (⌛);
-            # it gets its own turn here, as it would behind a mention turn.
-            # Drain-always, like on_message after a failed turn: a dispatch
-            # that raises still drains (`_drain_pending_mentions` never
-            # raises), then re-raises for the spawned task's error log.
-            try:
-                await self._dispatch_continuations(
+            await dispatch_and_drain(
+                lambda: self._dispatch_continuations(
                     tenant_id=tenant_id, thread=thread, guild_id=guild_id
-                )
-            except Exception:
-                await self._drain_pending_mentions(thread.id, guild_id, tenant_id)
-                raise
-            await self._drain_pending_mentions(thread.id, guild_id, tenant_id)
+                ),
+                lambda: self._drain_pending_mentions(thread.id, guild_id, tenant_id),
+                drain_on_error=True,
+            )
         finally:
             self._release_thread(thread.id)
 
@@ -1942,24 +1919,24 @@ class DaimonBot(commands.Bot):
         return True
 
     def _release_thread(self, thread_id: int) -> None:
-        """Free the thread's `_processing` slot; re-run a dispatch it skipped.
-
-        `dispatch_continuations_in_thread` skips a processing thread, trusting
-        the running turn's tail dispatch. A continuation recorded after that
-        tail already ran (a form submitted as the turn was finishing) would
-        otherwise wait for the next completed turn in the thread. Spawned, so
-        the caller's `finally` never blocks; not while draining, when no new
-        turn may start (the row stays pending for the next turn).
-        """
-        self._processing.discard(thread_id)
-        deferred = self._deferred_dispatch.pop(thread_id, None)
-        if deferred is not None and not self.draining:
-            tenant_id, thread, guild_id = deferred
+        def resume(_key: int, request: tuple[uuid.UUID, discord.Thread, str]) -> None:
+            tenant_id, thread, guild_id = request
             self._spawn(
                 self.dispatch_continuations_in_thread(
-                    tenant_id=tenant_id, thread=thread, guild_id=guild_id
+                    tenant_id=tenant_id,
+                    thread=thread,
+                    guild_id=guild_id,
                 )
             )
+
+        release_thread(
+            self._processing,
+            thread_id,
+            self._deferred_dispatch,
+            dispatch_keys=lambda: [thread_id],
+            draining=self.draining,
+            resume=resume,
+        )
 
     async def _run_continuation_turn(
         self,

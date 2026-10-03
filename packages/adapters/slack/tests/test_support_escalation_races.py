@@ -19,6 +19,7 @@ import pytest
 import pytest_asyncio
 from aioresponses import CallbackResult
 from cryptography.fernet import Fernet
+from daimon.adapters.slack import support_escalation as slack_support
 from daimon.adapters.slack.support_escalation import (
     NOT_ALLOWED,
     evaluate_support_submission,
@@ -31,7 +32,7 @@ from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.access_policy import (
     load_access_policy,
-    lock_access_policy,
+    policy_write_transaction,
     set_access_policy,
 )
 from daimon.core.stores.domain import TenantRow
@@ -117,24 +118,38 @@ async def _pid(session: AsyncSession) -> int:
     return int((await session.execute(text("SELECT pg_backend_pid()"))).scalar_one())
 
 
-async def _blocked_by(engine: AsyncEngine, holder_pid: int) -> int:
-    """The backend waiting on a lock `holder_pid` holds."""
+@pytest_asyncio.fixture
+async def recorder_pid(monkeypatch: pytest.MonkeyPatch) -> asyncio.Future[int]:
+    """Observe the real recorder's connection before it takes any locks."""
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    record = slack_support.record_escalation_once
+
+    async def recording(session: AsyncSession, **kwargs: Any) -> Any:
+        pid.set_result(await _pid(session))
+        return await record(session, **kwargs)
+
+    monkeypatch.setattr(slack_support, "record_escalation_once", recording)
+    return pid
+
+
+async def _blocked_by(engine: AsyncEngine, waiter_pid: int, holder_pid: int) -> None:
+    """Wait for this backend to block on this holder, excluding other workers."""
     async with engine.connect() as probe:
         for _ in range(200):
             pid = (
                 await probe.execute(
                     text(
                         "SELECT pid FROM pg_stat_activity"
-                        " WHERE :holder = ANY(pg_blocking_pids(pid)) LIMIT 1"
+                        " WHERE pid = :waiter AND :holder = ANY(pg_blocking_pids(pid))"
                     ),
-                    {"holder": holder_pid},
+                    {"waiter": waiter_pid, "holder": holder_pid},
                 )
             ).scalar_one_or_none()
             if pid is not None:
-                return int(pid)
+                return
             await probe.rollback()
             await asyncio.sleep(0.025)
-    raise AssertionError(f"nothing ever waited on backend {holder_pid}")
+    raise AssertionError(f"backend {waiter_pid} never waited on backend {holder_pid}")
 
 
 async def _count(factory: async_sessionmaker[AsyncSession]) -> int:
@@ -154,6 +169,7 @@ async def test_an_edit_committed_while_waiting_on_the_credit_lock_refuses(
     db_session: AsyncSession,
     race_engine: AsyncEngine,
     fake_slack_web_client: Any,
+    recorder_pid: asyncio.Future[int],
     policy_row: bool,
     edit: str,
 ) -> None:
@@ -168,9 +184,8 @@ async def test_an_edit_committed_while_waiting_on_the_credit_lock_refuses(
             holder, tenant_id=tenant_id, platform_user_id=_USER
         )
         submitting = asyncio.create_task(run_support_submission(runtime, decision))
-        await _blocked_by(race_engine, await _pid(holder))
-        async with factory.begin() as editor:
-            await lock_access_policy(editor, tenant_id=tenant_id)
+        await _blocked_by(race_engine, await recorder_pid, await _pid(holder))
+        async with policy_write_transaction(factory, tenant_id=tenant_id) as editor:
             await set_access_policy(editor, tenant_id=tenant_id, policy=_EDITS[edit])
     await asyncio.wait_for(submitting, 10)
 
@@ -184,6 +199,7 @@ async def test_an_edit_arriving_while_the_recorder_holds_the_locks_waits_then_ap
     db_session: AsyncSession,
     race_engine: AsyncEngine,
     fake_slack_web_client: Any,
+    recorder_pid: asyncio.Future[int],
     policy_row: bool,
 ) -> None:
     """Also the deadlock check: the edit's lock wait and the recorder's
@@ -200,9 +216,8 @@ async def test_an_edit_arriving_while_the_recorder_holds_the_locks_waits_then_ap
     editor_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
 
     async def edit() -> None:
-        async with factory.begin() as editor:
+        async with policy_write_transaction(factory, tenant_id=tenant_id) as editor:
             editor_pid.set_result(await _pid(editor))
-            await lock_access_policy(editor, tenant_id=tenant_id)
             await set_access_policy(editor, tenant_id=tenant_id, policy=_EDITS["protect-source"])
 
     async with factory() as holder, holder.begin():
@@ -212,11 +227,10 @@ async def test_an_edit_arriving_while_the_recorder_holds_the_locks_waits_then_ap
             text("SELECT id FROM accounts WHERE id = :id FOR UPDATE"), {"id": account_id}
         )
         submitting = asyncio.create_task(run_support_submission(runtime, decision))
-        recorder = await _blocked_by(race_engine, await _pid(holder))
+        recorder = await recorder_pid
+        await _blocked_by(race_engine, recorder, await _pid(holder))
         editing = asyncio.create_task(edit())
-        assert await _blocked_by(race_engine, recorder) == await editor_pid, (
-            "the policy edit must wait for the recorder that already decided"
-        )
+        await _blocked_by(race_engine, await editor_pid, recorder)
         # A row keyed to the tenant, written by the account holder while the
         # recorder holds the tenant's policy lock: KEY SHARE must not wait on
         # NO KEY UPDATE, or this is a deadlock.
@@ -252,8 +266,7 @@ async def test_destination_protected_during_the_permalink_call_gets_no_post(
 
     async def permalink_then_protect(url: Any, **kwargs: Any) -> CallbackResult:
         # The protection commits while the permalink request is in flight.
-        async with factory.begin() as editor:
-            await lock_access_policy(editor, tenant_id=dest_tenant)
+        async with policy_write_transaction(factory, tenant_id=dest_tenant) as editor:
             await set_access_policy(editor, tenant_id=dest_tenant, policy=protect)
         return CallbackResult(payload={"ok": True, "permalink": _PERMALINK})
 

@@ -1,0 +1,86 @@
+class _ConfirmationView(discord.ui.LayoutView):
+    """One card; resolves `answer` on the requester's first click."""
+
+    def __init__(
+        self,
+        card: ConfirmationCard,
+        prompt: ConfirmationPrompt,
+        answer: asyncio.Future[ConfirmationAnswer] | None,
+    ) -> None:
+        super().__init__(timeout=None)
+        self._prompt = prompt
+        self._answer = answer
+        container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
+            accent_colour=discord.Colour(COLOR_AMBER)
+        )
+        for text in _body(card):
+            container.add_item(discord.ui.TextDisplay(text))
+        if card.state == "pending":
+            container.add_item(discord.ui.Separator(visible=False))
+            row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+            approve: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                style=discord.ButtonStyle.success, label="Approve"
+            )
+            deny: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                style=discord.ButtonStyle.danger, label="Deny"
+            )
+            approve.callback = self._on_approve
+            deny.callback = self._on_deny
+            row.add_item(approve)
+            row.add_item(deny)
+            container.add_item(row)
+        footer = _footer(card, prompt)
+        if footer is not None:
+            container.add_item(discord.ui.TextDisplay(f"-# {footer}"))
+        self.add_item(container)
+
+    async def _on_approve(self, interaction: discord.Interaction) -> None:
+        await self._settle(interaction, "approved")
+
+    async def _on_deny(self, interaction: discord.Interaction) -> None:
+        await self._settle(interaction, "denied")
+
+    async def _settle(self, interaction: discord.Interaction, answer: ConfirmationAnswer) -> None:
+        if str(interaction.user.id) != self._prompt.requester_platform_user_id:
+            await interaction.response.send_message(NOT_YOURS_MESSAGE, ephemeral=True)
+            return
+        if self._answer is None or self._answer.done():
+            await interaction.response.send_message(NO_LONGER_PENDING_MESSAGE, ephemeral=True)
+            return
+        self._answer.set_result(answer)
+        # Answered: nothing on this card listens any more.
+        self.stop()
+        answered = build_confirmation_card(
+            self._prompt, state=answer, answered_by_platform_user_id=str(interaction.user.id)
+        )
+        await interaction.response.edit_message(
+            view=_ConfirmationView(answered, self._prompt, answer=None)
+        )
+
+def discord_confirmation_hook(channel: discord.abc.Messageable) -> ConfirmationHook:
+    """A hook that posts each prompt's card into `channel` (the turn's thread)."""
+
+    async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        loop = asyncio.get_running_loop()
+        answer: asyncio.Future[ConfirmationAnswer] = loop.create_future()
+        pending = build_confirmation_card(prompt, state="pending", token=secrets.token_urlsafe(12))
+        view = _ConfirmationView(pending, prompt, answer)
+        message = await channel.send(view=view)
+        timeout_s = max(0.0, (prompt.expires_at - datetime.now(UTC)).total_seconds())
+        try:
+            result = await asyncio.wait_for(asyncio.shield(answer), timeout=timeout_s)
+        except TimeoutError:
+            result = "expired"
+        except asyncio.CancelledError:
+            # The turn was stopped while the card was up: retire its buttons.
+            answer.cancel()
+            view.stop()
+            await _retire(message, prompt, "denied")
+            raise
+        if result == "expired":
+            answer.cancel()
+            view.stop()
+            await _retire(message, prompt, "expired")
+        return result
+
+    return _confirm

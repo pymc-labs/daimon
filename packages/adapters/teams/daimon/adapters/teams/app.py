@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 import anthropic
+import daimon.core.turn.bookkeeping as turn_bookkeeping
 import structlog
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
@@ -123,6 +124,13 @@ from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import protection_state
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
+from daimon.core.turn.thread_queue import (
+    ThreadQueue,
+    claim_dispatch,
+    dispatch_and_drain,
+    group_by_author,
+    release_thread,
+)
 from daimon.core.turn_keys import list_mounted_key_names, render_keys_element
 from daimon.core.turn_origin import (
     HandoffNotice,
@@ -190,9 +198,6 @@ HandoffFactory = Callable[[ContinuityOutcome], HandoffNotice]
 
 def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
     """One turn per author, replying where that author's last message came from."""
-    by_author: dict[str, list[TeamsInbound]] = {}
-    for item in queued:
-        by_author.setdefault(item.user_id, []).append(item)
     return [
         dataclasses.replace(
             items[-1],
@@ -200,7 +205,7 @@ def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
             files=tuple(file for item in items for file in item.files),
             composed_ids=tuple(item.activity_id for item in items[:-1]),
         )
-        for items in by_author.values()
+        for items in group_by_author(queued, lambda item: item.user_id)
     ]
 
 
@@ -661,7 +666,7 @@ class TeamsApp:
         cap = await self._turn_cap(tenant_id)
         if key in self._processing:
             self._last_message_at[key] = datetime.now(UTC)
-            self._pending.setdefault(key, []).append(inbound)
+            self._thread_queue.enqueue(key, inbound)
             self._supersede_batch(inbound)
             return
         count = self._inflight.get(tenant_id, 0)
@@ -695,7 +700,7 @@ class TeamsApp:
     async def _holding(self, key: str, tenant_id: uuid.UUID) -> AsyncIterator[None]:
         """Hold a chat and a tenant turn slot; on exit, answer what could not run."""
         self._inflight[tenant_id] = self._inflight.get(tenant_id, 0) + 1
-        self._processing.add(key)
+        self._thread_queue.claim(key)
         try:
             yield
         finally:
@@ -706,15 +711,17 @@ class TeamsApp:
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
                     await self._say(item, _FAILED)
 
+    @property
+    def _thread_queue(self) -> ThreadQueue[str, TeamsInbound]:
+        return ThreadQueue(self._processing, self._pending)
+
     async def _run_turns(self, key: str, tenant_id: uuid.UUID, turns: list[TeamsInbound]) -> None:
-        """Run `turns`, then what queued behind them, in order, until the queue is empty."""
-        while turns:
-            for queued in turns:
-                # Routed now, not on arrival: the setup conversation may have ended since.
-                turn = await route_to_setup(self.runtime.sessionmaker, queued, tenant_id)
-                await self._run_turn_guarded(turn, tenant_id)
-                await self._dispatch_continuations(turn.thread_id, tenant_id, turn.service_url)
-            turns = _compose_queued(self._pending.pop(key, []))
+        async def run(queued: TeamsInbound) -> None:
+            turn = await route_to_setup(self.runtime.sessionmaker, queued, tenant_id)
+            await self._run_turn_guarded(turn, tenant_id)
+            await self._dispatch_continuations(turn.thread_id, tenant_id, turn.service_url)
+
+        await self._thread_queue.drain(key, initial=turns, compose=_compose_queued, run=run)
 
     async def _run_turn_guarded(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
         """Error boundary for failures before the status card exists."""
@@ -1147,52 +1154,64 @@ class TeamsApp:
             )
 
     def _release(self, key: str) -> None:
-        """Free a conversation; re-run private-input dispatches that found it busy."""
-        self._processing.discard(key)
-        self._last_message_at.pop(key, None)
-        for thread_id in [t for t in self._deferred_dispatch if conversation_of(t) == key]:
-            tenant_id, service_url, capped = self._deferred_dispatch.pop(thread_id)
-            if not self.draining:
-                resume = self.dispatch_after_input(tenant_id, thread_id, service_url, capped=capped)
-                self.spawn(resume, name="teams.resume")
+        def resume(thread_id: str, request: tuple[uuid.UUID, str | None, bool]) -> None:
+            tenant_id, service_url, capped = request
+            self.spawn(
+                self.dispatch_after_input(tenant_id, thread_id, service_url, capped=capped),
+                name="teams.resume",
+            )
+
+        release_thread(
+            self._processing,
+            key,
+            self._deferred_dispatch,
+            dispatch_keys=lambda: [t for t in self._deferred_dispatch if conversation_of(t) == key],
+            draining=self.draining,
+            resume=resume,
+            on_release=lambda: self._last_message_at.pop(key, None),
+        )
 
     async def dispatch_after_input(
         self, tenant_id: uuid.UUID, thread_id: str, service_url: str | None, *, capped: bool = False
     ) -> None:
-        """Run what a saved private input or a due wake queued here, from outside a turn.
-
-        A busy conversation is left to its turn's tail dispatch, and re-run on
-        release in case that tail already passed. Messages queued meanwhile follow.
-        A `capped` dispatch (a wake) waits while the tenant is at its turn cap:
-        its rows stay due, so the next poll retries them.
-        """
         if self.draining:
             return
         if self._recovery is not None:
             await asyncio.shield(self._recovery)
         conversation_id = conversation_of(thread_id)
-        # Only a wake is capped; read before the busy check, as `_orchestrate` does.
         cap = await self._turn_cap(tenant_id) if capped else 0
-        if conversation_id in self._processing:
-            # A wake's None must not drop a saved input's regional service URL, and
-            # the cap never holds back a saved input's resume.
-            _, previous_url, previous_capped = self._deferred_dispatch.get(
-                thread_id, (tenant_id, None, True)
-            )
-            self._deferred_dispatch[thread_id] = (
-                tenant_id,
-                service_url or previous_url,
-                capped and previous_capped,
-            )
-            return
-        if capped and not should_admit_turn(
-            current_in_flight=self._inflight.get(tenant_id, 0), cap=cap
+
+        def merge(
+            previous: tuple[uuid.UUID, str | None, bool] | None,
+            request: tuple[uuid.UUID, str | None, bool],
+        ) -> tuple[uuid.UUID, str | None, bool]:
+            _, previous_url, previous_capped = previous or (tenant_id, None, True)
+            return tenant_id, request[1] or previous_url, request[2] and previous_capped
+
+        if not claim_dispatch(
+            self._processing,
+            conversation_id,
+            self._deferred_dispatch,
+            thread_id,
+            (tenant_id, service_url, capped),
+            merge=merge,
+            claim_slot=False,
+            admit=lambda: (
+                not capped
+                or should_admit_turn(current_in_flight=self._inflight.get(tenant_id, 0), cap=cap)
+            ),
         ):
             return
         async with self._holding(conversation_id, tenant_id):
-            await self._dispatch_continuations(thread_id, tenant_id, service_url)
-            queued = _compose_queued(self._pending.pop(conversation_id, []))
-            await self._run_turns(conversation_id, tenant_id, queued)
+
+            async def drain() -> None:
+                queued = _compose_queued(self._pending.pop(conversation_id, []))
+                await self._run_turns(conversation_id, tenant_id, queued)
+
+            await dispatch_and_drain(
+                lambda: self._dispatch_continuations(thread_id, tenant_id, service_url),
+                drain,
+            )
 
     async def _dispatch_continuations(
         self, thread_id: str, tenant_id: uuid.UUID, service_url: str | None
@@ -1308,8 +1327,7 @@ class TeamsApp:
                     await retire_turn_card_intent(
                         session, id=intent_id, expected_message_id=message_id
                     )
-                for marker_id in markers:
-                    await clear_active_turn(session, id=marker_id)
+                await turn_bookkeeping.clear_turn_markers(session, markers, clear=clear_active_turn)
         except SQLAlchemyError:
             log.exception("teams.turn.settle_failed", intent_id=str(intent_id))
 
