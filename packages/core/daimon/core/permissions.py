@@ -3,9 +3,9 @@
 Protected, sealed, confidential (isolated) and pinned are not separate
 mechanisms but presets of two rules. A channel rule says who may read a
 channel and who may write in it; an agent rule says where an agent may run.
-What else an agent may do (where it posts, whom it messages, where it is
-listed, whether it may be copied) follows from those two rules and is derived
-here, never stored.
+What else an agent may do (where it runs and posts, whom it messages, where
+it is listed, whether it may be copied) follows from those two rules and is
+derived here, never stored.
 
 Pure. Rules are read from and written back to `TenantAccessPolicy`, whose
 stored shape is unchanged, and `daimon.core.authz.authorize` still decides
@@ -39,9 +39,8 @@ ChannelWriters = Literal["any_agent", "own_agents", "nobody"]
 
 ChannelPreset = Literal["open", "protected", "sealed", "confidential"]
 
-AgentPosts = Literal["anywhere", "runs_in_and_requester_dm", "confidential_channel"]
 AgentDirectMessages = Literal["anyone", "requester", "nobody"]
-AgentListing = Literal["everywhere", "confidential_channel"]
+AgentListing = Literal["outside_confidential_channels", "its_confidential_channel"]
 
 
 class ChannelRule(BaseModel):
@@ -132,7 +131,12 @@ def with_channel_rule(
 
     This sets the channel's rule only: making it confidential does not pin an
     agent to it (`with_agent_rule`, or `daimon.core.channel_isolation_setup`).
+    Confidential is a channel's rule; a Discord thread takes its channel's. A
+    Slack thread (``channel:ts``) can only be sealed, since a turn there is
+    protected or held by its channel.
     """
+    if ":" in channel_id and (rule.readers == "own_agents" or rule.writers != "any_agent"):
+        raise ValueError("a Slack thread can only be sealed; protect or isolate its channel")
     return _rebuilt(
         policy,
         protected_channel_ids=_toggled(
@@ -179,13 +183,16 @@ class ChannelPermissions:
     ``channel:ts`` rule and its Discord category's.
     """
 
+    channel_id: str
+    parent_channel_id: str | None
     readers: ChannelReaders
     writers: ChannelWriters
     confidential_channel: str | None
     """The confidential channel the place lies in (a thread counts as its channel)."""
-    own_agents: tuple[str, ...]
-    """Agent names pinned to `confidential_channel` alone, the only ones that
-    answer and are listed there. Empty outside a confidential channel."""
+    own_agent_names: tuple[str, ...]
+    """Names pinned to `confidential_channel` alone. An agent carrying several
+    names is one of its own agents only when every pin on it names that
+    channel alone. Empty outside a confidential channel."""
 
 
 def channel_permissions(
@@ -216,10 +223,12 @@ def channel_permissions(
         "nobody" if protected else "own_agents" if confidential is not None else "any_agent"
     )
     return ChannelPermissions(
+        channel_id=channel_id,
+        parent_channel_id=parent_channel_id,
         readers=readers,
         writers=writers,
         confidential_channel=confidential,
-        own_agents=_pinned_alone(policy, confidential) if confidential is not None else (),
+        own_agent_names=_pinned_alone(policy, confidential) if confidential is not None else (),
     )
 
 
@@ -230,20 +239,20 @@ def _pinned_alone(policy: TenantAccessPolicy, channel_id: str) -> tuple[str, ...
 
 @dataclass(frozen=True)
 class AgentPermissions:
-    """What one agent may do, from its rule and the rule of the channel it belongs to.
+    """What one agent may do, for a member's turn.
 
-    For a member's turn. A server admin may also run a pinned agent in their
-    own DM and hub, where only they see it, and so may a confidential
-    channel's admin with that channel's own agents. A turn inside a
+    A server admin may also run a pinned agent in their own DM and hub, where
+    only they see it, and so may a confidential channel's admin with that
+    channel's own agents; admins see every agent listed. A turn inside a
     confidential channel holds whatever agent runs it to that channel.
     """
 
-    runs_in: frozenset[str] | None
-    """Channels it runs in (and threads under them): inside every pin on any
-    of its names. None for an unpinned agent."""
+    pins: tuple[frozenset[str], ...]
+    """Every pin on any of its names; it runs only where each one allows
+    (`runs_at`). Empty for an unpinned agent."""
     confidential_channel: str | None
-    """The confidential channel it is an own agent of."""
-    posts_to: AgentPosts
+    """The confidential channel it is one of the own agents of."""
+    posts_to_requester_dm: bool
     direct_messages: AgentDirectMessages
     listed_in: AgentListing
     may_be_copied: bool
@@ -253,30 +262,45 @@ def agent_permissions(
     policy: TenantAccessPolicy, agent_names: tuple[str | None, ...]
 ) -> AgentPermissions:
     """The permissions of the agent carrying `agent_names` (`daimon.core.authz.agent_names`)."""
-    pins = [
+    pins = tuple(
         frozenset(policy.agent_channel_pins[name])
         for name in agent_names
         if name is not None and name in policy.agent_channel_pins
-    ]
-    runs_in: frozenset[str] | None = None
-    for pin in pins:
-        runs_in = pin if runs_in is None else runs_in & pin
+    )
     confidential = isolation_owner(policy, agent_names)
-    if confidential is not None:
-        posts_to: AgentPosts = "confidential_channel"
-        direct_messages: AgentDirectMessages = "nobody"
-    elif pins:
-        posts_to, direct_messages = "runs_in_and_requester_dm", "requester"
-    else:
-        posts_to, direct_messages = "anywhere", "anyone"
+    direct_messages: AgentDirectMessages = (
+        "nobody" if confidential is not None else "requester" if pins else "anyone"
+    )
     return AgentPermissions(
-        runs_in=runs_in,
+        pins=pins,
         confidential_channel=confidential,
-        posts_to=posts_to,
+        posts_to_requester_dm=confidential is None,
         direct_messages=direct_messages,
-        listed_in="confidential_channel" if confidential is not None else "everywhere",
+        listed_in=(
+            "its_confidential_channel"
+            if confidential is not None
+            else "outside_confidential_channels"
+        ),
         may_be_copied=not pins,
     )
+
+
+def runs_at(agent: AgentPermissions, here: ChannelPermissions) -> bool:
+    """Whether a member's turn may run the agent here.
+
+    Inside every pin (a pin naming a thread holds at that thread only), and
+    inside a confidential channel only as one of its own agents. Protection
+    stops the turn, not the agent; a confidential channel's setup thread also
+    answers as the built-in agent.
+    """
+    place = {here.channel_id, here.parent_channel_id}
+    inside_pins = all(place & pin for pin in agent.pins)
+    return inside_pins and agent.confidential_channel == here.confidential_channel
+
+
+def posts_at(agent: AgentPermissions, here: ChannelPermissions) -> bool:
+    """Whether the agent may post here, from a turn outside every confidential channel."""
+    return here.writers != "nobody" and runs_at(agent, here)
 
 
 __all__ = [
@@ -284,7 +308,6 @@ __all__ = [
     "AgentDirectMessages",
     "AgentListing",
     "AgentPermissions",
-    "AgentPosts",
     "AgentRule",
     "ChannelPermissions",
     "ChannelPreset",
@@ -297,7 +320,9 @@ __all__ = [
     "channel_permissions",
     "channel_rule",
     "channel_rules",
+    "posts_at",
     "preset_of",
+    "runs_at",
     "with_agent_rule",
     "with_category_rule",
     "with_channel_rule",
