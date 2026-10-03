@@ -6340,5 +6340,44 @@
         'type': 'object',
       }),
     }),
+    'where_am_i': dict({
+      'description': '''
+        Return the fixed /here card with structured facts and rendered text.
+        Use this when someone asks which agent you are, who answers here, whether
+        you can see a channel, or whose token or sign-in you hold. Never guess
+        these facts from the conversation. Pass the parent channel id from turn
+        controls and the current thread id when present. A bound coding token
+        can omit channel_id. Discord and Slack channel turns only. Unknown
+        visibility is reported as unknown.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'thread_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
   })
 # ---

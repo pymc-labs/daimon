@@ -141,6 +141,7 @@ source_modules = [
     "daimon.core.handoff_context",
     "daimon.core.headless_runner",
     "daimon.core.health",
+    "daimon.core.here_card",
     "daimon.core.hub_identity",
     "daimon.core.hub_oauth_kv_sweep",
     "daimon.core.ids",
