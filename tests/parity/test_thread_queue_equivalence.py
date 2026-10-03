@@ -160,12 +160,16 @@ class Replay:
                 self.effects.append(("wait", number, emoji))
                 await self.stop("reaction")
 
+            async def send(text):
+                self.effects.append(("response", number, text))
+
             return SimpleNamespace(
                 author=SimpleNamespace(id=author, display_name=str(author)),
                 id=number,
                 content=text,
                 attachments=[number],
                 add_reaction=react,
+                channel=SimpleNamespace(send=send),
             )
         if self.platform == "slack":
             return dict(
@@ -296,11 +300,25 @@ async def replay(platform, old, authors, pause_at, fault, cancel, draining):
     ],
 )
 @pytest.mark.parametrize("draining", [False, True])
-async def test_scheduled_arrivals_errors_and_cancels_match_base(
+async def test_scheduled_arrivals_errors_and_cancels_match_base_except_cancelled_groups(
     platform, authors, pause_at, fault, cancel, draining
 ):
     before = await replay(platform, True, authors, pause_at, fault, cancel, draining)
     after = await replay(platform, False, authors, pause_at, fault, cancel, draining)
+    if cancel and pause_at == "turn" and not (platform == "teams" and draining):
+        # The cancellation fix adds one apology for the unstarted author.
+        # Every other effect and the complete final state still match base.
+        notices = [effect for effect in after[0] if effect[0] == "response"]
+        old_notices = [effect for effect in before[0] if effect[0] == "response"]
+        if platform in {"slack", "teams"}:
+            # Base already apologises to the two arrivals in the later batch.
+            assert len(notices) == len(old_notices) + 1
+            assert notices[1:] == old_notices
+            after[0].remove(notices[0])
+        else:
+            assert len(notices) == 1
+            assert not old_notices
+            after[0].remove(notices[0])
     assert after == before
 
 

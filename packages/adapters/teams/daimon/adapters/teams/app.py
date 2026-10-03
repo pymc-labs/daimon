@@ -727,7 +727,14 @@ class TeamsApp:
             await self._run_turn_guarded(turn, tenant_id)
             await self._dispatch_continuations(turn.thread_id, tenant_id, turn.service_url)
 
-        await self._thread_queue.drain(key, initial=turns, compose=_compose_queued, run=run)
+        async def on_cancel(unstarted: list[TeamsInbound]) -> None:
+            for item in unstarted:
+                with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                    await self._say(item, _FAILED)
+
+        await self._thread_queue.drain(
+            key, initial=turns, compose=_compose_queued, run=run, on_cancel=on_cancel
+        )
 
     async def _run_turn_guarded(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
         """Error boundary for failures before the status card exists."""

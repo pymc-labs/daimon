@@ -1728,10 +1728,21 @@ class DaimonBot(commands.Bot):
                 attachments_override=[a for m in messages for a in m.attachments],
             )
 
+        async def on_cancel(groups: list[list[discord.Message]]) -> None:
+            for messages in groups:
+                target = messages[0].channel
+                with contextlib.suppress(discord.HTTPException):
+                    notice = "Sorry, something went wrong handling that — please try again."
+                    if isinstance(target, discord.Thread):
+                        await safe_thread_send(target, notice)
+                    else:
+                        await target.send(notice)
+
         await self._thread_queue.drain(
             thread_id,
             compose=lambda queued: group_by_author(queued, lambda m: m.author.id),
             run=run,
+            on_cancel=on_cancel,
         )
 
     async def _handle_mention(
