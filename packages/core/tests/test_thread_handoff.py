@@ -540,6 +540,50 @@ async def test_a_channel_admin_hands_a_thread_only_to_an_agent_they_could_bind_h
         assert await _binding(db_session_factory, tenant_id) is None, "nothing was switched"
 
 
+@pytest.mark.parametrize("r2_holds_c3", [False, True], ids=["theirs-alone", "split-grants"])
+async def test_a_hold_split_across_user_and_group_grants_still_counts(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    r2_holds_c3: bool,
+) -> None:
+    """research-bot was made for C2 and answers in C2 and C3. U1 administers C1, C2
+    and C3. U2 holds it through a user grant on C2 and group R2's grant on C3:
+    neither alone covers it, together they do, so the binding would cost U2 it."""
+    tenant_id = (await _seed(db_session)).id
+    await _grant_c1(db_session_factory, tenant_id)
+    await _grant(db_session_factory, tenant_id, "C2", "U1", "U2")
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="C3"),
+            tenant_id=tenant_id,
+            agent_name="research-bot",
+        )
+        await set_channel_admins(
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            channel_id="C3",
+            role_ids=("R2",) if r2_holds_c3 else (),
+            user_ids=("U1",),
+            actor_account_id=None,
+        )
+    await _research_made_for_c2(db_session_factory, tenant_id)
+
+    async def switch() -> None:
+        async with db_session_factory.begin() as session:
+            await _switch(session, tenant_id, _channel_admin_of_c1(), recorded=())
+
+    if not r2_holds_c3:
+        await switch()
+        assert await _binding(db_session_factory, tenant_id) is not None, "U1 alone holds it"
+        return
+    with pytest.raises(ThreadHandoffRefused) as refused:
+        await switch()
+    assert refused.value.refusal.reason == "admin_required", "U2 would lose their hold"
+    assert await _binding(db_session_factory, tenant_id) is None, "nothing was switched"
+
+
 async def test_a_server_admin_hands_a_thread_to_another_channels_agent(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

@@ -551,13 +551,21 @@ def _held_by_other_admin(
 ) -> bool:
     """Whether a channel admin other than the caller holds the agent local to
     channels without `channel_id`, which a binding there would take away.
+
+    Read over the union of the channels of every other user and group a grant
+    names without `channel_id`, since one person may hold it through several:
+    both checks only grow with the channels, so it fails closed and may
+    over-refuse.
     """
-    return any(
-        channel_id not in held
-        and reach.is_local_to(held, platform_user_id=user_id if kind == "user" else None)
-        and agent_held_in(policy, agent=agent, standing=standing, channel_ids=held)
-        for (kind, user_id), held in _grant_holders(grants).items()
-        if (kind, user_id) != ("user", caller_platform_user_id)
+    channels = frozenset[str]().union(
+        *(
+            held
+            for holder, held in _grant_holders(grants).items()
+            if holder != ("user", caller_platform_user_id) and channel_id not in held
+        )
+    )
+    return reach.is_local_to(channels, platform_user_id=None) and agent_held_in(
+        policy, agent=agent, standing=standing, channel_ids=channels
     )
 
 
