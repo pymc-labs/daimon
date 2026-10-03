@@ -288,6 +288,11 @@ async def _require_unheld(
             f"this agent is pinned to its own channels, so {what} is refused: it shows "
             f"outside them. Tell the caller. {nothing} Do not retry."
         )
+    if refusal == "agent_unresolved":
+        raise ToolError(
+            f"this conversation's agent could not be found, so daimon can't tell which "
+            f"channel it is held to and {what} is refused. Tell the caller. {nothing}"
+        )
     if refusal is not None:
         raise ToolError(
             f"this conversation is held to an isolated channel, so {what} is refused: it "
