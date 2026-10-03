@@ -149,6 +149,7 @@ source_modules = [
     "daimon.core.ma",
     "daimon.core.ma_identity",
     "daimon.core.ma_resolver",
+    "daimon.core.named_agent",
     "daimon.core.mcp_attach",
     "daimon.core.mcp_auth",
     "daimon.core.mcp_credential_sweep",

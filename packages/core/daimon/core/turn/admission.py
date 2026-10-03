@@ -53,8 +53,10 @@ from daimon.core.channel_admins import ChannelAdminCaller, load_administered_cha
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills
+from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
+from daimon.core.named_agent import matching_agent
 from daimon.core.permissions import (
     agent_permissions,
     at_home,
@@ -82,6 +84,7 @@ from daimon.core.turn.errors import (
     AdmissionDenied,
     DmSourceSealedError,
     MissingTurnConfigError,
+    NamedAgentRefused,
     SessionBusyError,
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
@@ -205,6 +208,8 @@ async def admit(
     category_id: str | None = None,
     category_unresolved: bool = False,
     external: ExternalFinding | None = None,
+    requested_agent_name: str | None = None,
+    requested_agent_id: str | None = None,
 ) -> Admission:
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
@@ -228,6 +233,8 @@ async def admit(
                 category_id=category_id,
                 category_unresolved=category_unresolved,
                 external=external,
+                requested_agent_name=requested_agent_name,
+                requested_agent_id=requested_agent_id,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -253,6 +260,8 @@ async def admit_impl(
     category_id: str | None = None,
     category_unresolved: bool = False,
     external: ExternalFinding | None = None,
+    requested_agent_name: str | None = None,
+    requested_agent_id: str | None = None,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool.
 
@@ -360,6 +369,56 @@ async def admit_impl(
     )
     async with deps.sessionmaker() as session:
         config = await resolve_config(session, context=scope, default=deps.deployment_default)
+        parent_config = (
+            await resolve_config(
+                session,
+                context=scope.model_copy(update={"thread_id": None}),
+                default=deps.deployment_default,
+            )
+            if (requested_agent_name is not None or requested_agent_id is not None)
+            and thread_id is not None
+            else config
+        )
+    named_agent = None
+    if requested_agent_name is not None or requested_agent_id is not None:
+        roster = await list_agents_by_tenant(deps.anthropic, tenant_id=tenant_id)
+        named_agent = (
+            next((agent for agent in roster if agent.id == requested_agent_id), None)
+            if requested_agent_id is not None
+            else matching_agent(roster, requested_agent_name or "")
+        )
+        if named_agent is None and requested_agent_id is not None:
+            raise NamedAgentRefused(
+                "That agent is unavailable. Ask an admin to refresh agent roles."
+            )
+        if named_agent is not None:
+            if config.thread_binding_id is not None and (
+                config.responder_ma_agent_id != named_agent.id
+            ):
+                raise NamedAgentRefused(
+                    "This thread belongs to another agent. Start a new thread or ask for a handoff."
+                )
+            inside = confidential_channel_of(policy, thread_id, channel_id)
+            named_permissions = agent_permissions(
+                policy, (named_agent.name, named_agent.metadata.get("daimon_name"))
+            )
+            here = channel_permissions(
+                policy,
+                channel_id=thread_id or channel_id,
+                parent_channel_id=channel_id if thread_id is not None else None,
+            )
+            if inside is not None and not at_home(named_permissions, here):
+                own = parent_config.agent_name or "this channel's agent"
+                raise NamedAgentRefused(
+                    f"This is {own}'s confidential channel. Name that agent here instead."
+                )
+            config = config.model_copy(
+                update={
+                    "agent_name": named_agent.metadata.get("daimon_name") or named_agent.name,
+                    "agent_name_tier": "named",
+                    "responder_ma_agent_id": named_agent.id,
+                }
+            )
     mark("config")
 
     # --- An external caller is never answered in a setup conversation, even
@@ -422,7 +481,11 @@ async def admit_impl(
     # answer as the built-in Daimon (`get_setup_responder` asserts that), while
     # a thread whose task was handed to another agent answers as that agent,
     # which is an ordinary tenant-and-archive-checked retrieve.
-    if config.thread_binding_kind in ("handoff", "opened"):
+    if named_agent is not None:
+        agent = await get_setup_agent(
+            deps.anthropic, tenant_id=tenant_id, ma_agent_id=named_agent.id
+        )
+    elif config.thread_binding_kind in ("handoff", "opened"):
         agent = await get_setup_agent(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
     elif config.thread_binding_id is not None:
         agent = await get_setup_responder(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)

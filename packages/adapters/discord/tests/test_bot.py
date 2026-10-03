@@ -20,6 +20,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.stores.discord_agent_roles import save_role
 from daimon.core.stores.tenants import set_turn_cap
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_agent, ma_environment, ma_session
@@ -106,6 +107,35 @@ def _make_channel_message(
 
 class TestInflightCapRejection:
     """4th turn for a saturated tenant rejected (SCALE-01)."""
+
+    async def test_managed_role_mention_starts_a_turn_without_bot_mention(
+        self, db_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        from daimon.core.defaults.provisioning import provision_tenant
+
+        guild_id = "801000198"
+        tenant = await provision_tenant(
+            db_session_factory,
+            platform="discord",
+            workspace_id=guild_id,
+            signup_credit=Decimal("5.00"),
+        )
+        async with db_session_factory.begin() as session:
+            await save_role(
+                session,
+                tenant_id=tenant.tenant_id,
+                ma_agent_id="agent_named",
+                role_id="456",
+                agent_name="Planner",
+            )
+        bot = make_bot(_make_runtime(db_session_factory))
+        bot._handle_mention = AsyncMock()  # type: ignore[method-assign]  # test seam
+        message = _make_channel_message(content="<@&456> plan", guild_id=int(guild_id))
+        message.mentions = []
+        message.role_mentions = [SimpleNamespace(id=456)]  # type: ignore[list-item]  # fake role
+        with patch("daimon.adapters.discord.bot.sync_agent_roles", new_callable=AsyncMock):
+            await bot.on_message(message)
+        bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportAttributeAccessIssue]
 
     async def test_tenant_override_admits_above_deployment_default(
         self, db_session_factory: async_sessionmaker[AsyncSession]

@@ -5,18 +5,20 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 import anthropic as _anthropic
 import sentry_sdk
 import structlog
 import structlog.contextvars
 from daimon.adapters.discord import theme
+from daimon.adapters.discord.agent_roles import sync_agent_roles
 from daimon.adapters.discord.attachments import build_attachment_url_prefix
 from daimon.adapters.discord.budget_notice import with_budget_notifier
 from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
@@ -74,9 +76,11 @@ from daimon.core.errors import DaimonError, TurnError
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.named_agent import name_after_mention
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.routine_delivery import run_delivery_poller
+from daimon.core.stores.discord_agent_roles import roles_mentioned
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenants import (
@@ -103,6 +107,7 @@ from daimon.core.turn.bookkeeping import recover_orphan_marker
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
+    NamedAgentRefused,
     SessionAgentMismatch,
     SessionBusyError,
     SessionPreparationFailed,
@@ -487,6 +492,7 @@ class DaimonBot(commands.Bot):
         self._participant: ThreadParticipant | None = None
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
+        self._agent_role_sync_locks: dict[int, asyncio.Lock] = {}
         self._seed_sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
         # Gateway lifecycle callbacks run as separate tasks. Serialize only the
         # tenant provision/archive transitions so an earlier remove cannot
@@ -592,10 +598,30 @@ class DaimonBot(commands.Bot):
         await drain_budget_notices()
         await self.close()
 
+    async def _agent_role_sync_loop(self) -> None:
+        await self.wait_until_ready()
+        while not self.draining and not self.is_closed():
+            for guild in self.guilds:
+                await self._sync_agent_roles(
+                    guild, derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
+                )
+            await asyncio.sleep(60)
+
+    async def _sync_agent_roles(self, guild: discord.Guild, tenant_id: uuid.UUID) -> None:
+        lock = self._agent_role_sync_locks.setdefault(guild.id, asyncio.Lock())
+        async with lock:
+            await sync_agent_roles(
+                guild=guild,
+                tenant_id=tenant_id,
+                anthropic=self.runtime.anthropic,
+                sessionmaker=self.runtime.sessionmaker,
+            )
+
     async def setup_hook(self) -> None:
         """Arm orphan recovery and load command Cogs before on_ready syncs the tree."""
         self.start_orphan_recovery()
         if self.wake_poller_enabled:
+            self._spawn(self._agent_role_sync_loop())
             self._spawn(
                 run_wake_poller(
                     self.runtime.sessionmaker,
@@ -1447,9 +1473,13 @@ class DaimonBot(commands.Bot):
         # (it short-circuits on message.mention_everyone), which would make the bot
         # reply to every mass ping. message.mentions excludes @everyone/@here and
         # role mentions, so this triggers only on a direct user mention of the bot.
-        bot_mentioned = self.user is not None and any(
+        directly_mentioned = self.user is not None and any(
             user.id == self.user.id for user in message.mentions
         )
+        role_mentions = (
+            message.role_mentions if isinstance(cast(object, message.role_mentions), list) else []
+        )
+        bot_mentioned = directly_mentioned or bool(role_mentions)
         if not should_process_message(
             author_is_bot=message.author.bot,
             author_id=str(message.author.id),
@@ -1523,6 +1553,18 @@ class DaimonBot(commands.Bot):
                 await message.channel.send(_setting_up_message(bot_display_name))
                 return
             # Only 'ready' proceeds.
+            if role_mentions:
+                async with self.runtime.sessionmaker() as session:
+                    managed_roles = await roles_mentioned(
+                        session,
+                        tenant_id=tenant_id,
+                        role_ids=[str(item.id) for item in role_mentions],
+                    )
+                if len(managed_roles) > 1:
+                    await message.channel.send("Name one agent at a time.")
+                    return
+                if not managed_roles and not directly_mentioned:
+                    return
 
             log.info(
                 "mention_received",
@@ -2391,7 +2433,20 @@ class DaimonBot(commands.Bot):
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- D-01 admit(). ---
+        role_mentions = (
+            message.role_mentions if isinstance(cast(object, message.role_mentions), list) else []
+        )
         try:
+            if role_mentions:
+                async with self.runtime.sessionmaker() as session:
+                    selected_roles = await roles_mentioned(
+                        session,
+                        tenant_id=tenant_id,
+                        role_ids=[str(item.id) for item in role_mentions],
+                    )
+            else:
+                selected_roles = []
+            direct_mention = re.search(rf"<@!?{self.user.id}>", message.content)
             admission = await admit(
                 self.runtime.turn_deps,
                 tenant_id=tenant_id,
@@ -2406,7 +2461,14 @@ class DaimonBot(commands.Bot):
                 now=datetime.now(UTC),
                 category_id=category_id,
                 category_unresolved=category_unresolved,
+                requested_agent_id=selected_roles[0].ma_agent_id if selected_roles else None,
+                requested_agent_name=name_after_mention(message.content, direct_mention.group(0))
+                if direct_mention is not None and not selected_roles
+                else None,
             )
+        except NamedAgentRefused as err:
+            await (thread or message.channel).send(str(err))
+            return
         except MissingTurnConfigError as err:
             log.info(
                 "missing_config",
