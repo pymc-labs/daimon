@@ -48,11 +48,6 @@ from daimon.core.authz import (
 )
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.channel_isolation import (
-    routine_destination_channel,
-    routine_destination_place,
-    routine_origin,
-)
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -75,7 +70,7 @@ from daimon.core.ma_resolver import (
 )
 from daimon.core.observability import init_sentry
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
-from daimon.core.permissions import any_confidential, any_pinned
+from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.promo_settlement import settle_promo_credit
 from daimon.core.routine_delivery import (
@@ -84,6 +79,11 @@ from daimon.core.routine_delivery import (
     delivery_target,
     placement_unknown_is_unsafe,
     render_routine_controls,
+)
+from daimon.core.rule_views import (
+    routine_destination_channel,
+    routine_destination_place,
+    routine_origin,
 )
 from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
@@ -284,9 +284,9 @@ async def _build_fire(
                         agent=AgentRef.of(row.agent_name),
                         place=Place(channel_id=target.channel_id if target is not None else None),
                     ).reason
-                    == "agent_pinned_elsewhere"
+                    == "runs_elsewhere"
                 ):
-                    policy_error = "agent_pinned_elsewhere"
+                    policy_error = "runs_elsewhere"
             if policy_error is not None:
                 log.info(
                     "routine.skipped.invoker_policy",
@@ -367,7 +367,9 @@ async def _build_fire(
         # will actually run, by every name a pin can be keyed by, after
         # self-healing may have picked a replacement: the saved routine name
         # alone can miss a pin on the display name or a rename.
-        if fire_policy is not None and (any_pinned(fire_policy) or any_confidential(fire_policy)):
+        if fire_policy is not None and (
+            any_agent_rules(fire_policy) or any_own_readers(fire_policy)
+        ):
             ran = await client.beta.agents.retrieve(resolved_agent_id)
             decision = authorize(
                 fire_policy,

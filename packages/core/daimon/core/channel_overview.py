@@ -1,18 +1,19 @@
-"""One channel's state as one viewer may see it: isolation, seal, protection,
-budget, environment and admins.
+"""One channel's state as one viewer may see it: its rule, budget, environment
+and admins.
 
 A fact is shown only to a viewer who can already learn it through another
 read, and otherwise omitted (None, and missing from `ChannelOverview.shown`),
 never reported as false:
 
-- isolation and admins: server admins and operator tokens reading the tenant
-  (`get_tenant_summary`, `list_channel_admins`), and the deployment operator;
-- seal and protection: the deployment operator, who reads the whole access
-  policy (`daimon channels list`);
+- whether only its own agents run there, and admins: server admins and
+  operator tokens reading the tenant (`get_tenant_summary`,
+  `list_channel_admins`), and the deployment operator;
+- its readers and writers: the deployment operator, who reads the whole
+  access policy (`daimon channels list`);
 - budget: those, and anyone the platform shows the channel to
   (`get_channel_budget`);
 - environment: those, and anyone on the channel's side of every isolation
-  line (`explain_agent_resolution`).
+  channel kept to its own agents (`explain_agent_resolution`).
 
 Everything here is pure but `load_channel_overview`.
 """
@@ -24,9 +25,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import ChannelReaders, ChannelWriters, TenantAccessPolicy
 from daimon.core.channel_budget import ChannelBudgetStatus, get_channel_budget_status
-from daimon.core.permissions import channel_rule, confidential_channel_of
+from daimon.core.permissions import channel_rule, home_of
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins
@@ -34,7 +35,7 @@ from daimon.core.stores.domain import ChannelAdminsRow
 from daimon.core.stores.scoped_config_read import resolve
 from sqlalchemy.ext.asyncio import AsyncSession
 
-OverviewFact = Literal["isolation", "seal", "protection", "budget", "environment", "admins"]
+OverviewFact = Literal["own_agents", "rule", "budget", "environment", "admins"]
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,7 @@ class ChannelViewer:
     sees_channel: bool = False
     """The platform shows the viewer this channel; the caller has checked."""
     inside_channel_id: str | None = None
-    """The isolated channel the viewer stands in (`IsolationViewer.inside_channel_id`)."""
+    """The channel kept to its own agents the viewer stands in (`RuleViewer.inside_channel_id`)."""
 
 
 @dataclass(frozen=True)
@@ -65,9 +66,9 @@ class ChannelOverview:
 
     channel_id: str
     shown: frozenset[OverviewFact]
-    isolated: bool | None = None
-    sealed: bool | None = None
-    protected: bool | None = None
+    own_agents_only: bool | None = None
+    readers: ChannelReaders | None = None
+    writers: ChannelWriters | None = None
     budget: ChannelBudgetStatus | None = None
     environment_name: str | None = None
     admins: ChannelAdminSet | None = None
@@ -80,12 +81,12 @@ def shown_facts(
     wide = viewer.is_server_admin or viewer.reads_access_policy
     facts: set[OverviewFact] = set()
     if wide:
-        facts |= {"isolation", "admins", "budget", "environment"}
+        facts |= {"own_agents", "admins", "budget", "environment"}
     if viewer.reads_access_policy:
-        facts |= {"seal", "protection"}
+        facts.add("rule")
     if viewer.sees_channel:
         facts.add("budget")
-    if confidential_channel_of(policy, channel_id) == viewer.inside_channel_id:
+    if home_of(policy, channel_id) == viewer.inside_channel_id:
         facts.add("environment")
     return frozenset(facts)
 
@@ -105,9 +106,9 @@ def build_channel_overview(
     return ChannelOverview(
         channel_id=channel_id,
         shown=shown,
-        isolated=rule.readers == "own" if "isolation" in shown else None,
-        sealed=rule.readers != "any" if "seal" in shown else None,
-        protected=rule.writers == "none" if "protection" in shown else None,
+        own_agents_only=rule.readers == "own" if "own_agents" in shown else None,
+        readers=rule.readers if "rule" in shown else None,
+        writers=rule.writers if "rule" in shown else None,
         budget=budget if "budget" in shown else None,
         environment_name=environment_name if "environment" in shown else None,
         admins=(

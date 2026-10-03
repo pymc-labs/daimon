@@ -46,10 +46,10 @@ is supported; government and China clouds use other Bot Framework hosts.
   1.25), but adding the app to a team does not add it to these channels: each
   one's owner adds it from the channel.
 - **Group chats** get a short refusal.
-- **Protected channels** (tenant access policy; ids look like
-  `19:…@thread.tacv2`) and their threads get no reply, notice or tool post.
-  One thread is named by adding `;messageid=<root post id>`. In a sealed
-  channel or thread, the agent's memory is read-only.
+- **Channels with `writers: none`** (ids look like `19:…@thread.tacv2`) and
+  their threads get no reply, notice or tool post. One thread is named by
+  adding `;messageid=<root post id>`. Where readers are limited, the agent's
+  memory is read-only. See [permissions.md](permissions.md).
 
 A turn shows one status card, edited in place, with a Cancel button only the
 author can use. The answer replaces the card, split across messages when long,
@@ -66,7 +66,7 @@ Two kinds of people count as from another organisation: a shared channel's
 external participants, who join through B2B direct connect and stay in their
 home tenant, and guests (Entra B2B guest accounts in ours), who can be in
 standard and private channels and 1:1 chats. daimon answers them only inside
-a confidential channel and its threads. Anywhere else an addressed message gets
+a channel kept to its own agents (`readers: own`) and its threads. Anywhere else an addressed message gets
 one line saying so and runs no turn, and their unmentioned replies are never
 judged for a followed thread. Their turns run as a member (never an admin or
 a channel admin, whatever is configured, a grant naming a team they own
@@ -138,14 +138,13 @@ group ID in `role_ids` to admit that team's owners), channel budgets
 work as on Discord and Slack. Who answers where lists each channel's
 environment, and its **Channel settings** dialog changes one channel picked
 there, since the panel lives in the 1:1 chat: its environment (server admins,
-or that channel's admins), and whether it is confidential and its admins by Entra object ID
-(server admins only).
-Confidential channels work as on Discord and Slack, with `set_channel_isolation`,
-`daimon channels isolate` or `--isolated-channel`. A thread (`;messageid=`)
-counts as its channel, and the confidential channel's agents send nothing to 1:1 chats. The
+or that channel's admins), and its permissions (readers and writers) and admins by
+Entra object ID (server admins only). Channel rules work as on Discord and Slack,
+with `set_channel_rule` or `daimon channels rule set`. A thread (`;messageid=`)
+counts as its channel, and a channel's own agents send nothing to 1:1 chats. The
 CLI can't read channel names, so a copy it makes is named from the channel id.
 The setup panel lives in the 1:1 chat, outside every channel, so a member's
-Agents list leaves out each confidential channel's own agents; an admin sees all.
+Agents list leaves out every channel's own agents; an admin sees all.
 
 ### Channel history
 
@@ -195,7 +194,7 @@ status card or Cancel button, and every refusal, notice and error is only
 logged. No turn posts a status message of its own under its answer, as on
 Slack and Discord: what the person must hear rides on the answer, and only
 cards (forms, file offers) are sent besides it. Root posts are never judged, the bot's own and other bots' messages
-are ignored, and protected channels are skipped. Without Graph history (the
+are ignored, and channels with `writers: none` are skipped. Without Graph history (the
 consent above) a followed thread stays mention-only.
 
 ### Files

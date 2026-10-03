@@ -181,7 +181,7 @@ async def test_a_channel_in_a_protected_category_falls_back_to_a_dm(
     channel.send.assert_not_awaited()
     (guild_id, user_id, content) = dms.sent[0]
     assert (guild_id, user_id) == (_GUILD, 1)
-    assert "protected channel" in content and content.endswith("All green @everyone.")
+    assert "lets nobody write there" in content and content.endswith("All green @everyone.")
 
 
 async def test_an_uncached_thread_parent_is_resolved_before_category_protection(

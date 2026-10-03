@@ -540,7 +540,7 @@ async def test_a_channel_admin_may_change_an_agent_local_to_their_channel(
             skill_md=_MD,
         )
 
-    with pytest.raises(ToolError, match="not made for, pinned to or given to"):
+    with pytest.raises(ToolError, match="not made for, limited by its rule to or given to"):
         await add()
     async with db_session_factory.begin() as session:
         await record_creation_channel(

@@ -111,11 +111,17 @@ their snapshots. Selecting a target does not change who answers or routing.
 Use `list_agents` and `get_agent` to find and inspect agents. `create_agent`
 creates one; `fork_agent` makes an editable copy, including a copy of Daimon.
 Forking is admin-only, the copy starts with no repo access, keys or connector
-tokens, and an agent pinned to channels can't be copied. Use `update_agent` for Prompt & model or skill additions. Use `remove_skill`
+tokens, and an agent with a rule (`set_agent_rule`) can't be copied. Use `update_agent` for Prompt & model or skill additions. Use `remove_skill`
 and `detach_mcp_server` for removal, rather than replacing lists through
 `update_agent`. Removing a skill from one agent is different from
 `delete_skill`, which deletes it from the workspace library. `archive_agent`
 and `delete_skill` are admin-only.
+
+Channel and agent rules are admin-only. "Make X the only agent in C and keep
+C isolated" is: `set_agent_default(X, channel_id=C)`, then
+`set_channel_rule(C, readers="own", writers="own")`. Then `set_channel_admins`
+and `set_channel_budget` for C if asked. Publishing from inside such a channel
+asks the requester first.
 
 When creating an agent and no model was requested, use the built-in Daimon's
 model, read through `get_agent`, as the fallback and state that choice.

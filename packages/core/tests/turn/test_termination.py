@@ -282,15 +282,15 @@ _REFUSALS: dict[str, tuple[Callable[[], BaseException | None], TerminationReason
         TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
     ),
     "protected": (
-        lambda: AdmissionDenied(reason="channel_protected"),
+        lambda: AdmissionDenied(reason="writers_none"),
         TerminationReason.ADMISSION_CHANNEL_PROTECTED,
     ),
     "pinned": (
-        lambda: AdmissionDenied(reason="agent_pinned_elsewhere"),
+        lambda: AdmissionDenied(reason="runs_elsewhere"),
         TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE,
     ),
     "isolated": (
-        lambda: AdmissionDenied(reason="channel_isolated"),
+        lambda: AdmissionDenied(reason="own_agents_only"),
         TerminationReason.ADMISSION_CHANNEL_ISOLATED,
     ),
     "invoker_not_allowed": (

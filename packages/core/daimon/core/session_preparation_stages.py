@@ -248,6 +248,7 @@ async def desired_snapshot_for(
     tool_safety: ToolSafetyPolicy,
     public_url: str | None,
     memory_read_only: bool = False,
+    asks_before_publishing: bool = False,
     channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would freeze.
@@ -297,6 +298,7 @@ async def desired_snapshot_for(
         repo_branch=None if binding is None else binding.default_branch,
         memory_store_id=memory_store_id,
         memory_read_only=memory_read_only,
+        asks_before_publishing=asks_before_publishing,
         vault_id=None if recorded is None else recorded.vault_id,
         env_file_id=None if recorded is None else recorded.env_file_id,
         repo_mount_path=None if recorded is None else recorded.repo_mount_path,

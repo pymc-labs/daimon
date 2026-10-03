@@ -16,7 +16,7 @@ from typing import Annotated, cast
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._isolation import load_caller_isolation
+from daimon.adapters.mcp.tools._rule_view import load_caller_view
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.continuity import timers
 from daimon.core.continuity.timers import TimerError
@@ -100,7 +100,7 @@ async def _list_timers_impl(runtime: McpRuntime, auth: AuthIdentity) -> list[Tim
     rows = await timers.list_timers(
         runtime.session_factory, tenant_id=auth.tenant_id, account_id=auth.account_id
     )
-    caller = await load_caller_isolation(runtime, auth)
+    caller = await load_caller_view(runtime, auth)
     return [
         _timer(row)
         for row in rows

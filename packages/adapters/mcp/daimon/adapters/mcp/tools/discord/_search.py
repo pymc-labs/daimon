@@ -29,7 +29,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.permissions import any_sealed
+from daimon.core.permissions import any_readers_limited
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -87,7 +87,7 @@ def _names_a_withheld_thread(hit: _SearchHit, read_policy: ChannelReadPolicy) ->
         return False
     thread_id = hit.message_reference.channel_id if hit.message_reference else None
     if thread_id is None:
-        return any_sealed(read_policy.policy)
+        return any_readers_limited(read_policy.policy)
     return not read_policy.allows(thread_id, hit.channel_id)
 
 
@@ -350,10 +350,10 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         # existence/volume of messages in channels the caller cannot view.
         # Once anything is sealed, a scoped count could include hits in a sealed
         # thread under a scoped parent, so it reports only what is shown too.
-        exact_count = bool(channel_ids) and not any_sealed(read_policy.policy)
+        exact_count = bool(channel_ids) and not any_readers_limited(read_policy.policy)
         effective_total = parsed.total_results if exact_count else showing
         hint: str | None = None
-        if any_sealed(read_policy.policy):
+        if any_readers_limited(read_policy.policy):
             # With anything sealed, the raw total (and a page's raw size) could
             # count withheld hits, so the hint rests on what is shown: a full
             # page of visible rows may have more behind it.

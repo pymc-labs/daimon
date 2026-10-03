@@ -303,8 +303,10 @@ def session_tools(
     *,
     tool_safety: ToolSafetyPolicy,
     public_url: str | None,
+    asks_before_publishing: bool = False,
 ) -> Sequence[MaTool]:
-    """The tools a session for this caller runs: the visible ones, tool safety applied.
+    """The tools a session for this caller runs: the visible ones, tool safety applied,
+    and the publish tools asking first when the turn's agent may not publish freely.
 
     The one definition `create_session`, the bind-time drift check and the
     in-place update all use. Hashing or pushing the agent's raw tools instead
@@ -316,6 +318,7 @@ def session_tools(
         tool_safety,
         [tool.model_dump(mode="json") for tool in visible],
         trusted_servers=trusted_servers_for(public_url),
+        asks_before_publishing=asks_before_publishing,
     )
     return visible if gated is None else _TOOLS.validate_python(gated)
 
@@ -347,6 +350,7 @@ def desired_snapshot(
     vault_id: str | None,
     env_file_id: str | None = None,
     memory_read_only: bool = False,
+    asks_before_publishing: bool = False,
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
@@ -383,7 +387,11 @@ def desired_snapshot(
         vault_id=vault_id,
         tools_sha256=hash_tools(
             session_tools(
-                agent, hidden_mcp_server_names, tool_safety=tool_safety, public_url=public_url
+                agent,
+                hidden_mcp_server_names,
+                tool_safety=tool_safety,
+                public_url=public_url,
+                asks_before_publishing=asks_before_publishing,
             )
         ),
         mcp_servers_sha256=hash_mcp_servers(

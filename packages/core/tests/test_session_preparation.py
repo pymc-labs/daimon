@@ -2442,7 +2442,7 @@ async def test_channel_admin_switch_rechecks_sessions_created_after_snapshot(
                     runtime, auth, origin_context_id=str(origin.id), agent_id="ag_research"
                 )
             except ToolError as error:
-                assert "sealed" in str(error)
+                assert "Only turns inside" in str(error)
                 return False
             return True
 
@@ -2475,7 +2475,7 @@ async def test_channel_admin_switch_rechecks_sessions_created_after_snapshot(
         place=Place.from_origin(parent_channel_id="channel-1", thread_id="thread-1"),
         recorded_seal_ids=frozenset(s for row in fresh for s in row.facts.seal_ids),
     )
-    assert decision.reason == "sealed"
+    assert decision.reason == "not_a_reader"
     assert not outcome, (
         "channel admin uses stale open-session snapshot despite a new recorded sealed session"
     )

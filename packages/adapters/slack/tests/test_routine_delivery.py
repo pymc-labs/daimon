@@ -107,7 +107,7 @@ async def test_a_protected_channel_is_refused(
     assert (outcome.status, outcome.note) == ("delivered", "dm_fallback:protected_channel")
     (call,) = client.chat_postMessage.await_args_list
     assert call.kwargs["channel"] == "D_CREATOR", "the result went to the creator, not C_ANN"
-    assert "protected channel" in call.kwargs["text"]
+    assert "lets nobody write there" in call.kwargs["text"]
 
 
 async def test_a_malformed_thread_destination_is_skipped(

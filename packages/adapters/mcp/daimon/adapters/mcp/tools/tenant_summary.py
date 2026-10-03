@@ -2,8 +2,9 @@
 
 For server admins and operator tokens holding ``tenant:read``, so an
 integration can show a workspace's state without one call per channel. The
-read lives in ``daimon.core.tenant_summary``. A chat turn's isolation keeps
-other isolated channels' agent and environment names from it, as in
+read lives in ``daimon.core.tenant_summary``. A chat turn held to a channel
+kept to its own agents doesn't see other such channels' agent and environment
+names, as in
 ``list_agents`` and ``list_environments``.
 """
 
@@ -18,7 +19,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._isolation import load_caller_isolation
+from daimon.adapters.mcp.tools._rule_view import load_caller_view
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.channel_environments import load_hidden_environment_names
 from daimon.core.errors import StoreError
@@ -28,13 +29,13 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 
-async def _hide_across_isolation(
+async def _hide_across_homes(
     runtime: McpRuntime, auth: AuthIdentity, summary: TenantSummary
 ) -> TenantSummary:
-    """Blank the names the caller's isolation keeps from it; an operator sees all."""
+    """Blank the names the caller's channel keeps from it; an operator sees all."""
     if auth.is_operator:
         return summary
-    caller = await load_caller_isolation(runtime, auth)
+    caller = await load_caller_view(runtime, auth)
     if not caller.is_active:
         return summary
     async with runtime.session_factory() as session:
@@ -68,7 +69,7 @@ async def _get_tenant_summary_impl(runtime: McpRuntime, auth: AuthIdentity) -> T
             raise ToolError("internal: the caller's tenant no longer exists") from exc
         except AccessPolicyUnreadable as exc:
             raise ToolError("the workspace access policy could not be read") from exc
-    return await _hide_across_isolation(runtime, auth, summary)
+    return await _hide_across_homes(runtime, auth, summary)
 
 
 def register_tenant_summary_tools(mcp: FastMCP, runtime: McpRuntime) -> None:

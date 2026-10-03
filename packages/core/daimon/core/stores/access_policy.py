@@ -157,15 +157,11 @@ async def set_access_policy(
     await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     payload = policy.model_dump(mode="json")
-    if not payload.get("agent_channel_pins"):
-        # Leave the key out when nothing is pinned, so a process built before
-        # pins existed still reads the row.
-        payload.pop("agent_channel_pins", None)
-    if not payload.get("isolated_channel_ids"):
-        # Same for isolation, so a rollback to a build without it reads the row.
-        payload.pop("isolated_channel_ids", None)
-    if not payload.get("member_guest_ids"):
-        payload.pop("member_guest_ids", None)
+    # Leave empty keys out, so a build from before them still reads a row
+    # that sets none of them.
+    for key in ("channel_rules", "category_rules", "agent_rules", "member_guest_ids"):
+        if not payload.get(key):
+            payload.pop(key, None)
     await session.execute(
         insert(TenantAccessPolicyRecord)
         .values(tenant_id=tenant_id, policy=payload)

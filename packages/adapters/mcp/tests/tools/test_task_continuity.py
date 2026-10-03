@@ -1044,7 +1044,7 @@ async def test_handoff_refuses_an_agent_pinned_to_other_channels_and_writes_noth
         responder_name="daimon",
         role=Role.ADMIN,
     ) as origin:
-        with pytest.raises(ToolError, match="pinned to other channels"):
+        with pytest.raises(ToolError, match="only runs in other channels"):
             await _hand_off_task_impl(
                 runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
             )
@@ -1199,7 +1199,7 @@ async def test_handoff_from_a_dm_is_outside_every_pin(
         responder_name="daimon",
         role=Role.ADMIN,
     ) as origin:
-        with pytest.raises(ToolError, match="pinned to other channels"):
+        with pytest.raises(ToolError, match="only runs in other channels"):
             await _hand_off_task_impl(
                 runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
             )
@@ -1245,7 +1245,7 @@ async def test_handoff_refuses_an_agent_pinned_by_its_display_name(
         responder_name="daimon",
         role=Role.ADMIN,
     ) as origin:
-        with pytest.raises(ToolError, match="pinned to other channels"):
+        with pytest.raises(ToolError, match="only runs in other channels"):
             await _hand_off_task_impl(
                 runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
             )
@@ -1403,7 +1403,7 @@ async def test_a_channel_admin_hands_the_thread_to_a_defaults_managed_agent(
 @pytest.mark.parametrize(
     ("policy", "channel_admin", "copy"),
     [
-        (TenantAccessPolicy(sealed_channel_ids=("C_PARENT",)), True, "is sealed"),
+        (TenantAccessPolicy(sealed_channel_ids=("C_PARENT",)), True, "Only turns inside"),
         (
             TenantAccessPolicy(protected_channel_ids=("C_PARENT",)),
             True,
@@ -1422,10 +1422,10 @@ async def test_a_channel_admin_hands_the_thread_to_a_defaults_managed_agent(
         (
             TenantAccessPolicy(agent_channel_pins={_DESTINATION_NAME: ("C_ACME",)}),
             True,
-            "pinned to other channels",
+            "only runs in other channels",
         ),
     ],
-    ids=["sealed", "protected", "invoker", "isolated", "pinned-elsewhere"],
+    ids=["inside", "writers-none", "invoker", "own-agents", "runs-elsewhere"],
 )
 async def test_a_switch_the_policy_refuses_writes_nothing(
     db_session: AsyncSession,
@@ -1563,5 +1563,5 @@ async def test_a_policy_refused_handoff_is_audited_as_an_authz_denial(
     assert (decision.operation, decision.denied, decision.reason) == (
         "hand_off",
         True,
-        "authz:agent_pinned_elsewhere",
+        "authz:runs_elsewhere",
     ), "the refusal is audited as the policy's denial, not a tool error"

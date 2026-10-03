@@ -39,7 +39,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
 )
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.permissions import any_sealed
+from daimon.core.permissions import any_readers_limited
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
 from daimon.core.session_seal import inherited_seal_ids, origin_stamp, seal_ids
@@ -227,7 +227,7 @@ async def create_ma_session(
             deps.anthropic,
             predecessor_session_id=predecessor_session_id,
             own_thread_id=admission.origin_thread_id or admission.origin_channel_id,
-            tenant_seals_anything=any_sealed(policy),
+            tenant_seals_anything=any_readers_limited(policy),
         )
     if predecessor_session_id is not None:
         async with deps.sessionmaker() as db:
@@ -263,6 +263,7 @@ async def create_ma_session(
             final_seal != seal
             or current.origin_seal_ids != built.origin_seal_ids
             or current.memory_read_only != built.memory_read_only
+            or current.asks_before_publishing != built.asks_before_publishing
         ):
             raise SessionBusyError(
                 pending_reasons=("seal",),
@@ -287,6 +288,7 @@ async def create_ma_session(
         extra_resources=extra_resources,
         memory_read_only=admission.memory_read_only,
         tool_safety=deps.tool_safety,
+        asks_before_publishing=admission.asks_before_publishing,
         slack_turn_context_id=admission.slack_turn_context_id,
         private_dm_id=admission.private_dm_id,
         budget_channel_id=admission.budget_channel_id,
@@ -539,7 +541,9 @@ async def _decide_reuse_again(
     current = await reauthorize(deps, prepared.admission)
     if current is prepared.admission:
         return prepared
-    if current.memory_read_only and not prepared.admission.memory_read_only:
+    if (current.memory_read_only and not prepared.admission.memory_read_only) or (
+        current.asks_before_publishing and not prepared.admission.asks_before_publishing
+    ):
         raise SessionBusyError(
             pending_reasons=("seal",), retry_after=now() + dt.timedelta(seconds=1)
         )

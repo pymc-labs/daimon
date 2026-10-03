@@ -375,5 +375,5 @@ async def test_an_authorize_refusal_a_tool_raises_is_audited_with_its_reason(
     assert (row.outcome, row.operation, row.reason) == (
         "denied",
         "post",
-        "authz:channel_protected",
+        "authz:writers_none",
     ), f"the refusal is audited as a denial; got {row!r}"

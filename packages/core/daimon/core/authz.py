@@ -1,6 +1,6 @@
 """One decision for who may run, configure, post as, or read through an agent.
 
-The pin, seal, protection, invoker, admin-trust and fork rules are decided
+The channel rule, agent rule, invoker, admin-trust and fork rules are decided
 here, in one pure function, `authorize` (what is still decided elsewhere is
 listed under "Scope today" below). The turn pipeline, the MCP gates, the
 channel tools, the routine and handoff tools and the fork paths describe the
@@ -21,8 +21,8 @@ policy. Two limits to check when adding a rule:
   refreshed there too.
 - Some callers still short-circuit before `authorize`: the hub's admin
   exemption in ``_ctx._policy_gate`` and `require_pin_write_access` for a
-  trusted admin or an unpinned tenant. A rule that must also bind admins or
-  unpinned agents has to remove the matching short-circuit.
+  trusted admin or a tenant without agent rules. A rule that must also bind
+  admins or agents without a rule has to remove the matching short-circuit.
 - Facts derived from the policy alone (`Place.permissions`,
   `AgentRef.permissions`, from `daimon.core.permissions`) are filled in by
   `authorize` itself, so every re-check sees them as the policy is now. Where
@@ -39,98 +39,102 @@ admins, so a grant never counts there.
 
 The rules, in the vocabulary of the formal model (`formal/access_control`):
 
-- **Protection** (`channel_protected`): nothing writes into a protected
-  channel, a thread under one, or a protected Discord category. No admin
-  exemption.
+- **Writers none** (`writers_none`): nothing writes into such a channel, a
+  thread under one, or such a Discord category. No admin exemption.
 - **Invoker allowlist** (`invoker_not_allowed`): when the tenant names who may
   start a turn, only they -- and admins -- may.
-- **Pins** (`agent_pinned_elsewhere`): an agent pinned to channels runs, posts
-  and is configured only from inside them. A pin on ANY name the agent answers
-  to applies (the cascade name, the MA name and the config name), and an empty
-  pin list means "nowhere". A DM or a headless call is outside every pin.
+- **Agent rules** (`runs_elsewhere`): an agent whose rule names channels
+  runs, posts and is configured only from inside them. A rule on ANY name
+  the agent answers to applies (the cascade name, the MA name and the config
+  name), and a rule naming no channel means "nowhere". A DM or a headless
+  call is outside every rule.
 - **Admin trust model**: admins are trusted, so they are exempt where the
   output reaches them alone -- their DM, their own hub turn -- and when they
   configure an agent. In a channel, thread, routine or handoff other members
-  would see the result, so the pin holds for admins too. Who counts as an
-  admin is the caller's trusted signal (`Subject.is_admin`): the live platform
-  role for a platform turn, the stored role for a hub or form caller. Agent
-  keys and tokens with no person behind them are never exempt.
+  would see the result, so the agent rule holds for admins too. Who counts as
+  an admin is the caller's trusted signal (`Subject.is_admin`): the live
+  platform role for a platform turn, the stored role for a hub or form
+  caller. Agent keys and tokens with no person behind them are never exempt.
 - **Channel admins** hold a server admin's rights, limited to the channels
   they administer (`Subject.administered_channel_ids`, from stored grants;
   never `is_admin`). Over an agent they hold them only when it is theirs
   (`channel_admin_holds`): created by a channel admin for one of their
-  channels, pinned by a server admin inside their channels, or made one of
-  their channels' default by a server admin. The first and last also need
-  the agent to stay local to their channels (`daimon.core.agent_reach`),
-  as every admin-level change and default binding by them does. Only the
-  first two let them bind it as their channel's default, since binding is
-  what sets the default. Configuring a pinned agent is theirs when they
-  administer every channel of every pin on it; a pin to no channel stays
-  with server admins. So is minting a coding-tool token for such an agent,
-  always bound to one of their channels inside its pin; an unbound token
-  or an unpinned agent stays with server admins. On their own hub they
-  read any conversation that ran in a channel they administer when every
-  id that sealed it lies there too (the channel, a thread under it, or a
-  Slack ``channel:ts`` under it); never a private DM, an unstamped
-  session, or to continue a sealed one.
-- **Pinned sends**: wherever a pinned agent was admitted, it posts only into
-  its pinned channels (and threads under them) or the requester's own DM,
-  and sends direct messages only to the requester.
+  channels, run only inside their channels by a server admin's agent rule,
+  or made one of their channels' default by a server admin. The first and
+  last also need the agent to stay local to their channels
+  (`daimon.core.agent_reach`), as every admin-level change and default
+  binding by them does. Only the first two let them bind it as their
+  channel's default, since binding is what sets the default. Configuring an
+  agent with a rule is theirs when they administer every channel its rules
+  name; a rule naming no channel stays with server admins. So is minting a
+  coding-tool token for such an agent, always bound to one of their channels
+  inside its rule; an unbound token or an agent without a rule stays with
+  server admins. On their own hub they read any conversation that ran in a
+  channel they administer when every id that limited its readers lies there
+  too (the channel, a thread under it, or a Slack ``channel:ts`` under it);
+  never a private DM, an unstamped session, or to continue a limited one.
+- **Sends under an agent rule**: wherever such an agent was admitted, it
+  posts only into its channels (and threads under them) or the requester's
+  own DM, and sends direct messages only to the requester.
 - **Channel environments**: a server admin picks any channel's environment
   or the workspace default; a channel admin picks the channels they
   administer, except an environment with unrestricted networking in a
-  sealed channel, or one holding a sealed thread (`sealed`).
-- **Channel protection and seals**: a server admin's call, never a channel
+  channel whose readers are limited, or one holding such a thread
+  (`not_a_reader`).
+- **Channel and agent rules**: a server admin's call, never a channel
   admin's, even on a channel they administer.
-- **Archiving an isolation copy**: a server admin's call; which copies may go
-  is `daimon.core.isolation_copies`'s.
+- **Archiving a channel's copy**: a server admin's call; which copies may go
+  is `daimon.core.channel_copies`'s.
 - **Channel budgets**: only a server admin sets, clears or raises a channel's
   budget; a channel admin may not, even for the channels they administer.
-- **Fork**: an admin's call, and a pinned agent can't be copied at all.
-- **Channel default**: nobody makes a pinned agent the default of a channel
-  outside its pin, since it would refuse every turn there. A channel admin
+- **Fork**: an admin's call, and an agent with a rule can't be copied at all.
+- **Channel default**: nobody makes an agent the default of a channel outside
+  its rule, since it would refuse every turn there. A channel admin
   (`Request.reach`) binds by the handoff rule below.
 - **Handoff** (`HAND_OFF`): handing a thread to another agent is starting a
-  turn there as that agent, so protection, the invoker allowlist, the pin and
-  isolation all apply, with no admin exemption. A member may bring in an agent
-  scoped to the channel (the one it answers with, one pinned to it, or one of
-  its own agents when isolated); any other needs a server admin, or a channel
-  admin of the parent channel when neither the place nor any live session in
-  it was sealed and they could bind the agent as its default (`Request.reach`:
-  managed, tenant-wide, or theirs with `binding` and staying in their
-  channels), unless the binding would take it out of another channel admin's
-  channels while it is theirs.
-- **Seals**: a sealed channel, a thread under one, and a session that ran
-  under a seal are readable only from a turn inside every id that sealed it.
-- **Isolation** (`channel_isolated`): an isolated channel C is sealed and
-  its own agents are pinned to C alone (`AgentPermissions.own_channel`). In C
-  (`ChannelPermissions.confidential_channel`) only they run, post, read and get routines or a
-  default binding; a setup thread (`Place.setup_thread`) answers there as the
-  built-in agent. They post nowhere outside C, not even the requester's DM,
-  and send no direct messages or create agents, which would answer outside
-  C. Admins are exempt as for pins: a server admin in their own DM or hub,
-  and a channel admin of C there too. A call whose verified turn origin lies
-  in C is held to C the same way, whatever agent runs it, and only C's own
-  agents read C's sessions. Held to C, a call also reads only C and the
-  sessions that ran in it (`isolation_hold`), so nothing from elsewhere is
-  carried into C; an admin's hub read is exempt, since only they see it. A
-  thread whose parent is unknown (`Place.parent_unresolved`) may lie in C, so
-  it fails closed.
+  turn there as that agent, so writers, the invoker allowlist and both rules
+  apply, with no admin exemption. A member may bring in an agent scoped to
+  the channel (the one it answers with, one whose rule names it, or one of
+  its own agents); any other needs a server admin, or a channel admin of the
+  parent channel when neither the place nor any live session in it had
+  limited readers and they could bind the agent as its default
+  (`Request.reach`: managed, tenant-wide, or theirs with `binding` and
+  staying in their channels), unless the binding would take it out of
+  another channel admin's channels while it is theirs.
+- **Readers** (`not_a_reader`): a channel whose readers are inside, a thread
+  under one, and a session that ran there are readable only from a turn
+  inside every id that limited it.
+- **Own agents** (`own_agents_only`): channel C whose readers are own keeps
+  to its own agents, those whose rule names C alone
+  (`AgentPermissions.home`). In C (`ChannelPermissions.home`) only they run,
+  post, read and get routines or a default binding; a setup thread
+  (`Place.setup_thread`) answers there as the built-in agent. They post
+  nowhere outside C, not even the requester's DM, and send no direct
+  messages or create agents, which would answer outside C; they publish
+  only on the requester's approval (`Request.approved`). Admins are exempt as
+  for agent rules: a server admin in their own DM or hub, and a channel admin
+  of C there too. A call whose verified turn origin lies in C is held to C
+  the same way, whatever agent runs it, and only C's own agents read C's
+  sessions. Held to C, a call also reads only C and the sessions that ran in
+  it (`home_hold`), so nothing from elsewhere is carried into C; an admin's
+  hub read is exempt, since only they see it. A thread whose parent is
+  unknown (`Place.parent_unresolved`) may lie in C, so it fails closed.
 
 Nothing here does I/O: the callers load the policy and resolve the agent,
 and decide again at the moment of action (`daimon.core.turn.admission.reauthorize`
 before a session is built; a fresh policy read before every send, form
 submit and OAuth grant).
 
-Scope today: the pin decisions (turn admission, MCP and hub turns, routine
-save and fire, handoff, configuration writes, form submits and the OAuth
-callback), the caller gates of a platform turn and an MCP turn, pinned sends
-and direct messages, channel and session reads (including the hub's admin
-and channel admin reads and the refusal to continue a sealed conversation),
-fork, channel default binds, channel environment picks, channel protection and
-seal toggles, isolation copy archives, coding-tool token mints, agent
-creation (`CREATE_AGENT`), publishing (`PUBLISH`), the protection of a turn's own notices and of a
-routine's destination (`POST` with no agent), a routine's creator at fire and delivery
+Scope today: the agent rule decisions (turn admission, MCP and hub turns,
+routine save and fire, handoff, configuration writes, form submits and the
+OAuth callback), the caller gates of a platform turn and an MCP turn, sends
+and direct messages under an agent rule, channel and session reads
+(including the hub's admin and channel admin reads and the refusal to
+continue a limited conversation), fork, channel default binds, channel
+environment picks, channel and agent rule changes, channel copy archives,
+coding-tool token mints, agent creation (`CREATE_AGENT`), publishing
+(`PUBLISH`), the writers rule on a turn's own notices and on a routine's
+destination (`POST` with no agent), a routine's creator at fire and delivery
 (`ACT_FOR_CREATOR`), and the shared-agent table (`CHANGE_SHARED_AGENT`, asked by
 `daimon.core.operation_policy`).
 """
@@ -151,20 +155,19 @@ from daimon.core.defaults.metadata import (
 from daimon.core.permissions import (
     AgentPermissions,
     ChannelPermissions,
-    Refusal,
     agent_permissions,
-    any_confidential,
-    any_pinned,
+    any_agent_rules,
+    any_own_readers,
     channel_permissions,
-    crosses_confidential,
+    crosses_home,
     held_to,
-    outside_pins,
-    pinned_names,
+    limited_under,
+    outside_runs_in,
     post_refusal,
     readable_from,
+    ruled_agents,
     run_refusal,
-    sealed_under,
-    session_confidential_channels,
+    session_homes,
     session_readable_from,
 )
 
@@ -172,14 +175,14 @@ from daimon.core.permissions import (
 class Action(StrEnum):
     """What the subject wants to do."""
 
-    # A platform turn's caller gates: protection of the reply target, then the
+    # A platform turn's caller gates: the reply target's writers, then the
     # invoker allowlist. Runs before the agent is known.
     START_TURN = "start_turn"
     # Run a resolved agent here (a turn, a routine fire, a handoff binding).
     RUN_AGENT = "run_agent"
     # Save (create or update) a routine for an agent: RUN_AGENT at the
-    # routine's destination, but only once a non-empty name of the agent is
-    # pinned (an empty name never makes a routine pinned). `Place.channel_id`
+    # routine's destination, but only once a non-empty name of the agent has
+    # a rule (an empty name never gives a routine one). `Place.channel_id`
     # is the destination channel (None for a Discord thread or no
     # destination) and `parent_channel_id` the channel it posts into.
     SAVE_ROUTINE = "save_routine"
@@ -187,7 +190,7 @@ class Action(StrEnum):
     # tools, skills, repo binding.
     CONFIGURE = "configure"
     # Post into a channel, thread or conversation as the executing agent. With
-    # no agent (`AgentRef.none()`) only protection is decided: an adapter's own
+    # no agent (`AgentRef.none()`) only the writers rule is decided: an adapter's own
     # notice around a turn, or a routine's delivery post.
     POST = "post"
     # Run or deliver a routine on its creator's behalf: only while the creator
@@ -200,7 +203,7 @@ class Action(StrEnum):
     CREATE_AGENT = "create_agent"
     # Publish a report, notebook or blog, or change daimon's server-wide
     # identity, from the calling turn: seen outside every channel, so judged as
-    # a post outside them.
+    # a post outside them, unless the requester approved it (`Request.approved`).
     PUBLISH = "publish"
     # Change what a possibly shared agent runs or reaches: a spec edit, an
     # attachment replace/remove, or a posted-token contribution
@@ -218,20 +221,22 @@ class Action(StrEnum):
     # the workspace default). `open_network` says the environment it leaves
     # the channel in has unrestricted networking.
     SET_CHANNEL_ENVIRONMENT = "set_channel_environment"
-    # Protect or seal one channel (`Place.channel_id`), or lift either.
-    SET_CHANNEL_PROTECTION = "set_channel_protection"
-    # Archive the copy an isolated channel was given, as that channel closes.
-    ARCHIVE_ISOLATION_COPY = "archive_isolation_copy"
+    # Set one channel's rule (`Place.channel_id`).
+    SET_CHANNEL_RULE = "set_channel_rule"
+    # Set one agent's rule.
+    SET_AGENT_RULE = "set_agent_rule"
+    # Archive the copy a channel kept to its own agents was given, as it opens.
+    ARCHIVE_CHANNEL_COPY = "archive_channel_copy"
     # Set, clear or raise the budget of one channel (`Place.channel_id`).
     SET_CHANNEL_BUDGET = "set_channel_budget"
     # Add or remove the extra skills one channel's turns run with (`Place.channel_id`).
     SET_CHANNEL_SKILLS = "set_channel_skills"
     # Hand a thread's conversation to another agent (`Place` is the thread).
-    # Protection and the invoker allowlist as START_TURN, then RUN_AGENT on
-    # the handoff surface, then who may bring that agent here: anyone when it
-    # is scoped to this channel (`Request.answers_here`, a pin naming it, or
-    # one of this isolated channel's own agents); otherwise a server admin, or
-    # a channel admin of the parent channel unless the place is sealed.
+    # Writers and the invoker allowlist as START_TURN, then RUN_AGENT on the
+    # handoff surface, then who may bring that agent here: anyone when it is
+    # scoped to this channel (`Request.answers_here`, a rule naming it, or one
+    # of the channel's own agents); otherwise a server admin, or a channel
+    # admin of the parent channel unless the place's readers are limited.
     HAND_OFF = "hand_off"
     # Read a channel's content.
     READ_CHANNEL = "read_channel"
@@ -322,11 +327,10 @@ class Place:
     category_unresolved: bool = False
     own_dm: bool = False
     # A setup conversation's thread: the built-in agent answers it to set the
-    # channel up, so isolation lets it run there.
+    # channel up, so it runs there even in a channel kept to its own agents.
     setup_thread: bool = False
     # A thread whose parent channel isn't known (a routine saved before its
-    # parent was recorded): while anything is isolated it may lie in an
-    # isolated channel.
+    # parent was recorded): while some channel's readers are own it may lie in one.
     parent_unresolved: bool = False
     # What the channel rules say here. Filled in by `authorize` from the
     # policy; never pass it.
@@ -340,7 +344,7 @@ class Place:
 
         A private DM conversation's scope id (``dm:…``) stands in for its
         thread id; a DM runs in no workspace channel, so it is outside every
-        pin, as ``admit(is_dm=True)`` treats it.
+        agent rule, as ``admit(is_dm=True)`` treats it.
         """
         if thread_id is not None and thread_id.startswith(DM_SCOPE_PREFIX):
             return cls()
@@ -359,7 +363,7 @@ class SessionFacts:
     ``private`` marks a DM conversation (the private-DM stamp, a ``dm:``
     scope, a Slack IM or a Teams personal chat), which no one else ever reads.
     ``channel`` / ``thread`` are the stamps it was created with,
-    ``seal_ids`` every id that sealed it, and ``legacy_thread_id`` the thread
+    ``seal_ids`` every id that limited its readers, and ``legacy_thread_id`` the thread
     an unstamped (pre-stamp) session ran on, if any.
     """
 
@@ -414,17 +418,18 @@ class AgentStanding:
 
 
 DenyReason = Literal[
-    "channel_protected",
+    "writers_none",
     "invoker_not_allowed",
-    "agent_pinned_elsewhere",
+    "runs_elsewhere",
     "agent_unresolved",
     "dm_recipient_not_requester",
     "admin_required",
-    "agent_pinned",
-    "sealed",
+    "agent_has_rule",
+    "not_a_reader",
     "not_owner",
     "managed_agent",
-    "channel_isolated",
+    "own_agents_only",
+    "needs_approval",
 ]
 
 
@@ -467,23 +472,26 @@ class Request:
     # HAND_OFF: the channel/workspace cascade already sends this place's
     # parent channel to the agent.
     answers_here: bool = False
-    # HAND_OFF: every id that sealed a live session in the thread, as the
-    # sessions recorded it. A seal lifted since still counts.
+    # HAND_OFF: every id that limited the readers of a live session in the
+    # thread, as the sessions recorded it. A limit lifted since still counts.
     recorded_seal_ids: frozenset[str] = frozenset()
+    # PUBLISH: the requester approved this very call on a card, as the caller
+    # verified (`daimon.core.publish_gate`).
+    approved: bool = False
 
 
-def _outside_pin(agent: AgentRef, place: Place) -> bool:
-    return outside_pins(agent.permissions, place.channel_id, place.parent_channel_id)
+def _outside_rule(agent: AgentRef, place: Place) -> bool:
+    return outside_runs_in(agent.permissions, place.channel_id, place.parent_channel_id)
 
 
-def _pin_administered(
+def _rule_administered(
     policy: TenantAccessPolicy, agent: AgentRef, administered_channel_ids: frozenset[str]
 ) -> bool:
-    """Whether every channel of every pin on any of the agent's names is administered.
+    """Whether every channel the rules on any of the agent's names name is administered.
 
-    False for an unpinned agent and for a pin to no channel, which is nobody's.
+    False for an agent without a rule and for a rule naming no channel, which is nobody's.
     """
-    return agent_permissions(policy, agent.names).pinned_within(administered_channel_ids)
+    return agent_permissions(policy, agent.names).runs_within(administered_channel_ids)
 
 
 def _origin_permissions(req: Request) -> ChannelPermissions | None:
@@ -494,16 +502,9 @@ def _held_to(agent: AgentRef, origin: Place | None) -> str | None:
     return held_to(agent.permissions, origin.permissions if origin is not None else None)
 
 
-_REFUSALS: dict[Refusal, DenyReason] = {
-    "protected": "channel_protected",
-    "pinned_elsewhere": "agent_pinned_elsewhere",
-    "confidential": "channel_isolated",
-}
-
-
-def _isolation_exempt(subject: Subject, agent: AgentRef) -> bool:
-    """A channel admin of the agent's isolated channel, as a server admin is exempt."""
-    own = agent.permissions.own_channel
+def _home_admin(subject: Subject, agent: AgentRef) -> bool:
+    """A channel admin of the agent's home channel, exempt as a server admin is."""
+    own = agent.permissions.home
     return (
         own is not None
         and subject.platform_user_id is not None
@@ -512,30 +513,34 @@ def _isolation_exempt(subject: Subject, agent: AgentRef) -> bool:
     )
 
 
-def holds_seal(policy: TenantAccessPolicy, channel: str, *places: Place | None) -> bool:
-    """Whether `channel`, or a thread under it, is sealed: a Slack ``channel:ts``
-    by its id, a Discord thread only when one of `places` names it as a thread."""
+def holds_limited_readers(policy: TenantAccessPolicy, channel: str, *places: Place | None) -> bool:
+    """Whether `channel`, or a thread under it, has limited readers: a Slack
+    ``channel:ts`` by its id, a Discord thread only when one of `places` names it."""
     threads = [
         at.channel_id
         for at in places
         if at is not None and at.parent_channel_id == channel and at.channel_id is not None
     ]
-    return sealed_under(policy, channel, threads)
+    return limited_under(policy, channel, threads)
 
 
 def _scoped_here(req: Request) -> bool:
     """The agent belongs in this place without anyone's say-so.
 
-    The channel answers with it, a pin names this channel for it, or it is
-    one of this isolated channel's own agents.
+    The channel answers with it, its rule names this channel, or it is one of
+    the channel's own agents.
     """
     agent, place = req.agent, req.place
     if req.answers_here:
         return True
-    if place.channel_id is not None and agent.permissions.pins and not _outside_pin(agent, place):
+    if (
+        place.channel_id is not None
+        and agent.permissions.runs_in
+        and not _outside_rule(agent, place)
+    ):
         return True
-    here = place.permissions.confidential_channel
-    return here is not None and agent.permissions.own_channel == here
+    here = place.permissions.home
+    return here is not None and agent.permissions.home == here
 
 
 def _decide_hand_off(policy: TenantAccessPolicy, req: Request) -> Decision:
@@ -545,7 +550,7 @@ def _decide_hand_off(policy: TenantAccessPolicy, req: Request) -> Decision:
         return started
     if not req.agent.present:
         return _deny("agent_unresolved")
-    # The handoff surface is shared, so no admin exemption from the pin.
+    # The handoff surface is shared, so no admin exemption from the agent rule.
     ran = _decide(policy, replace(req, action=Action.RUN_AGENT, surface=Surface.HANDOFF))
     if not ran:
         return ran
@@ -560,11 +565,11 @@ def _decide_hand_off(policy: TenantAccessPolicy, req: Request) -> Decision:
         and not subject.via_agent_key
         and parent in subject.administered_channel_ids
     ):
-        # Sealed content would reach an agent with its own keys and
-        # connectors: a server admin's call, as for an open network. A
-        # session sealed before an unseal still holds sealed content.
+        # Content with limited readers would reach an agent with its own keys
+        # and connectors: a server admin's call, as for an open network. A
+        # session limited before the limit was lifted still holds that content.
         if place.permissions.readers != "any" or req.recorded_seal_ids:
-            return _deny("sealed")
+            return _deny("not_a_reader")
         # The default-binding rule: answering here would lend another
         # channel's own agent's keys and memory to this channel.
         if _channel_admin_binds(req.reach or AgentReach()):
@@ -581,7 +586,7 @@ def _channel_admin_binds(reach: AgentReach) -> bool:
     return bindable and not reach.held_by_other_admin
 
 
-def _protected(place: Place) -> bool:
+def _writers_none(place: Place) -> bool:
     return place.permissions.writers == "none"
 
 
@@ -589,7 +594,7 @@ def _seal_id_administered(
     seal_id: str, facts: SessionFacts, administered_channel_ids: frozenset[str]
 ) -> bool:
     """An administered channel, the session's own thread under one, or a Slack
-    thread (``channel:ts``) under one. A thread sealed elsewhere has no known parent."""
+    thread (``channel:ts``) under one. A thread limited elsewhere has no known parent."""
     if seal_id in administered_channel_ids:
         return True
     if seal_id == facts.thread and facts.channel in administered_channel_ids:
@@ -600,7 +605,7 @@ def _seal_id_administered(
 
 def _channel_admin_hub_read(subject: Subject, facts: SessionFacts) -> bool:
     """A channel admin's hub read: anyone's conversation that ran in a channel they
-    administer, sealed only by ids that lie there too. Never a private DM or an
+    administer, limited only by ids that lie there too. Never a private DM or an
     unstamped session, which can't be placed."""
     administered = subject.administered_channel_ids
     return (
@@ -651,7 +656,7 @@ def channel_admin_holds(
     """Whether an agent is the subject's to administer as a channel admin.
 
     It is when a channel admin created it for one of their channels, a server
-    admin pinned it inside their channels (`_pin_administered`), or, except
+    admin's rule runs it inside their channels (`_rule_administered`), or, except
     when `binding` it as a default, a server admin made it one of their
     channels' default. Locality is the caller's to add
     (`daimon.core.agent_reach`). Never for an agent key or a token with no
@@ -678,7 +683,7 @@ def agent_held_in(
         return False
     if standing.created_for_channel_id in channel_ids:
         return True
-    if _pin_administered(policy, agent, channel_ids):
+    if _rule_administered(policy, agent, channel_ids):
         return True
     return not binding and not standing.admin_default_channel_ids.isdisjoint(channel_ids)
 
@@ -688,8 +693,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     admin_only_surface = req.surface in _ADMIN_ONLY_SURFACES
 
     if req.action is Action.START_TURN:
-        if _protected(place):
-            return _deny("channel_protected")
+        if _writers_none(place):
+            return _deny("writers_none")
         if subject.platform_user_id is not None and not is_invoker_allowed(
             policy, external_user_id=subject.platform_user_id, is_admin=subject.is_admin
         ):
@@ -711,54 +716,54 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             and not subject.via_agent_key
         ):
             return ALLOW
-        if admin_only_surface and _isolation_exempt(subject, agent):
+        if admin_only_surface and _home_admin(subject, agent):
             return ALLOW
         if not agent.present:
             return ALLOW
         if not agent.resolved:
-            if place.permissions.confidential_channel is not None and not place.setup_thread:
-                return _deny("channel_isolated")
-            return _deny("agent_unresolved") if any_pinned(policy) else ALLOW
+            if place.permissions.home is not None and not place.setup_thread:
+                return _deny("own_agents_only")
+            return _deny("agent_unresolved") if any_agent_rules(policy) else ALLOW
         refusal = run_refusal(agent.permissions, place.permissions, setup_thread=place.setup_thread)
-        return ALLOW if refusal is None else _deny(_REFUSALS[refusal])
+        return ALLOW if refusal is None else _deny(refusal)
 
     if req.action is Action.SAVE_ROUTINE:
-        here = place.permissions.confidential_channel
-        if here is not None and agent.permissions.own_channel != here:
-            return _deny("channel_isolated")
+        here = place.permissions.home
+        if here is not None and agent.permissions.home != here:
+            return _deny("own_agents_only")
         # Saved from inside C: the result stays in C.
-        if req.origin is not None and req.origin.permissions.confidential_channel not in (
+        if req.origin is not None and req.origin.permissions.home not in (
             None,
             here,
         ):
-            return _deny("channel_isolated")
-        pinned = pinned_names(policy)
-        if not any(name in pinned for name in agent.names if name):
+            return _deny("own_agents_only")
+        ruled = ruled_agents(policy)
+        if not any(name in ruled for name in agent.names if name):
             return ALLOW
-        # Straight into a pinned channel: a thread under one is refused, as a
-        # fire can't always tell its parent.
-        if _outside_pin(agent, Place(channel_id=place.channel_id)):
-            return _deny("agent_pinned_elsewhere")
+        # Straight into a channel its rule names: a thread under one is
+        # refused, as a fire can't always tell its parent.
+        if _outside_rule(agent, Place(channel_id=place.channel_id)):
+            return _deny("runs_elsewhere")
         return ALLOW
 
     if req.action is Action.CONFIGURE:
-        if (subject.is_admin and not subject.via_agent_key) or not any_pinned(policy):
+        if (subject.is_admin and not subject.via_agent_key) or not any_agent_rules(policy):
             return ALLOW
         if not agent.resolved:
             return _deny("agent_unresolved")
-        if not subject.via_agent_key and _pin_administered(
+        if not subject.via_agent_key and _rule_administered(
             policy, agent, subject.administered_channel_ids
         ):
             return ALLOW
-        if _outside_pin(agent, place):
-            return _deny("agent_pinned_elsewhere")
+        if _outside_rule(agent, place):
+            return _deny("runs_elsewhere")
         return ALLOW
 
     if req.action is Action.BIND_CHANNEL_DEFAULT:
-        if _outside_pin(agent, place):
-            return _deny("agent_pinned_elsewhere")
-        if agent.present and crosses_confidential(agent.permissions, place.permissions):
-            return _deny("channel_isolated")
+        if _outside_rule(agent, place):
+            return _deny("runs_elsewhere")
+        if agent.present and crosses_home(agent.permissions, place.permissions):
+            return _deny("own_agents_only")
         # A channel admin's binding carries `reach`; the handoff rule decides it.
         if req.reach is not None and not _channel_admin_binds(req.reach):
             return _deny("admin_required")
@@ -770,21 +775,20 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         channel = place.parent_channel_id or place.channel_id
         if subject.via_agent_key or channel not in subject.administered_channel_ids:
             return _deny("admin_required")
-        # A sealed channel's content must not leave through an open network
+        # Content with limited readers must not leave through an open network
         # that the channel admin chose; that is a server admin's call. The
-        # environment covers every thread under the channel, so a sealed one counts.
-        if req.open_network and holds_seal(policy, channel, place, req.origin):
-            return _deny("sealed")
+        # environment covers every thread under the channel, so a limited one counts.
+        if req.open_network and holds_limited_readers(policy, channel, place, req.origin):
+            return _deny("not_a_reader")
         return ALLOW
 
-    if req.action is Action.ARCHIVE_ISOLATION_COPY:
-        if subject.is_admin and not subject.via_agent_key:
-            return ALLOW
-        return _deny("admin_required")
-
-    if req.action is Action.SET_CHANNEL_PROTECTION:
-        # Protection and seals guard what a server admin owns, so a channel
-        # admin changes neither, even on their own channel.
+    if req.action in (
+        Action.ARCHIVE_CHANNEL_COPY,
+        Action.SET_CHANNEL_RULE,
+        Action.SET_AGENT_RULE,
+    ):
+        # The rules guard what a server admin owns, so a channel admin changes
+        # none, even on their own channel.
         if subject.is_admin and not subject.via_agent_key:
             return ALLOW
         return _deny("admin_required")
@@ -798,23 +802,23 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         if subject.is_admin and not subject.via_agent_key:
             return ALLOW
         # A channel admin's token is always bound, to a channel they administer
-        # inside a pin they administer wholly; an unpinned agent may answer anywhere.
+        # inside a rule they administer wholly; an agent without one answers anywhere.
         administered = subject.administered_channel_ids
         if subject.via_agent_key or place.channel_id not in administered:
             return _deny("admin_required")
         if not agent.resolved:
             return _deny("agent_unresolved")
-        if not agent.permissions.pins:
+        if not agent.permissions.runs_in:
             return _deny("admin_required")
-        if not _pin_administered(policy, agent, administered) or _outside_pin(agent, place):
-            return _deny("agent_pinned_elsewhere")
+        if not _rule_administered(policy, agent, administered) or _outside_rule(agent, place):
+            return _deny("runs_elsewhere")
         return ALLOW
 
     if req.action is Action.POST:
         # A caller with no agent (the CLI, an operator token) is input: only
-        # protection stops it.
+        # the writers rule stops it.
         if not agent.present:
-            return _deny("channel_protected") if _protected(place) else ALLOW
+            return _deny("writers_none") if _writers_none(place) else ALLOW
         origin = req.origin
         refusal = post_refusal(
             agent.permissions,
@@ -822,23 +826,23 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             origin.permissions if origin is not None else None,
             setup_origin=origin is not None and origin.setup_thread,
         )
-        if refusal == "protected":
-            return _deny("channel_protected")
-        if refusal == "confidential":
-            return _deny("channel_isolated" if agent.resolved else "agent_unresolved")
-        if place.own_dm or not any_pinned(policy):
+        if refusal == "writers_none":
+            return _deny("writers_none")
+        if refusal == "own_agents_only":
+            return _deny("own_agents_only" if agent.resolved else "agent_unresolved")
+        if place.own_dm or not any_agent_rules(policy):
             return ALLOW
         if not agent.resolved:
             return _deny("agent_unresolved")
-        return ALLOW if refusal is None else _deny(_REFUSALS[refusal])
+        return ALLOW if refusal is None else _deny(refusal)
 
     if req.action is Action.DIRECT_MESSAGE:
         if not agent.present:
             return ALLOW
         recipients = agent.permissions.direct_messages(_origin_permissions(req))
         if recipients == "none":
-            return _deny("channel_isolated")
-        if not any_pinned(policy):
+            return _deny("own_agents_only")
+        if not any_agent_rules(policy):
             return ALLOW
         if not agent.resolved:
             return _deny("agent_unresolved")
@@ -849,21 +853,21 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.action is Action.CREATE_AGENT:
         # A new agent is nobody's own: what a call held to C wrote into it would
         # answer outside C. An unresolved agent may be C's own, so it fails closed.
-        if not agent.resolved and any_confidential(policy):
+        if not agent.resolved and any_own_readers(policy):
             return _deny("agent_unresolved")
         if not agent.permissions.creates_agents(_origin_permissions(req)):
-            return _deny("channel_isolated")
+            return _deny("own_agents_only")
         return ALLOW
 
     if req.action is Action.PUBLISH:
-        # Refused wherever a post outside the channel is, admins included: a
-        # link is read by whoever holds it, never only the acting admin.
-        if not agent.resolved and (any_pinned(policy) or any_confidential(policy)):
+        # Wherever a post outside the channel is refused, admins included, the
+        # requester's own approval is needed: a link is read by whoever holds
+        # it, never only the acting admin.
+        if not agent.resolved and (any_agent_rules(policy) or any_own_readers(policy)):
             return _deny("agent_unresolved")
-        if not agent.permissions.publishes(_origin_permissions(req)):
-            held = _held_to(agent, req.origin) is not None
-            return _deny("channel_isolated" if held else "agent_pinned")
-        return ALLOW
+        if agent.permissions.publishes(_origin_permissions(req)) or req.approved:
+            return ALLOW
+        return _deny("needs_approval")
 
     if req.action is Action.CHANGE_SHARED_AGENT:
         return _decide_shared_agent_change(req)
@@ -875,36 +879,36 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         if not subject.is_admin or subject.via_agent_key:
             return _deny("admin_required")
         if not agent.permissions.may_be_copied:
-            return _deny("agent_pinned")
+            return _deny("agent_has_rule")
         return ALLOW
 
     if req.action is Action.READ_CHANNEL:
         # Held to C, a read stays in C as a post does: nothing read elsewhere,
         # a prompt injected in C included, can be carried back into C.
         held = _held_to(agent, req.origin) if agent.present else None
-        if held is not None and place.permissions.confidential_channel != held:
-            return _deny("channel_isolated")
+        if held is not None and place.permissions.home != held:
+            return _deny("own_agents_only")
         if place.channel_id is None:
             return ALLOW
         if not readable_from(
             policy, req.origin_channel_ids, place.channel_id, place.parent_channel_id
         ):
-            return _deny("sealed")
+            return _deny("not_a_reader")
         if (
-            place.permissions.confidential_channel is not None
+            place.permissions.home is not None
             and agent.present
-            and agent.permissions.own_channel != place.permissions.confidential_channel
+            and agent.permissions.home != place.permissions.home
         ):
-            return _deny("channel_isolated")
+            return _deny("own_agents_only")
         return ALLOW
 
     # Action.READ_SESSION / Action.CONTINUE_SESSION
     facts = req.session or SessionFacts()
     # Admins are trusted to READ any channel conversation of the agent from
-    # their own hub session, sealed or not, anyone's -- never another
+    # their own hub session, limited or not, anyone's -- never another
     # person's private DM, and never to continue it (a follow-up would join
     # the channel's session). Their own sessions, DMs included, are read
-    # without the seal filter: ownership was already proven by the caller.
+    # without the readers filter: ownership was already proven by the caller.
     # A channel admin holds the same read for their channels.
     hub_read = req.action is Action.READ_SESSION and req.surface is Surface.HUB
     admin_hub_read = (
@@ -931,18 +935,18 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         seal_ids=facts.seal_ids,
         legacy_thread_id=facts.legacy_thread_id,
     ):
-        return _deny("sealed")
-    lies_in = session_confidential_channels(
+        return _deny("not_a_reader")
+    lies_in = session_homes(
         policy, channel=facts.channel, thread=facts.thread, seal_ids=facts.seal_ids
     )
     # Held to C, only a session that ran in C is read, as for READ_CHANNEL.
     held = _held_to(agent, req.origin) if agent.present else None
     if held is not None and held not in lies_in:
-        return _deny("channel_isolated")
+        return _deny("own_agents_only")
     # Only C's own agents read what was said in C, even from a turn inside it
     # (the built-in answering C's setup thread is not one of them).
-    if any(channel != agent.permissions.own_channel for channel in lies_in):
-        return _deny("channel_isolated")
+    if any(channel != agent.permissions.home for channel in lies_in):
+        return _deny("own_agents_only")
     return ALLOW
 
 
@@ -950,12 +954,12 @@ _READER_SUFFIX = "-reader"
 
 
 def agent_names(name: str | None, metadata: Mapping[str, str]) -> tuple[str | None, ...]:
-    """Every name a pin on an agent may be keyed by: its MA name and its config name.
+    """Every name an agent rule may be keyed by: its MA name and its config name.
 
     A published report's reader variant answers as its source agent, so it
     also carries the source's names (stamped as `daimon_reader_source`; a
     reader written before that stamp falls back to its name without the
-    ``-reader`` suffix): a pin on the source holds for its reader.
+    ``-reader`` suffix): a rule on the source holds for its reader.
     """
     config_name = metadata.get(MA_METADATA_KEY_NAME)
     names: list[str | None] = [name, config_name]
@@ -1033,12 +1037,13 @@ def _placed(policy: TenantAccessPolicy, at: Place) -> Place:
     )
 
 
-def isolation_hold(policy: TenantAccessPolicy, agent: AgentRef, origin: Place | None) -> str | None:
-    """The confidential channel a call's reads and posts are held to
-    (`daimon.core.permissions.held_to`); None when it is held nowhere. Pure.
+def home_hold(policy: TenantAccessPolicy, agent: AgentRef, origin: Place | None) -> str | None:
+    """The channel kept to its own agents that a call's reads and posts are held
+    to (`daimon.core.permissions.held_to`); None when it is held nowhere. Pure.
 
-    The rule `READ_CHANNEL` applies; a channel list asks it directly, since a
-    sealed channel's name may be listed where its messages may not be read.
+    The rule `READ_CHANNEL` applies; a channel list asks it directly, since the
+    name of a channel with limited readers may be listed where its messages
+    may not be read.
     """
     if not agent.present:
         return None
@@ -1063,6 +1068,7 @@ def authorize(
     open_network: bool = False,
     answers_here: bool = False,
     recorded_seal_ids: frozenset[str] = frozenset(),
+    approved: bool = False,
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
     agent = agent if agent is not None else AgentRef.none()
@@ -1085,6 +1091,7 @@ def authorize(
             open_network=open_network,
             answers_here=answers_here,
             recorded_seal_ids=recorded_seal_ids,
+            approved=approved,
         ),
     )
 
@@ -1110,6 +1117,6 @@ __all__ = [
     "build_subject",
     "build_turn_place",
     "channel_admin_holds",
-    "holds_seal",
-    "isolation_hold",
+    "holds_limited_readers",
+    "home_hold",
 ]

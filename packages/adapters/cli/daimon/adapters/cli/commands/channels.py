@@ -1,9 +1,10 @@
-"""daimon channels ... sub-app: per-channel budgets, admins, skills, isolation and protection."""
+"""daimon channels ... sub-app: per-channel budgets, admins, skills and rules."""
 
 from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable, Iterable
 from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -25,8 +26,16 @@ from daimon.core.channel_budget import (
     load_budget_status,
     parse_budget_spec,
 )
-from daimon.core.channel_isolation_setup import set_channel_isolation
-from daimon.core.channel_protection import ChannelProtectionRefused, set_channel_protection
+from daimon.core.channel_rules import (
+    READERS_LABELS,
+    WRITERS_LABELS,
+    ChannelRuleRefused,
+    as_readers,
+    as_writers,
+    set_agent_rule,
+    set_category_rule,
+    set_channel_rule,
+)
 from daimon.core.channel_skills import REFUSALS as CHANNEL_SKILL_REFUSALS
 from daimon.core.channel_skills import add_skill_to_channel
 from daimon.core.config import load_settings
@@ -52,7 +61,7 @@ from rich.markup import escape
 from sqlalchemy.ext.asyncio import AsyncSession
 
 channels_app = typer.Typer(
-    help="Channels: a summary, spend budgets, channel admins, confidential channels and protection."
+    help="Channels: a summary, spend budgets, channel admins, skills and rules."
 )
 budget_app = typer.Typer(
     help="A channel's spend budget: new turns there stop once its spend reaches the limit."
@@ -66,8 +75,9 @@ skills_app = typer.Typer(
     help="A channel's extra skills: added to whatever agent answers there, there only."
 )
 channels_app.add_typer(skills_app, name="skills")
-isolation_app = typer.Typer(help="Mark a channel confidential with its own agent, or unmark it.")
-channels_app.add_typer(isolation_app, name="isolation")
+rule_app = typer.Typer(help="A channel's rule: who can read it and who can post there.")
+channels_app.add_typer(rule_app, name="rule")
+agent_rule_app = typer.Typer(help="An agent's rule: which channels it runs in.")
 
 _PLATFORMS = ("discord", "slack", "teams")
 _CHANNEL_HELP = "Channel id; a thread budgets against its parent channel."
@@ -76,23 +86,6 @@ _DISCORD_API = "https://discord.com/api/v10"
 _DISCORD_THREAD_TYPES = frozenset({10, 11, 12})
 _DISCORD_MISSING = frozenset({403, 404})  # the bot cannot see the channel, or it is gone
 _SLACK_CONVERSATIONS_INFO = "https://slack.com/api/conversations.info"
-
-
-@isolation_app.command("set")
-def isolation_set_command(
-    platform: str,
-    workspace_id: str,
-    channel_id: str,
-    fork_from: Annotated[str | None, typer.Option("--fork-from")] = None,
-) -> None:
-    """Alias of `channels isolate`: seal a channel and mark it confidential, copying --fork-from."""
-    _run_isolate(platform, workspace_id, channel_id, fork_from=fork_from)
-
-
-@isolation_app.command("lift")
-def isolation_lift_command(platform: str, workspace_id: str, channel_id: str) -> None:
-    """Alias of `channels isolate --end --lift-seal-and-pins`."""
-    _run_isolate(platform, workspace_id, channel_id, end=True, lift_seal_and_pins=True)
 
 
 class BudgetListing(BaseModel):
@@ -402,7 +395,7 @@ class ChannelListing(BaseModel):
     channel_id: str
     agent: str | None
     environment: str | None
-    isolated: bool
+    own_agents_only: bool
     admins: str
     budget: str
 
@@ -414,7 +407,7 @@ def _listing(channel: ChannelSummary) -> ChannelListing:
         channel_id=channel.channel_id,
         agent=channel.agent_name,
         environment=channel.environment_name,
-        isolated=channel.isolated,
+        own_agents_only=channel.own_agents_only,
         admins=", ".join(admins),
         budget=f"${budget.spent_usd} of ${budget.limit_usd} ({budget.window})" if budget else "",
     )
@@ -446,7 +439,7 @@ async def channels_list(
     *, rt: CliRuntime, console: Console, platform: str, workspace_id: str, as_json: bool
 ) -> None:
     """The CLI twin of the MCP `get_tenant_summary` tool: the same JSON plus each channel's
-    `sealed` and `protected`."""
+    `readers` and `writers`."""
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     async with rt.sessionmaker() as session:
         # An operator reads the whole access policy anyway (`tenants access-policy get`).
@@ -812,63 +805,6 @@ async def _audit_skill_change(
     )
 
 
-@channels_app.command("isolate")
-def channels_isolate_command(
-    platform: str,
-    workspace_id: str,
-    channel_id: Annotated[str, typer.Argument(help="The channel's id, never a thread's.")],
-    fork_from: Annotated[
-        str | None,
-        typer.Option(
-            "--fork-from",
-            help="Copy this agent, without credentials, as the channel's own when it has none.",
-        ),
-    ] = None,
-    end: Annotated[
-        bool, typer.Option("--end", help="Unmark it confidential; the seal and pins stay.")
-    ] = False,
-    lift_seal_and_pins: Annotated[
-        bool, typer.Option("--lift-seal-and-pins", help="With --end, lift the seal and pins too.")
-    ] = False,
-) -> None:
-    """Mark a channel confidential: seal it and pin its default agent to it alone, in one write."""
-    _run_isolate(
-        platform,
-        workspace_id,
-        channel_id,
-        fork_from=fork_from,
-        end=end,
-        lift_seal_and_pins=lift_seal_and_pins,
-    )
-
-
-def _run_isolate(
-    platform: str,
-    workspace_id: str,
-    channel_id: str,
-    *,
-    fork_from: str | None = None,
-    end: bool = False,
-    lift_seal_and_pins: bool = False,
-) -> None:
-    console = Console(highlight=False)
-
-    async def _run() -> None:
-        async with build_runtime(load_settings()) as rt:
-            await channels_isolate(
-                rt=rt,
-                console=console,
-                platform=platform,
-                workspace_id=workspace_id,
-                channel_id=channel_id,
-                fork_from=fork_from,
-                end=end,
-                lift_seal_and_pins=lift_seal_and_pins,
-            )
-
-    run_cli(_run(), console=console)
-
-
 async def _channel_label(
     rt: CliRuntime,
     *,
@@ -879,7 +815,7 @@ async def _channel_label(
     slack_transport: httpx.AsyncBaseTransport | None,
 ) -> str | None:
     """The channel's name, to name a copied agent after; None when it can't be
-    read, as `set_channel_isolation` the tool does. The CLI holds no Teams Graph
+    read, as `set_channel_rule` the tool does. The CLI holds no Teams Graph
     access, so a Teams copy is named from the channel id."""
     if platform == "teams":
         return None
@@ -930,26 +866,116 @@ async def _fetch_slack_channel_name(
     return name if isinstance(name, str) else None
 
 
-async def channels_isolate(
+@rule_app.command("set")
+def channels_rule_set_command(
+    platform: str,
+    workspace_id: str,
+    channel_id: Annotated[
+        str, typer.Argument(help="The channel's id; a thread names its channel.")
+    ],
+    readers: Annotated[
+        str | None,
+        typer.Option(
+            help=(
+                "any; inside: only turns in the channel read it; own: also keep it to its "
+                "own agents, its default agent becoming one."
+            )
+        ),
+    ] = None,
+    writers: Annotated[
+        str | None,
+        typer.Option(help="any; own (with readers own); none: nothing posts there."),
+    ] = None,
+    copy_from: Annotated[
+        str | None,
+        typer.Option(
+            "--copy-from",
+            help="With readers own: copy this agent, without credentials, as the channel's "
+            "own when it has none.",
+        ),
+    ] = None,
+    release_agents: Annotated[
+        bool,
+        typer.Option("--release-agents", help="Drop the rules of the agents kept to the channel."),
+    ] = False,
+    category: Annotated[
+        bool,
+        typer.Option("--category", help="CHANNEL_ID is a Discord category; only --writers."),
+    ] = False,
+) -> None:
+    """Set who can read a channel and who can post there; a value left out is kept."""
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            await channels_rule_set(
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace_id=workspace_id,
+                channel_id=channel_id,
+                readers=readers,
+                writers=writers,
+                copy_from=copy_from,
+                release_agents=release_agents,
+                category=category,
+            )
+
+    run_cli(_run(), console=console)
+
+
+def _choice[T: str](
+    flag: str, value: str | None, parse: Callable[[object], T | None], choices: Iterable[str]
+) -> T | None:
+    if value is None:
+        return None
+    if (choice := parse(value)) is not None:
+        return choice
+    raise typer.BadParameter(f"{flag}: expected one of {', '.join(choices)}, got {value!r}")
+
+
+async def channels_rule_set(
     *,
     rt: CliRuntime,
     console: Console,
     platform: str,
     workspace_id: str,
     channel_id: str,
-    fork_from: str | None = None,
-    end: bool = False,
-    lift_seal_and_pins: bool = False,
+    readers: str | None = None,
+    writers: str | None = None,
+    copy_from: str | None = None,
+    release_agents: bool = False,
+    category: bool = False,
     discord_transport: httpx.AsyncBaseTransport | None = None,
     slack_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
     _validate_platform(platform)
-    if end and fork_from is not None:
-        raise typer.BadParameter("--fork-from only applies when marking a channel confidential")
-    if lift_seal_and_pins and not end:
-        raise typer.BadParameter("--lift-seal-and-pins only applies with --end")
-    channel, _, _ = _ids(platform, channel_id, roles=[], users=[])
+    wanted_readers = _choice("--readers", readers, as_readers, READERS_LABELS)
+    wanted_writers = _choice("--writers", writers, as_writers, WRITERS_LABELS)
+    if wanted_readers is None and wanted_writers is None and not release_agents:
+        raise typer.BadParameter("pass --readers, --writers or --release-agents")
+    if category and (platform != "discord" or readers or copy_from or release_agents):
+        raise typer.BadParameter("--category is a Discord category, and takes only --writers")
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+    where = f"{platform}:{workspace_id} {'category' if category else 'channel'}"
+    # The CLI is the deployment operator.
+    subject = Subject(is_admin=True)
+    if category:
+        try:
+            changed = await set_category_rule(
+                rt.sessionmaker,
+                tenant_id=tenant_id,
+                category_id=channel_id.strip(),
+                writers=wanted_writers or "any",
+                subject=subject,
+            )
+        except ChannelRuleRefused as exc:
+            console.print(f"[red]{escape(str(exc))} Nothing was changed.[/red]")
+            raise typer.Exit(1) from exc
+        status = "now" if changed else "already"
+        console.print(f"{where} {channel_id.strip()}: {status} writers {wanted_writers}.")
+        return
+    channel, _, _ = _ids(platform, channel_id, roles=[], users=[])
     label = (
         await _channel_label(
             rt,
@@ -959,113 +985,106 @@ async def channels_isolate(
             discord_transport=discord_transport,
             slack_transport=slack_transport,
         )
-        if fork_from is not None
+        if copy_from is not None
         else None
     )
-    public_url = rt.settings.mcp.public_url if fork_from is not None else None
-    change = await set_channel_isolation(
-        rt.anthropic,
-        rt.sessionmaker,
-        tenant_id=tenant_id,
-        platform=platform,
-        channel_id=channel,
-        isolated=not end,
-        default=rt.deployment_default,
-        actor_account_id=None,
-        channel_label=label,
-        fork=fork_from is not None,
-        fork_from=fork_from,
-        public_url=str(public_url) if public_url is not None else None,
-        drop_seal_and_pins=lift_seal_and_pins,
-        # The CLI is the deployment operator.
-        subject=Subject(is_admin=True),
+    public_url = rt.settings.mcp.public_url if copy_from is not None else None
+    try:
+        change = await set_channel_rule(
+            rt.anthropic,
+            rt.sessionmaker,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel,
+            readers=wanted_readers,
+            writers=wanted_writers,
+            subject=subject,
+            default=rt.deployment_default,
+            copy=copy_from is not None,
+            copy_from=copy_from,
+            channel_label=label,
+            public_url=str(public_url) if public_url is not None else None,
+            release_agents=release_agents,
+        )
+    except ChannelRuleRefused as exc:
+        console.print(f"[red]{escape(str(exc))} Nothing was changed.[/red]")
+        raise typer.Exit(1) from exc
+    status = "now" if change.changed else "already"
+    console.print(
+        f"{where} {channel}: {status} readers {change.rule.readers}, writers {change.rule.writers}."
     )
-    where = f"{platform}:{workspace_id} channel {channel}"
-    if not change.isolated:
-        status = "no longer confidential" if change.changed else "was not confidential"
-        console.print(f"{where}: {status}. {change.end_warning}")
-        return
-    copied = f", copied from {change.forked_from}" if change.forked_from else ""
-    status = "marked confidential" if change.changed else "already confidential"
-    console.print(f"{where}: {status}; its own agent is {change.agent_name}{copied}.")
-    for note in (change.dropped_skills_note, change.network_warning):
-        if note:
-            console.print(f"[yellow]{escape(note)}[/yellow]")
+    for note in change.notes[1:]:
+        console.print(f"[yellow]{escape(note)}[/yellow]")
 
 
-@channels_app.command("protect")
-def channels_protect_command(
+@agent_rule_app.command("set")
+def agents_rule_set_command(
     platform: str,
     workspace_id: str,
-    channel_id: Annotated[
-        str, typer.Argument(help="The channel's id; a thread names its channel.")
-    ],
-    protect: Annotated[
-        bool | None,
-        typer.Option("--protect/--unprotect", help="Stop, or allow again, every post there."),
+    agent_name: str,
+    runs_in: Annotated[
+        list[str] | None,
+        typer.Option("--runs-in", help="A channel it runs in, with its threads (repeatable)."),
     ] = None,
-    seal: Annotated[
-        bool | None,
-        typer.Option(
-            "--seal/--unseal", help="Make its content readable only from inside it, or lift that."
-        ),
-    ] = None,
+    anywhere: Annotated[
+        bool, typer.Option("--anywhere", help="Drop its rule: it runs wherever it answers.")
+    ] = False,
+    nowhere: Annotated[bool, typer.Option("--nowhere", help="It runs nowhere.")] = False,
 ) -> None:
-    """Protect or seal one channel, or lift either; a confidential channel stays sealed."""
+    """Set which channels an agent runs in. An agent with a rule messages only
+    whoever asked, asks before publishing and can't be copied."""
     console = Console(highlight=False)
 
     async def _run() -> None:
         async with build_runtime(load_settings()) as rt:
-            await channels_protect(
+            await agents_rule_set(
                 rt=rt,
                 console=console,
                 platform=platform,
                 workspace_id=workspace_id,
-                channel_id=channel_id,
-                protect=protect,
-                seal=seal,
+                agent_name=agent_name,
+                runs_in=runs_in,
+                anywhere=anywhere,
+                nowhere=nowhere,
             )
 
     run_cli(_run(), console=console)
 
 
-async def channels_protect(
+async def agents_rule_set(
     *,
     rt: CliRuntime,
     console: Console,
     platform: str,
     workspace_id: str,
-    channel_id: str,
-    protect: bool | None,
-    seal: bool | None,
+    agent_name: str,
+    runs_in: list[str] | None = None,
+    anywhere: bool = False,
+    nowhere: bool = False,
 ) -> None:
-    _validate_platform(platform)
-    if protect is None and seal is None:
-        raise typer.BadParameter("pass --protect/--unprotect, --seal/--unseal or both")
-    channel, _, _ = _ids(platform, channel_id, roles=[], users=[])
+    if (runs_in is not None) + anywhere + nowhere != 1:
+        raise typer.BadParameter("pass --runs-in, --anywhere or --nowhere")
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+    channels = (
+        [_ids(platform, channel, roles=[], users=[])[0] for channel in runs_in]
+        if runs_in is not None
+        else None
+        if anywhere
+        else []
+    )
     try:
-        change = await set_channel_protection(
+        change = await set_agent_rule(
             rt.anthropic,
             rt.sessionmaker,
             tenant_id=tenant_id,
-            channel_id=channel,
-            protected=protect,
-            sealed=seal,
+            platform=platform,
+            agent_name=agent_name.strip(),
+            runs_in=channels,
             # The CLI is the deployment operator.
             subject=Subject(is_admin=True),
             default=rt.deployment_default,
         )
-    except ChannelProtectionRefused as exc:
+    except ChannelRuleRefused as exc:
         console.print(f"[red]{escape(str(exc))} Nothing was changed.[/red]")
         raise typer.Exit(1) from exc
-    state = ", ".join(
-        [
-            "protected" if change.protected else "not protected",
-            "sealed" if change.sealed else "not sealed",
-        ]
-    )
-    status = "now" if change.changed else "already"
-    console.print(f"{platform}:{workspace_id} channel {channel}: {status} {state}.")
-    if change.network_warning:
-        console.print(f"[yellow]{escape(change.network_warning)}[/yellow]")
+    console.print(f"{platform}:{workspace_id} {escape(' '.join(change.notes))}")

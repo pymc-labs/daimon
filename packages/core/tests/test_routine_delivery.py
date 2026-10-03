@@ -426,7 +426,7 @@ async def test_clear_creator_returns_the_policy_or_why_not(
 
     cleared = await clear_creator(db_session_factory, row, platform="discord")
     assert isinstance(cleared, TenantAccessPolicy)
-    assert cleared.protected_category_ids == ("CAT",)
+    assert {c: r.writers for c, r in cleared.category_rules.items()} == {"CAT": "none"}
 
     await set_access_policy(
         db_session, tenant_id=row.tenant_id, policy=TenantAccessPolicy(invoker_user_ids=("U9",))

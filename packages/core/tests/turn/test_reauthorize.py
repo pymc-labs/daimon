@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import AdmissionDenied, admit, reauthorize
@@ -67,7 +67,7 @@ async def test_a_pin_added_after_admission_refuses_the_session(
 
     with pytest.raises(AdmissionDenied) as exc_info:
         await reauthorize(deps, admission)
-    assert exc_info.value.reason == "agent_pinned_elsewhere"
+    assert exc_info.value.reason == "runs_elsewhere"
 
 
 async def test_a_channel_protected_after_admission_refuses_the_session(
@@ -82,7 +82,7 @@ async def test_a_channel_protected_after_admission_refuses_the_session(
 
     with pytest.raises(AdmissionDenied) as exc_info:
         await reauthorize(deps, admission)
-    assert exc_info.value.reason == "channel_protected"
+    assert exc_info.value.reason == "writers_none"
 
 
 async def test_an_invoker_removed_after_admission_is_refused(
@@ -230,7 +230,7 @@ async def test_an_isolation_added_after_admission_refuses_a_shared_agent(
 
     with pytest.raises(AdmissionDenied) as exc_info:
         await reauthorize(deps, admission)
-    assert exc_info.value.reason == "channel_isolated"
+    assert exc_info.value.reason == "own_agents_only"
 
 
 async def test_an_isolated_channels_own_agent_keeps_its_memory_writable(
@@ -265,7 +265,11 @@ async def test_an_external_participant_is_refused_once_their_channel_is_no_longe
     )
     deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
 
-    await _set_policy(db_session, tenant, _ISOLATED.model_copy(update={"isolated_channel_ids": ()}))
+    inside = TenantAccessPolicy(
+        channel_rules={"chan-1": ChannelRule(readers="inside")},
+        agent_rules={"daimon": AgentRule(runs_in=("chan-1",))},
+    )
+    await _set_policy(db_session, tenant, inside)
 
     with pytest.raises(AdmissionDenied) as exc_info:
         await reauthorize(deps, admission)

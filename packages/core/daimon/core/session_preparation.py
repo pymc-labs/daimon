@@ -688,6 +688,7 @@ async def _prepare_session_for_turn_locked(
             tool_safety=deps.tool_safety,
             public_url=deps.public_url,
             memory_read_only=admission.memory_read_only,
+            asks_before_publishing=admission.asks_before_publishing,
             channel_skills=admission.channel_skills,
         )
         fresh_start = row.fresh_start_requested_at is not None
@@ -821,6 +822,7 @@ async def _prepare_session_for_turn_locked(
                 github_app_id=deps.github_app_id,
                 github_app_private_key=deps.github_app_private_key,
                 now=moment,
+                asks_before_publishing=admission.asks_before_publishing,
             )
 
         if isinstance(decision, ReuseAsIs):

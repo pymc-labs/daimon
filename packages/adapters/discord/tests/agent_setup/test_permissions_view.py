@@ -1,4 +1,4 @@
-"""The isolation screen: what it offers, who may click, and what a click stores."""
+"""The Permissions screen: what it offers, who may click, and what a click stores."""
 
 from __future__ import annotations
 
@@ -7,21 +7,19 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
-from daimon.adapters.discord.agent_setup.isolation_view import (
-    END_LABEL,
-    ISOLATE_COPY_LABEL,
-    ISOLATE_LABEL,
-    LIFT_LABEL,
-    IsolationView,
+from daimon.adapters.discord.agent_setup.permissions_view import (
+    COPY_LABEL,
+    RELEASE_LABEL,
+    PermissionsView,
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.channel_isolation import ChannelIsolationStatus
-from daimon.core.channel_isolation_setup import LIFT_ISOLATION_WARNING
+from daimon.core.access_policy import OPEN_RULE, AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.channel_rules import ChannelRuleStatus
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
@@ -51,9 +49,16 @@ def _runtime(sessionmaker: object, state: FakeMAState | None = None) -> DiscordR
     )
 
 
+OWN = ChannelRule(readers="own", writers="own")
+
+
 def _view(
-    runtime: DiscordRuntime, account_id: uuid.UUID, *, isolated: bool, private: bool | None = None
-) -> IsolationView:
+    runtime: DiscordRuntime,
+    account_id: uuid.UUID,
+    *,
+    rule: ChannelRule = OPEN_RULE,
+    agents: tuple[str, ...] = (),
+) -> PermissionsView:
     state = PanelState(
         roster=[],
         selected=None,
@@ -63,11 +68,8 @@ def _view(
         channel_id=CHANNEL_ID,
         channel_name="Team Alpha",
     )
-    private = isolated if private is None else private
-    status = ChannelIsolationStatus(
-        is_private=private, dedicated_agent_names=("alpha",) if private else (), is_hidden=isolated
-    )
-    return IsolationView(state, runtime=runtime, allowed_user_id=42, status=status)
+    status = ChannelRuleStatus(rule, agents)
+    return PermissionsView(state, runtime=runtime, allowed_user_id=42, status=status)
 
 
 def _interaction(*, admin: bool = True) -> MagicMock:
@@ -105,21 +107,30 @@ def _text(view: discord.ui.LayoutView) -> str:
     )
 
 
-def test_screen_offers_isolating_ending_or_lifting_it(account_id: uuid.UUID) -> None:
+def _selects(view: discord.ui.LayoutView) -> list[Any]:
+    return [n for n in _walk(view) if isinstance(n, discord.ui.Select)]
+
+
+async def _choose(view: discord.ui.LayoutView, index: int, value: str, click: MagicMock) -> None:
+    select = _selects(view)[index]
+    select._values = [value]  # pyright: ignore[reportPrivateUsage]  # a real dispatch sets this
+    await select.callback(click)
+
+
+def test_screen_offers_both_sides_a_copy_and_a_release(account_id: uuid.UUID) -> None:
     runtime = _runtime(MagicMock())
-    assert _labels(_view(runtime, account_id, isolated=False)) == {
-        "◀ Back",
-        ISOLATE_LABEL,
-        ISOLATE_COPY_LABEL,
-        "Done",
-    }, "an open channel can be isolated, with or without a copy"
-    isolated = _view(runtime, account_id, isolated=True)
-    assert _labels(isolated) == {"◀ Back", END_LABEL, LIFT_LABEL, "Done"}
-    assert "Private: yes · Dedicated agent: **alpha** · Confidential: yes" in _text(isolated), (
-        "the screen shows each of isolation's controls"
-    )
-    ended = _view(runtime, account_id, isolated=False, private=True)
-    assert LIFT_LABEL in _labels(ended), "after ending, the seal and pin can still be lifted"
+    open_view = _view(runtime, account_id)
+    assert _labels(open_view) == {"◀ Back", COPY_LABEL, "Done"}, "an open channel can take a copy"
+    defaults = [next(o.value for o in s.options if o.default) for s in _selects(open_view)]
+    assert defaults == ["any", "any"], "each select shows the current side"
+    kept = _view(runtime, account_id, rule=OWN, agents=("alpha",))
+    assert _labels(kept) == {"◀ Back", "Done"}, "own agents are released by changing readers"
+    assert (
+        "Who can read it: Only its own agents · Who can post: Only its own agents · "
+        "Agents kept here: alpha"
+    ) in _text(kept)
+    inside = _view(runtime, account_id, rule=ChannelRule(readers="inside"), agents=("alpha",))
+    assert RELEASE_LABEL in _labels(inside), "agents still kept here can be released"
 
 
 async def test_a_member_who_lost_manage_server_changes_nothing(
@@ -128,22 +139,22 @@ async def test_a_member_who_lost_manage_server_changes_nothing(
     async with db_session_factory() as session, session.begin():
         tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
         account = await make_account(session, tenant=tenant)
-    view = _view(_runtime(db_session_factory), account.id, isolated=False)
+    view = _view(_runtime(db_session_factory), account.id)
     member = _interaction(admin=False)
-    await _button(view, ISOLATE_LABEL).callback(member)
+    await _choose(view, 1, "none", member)
     member.response.send_message.assert_awaited_once()
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant.id)
         (event,) = await list_events(session, tenant_id=tenant.id)
-    assert policy.isolated_channel_ids == (), "nothing was isolated"
+    assert policy == TenantAccessPolicy(), "nothing was changed"
     assert (event.tool_name, event.outcome, event.reason) == (
-        "panel:isolation",
+        "panel:channel_rule",
         "denied",
         "needs_admin",
     ), "the refusal is audited"
 
 
-async def test_isolate_refuses_a_shared_agent_then_copies_it_and_ends(
+async def test_own_readers_refuse_a_shared_agent_then_copy_it_and_release(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with db_session_factory() as session, session.begin():
@@ -163,36 +174,57 @@ async def test_isolate_refuses_a_shared_agent_then_copies_it_and_ends(
     runtime = _runtime(db_session_factory, state)
 
     refused = _interaction()
-    await _button(_view(runtime, account.id, isolated=False), ISOLATE_LABEL).callback(refused)
+    await _choose(_view(runtime, account.id), 0, "own", refused)
     screen = refused.response.edit_message.call_args.kwargs["view"]
     assert "also answers outside this channel" in _text(screen), "the refusal says why"
-    assert END_LABEL not in _labels(screen), "nothing was isolated"
+    assert "Nothing was changed" in _text(screen)
 
     copied = _interaction()
-    await _button(screen, ISOLATE_COPY_LABEL).callback(copied)
+    await _button(screen, COPY_LABEL).callback(copied)
     screen = copied.response.edit_message.call_args.kwargs["view"]
-    assert "**team-alpha**, a copy of **shared**" in _text(screen)
+    assert "team-alpha, a copy of shared, is its own agent" in _text(screen)
     async with db_session_factory() as session:
         scope = await get_scope(
             session, scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=str(CHANNEL_ID))
         )
         policy = await load_access_policy(session, tenant_id=tenant.id)
     assert scope is not None and scope.agent_name == "team-alpha", "the copy answers here"
-    assert policy.isolated_channel_ids == (str(CHANNEL_ID),)
+    assert policy.channel_rules == {str(CHANNEL_ID): OWN}
 
-    ended = _interaction()
-    await _button(screen, END_LABEL).callback(ended)
+    inside = _interaction()
+    await _choose(screen, 0, "inside", inside)
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant.id)
-    assert policy.isolated_channel_ids == (), "ending isolation clears the channel"
-    assert policy.sealed_channel_ids == (str(CHANNEL_ID),), "and keeps it private"
-
-    screen = ended.response.edit_message.call_args.kwargs["view"]
-    lifted = _interaction()
-    await _button(screen, LIFT_LABEL).callback(lifted)
-    async with db_session_factory() as session:
-        policy = await load_access_policy(session, tenant_id=tenant.id)
-    assert (policy.sealed_channel_ids, policy.agent_channel_pins) == ((), {}), (
-        "lifting drops the seal and the copy's pin"
+    assert policy.channel_rules == {str(CHANNEL_ID): ChannelRule(readers="inside")}
+    assert policy.agent_rules == {"team-alpha": AgentRule(runs_in=(str(CHANNEL_ID),))}, (
+        "the copy keeps its rule"
     )
-    assert LIFT_ISOLATION_WARNING in _text(lifted.response.edit_message.call_args.kwargs["view"])
+
+    screen = inside.response.edit_message.call_args.kwargs["view"]
+    released = _interaction()
+    await _button(screen, RELEASE_LABEL).callback(released)
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant.id)
+    assert policy.agent_rules == {}, "releasing drops the copy's rule"
+    assert "may now run elsewhere" in _text(released.response.edit_message.call_args.kwargs["view"])
+
+
+async def test_writers_none_closes_the_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+        account = await make_account(session, tenant=tenant)
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                channel_rules={str(CHANNEL_ID): ChannelRule(readers="inside")}
+            ),
+        )
+    click = _interaction()
+    rule = ChannelRule(readers="inside")
+    await _choose(_view(_runtime(db_session_factory), account.id, rule=rule), 1, "none", click)
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant.id)
+    assert policy.channel_rules == {str(CHANNEL_ID): ChannelRule(readers="inside", writers="none")}

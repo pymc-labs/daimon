@@ -138,7 +138,9 @@ async def test_admit_refuses_a_turn_on_a_pinned_agent(
             "daimon.adapters.mcp.tools._ctx.is_over_balance",
             new=AsyncMock(side_effect=AssertionError("the pin runs before billing")),
         ),
-        pytest.raises(ToolError, match="TERMINAL ERROR: An operator pinned this agent"),
+        pytest.raises(
+            ToolError, match="TERMINAL ERROR: This agent.s rule runs it only in certain channels"
+        ),
     ):
         await _admit(
             auth,
@@ -211,7 +213,7 @@ async def test_admit_runs_a_bound_key_in_its_channel_under_the_pin(
             )
             assert result is auth, "a key bound inside the pin runs there"
             return
-        with pytest.raises(ToolError, match="TERMINAL ERROR: An operator pinned"):
+        with pytest.raises(ToolError, match="TERMINAL ERROR: This agent.s rule runs it only"):
             await _admit(
                 auth,
                 sessionmaker=db_session_factory,
@@ -257,7 +259,7 @@ async def test_admission_recheck_refuses_a_bound_key_once_its_pin_moves_away(
     )
     await db_session.commit()
 
-    with pytest.raises(ToolError, match="TERMINAL ERROR: An operator pinned"):
+    with pytest.raises(ToolError, match="TERMINAL ERROR: This agent.s rule runs it only"):
         await recheck()
 
 

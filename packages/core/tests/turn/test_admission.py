@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget_notice import BudgetNotice, drain_budget_notices
 from daimon.core.config import McpSettings
@@ -1195,7 +1195,7 @@ async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
         else frozenset(
             c
             for c in (channel_id, thread_id, f"{channel_id}:{thread_id}")
-            if policy is not None and c in policy.sealed_channel_ids
+            if policy is not None and c in policy.channel_rules
         )
     )
     assert admission.origin_seal_ids == expected_seals
@@ -1240,9 +1240,8 @@ async def test_admit_records_every_seal_on_a_thread_sealed_twice(
 
 
 _ISOLATED = TenantAccessPolicy(
-    sealed_channel_ids=("chan-1",),
-    isolated_channel_ids=("chan-1",),
-    agent_channel_pins={"own": ("chan-1",)},
+    channel_rules={"chan-1": ChannelRule(readers="own", writers="own")},
+    agent_rules={"own": AgentRule(runs_in=("chan-1",))},
 )
 
 
@@ -1252,7 +1251,13 @@ _ISOLATED = TenantAccessPolicy(
         (None, None, False),
         (_ISOLATED, None, False),
         (_ISOLATED, "thr-1", False),
-        (_ISOLATED.model_copy(update={"isolated_channel_ids": ()}), None, True),
+        (
+            _ISOLATED.model_copy(
+                update={"channel_rules": {"chan-1": ChannelRule(readers="inside")}}
+            ),
+            None,
+            True,
+        ),
     ],
     ids=["open", "isolated-channel", "thread-under-isolated", "sealed-only"],
 )
@@ -1320,7 +1325,7 @@ async def test_admit_refuses_an_agent_that_is_not_the_isolated_channels_own(
             role=Role.USER,
         )
 
-    assert exc_info.value.reason == "channel_isolated"
+    assert exc_info.value.reason == "own_agents_only"
 
 
 _TEAMS_ROOM = "19:room@thread.tacv2"
@@ -1366,9 +1371,7 @@ async def test_admit_holds_an_isolated_teams_channel_to_its_own_agent(
             role=Role.USER,
             is_dm=True,
         )
-    assert exc_info.value.reason == "agent_pinned_elsewhere", (
-        "the isolated agent never answers a 1:1 chat"
-    )
+    assert exc_info.value.reason == "runs_elsewhere", "the isolated agent never answers a 1:1 chat"
 
 
 async def test_admit_refuses_an_outside_agent_in_an_isolated_teams_thread(
@@ -1393,7 +1396,7 @@ async def test_admit_refuses_an_outside_agent_in_an_isolated_teams_thread(
             role=Role.USER,
         )
 
-    assert exc_info.value.reason == "channel_isolated", "the workspace default stays outside"
+    assert exc_info.value.reason == "own_agents_only", "the workspace default stays outside"
 
 
 async def test_admit_refuses_a_handoff_under_an_isolated_channel_to_an_outside_agent(
@@ -1433,7 +1436,7 @@ async def test_admit_refuses_a_handoff_under_an_isolated_channel_to_an_outside_a
             now=_NOW,
         )
 
-    assert exc_info.value.reason == "channel_isolated"
+    assert exc_info.value.reason == "own_agents_only"
 
 
 async def test_admit_answers_a_setup_thread_under_an_isolated_channel_read_only(
@@ -1518,7 +1521,7 @@ async def test_admit_refuses_a_turn_whose_reply_would_land_in_a_protected_channe
             category_id=category_id,
         )
 
-    assert exc_info.value.reason == "channel_protected"
+    assert exc_info.value.reason == "writers_none"
 
 
 async def test_admit_still_admits_outside_the_protected_channels(
@@ -1575,7 +1578,7 @@ async def test_admit_protection_wins_over_the_invoker_refusal(
             role=Role.USER,
         )
 
-    assert exc_info.value.reason == "channel_protected"
+    assert exc_info.value.reason == "writers_none"
 
 
 @pytest.mark.parametrize(
@@ -1612,7 +1615,7 @@ async def test_admit_with_an_unresolved_category(
     if refused:
         with pytest.raises(AdmissionDenied) as exc_info:
             await call
-        assert exc_info.value.reason == "channel_protected"
+        assert exc_info.value.reason == "writers_none"
     else:
         assert isinstance(await call, Admission), "no category policy: nothing to check"
 
@@ -1658,7 +1661,7 @@ async def test_admit_refuses_a_pinned_agent_outside_its_channels(
             is_dm=is_dm,
         )
 
-    assert exc_info.value.reason == "agent_pinned_elsewhere"
+    assert exc_info.value.reason == "runs_elsewhere"
 
 
 @pytest.mark.parametrize(
@@ -1761,7 +1764,7 @@ async def test_start_dm_refuses_a_sealed_source_admission() -> None:
         source_sealed=True,
     )
     deps = MagicMock()
-    with pytest.raises(DaimonError, match="sealed"):
+    with pytest.raises(DaimonError, match="Only turns inside this channel read it"):
         await start_dm(
             deps,
             admission,
@@ -1777,7 +1780,7 @@ async def test_start_dm_refuses_a_sealed_source_admission() -> None:
             context=[],
         )
     deps.sessionmaker.assert_not_called()
-    assert "sealed" in SEALED_SOURCE_MESSAGE
+    assert "Only turns inside" in SEALED_SOURCE_MESSAGE
 
 
 async def test_admit_refuses_a_handed_off_thread_whose_binding_names_the_agent_differently(
@@ -1816,7 +1819,7 @@ async def test_admit_refuses_a_handed_off_thread_whose_binding_names_the_agent_d
             role=Role.USER,
         )
 
-    assert exc_info.value.reason == "agent_pinned_elsewhere"
+    assert exc_info.value.reason == "runs_elsewhere"
 
 
 async def test_admit_refuses_an_agent_pinned_by_its_display_name(
@@ -1850,7 +1853,7 @@ async def test_admit_refuses_an_agent_pinned_by_its_display_name(
             now=_NOW,
             role=Role.USER,
         )
-    assert exc_info.value.reason == "agent_pinned_elsewhere"
+    assert exc_info.value.reason == "runs_elsewhere"
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
@@ -1894,7 +1897,9 @@ async def test_an_admins_dm_with_an_isolated_channels_agent_is_held_to_its_budge
     tmp_path: Path,
 ) -> None:
     """An admin may DM chan-1's own agent; the turn counts toward chan-1 and stops at its budget."""
-    policy = _ISOLATED.model_copy(update={"agent_channel_pins": {"daimon": ("chan-1",)}})
+    policy = _ISOLATED.model_copy(
+        update={"agent_rules": {"daimon": AgentRule(runs_in=("chan-1",))}}
+    )
     tenant = await _seed_admittable_tenant(db_session, policy=policy)
     deps = _deps(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)

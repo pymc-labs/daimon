@@ -57,9 +57,9 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from cryptography.fernet import MultiFernet
-from daimon.core.channel_isolation import RoutineOrigin
 from daimon.core.config import McpSettings
 from daimon.core.context_prompt import TurnContext, context_prompt
+from daimon.core.rule_views import RoutineOrigin
 from daimon.core.sessions import create_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, trusted_servers_for
 from daimon.core.turn.approvals import headless_tool_confirmation

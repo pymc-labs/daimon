@@ -91,7 +91,7 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
-from daimon.core.permissions import confidential_channel_of
+from daimon.core.permissions import home_of
 from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import Role, TaskContinuationRow, TurnCardIntentRow
@@ -181,10 +181,10 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
     "balance_depleted": "turn.skipped.over_balance",
     "cap_exceeded": "turn.skipped.over_cap",
     "invoker_not_allowed": "turn.skipped.invoker_not_allowed",
-    "agent_pinned_elsewhere": "turn.skipped.agent_pinned_elsewhere",
+    "runs_elsewhere": "turn.skipped.runs_elsewhere",
     "channel_budget_exceeded": "turn.skipped.channel_budget_exceeded",
-    "channel_protected": "turn.skipped.channel_protected",
-    "channel_isolated": "turn.skipped.channel_isolated",
+    "writers_none": "turn.skipped.writers_none",
+    "own_agents_only": "turn.skipped.own_agents_only",
     "external_participant": "turn.skipped.external_participant",
 }
 
@@ -230,7 +230,7 @@ def _admission_refusal(
         return _RESOLVER_MISS
     log.info(_DENIALS[err.reason], tenant_id=str(tenant_id))
     # A protected channel hears nothing, a refusal included.
-    if err.reason == "channel_protected":
+    if err.reason == "writers_none":
         return None
     return admission_refusal_text(err.reason, TEAMS_REFUSAL_NOUNS)
 
@@ -557,7 +557,7 @@ class TeamsApp:
                 policy = await load_access_policy(session, tenant_id=tenant_id)
         except AccessPolicyUnreadable:
             return False
-        return confidential_channel_of(policy, inbound.thread_id, inbound.channel_id) is not None
+        return home_of(policy, inbound.thread_id, inbound.channel_id) is not None
 
     async def _participate(self, trigger: TeamsInbound, tenant_id: uuid.UUID) -> None:
         """The classifier said reply: run one turn as the burst's author, silently shed.
@@ -612,7 +612,7 @@ class TeamsApp:
         )
         if not state.may_post:
             log.info(
-                "turn.skipped.channel_protected",
+                "turn.skipped.writers_none",
                 channel_id=channel_id,
                 thread_id=thread_id,
                 state=state.value,

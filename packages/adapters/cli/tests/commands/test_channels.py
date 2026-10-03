@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import StringIO
@@ -18,20 +20,20 @@ from cryptography.fernet import Fernet
 from daimon.adapters.cli import main as main_mod
 from daimon.adapters.cli.commands import channels as channels_mod
 from daimon.adapters.cli.commands.channels import (
+    agents_rule_set,
     budget_clear,
     budget_list,
     budget_set,
     channels_admins_clear,
     channels_admins_get,
     channels_admins_set,
-    channels_isolate,
     channels_list,
-    channels_protect,
+    channels_rule_set,
     channels_skills_add,
     channels_skills_list,
     channels_skills_remove,
 )
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError, StoreError
@@ -54,6 +56,7 @@ from typer.testing import CliRunner
 from ..harness import FakeCliSettings, build_cli_runtime
 
 pytestmark = pytest.mark.no_cli_local_seed
+OWN = ChannelRule(readers="own", writers="own")
 
 
 def _console() -> Console:
@@ -381,49 +384,42 @@ def _ma(tenant_id: uuid.UUID, *names: str) -> AsyncAnthropic:
     return build_fake_anthropic(make_fake_ma_handler(state))
 
 
-async def test_isolate_copies_an_agent_seals_and_pins_it_then_ends(
+async def test_rule_set_copies_an_agent_keeps_it_there_then_opens(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """One command does what the panel's Isolate does: copy, seal, pin, mark."""
-    async with db_session_factory.begin() as session:
-        tenant = await make_tenant(session, platform="discord", workspace_id=GUILD)
-        for channel in (CHANNEL, OTHER_CHANNEL):
-            await set_fields(
-                session,
-                scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel),
-                tenant_id=tenant.id,
-                agent_name="shared",
-                mode="agent",
-            )
-    settings = SimpleNamespace(
-        cli=FakeCliSettings.cli,
-        discord=SimpleNamespace(bot_token=SimpleNamespace(get_secret_value=lambda: "t")),
-        mcp=SimpleNamespace(public_url=None),
-    )
+    """One command does what the panel's Permissions screen does: copy, keep, open."""
+    tenant_id = await _isolatable(db_session_factory, "discord", GUILD)
     rt = build_cli_runtime(
-        db_session_factory, anthropic=_ma(tenant.id, "shared"), settings=settings
+        db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_isolate_settings()
     )
     console = _console()
     where = {"rt": rt, "console": console, "platform": "discord", "workspace_id": GUILD}
 
-    with pytest.raises(DaimonError, match="shared"):
-        await channels_isolate(**where, channel_id=CHANNEL)  # shared answers elsewhere too
+    with pytest.raises(typer.Exit):
+        await channels_rule_set(**where, channel_id=CHANNEL, readers="own")
+    assert "shared also answers outside this channel" in _out(console), _out(console)
     named = _discord_channels({CHANNEL: {"guild_id": GUILD, "name": "Team Alpha", "type": 0}})
-    await channels_isolate(**where, channel_id=CHANNEL, fork_from="shared", discord_transport=named)
+    await channels_rule_set(
+        **where, channel_id=CHANNEL, readers="own", copy_from="shared", discord_transport=named
+    )
 
     async with db_session_factory() as s:
-        policy = await load_access_policy(s, tenant_id=tenant.id)
+        policy = await load_access_policy(s, tenant_id=tenant_id)
     name = "team-alpha"  # the copy is named after the channel
-    assert policy.isolated_channel_ids == (CHANNEL,), "the channel is isolated"
-    assert policy.sealed_channel_ids == (CHANNEL,), "and sealed in the same write"
-    assert policy.agent_channel_pins == {name: (CHANNEL,)}, "the copy is pinned to it alone"
-    assert f"marked confidential; its own agent is {name}, copied from shared" in _out(console)
+    assert policy.channel_rules == {CHANNEL: OWN}, "only its own agents read it"
+    assert policy.agent_rules == {name: AgentRule(runs_in=(CHANNEL,))}, "the copy runs there alone"
+    assert "now readers own, writers own" in _out(console)
+    assert f"{name}, a copy of shared, is its own agent" in _out(console)
 
-    await channels_isolate(**where, channel_id=CHANNEL, end=True)
+    await channels_rule_set(**where, channel_id=CHANNEL, readers="inside")
     async with db_session_factory() as s:
-        ended = await load_access_policy(s, tenant_id=tenant.id)
-    assert ended.isolated_channel_ids == (), "isolation ended"
-    assert ended.sealed_channel_ids == (CHANNEL,), "the seal stays unless lifted"
+        inside = await load_access_policy(s, tenant_id=tenant_id)
+    assert inside.channel_rules == {CHANNEL: ChannelRule(readers="inside")}
+    assert name in inside.agent_rules, "the agent rule stays unless released"
+    await channels_rule_set(**where, channel_id=CHANNEL, readers="any", release_agents=True)
+    async with db_session_factory() as s:
+        opened = await load_access_policy(s, tenant_id=tenant_id)
+    assert opened == TenantAccessPolicy(), "released, nothing is left"
 
 
 async def _isolatable(
@@ -432,7 +428,7 @@ async def _isolatable(
     workspace_id: str,
     channels: tuple[str, str] = (CHANNEL, OTHER_CHANNEL),
 ) -> uuid.UUID:
-    """A tenant whose channel answers with a shared agent, so isolating it needs a copy."""
+    """A tenant whose channel answers with a shared agent, so keeping it to its own needs a copy."""
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform=platform, workspace_id=workspace_id)
         for channel in channels:
@@ -457,7 +453,7 @@ def _isolate_settings(*, keys: tuple[str, ...] = ()) -> SimpleNamespace:
     )
 
 
-async def test_isolate_copies_without_a_label_when_discord_errors(
+async def test_rule_set_copies_without_a_label_when_discord_errors(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """A failed channel lookup names the copy after the channel id, as the tool does."""
@@ -468,23 +464,24 @@ async def test_isolate_copies_without_a_label_when_discord_errors(
     console = _console()
     failing = httpx.MockTransport(lambda _request: httpx.Response(500, json={}))
 
-    await channels_isolate(
+    await channels_rule_set(
         rt=rt,
         console=console,
         platform="discord",
         workspace_id=GUILD,
         channel_id=CHANNEL,
-        fork_from="shared",
+        readers="own",
+        copy_from="shared",
         discord_transport=failing,
     )
 
     async with db_session_factory() as s:
         policy = await load_access_policy(s, tenant_id=tenant_id)
-    assert policy.isolated_channel_ids == (CHANNEL,), "the lookup error never aborts isolation"
-    assert "its own agent is channel-000002, copied from shared" in _out(console)
+    assert policy.channel_rules == {CHANNEL: OWN}, "the lookup error never aborts the change"
+    assert "channel-000002, a copy of shared, is its own agent" in _out(console)
 
 
-async def test_isolate_names_a_slack_copy_after_the_channel(
+async def test_rule_set_names_a_slack_copy_after_the_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """The Slack name is read with the workspace's bot token, as the tool reads it."""
@@ -508,44 +505,24 @@ async def test_isolate_names_a_slack_copy_after_the_channel(
         assert request.url.params["channel"] == "C0LAUNCH1"
         return httpx.Response(200, json={"ok": True, "channel": {"name": "launch-room"}})
 
-    await channels_isolate(
+    await channels_rule_set(
         rt=rt,
         console=console,
         platform="slack",
         workspace_id="T1",
         channel_id="C0LAUNCH1",
-        fork_from="shared",
+        readers="own",
+        copy_from="shared",
         slack_transport=httpx.MockTransport(conversations_info),
     )
 
-    assert "its own agent is launch-room, copied from shared" in _out(console)
+    assert "launch-room, a copy of shared, is its own agent" in _out(console)
 
 
-async def test_isolate_end_lifts_the_seal_and_pins_when_asked(
+async def test_rule_set_takes_a_teams_thread_as_its_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """`--end --lift-seal-and-pins` unseals the channel and unpins its own agents."""
-    tenant_id = await _isolatable(db_session_factory, "discord", GUILD)
-    rt = build_cli_runtime(
-        db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_isolate_settings()
-    )
-    where = {"rt": rt, "console": _console(), "platform": "discord", "workspace_id": GUILD}
-    named = _discord_channels({CHANNEL: {"guild_id": GUILD, "name": "Team Alpha", "type": 0}})
-    await channels_isolate(**where, channel_id=CHANNEL, fork_from="shared", discord_transport=named)
-
-    await channels_isolate(**where, channel_id=CHANNEL, end=True, lift_seal_and_pins=True)
-
-    async with db_session_factory() as s:
-        policy = await load_access_policy(s, tenant_id=tenant_id)
-    assert policy.isolated_channel_ids == (), "isolation ended"
-    assert policy.sealed_channel_ids == (), "the seal was lifted"
-    assert policy.agent_channel_pins == {}, "and the copy unpinned"
-
-
-async def test_isolate_takes_a_teams_thread_as_its_channel(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Teams isolates as Discord and Slack do; the copy is named from the channel id."""
+    """Teams takes rules as Discord and Slack do; the copy is named from the channel id."""
     other = "19:other@thread.tacv2"
     tenant_id = await _isolatable(db_session_factory, "teams", "tid", (TEAMS_CHANNEL, other))
     rt = build_cli_runtime(
@@ -553,40 +530,41 @@ async def test_isolate_takes_a_teams_thread_as_its_channel(
     )
     console = _console()
 
-    await channels_isolate(
+    await channels_rule_set(
         rt=rt,
         console=console,
         platform="teams",
         workspace_id="tid",
         channel_id=f"{TEAMS_CHANNEL};messageid=1700000000000",
-        fork_from="shared",
+        readers="own",
+        copy_from="shared",
     )
 
     async with db_session_factory() as s:
         policy = await load_access_policy(s, tenant_id=tenant_id)
-    assert policy.isolated_channel_ids == (TEAMS_CHANNEL,), "the thread's channel is isolated"
-    assert policy.agent_channel_pins == {"channel-growth": (TEAMS_CHANNEL,)}, (
-        "the copy, named from the id, is pinned to the channel alone"
+    assert policy.channel_rules == {TEAMS_CHANNEL: OWN}, "the thread's channel takes the rule"
+    assert policy.agent_rules == {"channel-growth": AgentRule(runs_in=(TEAMS_CHANNEL,))}, (
+        "the copy, named from the id, runs in the channel alone"
     )
-    assert "its own agent is channel-growth, copied from shared" in _out(console)
+    assert "channel-growth, a copy of shared, is its own agent" in _out(console)
 
 
-async def test_isolate_refuses_bad_flag_mixes(
+async def test_rule_set_refuses_bad_flag_mixes(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     rt = build_cli_runtime(db_session_factory)
     base = {"rt": rt, "console": _console(), "workspace_id": "w", "channel_id": CHANNEL}
     with pytest.raises(typer.BadParameter, match="unsupported platform"):
-        await channels_isolate(**base, platform="cli")
-    with pytest.raises(
-        typer.BadParameter, match="only applies when marking a channel confidential"
-    ):
-        await channels_isolate(**base, platform="discord", end=True, fork_from="shared")
-    with pytest.raises(typer.BadParameter, match="only applies with --end"):
-        await channels_isolate(**base, platform="discord", lift_seal_and_pins=True)
+        await channels_rule_set(**base, platform="cli", readers="own")
+    with pytest.raises(typer.BadParameter, match="pass --readers, --writers or --release"):
+        await channels_rule_set(**base, platform="discord")
+    with pytest.raises(typer.BadParameter, match="--readers: expected one of any, inside, own"):
+        await channels_rule_set(**base, platform="discord", readers="sealed")
+    with pytest.raises(typer.BadParameter, match="takes only --writers"):
+        await channels_rule_set(**base, platform="discord", readers="inside", category=True)
 
 
-async def test_protect_toggles_a_teams_channel_and_keeps_an_isolated_seal(
+async def test_rule_set_writers_on_a_teams_channel_and_refusals_write_nothing(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = await _isolatable(db_session_factory, "teams", "tid", (TEAMS_CHANNEL, CHANNEL))
@@ -594,39 +572,44 @@ async def test_protect_toggles_a_teams_channel_and_keeps_an_isolated_seal(
         db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_isolate_settings()
     )
     args = {"rt": rt, "platform": "teams", "workspace_id": "tid"}
-    with pytest.raises(typer.BadParameter, match="pass --protect"):
-        await channels_protect(
-            **args, console=_console(), channel_id=TEAMS_CHANNEL, protect=None, seal=None
-        )
     console = _console()
-    await channels_protect(
+    await channels_rule_set(
         **args,
         console=console,
         channel_id=f"{TEAMS_CHANNEL};messageid=1700000000000",
-        protect=True,
-        seal=True,
+        readers="inside",
+        writers="none",
     )
-    assert "now protected, sealed" in _out(console), _out(console)
-    await channels_isolate(
-        rt=rt,
-        console=_console(),
-        platform="teams",
-        workspace_id="tid",
-        channel_id=TEAMS_CHANNEL,
-        fork_from="shared",
-    )
+    assert "now readers inside, writers none" in _out(console), _out(console)
     console = _console()
     with pytest.raises(typer.Exit):
-        await channels_protect(
-            **args, console=console, channel_id=TEAMS_CHANNEL, protect=False, seal=False
-        )
-    assert "unmark it confidential first" in _out(console), _out(console)
+        await channels_rule_set(**args, console=console, channel_id=TEAMS_CHANNEL, writers="own")
+    assert "Nothing was changed" in _out(console), _out(console)
     async with db_session_factory() as s:
         policy = await load_access_policy(s, tenant_id=tenant_id)
-    assert (policy.protected_channel_ids, policy.sealed_channel_ids) == (
-        (TEAMS_CHANNEL,),
-        (TEAMS_CHANNEL,),
-    ), "a refusal writes nothing, the protection included"
+    assert policy.channel_rules == {TEAMS_CHANNEL: ChannelRule(readers="inside", writers="none")}
+
+
+async def test_agents_rule_set_limits_where_an_agent_runs(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _isolatable(db_session_factory, "discord", GUILD)
+    rt = build_cli_runtime(
+        db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_isolate_settings()
+    )
+    args = {"rt": rt, "platform": "discord", "workspace_id": GUILD, "agent_name": "shared"}
+    with pytest.raises(typer.BadParameter, match="pass --runs-in, --anywhere or --nowhere"):
+        await agents_rule_set(**args, console=_console(), anywhere=True, nowhere=True)
+    console = _console()
+    await agents_rule_set(**args, console=console, runs_in=[CHANNEL])
+    assert f"shared runs only in {CHANNEL}" in _out(console), _out(console)
+    assert "still set to answer outside" in _out(console), "it is OTHER_CHANNEL's default"
+    async with db_session_factory() as s:
+        policy = await load_access_policy(s, tenant_id=tenant_id)
+    assert policy.agent_rules == {"shared": AgentRule(runs_in=(CHANNEL,))}
+    await agents_rule_set(**args, console=_console(), anywhere=True)
+    async with db_session_factory() as s:
+        assert (await load_access_policy(s, tenant_id=tenant_id)).agent_rules == {}
 
 
 async def test_list_shows_the_balance_and_each_configured_channel(
@@ -664,10 +647,10 @@ async def test_list_shows_the_balance_and_each_configured_channel(
     assert "$5.00" in text and "(monthly)" in text, "and shows the budget"
 
 
-async def test_list_json_carries_each_channels_seal_and_protection(
+async def test_list_json_carries_each_channels_readers_and_writers(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """An operator reads the access policy anyway, so the CLI adds both flags."""
+    """An operator reads the access policy anyway, so the CLI adds both sides of the rule."""
     rt = build_cli_runtime(db_session_factory)
     await provision_tenant(db_session_factory, platform="slack", workspace_id="T1")
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id="T1")
@@ -676,10 +659,8 @@ async def test_list_json_carries_each_channels_seal_and_protection(
             s,
             tenant_id=tenant_id,
             policy=TenantAccessPolicy(
-                sealed_channel_ids=("C1",),
-                protected_channel_ids=("C2",),
-                isolated_channel_ids=("C1",),
-                agent_channel_pins={"a": ("C1",)},
+                channel_rules={"C1": OWN, "C2": ChannelRule(writers="none")},
+                agent_rules={"a": AgentRule(runs_in=("C1",))},
             ),
         )
 
@@ -696,23 +677,43 @@ async def test_list_json_carries_each_channels_seal_and_protection(
     console = _console()
     await channels_list(rt=rt, platform="slack", workspace_id="T1", console=console, as_json=True)
     channels = {c["channel_id"]: c for c in json.loads(_out(console))["channels"]}
-    assert (channels["C1"]["sealed"], channels["C1"]["protected"]) == (True, False)
-    assert (channels["C2"]["sealed"], channels["C2"]["protected"]) == (False, True)
+    assert (channels["C1"]["readers"], channels["C1"]["writers"]) == ("own", "own")
+    assert (channels["C2"]["readers"], channels["C2"]["writers"]) == ("any", "none")
 
 
-def test_isolation_set_and_lift_run_the_isolate_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
-    monkeypatch.setattr(channels_mod, "_run_isolate", lambda *a, **kw: calls.append((a, kw)))
-    where = ["discord", GUILD, CHANNEL]
-    runner = CliRunner()
+@pytest.mark.parametrize(
+    ("argv", "target", "expected"),
+    [
+        (
+            ["channels", "rule", "set", "discord", GUILD, CHANNEL, "--readers", "own"],
+            "channels_rule_set",
+            {"channel_id": CHANNEL, "readers": "own", "writers": None, "copy_from": None},
+        ),
+        (
+            ["agents", "rule", "set", "discord", GUILD, "x", "--runs-in", CHANNEL],
+            "agents_rule_set",
+            {"agent_name": "x", "runs_in": [CHANNEL], "anywhere": False, "nowhere": False},
+        ),
+    ],
+    ids=["channel", "agent"],
+)
+def test_rule_commands_parse_their_flags(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], target: str, expected: dict[str, object]
+) -> None:
+    calls: list[dict[str, object]] = []
 
-    set_run = runner.invoke(
-        main_mod.app, ["channels", "isolation", "set", *where, "--fork-from", "shared"]
-    )
-    lift_run = runner.invoke(main_mod.app, ["channels", "isolation", "lift", *where])
+    async def record(**kwargs: object) -> None:
+        calls.append(kwargs)
 
-    assert set_run.exit_code == 0 and lift_run.exit_code == 0, set_run.output + lift_run.output
-    assert calls == [
-        (tuple(where), {"fork_from": "shared"}),
-        (tuple(where), {"end": True, "lift_seal_and_pins": True}),
-    ], "set isolates, lift ends isolation and its seal and pins"
+    @asynccontextmanager
+    async def no_runtime(_settings: object) -> AsyncIterator[None]:
+        yield None
+
+    monkeypatch.setattr(channels_mod, target, record)
+    monkeypatch.setattr(channels_mod, "build_runtime", no_runtime)
+    monkeypatch.setattr(channels_mod, "load_settings", lambda: None)
+
+    run = CliRunner().invoke(main_mod.app, argv)
+
+    assert run.exit_code == 0, run.output
+    assert len(calls) == 1 and expected.items() <= calls[0].items(), calls

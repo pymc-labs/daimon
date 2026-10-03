@@ -36,7 +36,7 @@ from typing import Final, Literal, cast
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_subject
-from daimon.core.permissions import any_protected
+from daimon.core.permissions import any_writers_none
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role, RoutineRow
@@ -101,7 +101,7 @@ SkipReason = Literal[
     "destination_unavailable",
     "post_failed",
     "no_result",
-    "channel_isolated",
+    "own_agents_only",
 ]
 
 
@@ -189,10 +189,10 @@ def render_routine_controls(
             "posts the end of your final reply there for you."
         )
     elif direct_post == "protected":
-        # Protected since the routine was made: never invite a write there.
+        # Writers none since the routine was made: never invite a write there.
         delivery = (
-            "The destination is now a protected channel: do not post there. daimon sends "
-            "the end of your final reply to the routine's creator instead."
+            "The destination's rule now lets nobody write there: do not post there. daimon "
+            "sends the end of your final reply to the routine's creator instead."
         )
     else:
         # Its parent channel or category could not be checked here: never
@@ -287,7 +287,7 @@ def render_fallback_post(row: RoutineRow) -> str:
 
 
 _DM_REASONS: Final[dict[str, str]] = {
-    "protected_channel": "its destination is a protected channel daimon does not post in",
+    "protected_channel": "its destination's rule lets nobody write there",
     "creator_cannot_post": "you can no longer post in its destination",
     "destination_unavailable": "its destination could not be reached (missing, moved, or "
     "outside this workspace)",
@@ -447,8 +447,8 @@ def placement_unknown_is_unsafe(
     if platform != "discord":
         return False
     if kind == "thread":
-        return any_protected(policy)
-    return any_protected(policy, categories_only=True)
+        return any_writers_none(policy)
+    return any_writers_none(policy, categories_only=True)
 
 
 @dataclass(frozen=True)

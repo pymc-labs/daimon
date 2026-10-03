@@ -426,7 +426,7 @@ async def test_sealed_origin_posts_a_link_and_the_note_only(
     lines = body["text"].split("\n")
     assert lines[0].startswith("*Human support requested* by ")
     assert lines[1] == _PERMALINK
-    assert "sealed" in lines[2]
+    assert "read only from inside" in lines[2]
     assert lines[3:] == ["", "help me"], "nothing but the requester, link and note"
     assert body["unfurl_links"] is False
 

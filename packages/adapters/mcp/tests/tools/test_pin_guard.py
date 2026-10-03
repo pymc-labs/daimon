@@ -119,7 +119,7 @@ async def test_direct_tools_refuse_a_member_editing_a_pinned_agent(
     auth = _member(tenant_id)
     target: dict[str, Any] = {"expected_ma_agent_id": _AGENT_ID}
 
-    with pytest.raises(ToolError, match="pinned this agent to its own channels"):
+    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
         if tool == "attach_mcp_server":
             await _attach_mcp_server_impl(
                 runtime,
@@ -177,7 +177,7 @@ async def test_an_agent_key_cannot_rebind_a_pinned_agents_repo(
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_ID),
     )
 
-    with pytest.raises(ToolError, match="pinned this agent to its own channels"):
+    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
         if tool == "set_repo_binding":
             await _set_repo_binding_impl(
                 runtime, auth, repo_url="https://github.com/evil/repo", default_branch="main"
@@ -221,7 +221,7 @@ async def test_bind_public_repo_refuses_a_member_outside_a_pinned_agents_channel
             now=datetime.now(UTC),
         )
 
-    with pytest.raises(ToolError, match="pinned this agent to its own channels"):
+    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
         await _bind_public_repo_impl(
             runtime,
             auth,
@@ -265,7 +265,7 @@ async def test_the_guard_lets_an_admin_of_every_pinned_channel_through_without_a
         tenant_id=tenant_id,
         metadata={"daimon_name": "acme-config"},
     )
-    with pytest.raises(ToolError, match="pinned this agent"):
+    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
         await require_pin_write_access(
             runtime, _member(tenant_id, administered={"C_OTHER"}), ma_agent=agent, origin=None
         )
@@ -282,7 +282,7 @@ async def test_the_guard_lets_an_admin_of_every_pinned_channel_through_without_a
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_ID),
         administered_channel_ids=frozenset({"C_ACME"}),
     )
-    with pytest.raises(ToolError, match="pinned this agent"):
+    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
         await require_pin_write_access(runtime, agent_key, ma_agent=agent, origin=None)
 
 
@@ -304,7 +304,7 @@ async def test_the_guard_trusts_neither_admin_on_a_login_without_a_chat_turn(
         is_admin=is_admin,
         administered_channel_ids=frozenset() if is_admin else frozenset({"C_ACME"}),
     )
-    with pytest.raises(ToolError, match="pinned this agent"):
+    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
         await require_pin_write_access(runtime, login, ma_agent=agent, origin=None)
 
 
@@ -319,7 +319,7 @@ async def test_the_guard_refuses_a_channel_admin_of_only_part_of_a_pin(
     )
     await db_session.commit()
     agent = ma_agent(id=_AGENT_ID, name="Acme Display", tenant_id=tenant_id, metadata={})
-    with pytest.raises(ToolError, match="pinned this agent"):
+    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
         await require_pin_write_access(
             runtime, _member(tenant_id, administered={"C_ACME"}), ma_agent=agent, origin=None
         )

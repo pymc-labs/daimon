@@ -11,8 +11,8 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.answering_map import AnsweringMap, ChannelEnvironment
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
-    SEALED_NETWORK_UNCHECKED_WARNING,
-    SEALED_OPEN_NETWORK_WARNING,
+    LIMITED_NETWORK_UNCHECKED_WARNING,
+    LIMITED_OPEN_NETWORK_WARNING,
     build_archive_environment_note,
     build_clear_environment_note,
     build_environment_resolution_note,
@@ -21,14 +21,14 @@ from daimon.core.channel_environments import (
     environment_option_value,
     has_open_network,
     hidden_environment_names,
+    limited_readers_network_warning,
     list_environment_names,
     parse_environment_option,
     plan_environment_picker,
     save_scope_environment,
-    sealed_network_warning,
 )
-from daimon.core.channel_isolation import IsolationViewer
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
+from daimon.core.rule_views import RuleViewer
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -290,7 +290,7 @@ async def test_sealed_network_warning_flags_only_a_channels_own_open_pick(
     default = DeploymentDefault(environment_name="open")
 
     async def warning(channel_id: str) -> str | None:
-        return await sealed_network_warning(
+        return await limited_readers_network_warning(
             db_session, client, tenant_id=tenant.id, channel_id=channel_id, default=default
         )
 
@@ -301,7 +301,7 @@ async def test_sealed_network_warning_flags_only_a_channels_own_open_pick(
             tenant_id=tenant.id,
             environment_name=name,
         )
-    assert await warning("c_open") == SEALED_OPEN_NETWORK_WARNING, "its own open pick warns"
+    assert await warning("c_open") == LIMITED_OPEN_NETWORK_WARNING, "its own open pick warns"
     assert await warning("c_closed") is None, "a limited network needs no confirmation"
     assert await warning("c_inherits") is None, "the open default is a server admin's pick"
 
@@ -322,7 +322,7 @@ async def test_sealed_network_warning_survives_a_failed_lookup(db_session: Async
         environment_name="open",
     )
 
-    warning = await sealed_network_warning(
+    warning = await limited_readers_network_warning(
         db_session,
         build_fake_anthropic(router.dispatch),
         tenant_id=tenant.id,
@@ -330,7 +330,7 @@ async def test_sealed_network_warning_survives_a_failed_lookup(db_session: Async
         default=DeploymentDefault(environment_name="open"),
     )
 
-    assert warning == SEALED_NETWORK_UNCHECKED_WARNING, "an unchecked pick still warns"
+    assert warning == LIMITED_NETWORK_UNCHECKED_WARNING, "an unchecked pick still warns"
 
 
 def test_only_names_isolated_channels_across_the_line_pick_are_hidden() -> None:
@@ -355,7 +355,7 @@ def test_only_names_isolated_channels_across_the_line_pick_are_hidden() -> None:
     default = DeploymentDefault(environment_name="deployment")
 
     def hidden(inside: str | None) -> frozenset[str]:
-        viewer = IsolationViewer(policy, inside)
+        viewer = RuleViewer(policy, inside)
         return hidden_environment_names(viewer, tenant=tenant, channels=channels, default=default)
 
     assert hidden(None) == {"acme", "beta"}, "outside, both isolated channels' own names hide"

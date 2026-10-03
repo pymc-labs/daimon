@@ -59,9 +59,9 @@ from daimon.core.permissions import (
     agent_permissions,
     at_home,
     channel_permissions,
-    confidential_channel_of,
-    dm_source_sealed,
-    seal_ids_at,
+    dm_source_limited,
+    home_of,
+    limiting_ids_at,
 )
 from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
@@ -160,6 +160,9 @@ class Admission:
     # Turn from a sealed channel (or a thread under one), or from a DM when the
     # tenant asks for it: memory mounts must be read-only.
     memory_read_only: bool = False
+    # The turn's agent may not publish freely (`AgentPermissions.publishes`): its
+    # session's publish tools wait for the requester's Approve on a card.
+    asks_before_publishing: bool = False
     # The channel or thread itself is sealed (DM memory policy aside). Callers
     # that copy content out of the channel, such as /dm, must refuse.
     source_sealed: bool = False
@@ -342,7 +345,7 @@ async def admit_impl(
     # --- External participant: someone from another organisation (a Teams
     # shared channel's B2B direct connect participant) is answered only
     # inside an isolated channel, its threads included, never in a DM. ---
-    _require_external_inside_isolation(
+    _require_external_inside_home(
         policy, is_external=is_external, is_dm=is_dm, channel_id=channel_id, thread_id=thread_id
     )
     mark("start_policy")
@@ -539,7 +542,7 @@ async def admit_impl(
     # Every id that seals the turn: its channel, and the thread sealed on its
     # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
     # them are recorded, so unsealing one later leaves the others holding.
-    seal_ids = seal_ids_at(policy, channel_id=channel_id, thread_id=thread_id)
+    seal_ids = limiting_ids_at(policy, channel_id=channel_id, thread_id=thread_id)
     source_sealed = bool(seal_ids)
     memory_read_only = (source_sealed and not _is_own_agent(policy, grant)) or (
         is_dm and policy.dm_memory_read_only
@@ -563,6 +566,7 @@ async def admit_impl(
 
     result = Admission(
         memory_read_only=memory_read_only,
+        asks_before_publishing=_asks_before_publishing(policy, grant),
         source_sealed=source_sealed,
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,
@@ -600,11 +604,11 @@ def _require_turn_start(policy: TenantAccessPolicy, subject: Subject, place: Pla
         raise AdmissionDenied(
             reason="invoker_not_allowed"
             if decision.reason == "invoker_not_allowed"
-            else "channel_protected"
+            else "writers_none"
         )
 
 
-def _require_external_inside_isolation(
+def _require_external_inside_home(
     policy: TenantAccessPolicy,
     *,
     is_external: bool,
@@ -638,10 +642,18 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
     )
     if not decision:
         raise AdmissionDenied(
-            reason="channel_isolated"
-            if decision.reason == "channel_isolated"
-            else "agent_pinned_elsewhere"
+            reason="own_agents_only" if decision.reason == "own_agents_only" else "runs_elsewhere"
         )
+
+
+def _asks_before_publishing(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
+    return not authorize(
+        policy,
+        subject=grant.subject,
+        action=Action.PUBLISH,
+        agent=grant.agent,
+        origin=grant.run_place,
+    )
 
 
 def _is_own_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
@@ -674,7 +686,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
     _require_turn_start(policy, grant.subject, grant.turn_place)
-    _require_external_inside_isolation(
+    _require_external_inside_home(
         policy,
         is_external=grant.is_external,
         is_dm=grant.is_dm,
@@ -683,14 +695,14 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         setup_thread=grant.run_place.setup_thread,
     )
     _require_run_agent(policy, grant)
-    if grant.dm_source is not None and dm_source_sealed(
+    if grant.dm_source is not None and dm_source_limited(
         policy,
         source_channel_id=grant.dm_source.channel_id,
         source_thread_id=grant.dm_source.thread_id,
         source_thread_keys=grant.dm_source.thread_keys,
     ):
-        raise DmSourceSealedError("dm_source_sealed")
-    seal_ids = admission.origin_seal_ids | seal_ids_at(
+        raise DmSourceSealedError("dm_source_limited")
+    seal_ids = admission.origin_seal_ids | limiting_ids_at(
         policy, channel_id=grant.channel_id, thread_id=grant.thread_id
     )
     # Memory posture is decided from the policy as it is now, not only from
@@ -701,13 +713,19 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         or (bool(seal_ids) and not _is_own_agent(policy, grant))
         or (grant.is_dm and policy.dm_memory_read_only)
     )
-    if seal_ids == admission.origin_seal_ids and memory_read_only == admission.memory_read_only:
+    asks_before_publishing = _asks_before_publishing(policy, grant)
+    if (
+        seal_ids == admission.origin_seal_ids
+        and memory_read_only == admission.memory_read_only
+        and asks_before_publishing == admission.asks_before_publishing
+    ):
         return admission
     return replace(
         admission,
         origin_seal_ids=seal_ids,
         source_sealed=admission.source_sealed or bool(seal_ids),
         memory_read_only=memory_read_only,
+        asks_before_publishing=asks_before_publishing,
     )
 
 
@@ -722,7 +740,7 @@ async def restrict_inherited_memory(
     if grant is not None:
         async with deps.sessionmaker() as db:
             policy = await load_access_policy(db, tenant_id=grant.tenant_id)
-        own_channel = agent_permissions(policy, grant.agent.names).own_channel
+        own_channel = agent_permissions(policy, grant.agent.names).home
         own = _is_own_agent(policy, grant) and all(
             seal
             in {
@@ -730,7 +748,7 @@ async def restrict_inherited_memory(
                 grant.thread_id,
                 f"{own_channel}:{grant.thread_id}" if grant.thread_id is not None else None,
             }
-            or confidential_channel_of(policy, seal) == own_channel
+            or home_of(policy, seal) == own_channel
             for seal in seals
         )
     return admission if own else replace(admission, memory_read_only=True)
@@ -751,6 +769,7 @@ def decide_before_send(deps: TurnDeps, admission: Admission) -> Callable[[], Awa
         if (
             current.origin_seal_ids != admission.origin_seal_ids
             or current.memory_read_only != admission.memory_read_only
+            or (current.asks_before_publishing and not admission.asks_before_publishing)
         ):
             raise SessionBusyError(
                 pending_reasons=("seal",), retry_after=datetime.now(UTC) + timedelta(seconds=1)

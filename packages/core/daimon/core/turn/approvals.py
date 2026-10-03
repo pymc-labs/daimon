@@ -162,6 +162,11 @@ def refusal_message(call: ToolCall, verdict: ToolVerdict) -> str:
     """What the model is told when `call` is refused without a person."""
     if verdict.reason == "denied_by_operator":
         return f"Refused: the operator does not allow {call.key}. Do not retry it."
+    if verdict.reason == "unattended_publish":
+        return (
+            f"Refused: {call.tool_name} publishes, which this agent does only after the "
+            "requester approves it, and nobody is here to approve. Do not retry it in this run."
+        )
     return (
         f"Refused: {call.key} changes data outside this session and nobody is here to "
         "approve it, so it did not run. Do not retry it in this run; report what you "
@@ -269,14 +274,16 @@ def chat_tool_confirmation(
     confirm: ConfirmationHook | None,
     attended: bool = True,
     trusted_servers: frozenset[str] = frozenset(),
+    asks_before_publishing: bool = False,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
-    Disabled keeps `RequireApproval`, as before. `attended=False` is a chat
-    turn nobody asked for just now (a wake continuing earlier work): it gets
-    the unattended rules even though it renders into a thread.
+    Disabled keeps `RequireApproval`, as before, unless the session asks
+    before publishing (`decide_tool_call`). `attended=False` is a chat turn
+    nobody asked for just now (a wake continuing earlier work): it gets the
+    unattended rules even though it renders into a thread.
     """
-    if not policy.enabled:
+    if not policy.enabled and not asks_before_publishing:
         return RequireApproval()
     if not attended:
         return PolicyApproval(decide=unattended_decider(policy, trusted_servers=trusted_servers))

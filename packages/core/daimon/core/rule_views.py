@@ -1,17 +1,13 @@
-"""Channel isolation: the confidential preset of `daimon.core.permissions`.
+"""What the channel and agent rules show and refuse at each place.
 
-A server admin isolates channel C (`TenantAccessPolicy.isolated_channel_ids`):
-its rule becomes ``readers: own`` with ``writers: own`` (``none`` while it is
-protected), and its *own agents* are those
-pinned to C alone (`AgentPermissions.own_channel`). What that means is defined
-in `daimon.core.permissions` and decided by `daimon.core.authz.authorize`
-(`channel_isolated`). This module holds what the agent and setup surfaces show
-of it: who is listed where (`IsolationViewer`), routines kept inside, default
-bindings, and the status a panel shows. A tenant that isolates nothing reads
-its policy and nothing more.
+The rules are defined in `daimon.core.permissions` and decided by
+`daimon.core.authz.authorize`. This module holds what the agent and setup
+surfaces show of them: who is listed where (`RuleViewer`), routines kept
+inside, default bindings. A tenant with no channel only its own agents read
+loads its policy and nothing more.
 
-Everything here is pure but `load_isolation_viewer` and `is_thread_turn_refused`;
-`daimon.core.channel_isolation_setup` turns isolation on and off.
+Everything here is pure but `load_rule_viewer` and `is_thread_turn_refused`;
+`daimon.core.channel_rules` sets the rules.
 """
 
 from __future__ import annotations
@@ -31,14 +27,13 @@ from daimon.core.defaults.metadata import private_routine_stamp
 from daimon.core.errors import DaimonError
 from daimon.core.permissions import (
     agent_permissions,
-    any_confidential,
-    any_pinned,
+    any_agent_rules,
+    any_own_readers,
     channel_permissions,
     channel_rule,
-    confidential_channel_of,
+    home_of,
+    limiting_ids_at,
     listed_at,
-    pinned_alone,
-    seal_ids_at,
 )
 from daimon.core.routine_delivery import delivery_target, teams_channel_of
 from daimon.core.scope import DeploymentDefault, ScopeContext
@@ -47,17 +42,37 @@ from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.scoped_config_read import resolve
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-BindingRefusal = Literal[
-    "agent_confined", "agent_pinned", "channel_needs_own_agent", "channel_isolated"
-]
-"""Why a routing write would break a pin or isolation.
+BindingRefusal = Literal["agent_has_home", "agent_runs_elsewhere", "not_own_agent", "keeps_own"]
+"""Why a routing write would break a rule.
 
-`agent_confined`: the agent belongs to another isolated channel. `agent_pinned`: the
-agent is pinned to other channels, so admission would refuse every turn there.
-`channel_needs_own_agent`: the target channel is isolated and the agent is not one of
-its own. `channel_isolated`: clearing an isolated channel's own agent would hand it to
-a shared one.
+`agent_has_home`: the agent is another channel's own agent. `agent_runs_elsewhere`:
+its rule names other channels, so admission would refuse every turn there.
+`not_own_agent`: only the channel's own agents run there, and it is not one.
+`keeps_own`: clearing such a channel's default would hand it to a shared agent.
 """
+
+
+def render_binding_refusal(reason: BindingRefusal, *, agent_name: str | None) -> str:
+    """The person-facing reason for a refused routing write."""
+    name = agent_name or "That agent"
+    match reason:
+        case "agent_has_home":
+            return f"{name} is another channel's own agent, so it can't be used here."
+        case "agent_runs_elsewhere":
+            return (
+                f"{name}'s agent rule names other channels, so it would refuse every turn here. "
+                "Pick another agent, or change its rule first."
+            )
+        case "not_own_agent":
+            return (
+                f"Only this channel's own agents answer here, and {name} is not one of them. "
+                "Use a copy of it, or give it an agent rule naming this channel alone."
+            )
+        case "keeps_own":
+            return (
+                "Only this channel's own agents answer here, so its default stays one of them. "
+                "Set another of its own agents, or change who can read the channel first."
+            )
 
 
 def binding_refusal(
@@ -69,9 +84,9 @@ def binding_refusal(
 ) -> BindingRefusal | None:
     """Why routing the agent at `channel_id` (None: the tenant default) is refused.
 
-    `authorize(BIND_CHANNEL_DEFAULT)` decides, for everyone: a pinned agent
-    routed outside its pin would refuse every turn there. Pass every name the
-    agent carries, and a thread binding's parent channel.
+    `authorize(BIND_CHANNEL_DEFAULT)` decides, for everyone: an agent routed
+    outside its rule would refuse every turn there. Pass every name the agent
+    carries, and a thread binding's parent channel.
     """
     decision = authorize(
         policy,
@@ -80,17 +95,17 @@ def binding_refusal(
         agent=AgentRef.of(*agent_names),
         place=Place(channel_id=channel_id, parent_channel_id=parent_channel_id),
     )
-    if decision.reason == "agent_pinned_elsewhere":
-        own = agent_permissions(policy, agent_names).own_channel
-        return "agent_confined" if own else "agent_pinned"
-    if decision.reason == "channel_isolated":
-        return "channel_needs_own_agent"
+    if decision.reason == "runs_elsewhere":
+        home = agent_permissions(policy, agent_names).home
+        return "agent_has_home" if home else "agent_runs_elsewhere"
+    if decision.reason == "own_agents_only":
+        return "not_own_agent"
     return None
 
 
 def clear_refusal(policy: TenantAccessPolicy, *, channel_id: str) -> BindingRefusal | None:
-    """A confidential channel's default stays one of its own agents, never a shared one."""
-    return "channel_isolated" if channel_rule(policy, channel_id).readers == "own" else None
+    """A channel only its own agents read keeps one of them as its default."""
+    return "keeps_own" if channel_rule(policy, channel_id).readers == "own" else None
 
 
 def routine_destination_channel(row: RoutineRow) -> str | None:
@@ -134,7 +149,7 @@ def routine_destination_place(row: RoutineRow, *, channel_id: str | None) -> Pla
     """Where a routine fires into: `channel_id` under its saved parent channel.
 
     A thread whose parent is unknown (`is_routine_parent_unknown`) is marked
-    `parent_unresolved`, so `authorize` refuses it while anything is isolated.
+    `parent_unresolved`, so `authorize` refuses it while any channel limits its readers.
     """
     return Place(
         channel_id=channel_id,
@@ -157,10 +172,10 @@ class RoutineOrigin:
 def routine_origin(
     policy: TenantAccessPolicy, row: RoutineRow, *, platform: str
 ) -> RoutineOrigin | None:
-    """The channel and thread a routine fires into, with the seal over them now.
+    """The channel and thread a routine fires into, with the readers limits over them now.
 
-    Stamped on the routine's session so an isolated or sealed channel's
-    routine transcript stays inside it. A routine without a destination is
+    Stamped on the routine's session so the routine transcript of a channel
+    with limited readers stays inside it. A routine without a destination is
     placed by its saved channel (for one made in a DM, the channel the DM
     came from); one with neither is headless (None). Every stamp is private
     too (`private_routine_stamp`): the routine runs on its owner's
@@ -184,7 +199,7 @@ def routine_origin(
     return RoutineOrigin(
         channel_id=channel_id,
         thread_id=thread_id,
-        seal_ids=seal_ids_at(policy, channel_id=channel_id, thread_id=thread_id),
+        seal_ids=limiting_ids_at(policy, channel_id=channel_id, thread_id=thread_id),
         private_dm_id=private_routine_stamp(row.id),
     )
 
@@ -192,13 +207,14 @@ def routine_origin(
 def keeps_routine_inside(
     policy: TenantAccessPolicy, row: RoutineRow, *, parent_channel_id: str | None = None
 ) -> bool:
-    """Whether a routine's result must stay in an isolated channel, so never goes by DM.
+    """Whether a routine's result must stay in a channel only its own agents read, so
+    never goes by DM.
 
-    The destination decides, so the agent needn't be resolved: an isolated
-    channel's own agent fires only into that channel, as its pin refuses every
+    The destination decides, so the agent needn't be resolved: such a
+    channel's own agent fires only into that channel, as its rule refuses every
     other destination, by every name, at save and at each fire. Pass
     `parent_channel_id` once the destination's parent is resolved; until then a
-    thread whose parent is unknown stays inside while anything is isolated.
+    thread whose parent is unknown stays inside while any channel is kept to its own agents.
     """
     if channel_permissions(policy, channel_id=parent_channel_id).keeps_content:
         return True
@@ -227,38 +243,11 @@ def is_memory_hidden(
 
 
 @dataclass(frozen=True)
-class ChannelIsolationStatus:
-    """The three controls an isolated channel is made of, as the panels show them."""
+class RuleViewer:
+    """What one reader, standing at a place, may see of the tenant's agents.
 
-    is_private: bool
-    """Sealed: its messages read only from inside it."""
-    dedicated_agent_names: tuple[str, ...]
-    """Pinned to this channel alone, so they answer nowhere else."""
-    is_hidden: bool
-    """Isolated: its own agents are hidden elsewhere, and only they show and answer here."""
-
-    @property
-    def is_liftable(self) -> bool:
-        """Whether a seal or a dedicated pin is left to lift."""
-        return self.is_private or bool(self.dedicated_agent_names)
-
-
-def channel_isolation_status(policy: TenantAccessPolicy, channel_id: str) -> ChannelIsolationStatus:
-    """What of isolation `channel_id` has now. Pure."""
-    rule = channel_rule(policy, channel_id)
-    return ChannelIsolationStatus(
-        is_private=rule.readers != "any",
-        dedicated_agent_names=pinned_alone(policy, channel_id),
-        is_hidden=rule.readers == "own",
-    )
-
-
-@dataclass(frozen=True)
-class IsolationViewer:
-    """What one reader, standing at a place, may see of an isolated tenant.
-
-    From inside isolated channel C only C's own agents are seen; from anywhere
-    else every agent but the isolated channels' own.
+    From inside channel C, read by its own agents only, only C's own agents
+    are seen; from anywhere else every agent but such channels' own.
     """
 
     policy: TenantAccessPolicy
@@ -270,7 +259,7 @@ class IsolationViewer:
 
     @property
     def is_active(self) -> bool:
-        return any_confidential(self.policy)
+        return any_own_readers(self.policy)
 
     def names_of(self, agent_name: str | None) -> tuple[str | None, ...]:
         """`agent_name` and every other name its agent carries."""
@@ -291,32 +280,30 @@ class IsolationViewer:
     def sees_place(self, channel_id: str | None) -> bool:
         """A channel (None: a tenant-wide place) on the reader's side of every line."""
         here = channel_permissions(self.policy, channel_id=channel_id)
-        return here.confidential_channel == self.inside_channel_id
+        return here.home == self.inside_channel_id
 
 
-async def load_isolation_viewer(
+async def load_rule_viewer(
     session: AsyncSession,
     anthropic: AsyncAnthropic,
     *,
     tenant_id: uuid.UUID,
     channel_id: str | None,
     is_admin: bool,
-) -> IsolationViewer | None:
+) -> RuleViewer | None:
     """What a reader at `channel_id` (a thread's parent) sees; None sees everything.
 
-    Admins see everything, and so does everyone while nothing is isolated.
+    Admins see everything, and so does everyone while no channel is kept to its own agents.
     The tenant's agents are listed so a place that records one name counts
     every name its agent carries.
     """
     if is_admin:
         return None
     policy = await load_access_policy(session, tenant_id=tenant_id)
-    if not any_confidential(policy):
+    if not any_own_readers(policy):
         return None
     agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
-    return IsolationViewer(
-        policy, confidential_channel_of(policy, channel_id), agent_aliases(agents)
-    )
+    return RuleViewer(policy, home_of(policy, channel_id), agent_aliases(agents))
 
 
 async def is_thread_turn_refused(
@@ -329,15 +316,15 @@ async def is_thread_turn_refused(
     thread_id: str,
     default: DeploymentDefault,
 ) -> bool:
-    """Whether admission would refuse a turn in `thread_id` for its pin or isolation.
+    """Whether admission would refuse a turn in `thread_id` for a rule.
 
     Asks `authorize(RUN_AGENT)` of the routed agent before a gate pays for a
     classifier call; admission still decides. The agent is looked up only in
-    an isolated channel, where its other names decide whether it is an own one.
+    a channel kept to its own agents, where its other names decide whether it is an own one.
     """
     async with sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        if not (any_pinned(policy) or any_confidential(policy)):
+        if not (any_agent_rules(policy) or any_own_readers(policy)):
             return False
         context = ScopeContext(
             tenant_id=tenant_id, channel_id=channel_id, platform=platform, thread_id=thread_id
@@ -349,7 +336,7 @@ async def is_thread_turn_refused(
     if config.agent_name is None:
         return False
     names: tuple[str | None, ...] = (config.agent_name,)
-    if confidential_channel_of(policy, thread_id, channel_id) is not None:
+    if home_of(policy, thread_id, channel_id) is not None:
         agent = await find_agent_by_daimon_tag(
             anthropic, tenant_id=tenant_id, name=config.agent_name
         )
@@ -369,16 +356,15 @@ async def is_thread_turn_refused(
 
 __all__ = [
     "BindingRefusal",
-    "ChannelIsolationStatus",
-    "IsolationViewer",
+    "RuleViewer",
     "binding_refusal",
-    "channel_isolation_status",
+    "render_binding_refusal",
     "clear_refusal",
     "is_memory_hidden",
     "is_thread_turn_refused",
     "is_routine_parent_unknown",
     "keeps_routine_inside",
-    "load_isolation_viewer",
+    "load_rule_viewer",
     "routine_destination_channel",
     "routine_destination_place",
 ]

@@ -37,11 +37,11 @@ def _output(console: Console) -> str:
     return cast(StringIO, console.file).getvalue()
 
 
-async def test_rules_name_each_channel_by_preset_and_each_pin_by_where_it_runs(
+async def test_rules_read_legacy_presets_back_as_readers_writers_and_runs_in(
     db_session_factory: async_sessionmaker[AsyncSession],
     stub_anthropic: AsyncAnthropic,
 ) -> None:
-    """Sealed, protected, isolated and pinned read back as rules with their preset."""
+    """A row an older build wrote reads back as the same rules."""
     rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
     await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-rules")
     async with db_session_factory() as session:
@@ -65,22 +65,15 @@ async def test_rules_name_each_channel_by_preset_and_each_pin_by_where_it_runs(
 
     rows = {(row["kind"], row["id"]): row for row in json.loads(_output(console))}
     expected = {
-        ("channel", "700"): ("protected", "any", "none", None, None, None),
-        ("channel", "800"): ("mix", "inside", "none", None, None, None),
-        ("channel", "600"): ("confidential", "own", "own", None, None, None),
-        ("category", "900"): ("protected", "any", "none", None, None, None),
-        ("agent", "client"): (None, None, None, ["600"], "own", "600"),
-        ("agent", "parked"): (None, None, None, [], "pinned", None),
+        ("channel", "700"): ("any", "none", None, None),
+        ("channel", "800"): ("inside", "none", None, None),
+        ("channel", "600"): ("own", "own", None, None),
+        ("category", "900"): ("any", "none", None, None),
+        ("agent", "client"): (None, None, ["600"], "600"),
+        ("agent", "parked"): (None, None, [], None),
     }
     got = {
-        key: (
-            row["preset"],
-            row["readers"],
-            row["writers"],
-            row["runs_in"],
-            row["agent"],
-            row["own_channel"],
-        )
+        key: (row["readers"], row["writers"], row["runs_in"], row["home"])
         for key, row in rows.items()
     }
     assert got == expected, f"rules differ: {got}"
@@ -91,9 +84,9 @@ async def test_rules_name_each_channel_by_preset_and_each_pin_by_where_it_runs(
     )
     lines = _output(table).splitlines()
     parked = next(line for line in lines if "parked" in line)
-    assert "nowhere" in parked, f"an empty pin reads as nowhere: {parked}"
-    confidential = next(line for line in lines if " 600 " in line and "channel" in line)
-    assert "confidential" in confidential, f"the isolated channel reads as confidential: {lines}"
+    assert "nowhere" in parked, f"an empty agent rule reads as nowhere: {parked}"
+    own = next(line for line in lines if " 600 " in line and "channel" in line)
+    assert own.count("own") == 2, f"the channel kept to its own agents reads own/own: {lines}"
 
 
 async def test_rules_report_a_tenant_without_a_policy_as_open(
@@ -109,4 +102,4 @@ async def test_rules_report_a_tenant_without_a_policy_as_open(
         rt=rt, console=console, platform="discord", external_id="guild-open", as_json=False
     )
 
-    assert "every channel open" in _output(console), _output(console)
+    assert "every channel and agent open" in _output(console), _output(console)

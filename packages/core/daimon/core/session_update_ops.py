@@ -271,6 +271,7 @@ async def apply_update_ops(
     github_app_id: str | None,
     github_app_private_key: str | None,
     now: dt.datetime,
+    asks_before_publishing: bool = False,
 ) -> AppliedOps | SessionBusy:
     """Run `ops` against the live session and return what it runs afterwards.
 
@@ -305,7 +306,13 @@ async def apply_update_ops(
                     server_urls={server.name: server.url for server in agent.mcp_servers},
                 )
                 public_url = None if mcp.public_url is None else str(mcp.public_url)
-                tools = session_tools(agent, hidden, tool_safety=tool_safety, public_url=public_url)
+                tools = session_tools(
+                    agent,
+                    hidden,
+                    tool_safety=tool_safety,
+                    public_url=public_url,
+                    asks_before_publishing=asks_before_publishing,
+                )
                 servers = session_mcp_servers(
                     agent, hidden, tool_safety=tool_safety, public_url=public_url
                 )

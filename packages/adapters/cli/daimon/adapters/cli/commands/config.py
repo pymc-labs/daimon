@@ -11,12 +11,11 @@ from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.runtime import build_runtime
 from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_tenant_override
 from daimon.core.agent_pins import agent_pin_names
-from daimon.core.channel_isolation import binding_refusal, clear_refusal
-from daimon.core.channel_isolation_setup import render_isolation_refusal
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.permissions import any_confidential, any_pinned
+from daimon.core.permissions import any_agent_rules, any_own_readers
+from daimon.core.rule_views import binding_refusal, clear_refusal, render_binding_refusal
 from daimon.core.scope import (
     ChannelScopeRef,
     ConfigField,
@@ -279,7 +278,7 @@ async def _config_get_entry(
     emit_rows(console, effective_rows, columns=("field", "value", "tier"), as_json=as_json)
 
 
-async def _refuse_breaking_isolation(
+async def _refuse_breaking_home(
     session: AsyncSession,
     *,
     console: Console,
@@ -287,15 +286,15 @@ async def _refuse_breaking_isolation(
     agent_name: str | None,
     anthropic: AsyncAnthropic | None,
 ) -> None:
-    """Exit before routing `agent_name` at `scope` (None: unsetting it) breaks a pin or isolation.
+    """Exit before routing `agent_name` at `scope` (None: unsetting it) breaks a rule.
 
-    A pinned agent routed outside its pin would refuse every turn there.
+    An agent routed outside its rule would refuse every turn there.
     `anthropic` looks up the agent's other names; without it only `agent_name` counts.
     """
     if isinstance(scope, UserScopeRef):
         return  # the user tier never picks the agent
     policy = await load_access_policy(session, tenant_id=scope.tenant_id)
-    if not (any_confidential(policy) or any_pinned(policy)):
+    if not (any_own_readers(policy) or any_agent_rules(policy)):
         return
     channel_id = scope.channel_id if isinstance(scope, ChannelScopeRef) else None
     if agent_name is None:
@@ -309,7 +308,7 @@ async def _refuse_breaking_isolation(
         names = (agent_name, *(agent_pin_names(agent.name, agent.metadata) if agent else ()))
         refusal = binding_refusal(policy, agent_names=names, channel_id=channel_id)
     if refusal is not None:
-        message = render_isolation_refusal(refusal, agent_name=agent_name)
+        message = render_binding_refusal(refusal, agent_name=agent_name)
         console.print(f"[red]{message} Nothing was changed.[/red]")
         raise typer.Exit(1)
 
@@ -383,7 +382,7 @@ async def _config_set_entry(
         raise typer.Exit(1)
     scope = _parse_scope(scope_str, tenant_id=tenant_id, account_id=account_id)
     if key == "agent_name":
-        await _refuse_breaking_isolation(
+        await _refuse_breaking_home(
             session,
             console=console,
             scope=scope,
@@ -464,7 +463,7 @@ async def _config_unset_entry(
 ) -> None:
     scope = _parse_scope(scope_str, tenant_id=tenant_id, account_id=account_id)
     if key == "agent_name":
-        await _refuse_breaking_isolation(
+        await _refuse_breaking_home(
             session, console=console, scope=scope, agent_name=None, anthropic=None
         )
     await unset_fields(session, scope=scope, fields=[key], actor_account_id=account_id)
@@ -556,7 +555,7 @@ async def _config_propagate_entry(
         agent_name = source_row.agent_name if source_row is not None else None
         if reset or agent_name is not None:
             for target in targets:
-                await _refuse_breaking_isolation(
+                await _refuse_breaking_home(
                     session,
                     console=console,
                     scope=target,

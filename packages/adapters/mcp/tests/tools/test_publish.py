@@ -107,9 +107,12 @@ async def test_publish_report_impl_is_held_before_anything_is_published(
 ) -> None:
     """A chat call is checked with its turn's origin before the host is reached."""
 
-    async def held(_runtime: McpRuntime, _auth: object, *, origin_context_id: str | None) -> None:
+    async def held(
+        _runtime: McpRuntime, _auth: object, *, tool_name: str, origin_context_id: str | None
+    ) -> None:
         assert origin_context_id == "o1", "the turn's origin decides where the call is held"
-        raise ToolError("held to an isolated channel")
+        assert tool_name == "publish_report", "the approval is checked for this tool"
+        raise ToolError("held to a channel kept to its own agents")
 
     async def never(**_kwargs: object) -> PublishResult:
         raise AssertionError("nothing may be published")

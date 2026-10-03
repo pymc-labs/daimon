@@ -186,7 +186,7 @@ async def test_a_newer_message_supersedes_the_queued_work(
 
 
 @pytest.mark.parametrize(
-    "reason", ["balance_depleted", "cap_exceeded", "invoker_not_allowed", "agent_pinned_elsewhere"]
+    "reason", ["balance_depleted", "cap_exceeded", "invoker_not_allowed", "runs_elsewhere"]
 )
 async def test_a_refused_turn_tells_only_a_live_person_then_raises(
     db_session_factory: async_sessionmaker[AsyncSession], reason: AdmissionDenialReason
@@ -338,7 +338,7 @@ async def test_a_timer_whose_chat_changed_responder_says_so_and_never_runs(
 async def test_a_continuation_in_a_protected_channel_settles_without_a_word(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """SYS-048: admission refuses it as channel_protected; nothing is posted and
+    """SYS-048: admission refuses it as writers_none; nothing is posted and
     the row still settles."""
     sender = FakeSender()
     teams, account_id = await _app(db_session_factory, sender)
@@ -350,10 +350,10 @@ async def test_a_continuation_in_a_protected_channel_settles_without_a_word(
     with patched_admission():
         await teams.dispatch_after_input(TENANT, THREAD_ID, SERVICE_URL)
 
-    assert sender.sent == [], "a protected channel hears nothing, not even the refusal"
+    assert sender.sent == [], "a channel nobody writes to hears nothing, not even the refusal"
     assert await _status(db_session_factory, key) == (
         "skipped",
-        "admission_denied:channel_protected",
+        "admission_denied:writers_none",
     )
 
 

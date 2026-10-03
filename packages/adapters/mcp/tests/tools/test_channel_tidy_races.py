@@ -3,11 +3,10 @@
 import asyncio
 import contextlib
 import dataclasses
-import io
 
 import pytest
 from aioresponses import CallbackResult, aioresponses
-from daimon.adapters.mcp.tools._channel_policy import SealedChannelError, load_read_policy
+from daimon.adapters.mcp.tools._channel_policy import ChannelReadRefused, load_read_policy
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
 from daimon.core.channel_tidy import content_hash
@@ -111,7 +110,7 @@ async def test_final_agent_lookup_cannot_use_stale_policy(
                 fresh = await load_access_policy(session, tenant_id=world.tenant_id)
             if change == "seal":
                 read = await load_read_policy(world.runtime, auth, origin_context_id=origin)
-                with pytest.raises(SealedChannelError):
+                with pytest.raises(ChannelReadRefused):
                     read.require(channel)
             else:
                 decision = authorize(
@@ -375,10 +374,8 @@ async def test_concurrent_discord_edits_keep_correct_replaced_hash(
 async def test_policy_writer_waits_for_platform_effect(
     committing_sessionmaker, fake, monkeypatch, existing_policy
 ):
-    from types import SimpleNamespace
-
-    from daimon.adapters.cli.commands.tenants import tenants_access_policy_set
-    from rich.console import Console
+    from daimon.core.channel_rules import set_channel_rule
+    from daimon.core.scope import DeploymentDefault
 
     channel = "222222222222222222"
     world = await d._world(committing_sessionmaker)
@@ -408,12 +405,16 @@ async def test_policy_writer_waits_for_platform_effect(
     )
     await asyncio.wait_for(entered.wait(), 5)
     writer = asyncio.create_task(
-        tenants_access_policy_set(
-            rt=SimpleNamespace(sessionmaker=world.sessionmaker),
-            console=Console(file=io.StringIO()),
+        set_channel_rule(
+            world.runtime.client,
+            world.sessionmaker,
+            tenant_id=world.tenant_id,
             platform="discord",
-            external_id=d._GUILD,
-            protected_channel=[channel],
+            channel_id=channel,
+            writers="none",
+            default=DeploymentDefault(agent_name="daimon"),
+            actor_account_id=None,
+            subject=Subject(is_admin=True),
         )
     )
     try:
@@ -422,7 +423,7 @@ async def test_policy_writer_waits_for_platform_effect(
     finally:
         release.set()
         await asyncio.gather(edit, writer)
-    with pytest.raises(ToolError, match="protected"):
+    with pytest.raises(ToolError, match="writers to none"):
         await d._delete_message_impl(
             world.runtime,
             auth,

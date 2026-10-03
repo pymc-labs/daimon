@@ -6,8 +6,8 @@ import uuid
 
 import pytest
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.channel_isolation import load_isolation_viewer
 from daimon.core.roster import Roster, RosterAgent, load_roster, order_roster, paginate
+from daimon.core.rule_views import load_rule_viewer
 from daimon.core.scope import ChannelScopeRef, ConfigTier, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_write import set_fields
@@ -207,7 +207,7 @@ async def test_load_roster_shows_a_member_only_their_side_of_an_isolated_channel
         channel_id=channel_id,
         thread_id=None,
         default=default,
-        viewer=await load_isolation_viewer(
+        viewer=await load_rule_viewer(
             db_session, anthropic, tenant_id=tenant.id, channel_id=channel_id, is_admin=is_admin
         ),
     )

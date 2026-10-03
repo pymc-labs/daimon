@@ -20,7 +20,6 @@ from datetime import datetime
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.channel_isolation import load_isolation_viewer
 from daimon.core.constants import MODEL_DISPLAY_NAMES
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -33,6 +32,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import RepoAccess, derive_repo_access
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routing_facts import build_unrouted_note
+from daimon.core.rule_views import load_rule_viewer
 from daimon.core.scope import (
     AnsweringPlace,
     ChannelConfigRow,
@@ -257,7 +257,7 @@ async def load_agent_details(
     `channel_id`, as if it did not exist.
     """
     agent = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
-    viewer = await load_isolation_viewer(
+    viewer = await load_rule_viewer(
         session, anthropic, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
     )
     if viewer is not None and not viewer.sees_agent(agent):

@@ -17,7 +17,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._isolation import load_caller_hidden_environments
+from daimon.adapters.mcp.tools._rule_view import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.channel_environments import build_archive_environment_note
 from daimon.core.defaults.ma_index import (

@@ -298,7 +298,7 @@ async def test_a_protected_channel_refuses_the_post_and_nothing_is_sent(
     await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
     await db_session.commit()
     fake = _Fake()
-    with pytest.raises(ToolError, match="protected"):
+    with pytest.raises(ToolError, match="writers to none"):
         await tool(
             _runtime(_client(fake), sessionmaker),
             _auth(tenant_id=tenant.id),

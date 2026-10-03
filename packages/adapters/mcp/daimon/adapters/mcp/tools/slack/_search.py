@@ -25,7 +25,7 @@ from daimon.adapters.mcp.tools.slack._client import (
 from daimon.adapters.mcp.tools.slack._leak_policy import get_destination, is_dm_destination
 from daimon.adapters.mcp.tools.slack._models import SlackSearchMatch, SlackSearchResult
 from daimon.adapters.mcp.tools.slack._visibility import map_slack_api_error
-from daimon.core.permissions import any_sealed
+from daimon.core.permissions import any_readers_limited
 from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
 
@@ -90,7 +90,7 @@ async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
                 permalink=str(m["permalink"]) if m.get("permalink") else None,
             )
         )
-    if any_sealed(read_policy.policy):
+    if any_readers_limited(read_policy.policy):
         # Slack's total counts every page, sealed hits included, so it would
         # answer "does the sealed channel mention X?". Report only what is
         # shown, as Discord does for unscoped searches.

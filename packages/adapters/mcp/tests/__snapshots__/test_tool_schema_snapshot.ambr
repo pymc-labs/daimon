@@ -387,38 +387,18 @@
         'type': 'object',
       }),
     }),
-    'archive_environment': dict({
+    'archive_channel_copy': dict({
       'description': '''
-        Archive the MA environment and delete from the tenant pool.
+        Archive the agent copied as a channel's own, when that channel closes. For
+        example, retire #client-acme's agent once the engagement ends. Requires a server
+        or workspace admin.
         
-        Channels and the workspace default that picked it are cleared, so they
-        fall through to the next tier; read ``note`` back to the user.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'name': dict({
-            'type': 'string',
-          }),
-        }),
-        'required': list([
-          'name',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'archive_isolation_copy': dict({
-      'description': '''
-        Archive the agent copied for a confidential channel, when that channel closes.
-        For example, retire #client-acme's agent once the engagement ends. Requires a
-        server or workspace admin.
-        
-        Only an agent ``set_channel_isolation`` copied for a channel can be archived
-        here, never a built-in agent or a default. Pass ``channel_id``, the channel it
-        was made for, to drop its pin and default there with it; while it is pinned
-        or a default anywhere else, the call is refused. The channel stays sealed and
-        isolated, so nothing answers there afterwards. ``expected_ma_agent_id`` guards
-        against a namesake made since the agent was listed.
+        Only an agent ``set_channel_rule`` copied for a channel can be archived here,
+        never a built-in agent or a default. Pass ``channel_id``, the channel it was made
+        for, to drop its rule and default there with it; while its rule or a default
+        names anywhere else, the call is refused. The channel keeps its rule, so nothing
+        answers there afterwards. ``expected_ma_agent_id`` guards against a namesake
+        made since the agent was listed.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -445,6 +425,26 @@
             ]),
             'default': None,
           }),
+          'name': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'archive_environment': dict({
+      'description': '''
+        Archive the MA environment and delete from the tenant pool.
+        
+        Channels and the workspace default that picked it are cleared, so they
+        fall through to the next tier; read ``note`` back to the user.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
           'name': dict({
             'type': 'string',
           }),
@@ -1787,8 +1787,8 @@
         key, so share it only where the notebook belongs. Never paste large file
         contents into a tool argument.
         
-        Pass this turn's origin_context_id. A pinned agent, or a turn in a
-        confidential channel, publishes nothing.
+        Pass this turn's origin_context_id. An agent with a rule (where it runs)
+        publishes only once the requester approves the call on a card.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3737,11 +3737,11 @@
         should answer questions (defaults to this tenant's configured
         agent).
         
-        Pass this turn's ``origin_context_id``. A pinned agent, or a turn in
-        a confidential channel, publishes nothing: a link reaches whoever holds
-        it. A confidential channel's own agent never answers a report. When the
-        answering agent is pinned to channels, a non-admin may only publish
-        its reader from inside them.
+        Pass this turn's ``origin_context_id``. An agent with a rule (where it
+        runs) publishes only once the requester approves the call on a card: a
+        link reaches whoever holds it. A channel's own agent never answers a
+        report. When the answering agent has a rule, a non-admin may only
+        publish its reader from inside its channels.
         
         Returns ``{upload_url, links}``: ``upload_url`` is a one-time
         capability URL: ``links`` maps each recipient's name to their own
@@ -4885,6 +4885,45 @@
         'type': 'object',
       }),
     }),
+    'set_agent_rule': dict({
+      'description': '''
+        Set where an agent runs: only in the ``runs_in`` channels and their threads,
+        or, with null, wherever it is set to answer; an empty list runs it nowhere.
+        Requires a server or workspace admin.
+        
+        Outside its rule its turns are refused. An agent with a rule messages only
+        whoever asked, asks before publishing, and can't be copied. A channel's own
+        agent keeps its rule until that channel's readers change (``set_channel_rule``).
+        Naming a channel only its own agents read makes the agent one of them, so name
+        that channel alone.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_name': dict({
+            'type': 'string',
+          }),
+          'runs_in': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+          }),
+        }),
+        'required': list([
+          'agent_name',
+          'runs_in',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'set_channel_admins': dict({
       'description': '''
         Name who administers one channel, on top of the server admins. For example,
@@ -5043,26 +5082,25 @@
         'type': 'object',
       }),
     }),
-    'set_channel_isolation': dict({
+    'set_channel_rule': dict({
       'description': '''
-        Mark one channel confidential, or unmark it. For example, give #team-alpha an
-        agent nobody outside it can see or reach. Requires a server or workspace admin.
+        Set who can read a channel and who can post there. Requires a server or
+        workspace admin. Leave one out to keep it.
         
-        Marking it confidential seals the channel and pins its own agent to it: its default agent,
-        answering nowhere else, pinned nowhere else and not built in. If it has none, pass
-        ``fork_from`` (an agent
-        name, usually the one answering there now): that agent is copied under a name
-        taken from the channel and becomes the channel's default. The copy carries no
-        credentials, and an agent pinned to channels can't be copied. Without it the call
-        is refused and says why. Repeating the call copies nothing again.
+        ``readers``: ``any``; ``inside``, only turns in this channel read its messages
+        and conversations; or ``own``, which also keeps it to its own agents: only they
+        run and show there, and they run and show nowhere else. ``writers``: ``any``;
+        ``own`` (only with readers ``own``); or ``none``, nothing posts there, daimon
+        included.
         
-        While confidential, the channel's own agents can't be set as the default anywhere
-        else, don't appear in agent, skill or routine lists outside it, and can't be
-        handed tasks from elsewhere; inside it only they appear. Its messages are
-        readable only from inside it. Unmarking it keeps the seal and the pins; a
-        server admin lifts them from Who answers where in the setup panel.
-        ``channel_id`` is the channel's id, never a Discord thread's; a Slack or Teams
-        thread id names its channel.
+        To isolate a channel so nothing leaks in or out, set readers and writers
+        ``own``. Its default agent becomes its own agent, by an agent rule naming the
+        channel alone; it must be custom and answer nowhere else. Otherwise pass
+        ``copy_from`` (an agent name, usually the one answering there) to copy that
+        agent, without credentials, as the channel's default. To make agent X the only
+        agent in a channel, set the channel's default to X first. ``release_agents``
+        drops the rules of the agents kept to the channel, once readers aren't ``own``.
+        ``channel_id`` is the channel's id; a Slack or Teams thread id names its channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -5070,7 +5108,7 @@
           'channel_id': dict({
             'type': 'string',
           }),
-          'fork_from': dict({
+          'copy_from': dict({
             'anyOf': list([
               dict({
                 'type': 'string',
@@ -5081,40 +5119,15 @@
             ]),
             'default': None,
           }),
-          'isolated': dict({
-            'type': 'boolean',
-          }),
-        }),
-        'required': list([
-          'channel_id',
-          'isolated',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'set_channel_protection': dict({
-      'description': '''
-        Protect or seal one channel, or lift either. For example, stop daimon posting
-        in #announcements, or make #legal readable only from inside it. Leave a flag out
-        to keep it as it is.
-        
-        ``protected`` stops every post into the channel and its threads, replies
-        included. ``sealed`` makes its messages and conversations readable only from
-        inside it. Requires a server admin; a channel's own admins can't change either.
-        A confidential channel stays sealed until it is unmarked confidential
-        (``set_channel_isolation``). ``channel_id`` is the channel's id; a Slack or
-        Teams thread id names its channel.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'channel_id': dict({
-            'type': 'string',
-          }),
-          'protected': dict({
+          'readers': dict({
             'anyOf': list([
               dict({
-                'type': 'boolean',
+                'enum': list([
+                  'any',
+                  'inside',
+                  'own',
+                ]),
+                'type': 'string',
               }),
               dict({
                 'type': 'null',
@@ -5122,10 +5135,19 @@
             ]),
             'default': None,
           }),
-          'sealed': dict({
+          'release_agents': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'writers': dict({
             'anyOf': list([
               dict({
-                'type': 'boolean',
+                'enum': list([
+                  'any',
+                  'own',
+                  'none',
+                ]),
+                'type': 'string',
               }),
               dict({
                 'type': 'null',

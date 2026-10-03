@@ -328,8 +328,9 @@ STILL_ADMIN_TOOL_NAMES = (
     "clear_channel_budget",
     "set_channel_environment",
     "clear_channel_environment",
-    "set_channel_protection",
-    "archive_isolation_copy",
+    "set_channel_rule",
+    "set_agent_rule",
+    "archive_channel_copy",
     "list_channel_skills",
     "add_channel_skill",
     "remove_channel_skill",
@@ -586,9 +587,9 @@ async def test_channel_admin_discovers_channel_default_tools_but_not_admin_ones(
     assert "### set_channel_environment" not in await _search(
         app, member, "set channel environment"
     ), "a member without a grant may not"
-    assert "### set_channel_protection" not in await _search(
-        app, channel_admin, "protect or seal channel"
-    ), "protection and seals stay with server admins"
+    assert "### set_channel_rule" not in await _search(
+        app, channel_admin, "set who can read or post in a channel"
+    ), "channel rules stay with server admins"
     for tool, query in (
         ("set_channel_budget", "set channel budget"),
         ("clear_channel_budget", "clear channel budget"),

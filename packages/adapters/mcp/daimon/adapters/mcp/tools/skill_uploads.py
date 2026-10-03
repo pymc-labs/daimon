@@ -34,6 +34,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
+from daimon.adapters.mcp.tools._session_gate import session_asks_first
 from daimon.adapters.mcp.tools.agents import (
     _system_agent_rejection,  # pyright: ignore[reportPrivateUsage]
 )
@@ -45,15 +46,11 @@ from daimon.adapters.mcp.tools.setup_target import (
 from daimon.adapters.mcp.tools.skills import (
     _resolve_sync_token,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import decrypt_token
-from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_personal_servers import visible_tools
 from daimon.core.operation_policy import OperationKind, decide_operation
-from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.add import (
     SkillAddResult,
@@ -76,10 +73,7 @@ from daimon.core.skills.ingest import (
 )
 from daimon.core.slack_file_token import verify_file_token
 from daimon.core.slack_files import fetch_slack_file
-from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
-from daimon.core.stores.thread_sessions import get_live_thread_session
-from daimon.core.tool_safety import has_confirmation_gate
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
@@ -118,100 +112,6 @@ def _no_card_refusal(agent_name: str, *, deployment_has_cards: bool) -> str:
         f"a confirmation card, and {why}. Tell them to run /agent-setup, open {agent_name} "
         "and use Add skill: it shows the same preview and adds it on their own click. "
         "Do not retry."
-    )
-
-
-async def _session_asks_first(
-    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow | None
-) -> bool:
-    """Whether this call comes from a chat turn whose session waits for the person's Approve.
-
-    Read from the session itself, never the model's word: the verified origin's
-    live session must run the origin's responder and hold `add_skill` on
-    `always_ask`, as MA reports it or, failing that, as daimon recorded sending
-    it (`_recorded_as_gated`). An `agent_chat` session has no origin; one
-    without tool safety holds `always_allow`.
-    """
-    if origin is None:
-        return False
-    async with runtime.session_factory() as session:
-        live = await get_live_thread_session(
-            session,
-            tenant_id=auth.tenant_id,
-            platform=origin.platform,
-            thread_id=origin.thread_id,
-            account_id=auth.account_id,
-        )
-    if live is None:
-        return False
-    try:
-        ma_session = await runtime.client.beta.sessions.retrieve(live.ma_session_id)
-        if ma_session.agent.id != origin.responder_ma_agent_id:
-            return False
-        if has_confirmation_gate(
-            [tool.model_dump(mode="json") for tool in ma_session.agent.tools], tool_name=_TOOL_NAME
-        ):
-            return True
-        return await _recorded_as_gated(
-            runtime,
-            auth,
-            live,
-            ma_agent_id=ma_session.agent.id,
-            reported_tools_sha256=hash_tools(ma_session.agent.tools),
-        )
-    except anthropic.APIError as exc:
-        # Unreadable (a deleted session, an outage) is not evidence of a card:
-        # the confirm is refused like any other session without one.
-        _log.warning(
-            "add_skill.session_check_failed", ma_session_id=live.ma_session_id, error=str(exc)
-        )
-        return False
-
-
-async def _recorded_as_gated(
-    runtime: McpRuntime,
-    auth: AuthIdentity,
-    live: ThreadSessionRow,
-    *,
-    ma_agent_id: str,
-    reported_tools_sha256: str,
-) -> bool:
-    """Whether the tools daimon recorded for `live` are the gated ones, `add_skill` asking.
-
-    Only for a session MA reports without its per-session overrides, i.e. with
-    the agent's own tools (`reported_tools_sha256`): a report showing other
-    tools, such as a session switched to `always_allow` out of band, is taken
-    at its word. The bind records the hash of the tools it last sent the
-    session; equal to the gated tools a session for this caller gets now
-    (`session_tools`), it is the server's own record of the card. An agent
-    changed since that bind reads as not gated.
-    """
-    recorded = live.effective_config
-    if recorded is None:
-        return False
-    agent = await runtime.client.beta.agents.retrieve(ma_agent_id)
-    hidden = await resolve_hidden_mcp_server_names(
-        runtime.session_factory,
-        tenant_id=auth.tenant_id,
-        agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent.id),
-        account_id=auth.account_id,
-        server_urls={server.name: server.url for server in agent.mcp_servers},
-    )
-    # MA reporting the agent's own tools means it left the overrides out.
-    if reported_tools_sha256 not in {
-        hash_tools(agent.tools),
-        hash_tools(visible_tools(agent, hidden)),
-    }:
-        return False
-    public_url = runtime.settings.mcp.public_url
-    tools = session_tools(
-        agent,
-        hidden,
-        tool_safety=runtime.settings.tool_safety,
-        public_url=None if public_url is None else str(public_url),
-    )
-    return hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
-        [tool.model_dump(mode="json") for tool in tools], tool_name=_TOOL_NAME
     )
 
 
@@ -408,7 +308,9 @@ async def _add_skill_impl(
     await recheck(agent)
     deployment_has_cards = runtime.settings.tool_safety.enabled
     try:
-        has_card = deployment_has_cards and await _session_asks_first(runtime, auth, origin)
+        has_card = deployment_has_cards and await session_asks_first(
+            runtime, auth, origin, tool_name=_TOOL_NAME
+        )
         if content_hash is not None and not has_card:
             raise ToolError(_no_card_refusal(agent_name, deployment_has_cards=deployment_has_cards))
         async with httpx.AsyncClient(timeout=30.0) as http:

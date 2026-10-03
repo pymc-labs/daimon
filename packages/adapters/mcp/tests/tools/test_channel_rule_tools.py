@@ -1,4 +1,4 @@
-"""set_channel_protection: who may protect or seal a channel, and what it may never lift."""
+"""set_channel_rule and set_agent_rule: who may set them, and what they refuse."""
 
 from __future__ import annotations
 
@@ -9,10 +9,11 @@ from unittest.mock import MagicMock
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools.channel_protection import (
-    _set_channel_protection_impl,  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.channel_rules import (
+    _set_agent_rule_impl,  # pyright: ignore[reportPrivateUsage]
+    _set_channel_rule_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import access_policy
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
@@ -26,6 +27,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 ROOM = "111111111111111111"
 OTHER = "222222222222222222"
 ISOLATED = "333333333333333333"
+OWN = ChannelRule(readers="own", writers="own")
+POLICY = TenantAccessPolicy(
+    channel_rules={ISOLATED: OWN}, agent_rules={"own": AgentRule(runs_in=(ISOLATED,))}
+)
 
 
 async def _world(
@@ -37,11 +42,7 @@ async def _world(
         await set_access_policy(
             session,
             tenant_id=tenant.id,
-            policy=TenantAccessPolicy(
-                sealed_channel_ids=(ISOLATED,),
-                isolated_channel_ids=(ISOLATED,),
-                agent_channel_pins={"own": (ISOLATED,)},
-            ),
+            policy=POLICY,
         )
     runtime = McpRuntime(
         session_factory=sessionmaker,
@@ -77,65 +78,72 @@ async def _policy(
         return await load_access_policy(session, tenant_id=tenant_id)
 
 
-async def test_a_server_admin_protects_seals_and_lifts_both(
+async def test_a_server_admin_limits_and_reopens_a_channel(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id, account_id, runtime = await _world(committing_sessionmaker)
     admin = _auth(tenant_id, account_id, admin=True)
 
-    done = await _set_channel_protection_impl(
-        runtime, admin, channel_id=ROOM, protected=True, sealed=True
+    done = await _set_channel_rule_impl(
+        runtime, admin, channel_id=ROOM, readers="inside", writers="none"
     )
-    assert (done.protected, done.sealed, done.changed) == (True, True, True), done
-    again = await _set_channel_protection_impl(runtime, admin, channel_id=ROOM, protected=True)
+    assert (done.readers, done.writers, done.changed) == ("inside", "none", True), done
+    assert "Only turns inside it read it" in done.note, done.note
+    again = await _set_channel_rule_impl(runtime, admin, channel_id=ROOM, writers="none")
     assert not again.changed, "repeating the call changes nothing"
-    policy = await _policy(committing_sessionmaker, tenant_id)
-    assert ROOM in policy.protected_channel_ids and ROOM in policy.sealed_channel_ids
 
-    lifted = await _set_channel_protection_impl(
-        runtime, admin, channel_id=ROOM, protected=False, sealed=False
+    opened = await _set_channel_rule_impl(
+        runtime, admin, channel_id=ROOM, readers="any", writers="any"
     )
-    assert (lifted.protected, lifted.sealed) == (False, False), lifted
-    policy = await _policy(committing_sessionmaker, tenant_id)
-    assert policy.sealed_channel_ids == (ISOLATED,), "other channels' seals are kept"
-    assert policy.protected_channel_ids == (), "the protection is lifted"
+    assert (opened.readers, opened.writers) == ("any", "any"), opened
+    assert await _policy(committing_sessionmaker, tenant_id) == POLICY, "other rules are kept"
 
 
-async def test_a_channel_admin_neither_protects_nor_seals_their_own_channel(
+async def test_a_channel_admin_sets_no_rule_even_on_their_own_channel(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id, account_id, runtime = await _world(committing_sessionmaker)
     channel_admin = _auth(tenant_id, account_id, administers=frozenset({ROOM, ISOLATED}))
+    member = _auth(tenant_id, account_id)
 
-    for change in ({"protected": True}, {"sealed": True}, {"protected": False}):
-        with pytest.raises(ToolError, match="needs a server admin"):
-            await _set_channel_protection_impl(runtime, channel_admin, channel_id=ROOM, **change)
-    with pytest.raises(ToolError, match="needs a server admin"):
-        await _set_channel_protection_impl(
-            runtime, channel_admin, channel_id=ISOLATED, sealed=False
-        )
-    with pytest.raises(ToolError, match="needs a server admin"):
-        await _set_channel_protection_impl(
-            runtime, _auth(tenant_id, account_id), channel_id=ROOM, protected=True
-        )
-    policy = await _policy(committing_sessionmaker, tenant_id)
-    assert policy.sealed_channel_ids == (ISOLATED,), "refusals write nothing"
-    assert policy.protected_channel_ids == (), "refusals protect nothing"
+    for auth in (channel_admin, member):
+        for change in ({"writers": "none"}, {"readers": "inside"}):
+            with pytest.raises(ToolError, match="Only a server or workspace admin"):
+                await _set_channel_rule_impl(runtime, auth, channel_id=ROOM, **change)  # type: ignore[arg-type]
+        with pytest.raises(ToolError, match="Only a server or workspace admin"):
+            await _set_channel_rule_impl(runtime, auth, channel_id=ISOLATED, readers="any")
+    assert await _policy(committing_sessionmaker, tenant_id) == POLICY, "refusals write nothing"
 
 
-async def test_an_isolated_channel_stays_sealed_until_its_isolation_ends(
+async def test_a_channel_kept_to_its_own_agents_keeps_them_until_its_readers_change(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id, account_id, runtime = await _world(committing_sessionmaker)
     admin = _auth(tenant_id, account_id, admin=True)
-    with pytest.raises(ToolError, match="unmark it confidential first"):
-        await _set_channel_protection_impl(runtime, admin, channel_id=ISOLATED, sealed=False)
-    protected = await _set_channel_protection_impl(
-        runtime, admin, channel_id=ISOLATED, protected=True
+    with pytest.raises(ToolError, match="so it keeps them"):
+        await _set_channel_rule_impl(runtime, admin, channel_id=ISOLATED, release_agents=True)
+    closed = await _set_channel_rule_impl(runtime, admin, channel_id=ISOLATED, writers="none")
+    assert (closed.readers, closed.writers) == ("own", "none"), "readers stay own"
+    with pytest.raises(ToolError, match="Pass readers, writers or release_agents"):
+        await _set_channel_rule_impl(runtime, admin, channel_id=ROOM)
+    released = await _set_channel_rule_impl(
+        runtime, admin, channel_id=ISOLATED, readers="any", writers="any", release_agents=True
     )
-    assert protected.protected and protected.sealed, "protecting it keeps the seal"
-    with pytest.raises(ToolError, match="Pass protected, sealed or both"):
-        await _set_channel_protection_impl(runtime, admin, channel_id=ROOM)
+    assert released.released_agents == ["own"], released
+    assert await _policy(committing_sessionmaker, tenant_id) == TenantAccessPolicy()
+
+
+async def test_set_agent_rule_needs_a_server_admin_and_an_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, account_id, runtime = await _world(committing_sessionmaker)
+    channel_admin = _auth(tenant_id, account_id, administers=frozenset({ROOM}))
+    with pytest.raises(ToolError, match="Only a server or workspace admin"):
+        await _set_agent_rule_impl(runtime, channel_admin, agent_name="own", runs_in=[ROOM])
+    admin = _auth(tenant_id, account_id, admin=True)
+    with pytest.raises(ToolError, match="There is no agent named ghost"):
+        await _set_agent_rule_impl(runtime, admin, agent_name="ghost", runs_in=[ROOM])
+    assert await _policy(committing_sessionmaker, tenant_id) == POLICY, "refusals write nothing"
 
 
 async def test_a_protection_change_waits_out_a_held_policy_fence(
@@ -153,9 +161,9 @@ async def test_a_protection_change_waits_out_a_held_policy_fence(
             {"key": access_policy._policy_write_key(tenant_id)},  # pyright: ignore[reportPrivateUsage]
         )
         writer = asyncio.create_task(
-            _set_channel_protection_impl(runtime, admin, channel_id=ROOM, protected=True)
+            _set_channel_rule_impl(runtime, admin, channel_id=ROOM, writers="none")
         )
         await asyncio.sleep(0.3)
         assert not writer.done(), "the write must wait for the fence, not fail as busy"
     done = await asyncio.wait_for(writer, 10)
-    assert (done.protected, done.changed) == (True, True), done
+    assert (done.writers, done.changed) == ("none", True), done

@@ -20,7 +20,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 
-from daimon.core.channel_isolation import IsolationViewer
+from daimon.core.rule_views import RuleViewer
 from daimon.core.scope import ChannelConfigRow, ConfigTier, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
@@ -165,7 +165,7 @@ def build_answering_map(
     )
 
 
-def hide_across_isolation(answering: AnsweringMap, viewer: IsolationViewer) -> AnsweringMap:
+def hide_across_homes(answering: AnsweringMap, viewer: RuleViewer) -> AnsweringMap:
     """Only the routing on the reader's side of every isolated channel's line. Pure."""
     outside = viewer.inside_channel_id is None
     tenant_default = answering.tenant_default
@@ -216,7 +216,7 @@ async def load_answering_map(
     tenant_id: uuid.UUID,
     platform: str,
     default: DeploymentDefault,
-    viewer: IsolationViewer | None = None,
+    viewer: RuleViewer | None = None,
 ) -> AnsweringMap:
     """Read one install's config rows and live setup conversations, then fold them.
 
@@ -233,4 +233,4 @@ async def load_answering_map(
         setup_threads=setup_threads,
         setup_threads_truncated=truncated,
     )
-    return answering if viewer is None else hide_across_isolation(answering, viewer)
+    return answering if viewer is None else hide_across_homes(answering, viewer)

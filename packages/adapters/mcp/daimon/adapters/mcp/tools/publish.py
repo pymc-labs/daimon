@@ -68,9 +68,9 @@ async def _source_authorizer(
     """The rules for the agent whose reader variant is published.
 
     A reader answers as its source agent, so publishing one is a change to
-    what that agent reaches: never an isolated channel's own agent; a pinned
-    one by an admin, or a member only from a turn inside the source's pinned
-    channels (``origin_context_id``).
+    what that agent reaches: never a channel's own agent; one with a rule by
+    an admin, or a member only from a turn inside the source's channels
+    (``origin_context_id``).
     """
     origin = (
         await require_turn_origin(runtime, auth, origin_context_id) if origin_context_id else None
@@ -105,7 +105,9 @@ async def _publish_report_impl(
         raise ToolError("report host not configured: DAIMON_MCP__JWT_SECRET is unset")
     jwt_secret = runtime.settings.mcp.jwt_secret.get_secret_value().encode()
     if auth is not None:
-        await require_publishable(runtime, auth, origin_context_id=origin_context_id)
+        await require_publishable(
+            runtime, auth, tool_name="publish_report", origin_context_id=origin_context_id
+        )
     authorize_source = (
         await _source_authorizer(runtime, auth, origin_context_id) if auth is not None else None
     )
@@ -185,11 +187,11 @@ def register_publish_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         should answer questions (defaults to this tenant's configured
         agent).
 
-        Pass this turn's ``origin_context_id``. A pinned agent, or a turn in
-        a confidential channel, publishes nothing: a link reaches whoever holds
-        it. A confidential channel's own agent never answers a report. When the
-        answering agent is pinned to channels, a non-admin may only publish
-        its reader from inside them.
+        Pass this turn's ``origin_context_id``. An agent with a rule (where it
+        runs) publishes only once the requester approves the call on a card: a
+        link reaches whoever holds it. A channel's own agent never answers a
+        report. When the answering agent has a rule, a non-admin may only
+        publish its reader from inside its channels.
 
         Returns ``{upload_url, links}``: ``upload_url`` is a one-time
         capability URL: ``links`` maps each recipient's name to their own

@@ -22,14 +22,14 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_PRIVATE_DM,
     is_private_routine_stamp,
 )
-from daimon.core.permissions import any_sealed
+from daimon.core.permissions import any_readers_limited
 from daimon.core.session_seal import session_facts
 from daimon.core.stores.thread_sessions import thread_ids_for_sessions
 from fastmcp.exceptions import ToolError
 
 _SEALED_SESSION_MSG = (
-    "this conversation ran in a sealed channel: its transcript can only be read "
-    "or continued from a conversation inside that channel. Tell the caller. Do not retry."
+    "this conversation ran in a channel read only from inside: its transcript can only "
+    "be read or continued from a conversation inside that channel. Tell the caller. Do not retry."
 )
 
 
@@ -49,7 +49,7 @@ class _HubAccess:
 _HUB_ACCESS: ContextVar[_HubAccess | None] = ContextVar("daimon_hub_access", default=None)
 
 _ADMIN_CONTINUE_REFUSED = (
-    "this conversation ran in a sealed channel. As an admin you can read it from "
+    "this conversation ran in a channel read only from inside. As an admin you can read it from "
     "here, but continue it in its channel: a follow-up from here would join the "
     "channel's own conversation. Tell the caller. Do not retry."
 )
@@ -262,7 +262,7 @@ async def _legacy_threads(
     sessions: Sequence[BetaManagedAgentsSession],
 ) -> dict[str, str]:
     unstamped = [s.id for s in sessions if MA_METADATA_KEY_CHANNEL not in (s.metadata or {})]
-    if not unstamped or not any_sealed(read.policy):
+    if not unstamped or not any_readers_limited(read.policy):
         return {}
     async with runtime.session_factory() as db:
         return await thread_ids_for_sessions(db, tenant_id=auth.tenant_id, ma_session_ids=unstamped)

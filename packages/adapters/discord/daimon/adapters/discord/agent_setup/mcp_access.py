@@ -57,7 +57,7 @@ def coding_tools_refusal(agent_name: str) -> str:
     """What a member sees instead of a token, naming the permission and the way round it."""
     return (
         f"Minting an access token for {agent_name} needs Manage Server, or channel admin "
-        "of every channel it is pinned to, pressed inside one of them. "
+        "of every channel its rule runs it in, pressed inside one of them. "
         "Ask an admin to open Details and use this button."
     )
 
@@ -290,7 +290,7 @@ def render_mcp_config(
         f'--header "Authorization: Bearer {jwt}"'
     )
     bound = (
-        f"It runs in <#{channel_id}>, under that channel's pins, seal and budget.\n"
+        f"It runs in <#{channel_id}>, under that channel's rules and budget.\n"
         if channel_id is not None
         else ""
     )
