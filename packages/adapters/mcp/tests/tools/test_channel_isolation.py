@@ -34,6 +34,7 @@ from daimon.adapters.mcp.tools.agents import (
     _update_agent_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.channel_environments import (
+    _clear_channel_environment_impl,  # pyright: ignore[reportPrivateUsage]
     _set_channel_environment_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.channel_isolation import (
@@ -801,6 +802,10 @@ async def test_an_isolated_channels_environment_name_shows_only_inside_it(
 
     assert await summary_row(world.auth()) == (None, None), "the summary hides C's names outside"
     assert await summary_row(operator) == ("local", "acme-env"), "an operator token sees them"
+    cleared = await _clear_channel_environment_impl(
+        runtime, world.auth(), channel_id=ROOM, confirm_open_network=True
+    )
+    assert cleared.changed and cleared.previous_environment_name is None, "cleared, unnamed"
 
 
 async def test_no_one_publishes_an_own_agents_reader(

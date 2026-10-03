@@ -86,6 +86,13 @@ _NEEDS_ADMIN: str = (
 )
 
 
+def _missing(environment_name: str | None) -> str:
+    return (
+        f"No environment named '{environment_name}' exists in this workspace. Nothing was "
+        "changed. Use list_environments to pick an existing one, or create_environment first."
+    )
+
+
 async def _require_pick_allowed(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -93,8 +100,9 @@ async def _require_pick_allowed(
     target: _Target,
     environment_name: str | None,
     confirm_open_network: bool,
-) -> EnvironmentPick:
-    """The decided pick; raise ``ToolError`` unless the caller may leave the scope on it."""
+) -> tuple[EnvironmentPick, frozenset[str]]:
+    """The decided pick and the names the caller's isolation hides, which read as missing;
+    raise ``ToolError`` unless the caller may leave the scope on it."""
     require_scope(auth, "channels:write")
     if target.channel_id is None and auth.is_operator:
         raise ToolError("An operator token changes only a channel's environment; pass channel_id.")
@@ -112,6 +120,9 @@ async def _require_pick_allowed(
             )
         except AccessPolicyUnreadable as exc:
             raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
+    hidden = await load_caller_hidden_environments(runtime, auth)
+    if environment_name in hidden:  # before any refusal that would name it
+        raise ToolError(_missing(environment_name))
     if not pick.decision:
         record_authz_denial(Action.SET_CHANNEL_ENVIRONMENT, pick.decision.reason)
     if pick.decision.reason == "sealed":
@@ -122,18 +133,15 @@ async def _require_pick_allowed(
         if target.channel_id is None:
             _require_admin(auth)  # the workspace default's own copy
         raise ToolError(_NEEDS_ADMIN)
-    if pick.missing or environment_name in await load_caller_hidden_environments(runtime, auth):
-        raise ToolError(
-            f"No environment named '{environment_name}' exists in this workspace. Nothing was "
-            "changed. Use list_environments to pick an existing one, or create_environment first."
-        )
+    if pick.missing:
+        raise ToolError(_missing(environment_name))
     if pick.needs_confirm and not confirm_open_network:
         raise ToolError(
             build_sealed_network_confirm(environment_name=environment_name)
             + " Ask the caller whether to go ahead; only if they confirm, retry with "
             "confirm_open_network=true. Never confirm on their behalf."
         )
-    return pick
+    return pick, hidden
 
 
 async def _set_channel_environment_impl(
@@ -145,7 +153,7 @@ async def _set_channel_environment_impl(
     confirm_open_network: bool = False,
 ) -> ChannelEnvironmentResult:
     target = await _environment_channel(runtime, auth, channel_id)
-    pick = await _require_pick_allowed(
+    pick, hidden = await _require_pick_allowed(
         runtime,
         auth,
         target=target,
@@ -164,7 +172,7 @@ async def _set_channel_environment_impl(
     return ChannelEnvironmentResult(
         scope=_scope_label(target.channel_id),
         environment_name=name,
-        previous_environment_name=previous,
+        previous_environment_name=None if previous in hidden else previous,
         changed=previous != name,
         note=build_set_environment_note(environment_name=name, channel=target.channel_id),
     )
@@ -178,7 +186,7 @@ async def _clear_channel_environment_impl(
     confirm_open_network: bool = False,
 ) -> ChannelEnvironmentResult:
     target = await _environment_channel(runtime, auth, channel_id, lenient=True)
-    await _require_pick_allowed(
+    _, hidden = await _require_pick_allowed(
         runtime,
         auth,
         target=target,
@@ -197,7 +205,7 @@ async def _clear_channel_environment_impl(
     return ChannelEnvironmentResult(
         scope=_scope_label(channel_id),
         environment_name=None,
-        previous_environment_name=previous,
+        previous_environment_name=None if previous in hidden else previous,
         changed=previous is not None,
         note=build_clear_environment_note(channel=channel_id, cleared=previous is not None),
     )
