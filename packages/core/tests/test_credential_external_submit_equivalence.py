@@ -243,6 +243,8 @@ async def _run(db, module, tenant, row, agent, admin, monkeypatch, fault="none")
             github=SimpleNamespace(oauth_scopes=("repo",)),
         ),
         turn_deps=SimpleNamespace(fernet=fernet),
+        # No Graph: a Teams channel admin grant names no team owner here.
+        team_owners=None,
     )
     state = row.token + "oauthstatepadding"
     value = "" if fault in ("stored", "stored_denied", "public", "private") else "fixture-token"
