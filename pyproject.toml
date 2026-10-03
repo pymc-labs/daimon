@@ -122,6 +122,7 @@ source_modules = [
     "daimon.core.context_prompt",
     "daimon.core.credential_env",
     "daimon.core.credential_requests",
+    "daimon.core.credential_submit",
     "daimon.core.cron",
     "daimon.core.db",
     "daimon.core.env_file",
