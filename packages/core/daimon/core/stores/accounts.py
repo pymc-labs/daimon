@@ -88,10 +88,11 @@ async def set_role(
     An external account stays a user whatever is asked: no path makes one an
     admin. One UPDATE, so it reads `is_external` as committed when it runs.
     """
+    effective_role = case((Account.is_external, Role.USER.value), else_=role.value)
     await session.execute(
         update(Account)
-        .where(Account.id == account_id)
-        .values(role=case((Account.is_external, Role.USER.value), else_=role.value))
+        .where(Account.id == account_id, Account.role.is_distinct_from(effective_role))
+        .values(role=effective_role)
     )
 
 
@@ -124,8 +125,10 @@ async def set_platform_role_ids(
     orm = await session.get(Account, account_id)
     if orm is None:
         return
-    orm.platform_role_ids = sorted(set(role_ids))
-    await session.flush()
+    normalized = sorted(set(role_ids))
+    if orm.platform_role_ids != normalized:
+        orm.platform_role_ids = normalized
+        await session.flush()
 
 
 async def demote_unlisted_admins(

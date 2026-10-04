@@ -26,6 +26,8 @@ from daimon.core.ma_resolver import (
     new_resolver_cache,
     resolve_agent,
     resolve_environment,
+    retrieve_agent_cached,
+    retrieve_environment_cached,
 )
 from daimon.testing.ma import (
     MARouter,
@@ -71,6 +73,77 @@ def resolver_cache() -> ResolverCache:
 # ---------------------------------------------------------------------------
 # Agent — cached_id path
 # ---------------------------------------------------------------------------
+
+
+async def test_resource_retrieves_share_inflight_and_expire(
+    tenant_id: uuid.UUID,
+) -> None:
+    clock = [0.0]
+    resolver_cache = ResolverCache(timer=lambda: clock[0])
+    agent = ma_agent(id="ag_live", name="daimon", tenant_id=tenant_id)
+    environment = ma_environment(id="env_live", name="default", tenant_id=tenant_id)
+    router = MARouter()
+    router.add_agent(agent)
+    router.add_environment(environment)
+    calls: dict[str, int] = {}
+
+    async def dispatch(request: httpx.Request) -> httpx.Response:
+        calls[request.url.path] = calls.get(request.url.path, 0) + 1
+        await asyncio.sleep(0.01)
+        return router.dispatch(request)
+
+    client = AsyncAnthropic(
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(dispatch))
+    )
+    try:
+        await asyncio.gather(
+            *(
+                retrieve_agent_cached(client, resolver_cache, tenant_id, agent.id)
+                for _ in range(20)
+            ),
+            *(
+                retrieve_environment_cached(client, resolver_cache, tenant_id, environment.id)
+                for _ in range(20)
+            ),
+        )
+        assert calls == {"/v1/agents/ag_live": 1, "/v1/environments/env_live": 1}
+        await retrieve_agent_cached(client, resolver_cache, tenant_id, agent.id)
+        await retrieve_environment_cached(client, resolver_cache, tenant_id, environment.id)
+        assert calls == {"/v1/agents/ag_live": 1, "/v1/environments/env_live": 1}
+        clock[0] = 31.0
+        await retrieve_agent_cached(client, resolver_cache, tenant_id, agent.id)
+        await retrieve_environment_cached(client, resolver_cache, tenant_id, environment.id)
+        assert calls == {"/v1/agents/ag_live": 2, "/v1/environments/env_live": 2}
+    finally:
+        await client.close()
+
+
+async def test_archived_retrieve_is_not_cached(
+    tenant_id: uuid.UUID, resolver_cache: ResolverCache
+) -> None:
+    archived = ma_agent(
+        id="ag_old", name="daimon", tenant_id=tenant_id, archived_at=datetime.now(UTC)
+    )
+    router = MARouter()
+    router.add_agent(archived)
+    calls = 0
+
+    def dispatch(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return router.dispatch(request)
+
+    client = build_fake_anthropic(dispatch)
+    try:
+        assert (
+            await retrieve_agent_cached(client, resolver_cache, tenant_id, archived.id)
+        ).archived_at
+        assert (
+            await retrieve_agent_cached(client, resolver_cache, tenant_id, archived.id)
+        ).archived_at
+        assert calls == 2
+    finally:
+        await client.close()
 
 
 async def test_resolve_agent_cached_id_live_returns_cached_id(

@@ -34,6 +34,7 @@ async def is_over_balance(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID | None,
+    session: AsyncSession | None = None,
 ) -> bool:
     """True iff a prepaid tenant balance is depleted (<= 0).
 
@@ -43,9 +44,13 @@ async def is_over_balance(
     """
     if tenant_id is None:
         return False  # DMs have no tenant — mirror the cap DM exemption
-    async with sessionmaker() as s:
-        tenant = await tenants.get_tenant(s, tenant_id)
-        balance = await tenant_ledger.get_balance(s, tenant_id=tenant_id)
+    if session is None:
+        async with sessionmaker() as opened:
+            tenant = await tenants.get_tenant(opened, tenant_id)
+            balance = await tenant_ledger.get_balance(opened, tenant_id=tenant_id)
+    else:
+        tenant = await tenants.get_tenant(session, tenant_id)
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant_id)
     depleted = balance <= Decimal("0")
     if tenant is not None and tenant.funding_mode == "operator_funded":
         if depleted:

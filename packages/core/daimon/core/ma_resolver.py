@@ -22,6 +22,7 @@ from typing import Literal
 
 import structlog
 from anthropic import APIStatusError, AsyncAnthropic
+from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from cachetools import TTLCache
 from daimon.core.defaults.ma_index import (
     list_agents_by_tenant,
@@ -37,6 +38,7 @@ _log = structlog.get_logger(__name__)
 
 Kind = Literal["agent", "environment"]
 _CacheKey = tuple[uuid.UUID, Kind, str]
+_ResourceKey = tuple[uuid.UUID, str]
 
 
 class ResolverCache(TTLCache[_CacheKey, str]):
@@ -47,6 +49,82 @@ class ResolverCache(TTLCache[_CacheKey, str]):
     ) -> None:
         super().__init__(maxsize=maxsize, ttl=ttl, timer=timer)
         self.inflight: dict[tuple[uuid.UUID, Kind], asyncio.Task[dict[str, str]]] = {}
+        # Full resources are short lived because admission uses their metadata
+        # for authorization and their archive state for liveness.
+        self.agents: TTLCache[_ResourceKey, BetaManagedAgentsAgent] = TTLCache[
+            _ResourceKey, BetaManagedAgentsAgent
+        ](500, 30, timer=timer)
+        self.environments: TTLCache[_ResourceKey, BetaEnvironment] = TTLCache[
+            _ResourceKey, BetaEnvironment
+        ](500, 30, timer=timer)
+        self.agent_retrieves: dict[_ResourceKey, asyncio.Task[BetaManagedAgentsAgent]] = {}
+        self.environment_retrieves: dict[_ResourceKey, asyncio.Task[BetaEnvironment]] = {}
+
+
+async def _retrieve_shared[Resource: (BetaManagedAgentsAgent, BetaEnvironment)](
+    cache: TTLCache[_ResourceKey, Resource],
+    inflight: dict[_ResourceKey, asyncio.Task[Resource]],
+    key: _ResourceKey,
+    load: Callable[[], Awaitable[Resource]],
+) -> Resource:
+    hit = cache.get(key)
+    if hit is not None:
+        return hit
+    task = inflight.get(key)
+    if task is None:
+
+        async def fetch() -> Resource:
+            result = await load()
+            # Publish before the task completes: otherwise its done callback can
+            # clear inflight before a waiting caller populates the cache.
+            if result.archived_at is None and result.metadata.get(MA_METADATA_KEY_TENANT) == str(
+                key[0]
+            ):
+                cache[key] = result
+            return result
+
+        task = asyncio.create_task(fetch())
+        inflight[key] = task
+
+        def clear(done: asyncio.Task[Resource]) -> None:
+            if inflight.get(key) is done:
+                del inflight[key]
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(clear)
+    return await asyncio.shield(task)
+
+
+async def retrieve_agent_cached(
+    client: AsyncAnthropic, cache: ResolverCache, tenant_id: uuid.UUID, agent_id: str
+) -> BetaManagedAgentsAgent:
+    key = (tenant_id, agent_id)
+    try:
+        return await _retrieve_shared(
+            cache.agents, cache.agent_retrieves, key, lambda: client.beta.agents.retrieve(agent_id)
+        )
+    except APIStatusError as err:
+        if err.status_code in (400, 404):
+            cache.agents.pop(key, None)
+        raise
+
+
+async def retrieve_environment_cached(
+    client: AsyncAnthropic, cache: ResolverCache, tenant_id: uuid.UUID, environment_id: str
+) -> BetaEnvironment:
+    key = (tenant_id, environment_id)
+    try:
+        return await _retrieve_shared(
+            cache.environments,
+            cache.environment_retrieves,
+            key,
+            lambda: client.beta.environments.retrieve(environment_id),
+        )
+    except APIStatusError as err:
+        if err.status_code in (400, 404):
+            cache.environments.pop(key, None)
+        raise
 
 
 def new_resolver_cache() -> ResolverCache:
