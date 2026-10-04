@@ -131,6 +131,18 @@ Set `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` to show an **Ask a human** but
 next to the 👍/👎 buttons on every final answer. It opens a short form; sending it
 spends one of the person's support requests (`DAIMON_SUPPORT__CREDITS_PER_USER`,
 default 20, counted per person per workspace and shared with Discord's ledger) and
+Final answers go out as `markdown` blocks. Slack shows text inside inline code
+and fenced blocks exactly as written, entities included, so daimon sends code
+unescaped and escapes only the prose around it: `<https://example.com|label>`
+in prose becomes a link, while the same text in code stays literal. Prose keeps
+user and channel mentions but not `<!channel>`, `<!here>` or `<!everyone>`. Each
+message is checked again as sent, since splitting a long answer can leave code
+lines outside their fence. Where the code boundary is ambiguous (an inline span
+across lines, a fence inside a blockquote, a span in a table cell holding `|`,
+a backtick a link or bare URL could take), the text is escaped as prose and its
+`<` shows as `&lt;`. The message's `text` field, which Slack parses as mrkdwn
+for notifications, escapes code as well.
+
 posts the request to that channel. Opening the form spends nothing, and asking twice
 on the same answer (a double click, two open forms, a Slack retry) records and posts
 once.
