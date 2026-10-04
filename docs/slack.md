@@ -112,6 +112,9 @@ Agent-initiated DMs use `send_direct_message` with a workspace user ID. Existing
 installations need to reauthorize the app with the `im:write` bot scope; the
 [app manifest](slack-app-manifest.yaml) includes it. The tool checks live workspace
 membership, then opens a one-person DM and posts using the bot token.
+A mention that arrives while its thread is busy gets ⌛ and waits for the
+active turn. The ⌛ comes off once that request is answered, fails, is cancelled
+or is dropped unanswered.
 See Slack's [conversations.open reference](https://docs.slack.dev/reference/methods/conversations.open/)
 and the tenant [recipient policy](architecture.md#agent-initiated-direct-messages).
 

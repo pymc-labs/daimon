@@ -2239,6 +2239,367 @@ async def test_drain_skips_an_event_with_no_author_and_still_runs_the_real_ones(
     )
 
 
+_REACTIONS_REMOVE_PATTERN = re.compile(r"https://slack\.com/api/reactions\.remove.*")
+
+
+def _cleared_pending_reactions(fake: Any) -> list[str]:
+    """Message timestamps whose ⌛ the app asked Slack to remove, in call order."""
+    return [
+        url.query["timestamp"]
+        for (method, url), reqs in fake.mock.requests.items()
+        if method == "POST"
+        and url.path == "/api/reactions.remove"
+        and url.query.get("name") == "hourglass_flowing_sand"
+        for _ in reqs
+    ]
+
+
+async def _provisioned_drain_app(
+    db_session_factory: async_sessionmaker[AsyncSession], team_id: str
+) -> tuple[Any, uuid.UUID]:
+    await provision_tenant(
+        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    )
+    app, _ = make_orchestrate_app(db_session_factory)
+    return app, derive_tenant_uuid(platform="slack", workspace_id=team_id)
+
+
+async def test_coalesced_drain_clears_the_pending_reaction_from_every_original_request(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    team_id, channel, thread_ts = "T_HOURGLASS_COALESCE", "C_TEST", "9100000010.000001"
+    app, tenant_id = await _provisioned_drain_app(db_session_factory, team_id)
+    fake_slack_web_client.mock.post(_REACTIONS_REMOVE_PATTERN, payload={"ok": True}, repeat=True)
+    queued = ["9100000010.000002", "9100000010.000003"]
+
+    calls = await _drive_drain(
+        app,
+        team_id=team_id,
+        channel=channel,
+        thread_ts=thread_ts,
+        tenant_id=tenant_id,
+        web_client=fake_slack_web_client.client,
+        root_event=_mention(ts=thread_ts, user="U_A", text="<@U_BOT> root", channel=channel),
+        queued_events=[
+            _mention(ts=ts, user="U_A", text=f"<@U_BOT> {ts}", channel=channel, thread_ts=thread_ts)
+            for ts in queued
+        ],
+    )
+
+    assert len(calls) == 2, f"both queued requests must coalesce into one turn, got {calls}"
+    assert sorted(_cleared_pending_reactions(fake_slack_web_client)) == queued, (
+        "each request answered by the coalesced turn must lose its ⌛"
+    )
+
+
+async def test_drain_clears_the_pending_reaction_for_each_author(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    team_id, channel, thread_ts = "T_HOURGLASS_AUTHORS", "C_TEST", "9100000011.000001"
+    app, tenant_id = await _provisioned_drain_app(db_session_factory, team_id)
+    fake_slack_web_client.mock.post(_REACTIONS_REMOVE_PATTERN, payload={"ok": True}, repeat=True)
+
+    calls = await _drive_drain(
+        app,
+        team_id=team_id,
+        channel=channel,
+        thread_ts=thread_ts,
+        tenant_id=tenant_id,
+        web_client=fake_slack_web_client.client,
+        root_event=_mention(ts=thread_ts, user="U_ROOT", text="<@U_BOT> root", channel=channel),
+        queued_events=[
+            _mention(
+                ts="9100000011.000002",
+                user="U_A",
+                text="<@U_BOT> a1",
+                channel=channel,
+                thread_ts=thread_ts,
+            ),
+            _mention(
+                ts="9100000011.000003",
+                user="U_B",
+                text="<@U_BOT> b",
+                channel=channel,
+                thread_ts=thread_ts,
+            ),
+            _mention(
+                ts="9100000011.000004",
+                user="U_A",
+                text="<@U_BOT> a2",
+                channel=channel,
+                thread_ts=thread_ts,
+            ),
+        ],
+    )
+
+    assert [c["user"] for c in calls[1:]] == ["U_A", "U_B"]
+    assert sorted(_cleared_pending_reactions(fake_slack_web_client)) == [
+        "9100000011.000002",
+        "9100000011.000003",
+        "9100000011.000004",
+    ]
+
+
+async def test_drain_clears_the_pending_reaction_when_a_drained_turn_fails(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    team_id, channel, thread_ts = "T_HOURGLASS_FAIL", "C_TEST", "9100000012.000001"
+    app, tenant_id = await _provisioned_drain_app(db_session_factory, team_id)
+    fake_slack_web_client.mock.post(_REACTIONS_REMOVE_PATTERN, payload={"ok": True}, repeat=True)
+
+    def _explode(event: dict[str, Any]) -> None:
+        raise SlackApiError("boom", response={"ok": False, "error": "internal_error"})
+
+    await _drive_drain(
+        app,
+        team_id=team_id,
+        channel=channel,
+        thread_ts=thread_ts,
+        tenant_id=tenant_id,
+        web_client=fake_slack_web_client.client,
+        root_event=_mention(ts=thread_ts, user="U_ROOT", text="<@U_BOT> root", channel=channel),
+        queued_events=[
+            _mention(
+                ts="9100000012.000002",
+                user="U_A",
+                text="<@U_BOT> a",
+                channel=channel,
+                thread_ts=thread_ts,
+            ),
+        ],
+        turn_side_effect=_explode,
+    )
+
+    assert _cleared_pending_reactions(fake_slack_web_client) == ["9100000012.000002"]
+
+
+async def test_cancelled_drain_clears_the_pending_reaction_of_every_popped_request(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Cancelling U_A's drained turn also abandons U_B's batch, popped alongside it."""
+    team_id, channel, thread_ts = "T_HOURGLASS_CANCEL", "C_TEST", "9100000013.000001"
+    app, tenant_id = await _provisioned_drain_app(db_session_factory, team_id)
+    fake_slack_web_client.mock.post(_REACTIONS_REMOVE_PATTERN, payload={"ok": True}, repeat=True)
+    root_gate = asyncio.Event()
+    drained_turn_started = asyncio.Event()
+
+    async def _spy_turn(event: dict[str, Any], **kwargs: Any) -> None:
+        if event["ts"] == thread_ts:
+            await root_gate.wait()
+            return
+        drained_turn_started.set()
+        await asyncio.Event().wait()
+
+    app._run_thread_turn = _spy_turn  # type: ignore[method-assign]
+    root = _mention(ts=thread_ts, user="U_ROOT", text="<@U_BOT> root", channel=channel)
+    queued = [
+        _mention(
+            ts="9100000013.000002",
+            user="U_A",
+            text="<@U_BOT> a",
+            channel=channel,
+            thread_ts=thread_ts,
+        ),
+        _mention(
+            ts="9100000013.000003",
+            user="U_B",
+            text="<@U_BOT> b",
+            channel=channel,
+            thread_ts=thread_ts,
+        ),
+    ]
+    with patch("daimon.adapters.slack.app.get_turn_cap", new=AsyncMock(return_value=3)):
+        task = asyncio.create_task(
+            app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                root,
+                team_id=team_id,
+                channel=channel,
+                event_ts=thread_ts,
+                web_client=fake_slack_web_client.client,
+                tenant_id=tenant_id,
+            )
+        )
+        await asyncio.sleep(0)
+        for ev in queued:
+            await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                ev,
+                team_id=team_id,
+                channel=channel,
+                event_ts=ev["ts"],
+                web_client=fake_slack_web_client.client,
+                tenant_id=tenant_id,
+            )
+        root_gate.set()
+        await drained_turn_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert sorted(_cleared_pending_reactions(fake_slack_web_client)) == [
+        "9100000013.000002",
+        "9100000013.000003",
+    ]
+
+
+@pytest.mark.parametrize("owner_exit", ["raises", "cancelled"])
+async def test_undrained_requests_lose_their_pending_reaction(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    owner_exit: str,
+) -> None:
+    """Requests still pending when the owning turn ends abnormally are never drained."""
+    team_id, channel, thread_ts = (
+        f"T_HOURGLASS_UNDRAINED_{owner_exit}",
+        "C_TEST",
+        "9100000014.000001",
+    )
+    app, tenant_id = await _provisioned_drain_app(db_session_factory, team_id)
+    fake_slack_web_client.mock.post(_REACTIONS_REMOVE_PATTERN, payload={"ok": True}, repeat=True)
+    root_gate = asyncio.Event()
+
+    async def _spy_turn(event: dict[str, Any], **kwargs: Any) -> None:
+        await root_gate.wait()
+        raise RuntimeError("owner turn escaped")
+
+    app._run_thread_turn = _spy_turn  # type: ignore[method-assign]
+    root = _mention(ts=thread_ts, user="U_ROOT", text="<@U_BOT> root", channel=channel)
+    queued = [
+        _mention(
+            ts="9100000014.000002",
+            user="U_A",
+            text="<@U_BOT> a",
+            channel=channel,
+            thread_ts=thread_ts,
+        ),
+        _mention(
+            ts="9100000014.000003",
+            user=None,
+            text="<@U_BOT> ghost",
+            channel=channel,
+            thread_ts=thread_ts,
+        ),
+    ]
+    with patch("daimon.adapters.slack.app.get_turn_cap", new=AsyncMock(return_value=3)):
+        task = asyncio.create_task(
+            app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                root,
+                team_id=team_id,
+                channel=channel,
+                event_ts=thread_ts,
+                web_client=fake_slack_web_client.client,
+                tenant_id=tenant_id,
+            )
+        )
+        await asyncio.sleep(0)
+        for ev in queued:
+            await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                ev,
+                team_id=team_id,
+                channel=channel,
+                event_ts=ev["ts"],
+                web_client=fake_slack_web_client.client,
+                tenant_id=tenant_id,
+            )
+        if owner_exit == "raises":
+            root_gate.set()
+            with pytest.raises(RuntimeError):
+                await task
+        else:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    assert sorted(_cleared_pending_reactions(fake_slack_web_client)) == [
+        "9100000014.000002",
+        "9100000014.000003",
+    ]
+
+
+async def test_drain_clears_the_pending_reaction_of_an_authorless_request(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    team_id, channel, thread_ts = "T_HOURGLASS_NOAUTHOR", "C_TEST", "9100000015.000001"
+    app, tenant_id = await _provisioned_drain_app(db_session_factory, team_id)
+    fake_slack_web_client.mock.post(_REACTIONS_REMOVE_PATTERN, payload={"ok": True}, repeat=True)
+
+    await _drive_drain(
+        app,
+        team_id=team_id,
+        channel=channel,
+        thread_ts=thread_ts,
+        tenant_id=tenant_id,
+        web_client=fake_slack_web_client.client,
+        root_event=_mention(ts=thread_ts, user="U_ROOT", text="<@U_BOT> root", channel=channel),
+        queued_events=[
+            _mention(
+                ts="9100000015.000002",
+                user=None,
+                text="<@U_BOT> ghost",
+                channel=channel,
+                thread_ts=thread_ts,
+            ),
+        ],
+    )
+
+    assert _cleared_pending_reactions(fake_slack_web_client) == ["9100000015.000002"]
+
+
+@pytest.mark.parametrize(
+    "removal",
+    [
+        {"payload": {"ok": False, "error": "no_reaction"}},
+        {"payload": {"ok": False, "error": "message_not_found"}},
+        {"payload": {"ok": False, "error": "ratelimited"}},
+        {"exception": aiohttp.ClientConnectionError("reset")},
+    ],
+    ids=["no_reaction", "message_not_found", "ratelimited", "transport"],
+)
+async def test_failed_pending_reaction_removal_leaves_the_drained_turn_intact(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    removal: dict[str, Any],
+) -> None:
+    team_id, channel, thread_ts = "T_HOURGLASS_REMOVE_ERR", "C_TEST", "9100000016.000001"
+    app, tenant_id = await _provisioned_drain_app(db_session_factory, team_id)
+    fake_slack_web_client.mock.post(_REACTIONS_REMOVE_PATTERN, repeat=True, **removal)
+
+    calls = await _drive_drain(
+        app,
+        team_id=team_id,
+        channel=channel,
+        thread_ts=thread_ts,
+        tenant_id=tenant_id,
+        web_client=fake_slack_web_client.client,
+        root_event=_mention(ts=thread_ts, user="U_ROOT", text="<@U_BOT> root", channel=channel),
+        queued_events=[
+            _mention(ts=ts, user=user, text=f"<@U_BOT> {ts}", channel=channel, thread_ts=thread_ts)
+            for ts, user in [("9100000016.000002", "U_A"), ("9100000016.000003", "U_B")]
+        ],
+    )
+
+    assert [c["user"] for c in calls[1:]] == ["U_A", "U_B"], (
+        "a failed reaction removal must not abandon or replay the remaining drain"
+    )
+    assert sorted(_cleared_pending_reactions(fake_slack_web_client)) == [
+        "9100000016.000002",
+        "9100000016.000003",
+    ]
+    posts = [
+        req
+        for (method, url), reqs in fake_slack_web_client.mock.requests.items()
+        if method == "POST" and url.path == "/api/chat.postMessage"
+        for req in reqs
+    ]
+    assert not any("something went wrong" in str(r.kwargs) for r in posts), (
+        "a cosmetic cleanup failure must not surface as a turn failure"
+    )
+
+
 async def test_on_request_when_tokens_revoked_carries_an_empty_bot_list_does_not_tear_down() -> (
     None
 ):

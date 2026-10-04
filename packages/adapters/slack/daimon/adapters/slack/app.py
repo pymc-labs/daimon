@@ -252,6 +252,9 @@ _DRAIN_GRACE_S: float = 50.0
 _ORPHAN_RECOVERY_RETRY_DELAY_S: float = 1.0
 _ORPHAN_RECOVERY_MAX_RETRY_DELAY_S: float = 30.0
 
+# Marks a request queued behind the thread's active turn.
+_PENDING_REACTION = "hourglass_flowing_sand"
+
 _CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
 _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
 
@@ -1425,7 +1428,8 @@ class SlackApp:
 
         Gate order (strict):
         1. Per-thread queue check: if thread already processing → reactions_add ⌛
-           and enqueue. No slot consumed.
+           and enqueue. No slot consumed. The drain or the owner's finally
+           removes the ⌛ once that request settles.
         2. Per-tenant cap: read-check-increment in one synchronous span (no await
            between read and increment) — mirrors Discord bot.py:516-529.
         3. Turn body via ``_run_thread_turn``.
@@ -1473,7 +1477,7 @@ class SlackApp:
                 await web_client.reactions_add(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                     channel=channel,
                     timestamp=event_ts,
-                    name="hourglass_flowing_sand",
+                    name=_PENDING_REACTION,
                 )
             return
 
@@ -1609,6 +1613,16 @@ class SlackApp:
             )
             return None
 
+        # Composed events leave the thread queue before their batch runs, so the
+        # owner's cleanup never sees them. Whatever was composed but not run when
+        # the drain exits (authorless events, batches abandoned by a cancel) is
+        # cleared here.
+        unsettled: dict[int, dict[str, Any]] = {}
+
+        def compose(queued: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+            unsettled.update((id(event), event) for event in queued)
+            return group_by_author(queued, author)
+
         async def run(user_events: list[dict[str, Any]]) -> None:
             try:
                 await self._run_thread_turn(
@@ -1645,12 +1659,49 @@ class SlackApp:
                         text=("Sorry, something went wrong handling that — please try again."),
                         thread_ts=thread_id,
                     )
+            finally:
+                for event in user_events:
+                    unsettled.pop(id(event), None)
+                await self._clear_pending_reactions(
+                    user_events, channel=channel, web_client=web_client
+                )
 
-        await self._thread_queue.drain(
-            thread_id,
-            compose=lambda queued: group_by_author(queued, author),
-            run=run,
-        )
+        try:
+            await self._thread_queue.drain(thread_id, compose=compose, run=run)
+        finally:
+            await self._clear_pending_reactions(
+                list(unsettled.values()), channel=channel, web_client=web_client
+            )
+
+    async def _clear_pending_reactions(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        channel: str,
+        web_client: AsyncWebClient,
+    ) -> None:
+        """Remove the ⌛ from requests whose queued work has settled.
+
+        Best-effort: a second removal, or one after a failed add, reports
+        ``no_reaction``, and a stale ⌛ is cosmetic, so no error may reach the
+        turn that settled these requests.
+        """
+        for event in events:
+            q_channel: str = event.get("channel") or channel
+            q_ts: str = event.get("event_ts") or event.get("ts") or ""
+            try:
+                await web_client.reactions_remove(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                    channel=q_channel,
+                    timestamp=q_ts,
+                    name=_PENDING_REACTION,
+                )
+            except (SlackApiError, aiohttp.ClientError, TimeoutError) as exc:
+                log.info(
+                    "slack.pending_reaction.remove_failed",
+                    channel_id=q_channel,
+                    message_ts=q_ts,
+                    error=str(exc),
+                )
 
     async def _notify_undrained_mentions(
         self,
@@ -1672,6 +1723,7 @@ class SlackApp:
                     text="Sorry, something went wrong handling that — please try again.",
                     thread_ts=thread_id,
                 )
+        await self._clear_pending_reactions(events, channel=channel, web_client=web_client)
 
     async def _run_thread_turn(
         self,

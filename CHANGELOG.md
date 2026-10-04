@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Code in Slack answers shows `<`, `>` and `&` as written.** Inline code and fenced blocks in a final answer showed `&lt;` and `&gt;` where the answer had `<` and `>`. Code is now sent unescaped; prose around it is escaped as before, so Slack-style links in prose stay clickable and broadcast mentions stay inert.
+- **Answered Slack requests lose their ⌛.** Mentions queued behind a busy thread kept the hourglass after they were answered, so finished work looked pending. The hourglass now comes off every queued message once its request is answered, fails, is cancelled or is dropped unanswered. A failed removal is logged and never affects the turn.
 - **A reply timestamp no longer reads a sealed thread.** Slack `read_thread` given a reply's ts read the whole parent thread, text and files, checking the seal only on the ts it was given. It now checks the parent's seal too.
 - **A cancelled turn says so.** A cancelled Discord or Slack turn someone asked for shows "Turn cancelled." even after tool calls, keeps any partial answer, and sends no completion ping or feedback buttons. An unprompted Discord turn cancelled before it has an answer stays silent.
 - **Slack links in answers are clickable.** `<https://example.com|label>` in a final answer renders as a Markdown link; code examples stay literal and broadcast mentions stay escaped.
