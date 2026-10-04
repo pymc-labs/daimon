@@ -20,7 +20,6 @@ from datetime import datetime
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.agent_pins import agent_pin_names
 from daimon.core.constants import MODEL_DISPLAY_NAMES
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -122,7 +121,6 @@ class AgentDetails(BaseModel):
 
     ma_agent_id: str
     name: str
-    rule_names: tuple[str | None, ...] = ()
     purpose: str | None = None
     model_id: str
     model_display_name: str
@@ -185,7 +183,6 @@ def build_agent_details(
     return AgentDetails(
         ma_agent_id=agent.id,
         name=agent.name,
-        rule_names=agent_pin_names(agent.name, agent.metadata),
         purpose=agent.description,
         model_id=agent.model.id,
         model_display_name=MODEL_DISPLAY_NAMES.get(agent.model.id, agent.model.id),

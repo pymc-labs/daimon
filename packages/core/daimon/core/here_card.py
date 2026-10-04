@@ -14,6 +14,7 @@ from datetime import datetime
 from anthropic import AsyncAnthropic
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import (
@@ -32,6 +33,7 @@ from daimon.core.scope import (
     TenantConfigRow,
     TenantScopeRef,
 )
+from daimon.core.setup_conversations import get_setup_agent
 from daimon.core.stores import agent_mcp_credentials, mcp_oauth_flows, scoped_config_read
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import McpOAuthGrantRow, Platform
@@ -96,6 +98,7 @@ def assemble_here_card(
     thread_set_at: datetime | None = None,
     policy: TenantAccessPolicy,
     details: AgentDetails | None,
+    agent_rule_names: Collection[str | None] | None = None,
     mcp_token_urls: Collection[str] = (),
     personal_grants: Sequence[McpOAuthGrantRow] = (),
     caller_account_id: uuid.UUID | None = None,
@@ -131,7 +134,7 @@ def assemble_here_card(
         parent_channel_id=channel_id if thread_id is not None else None,
         category_id=category_id,
     )
-    names = details.rule_names if details is not None and details.rule_names else (agent_name,)
+    names = tuple(agent_rule_names) if agent_rule_names is not None else (agent_name,)
     permissions = agent_permissions(policy, names)
     running: set[str] | None = None
     for rule in permissions.runs_in:
@@ -429,6 +432,7 @@ async def load_here_card(
         # agent roster while still answering this very setup thread.
         agent_name = resolved.agent_name
     details = None
+    rule_names: tuple[str | None, ...] | None = None
     mcp_urls: set[str] = set()
     grants: tuple[McpOAuthGrantRow, ...] = ()
     if roster.answering is not None:
@@ -446,6 +450,12 @@ async def load_here_card(
             is_admin=is_admin,
             channel_label=channel_id,
         )
+        # Keep alias lookup local to this card; AgentDetails is also returned
+        # by get_agent and must not gain a new public field for /here.
+        ma_agent = await get_setup_agent(
+            anthropic, tenant_id=tenant_id, ma_agent_id=details.ma_agent_id
+        )
+        rule_names = agent_pin_names(ma_agent.name, ma_agent.metadata)
         agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=details.ma_agent_id)
         mcp_urls = {
             row.mcp_server_url
@@ -530,6 +540,7 @@ async def load_here_card(
         channel_level_only=channel_level_only,
         policy=policy,
         details=details,
+        agent_rule_names=rule_names,
         mcp_token_urls=mcp_urls,
         personal_grants=grants,
         caller_account_id=caller_account_id,

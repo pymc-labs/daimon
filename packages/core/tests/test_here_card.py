@@ -169,7 +169,6 @@ def test_stricter_thread_and_category_rules_are_shown() -> None:
 
 
 def test_agent_alias_rules_intersect() -> None:
-    details = _details("helper").model_copy(update={"rule_names": ("helper", "alias")})
     card = assemble_here_card(
         channel_id="home",
         agent_name="helper",
@@ -183,7 +182,8 @@ def test_agent_alias_rules_intersect() -> None:
                 "alias": AgentRule(runs_in=("second",)),
             }
         ),
-        details=details,
+        details=_details("helper"),
+        agent_rule_names=("helper", "alias"),
     )
     assert card.agent_runs_in == ("second",)
     assert not card.agent_can_answer_here
@@ -319,6 +319,11 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
         AsyncMock(return_value=(None, [])),
     )
     monkeypatch.setattr(here_card_module, "load_agent_details", AsyncMock(return_value=details))
+    monkeypatch.setattr(
+        here_card_module,
+        "get_setup_agent",
+        AsyncMock(return_value=SimpleNamespace(name="daimon", metadata={})),
+    )
     monkeypatch.setattr(
         here_card_module.agent_mcp_credentials,
         "list_credentials",
