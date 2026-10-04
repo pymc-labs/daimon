@@ -85,6 +85,7 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
@@ -692,6 +693,48 @@ async def test_an_own_agent_writes_into_no_other_agent(
     assert [a.name for a in listed] == ["shared"], "outside, its edited spec never shows"
     with pytest.raises(ToolError, match="not found"):
         await _get_agent_impl(runtime, world.auth(), "local")
+
+
+async def test_channel_admin_update_tool_changes_own_agent_but_refuses_another_teams_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    world.state.agents["agent_local"]["metadata"]["daimon_account"] = str(world.account_id)
+    async with committing_sessionmaker.begin() as session:
+        await set_channel_admins(
+            session,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            channel_id=ROOM,
+            role_ids=[],
+            user_ids=["444444444444444444"],
+            actor_account_id=None,
+        )
+    channel_admin = replace(
+        world.auth(admin=False, executing="agent_local"),
+        administered_channel_ids=frozenset({ROOM}),
+    )
+
+    async def update(name: str, agent_id: str) -> AgentInfo:
+        return await _update_agent_impl(
+            runtime,
+            channel_admin,
+            name,
+            model=None,
+            description=None,
+            system="Team instructions",
+            tools=None,
+            mcp_servers=None,
+            skills=None,
+            expected_ma_agent_id=agent_id,
+        )
+
+    own = await update("local", "agent_local")
+    assert own.applies is not None
+    assert world.state.agents["agent_local"]["system"].endswith("Team instructions")
+    with pytest.raises(ToolError, match="missing or changed"):
+        await update("shared", "agent_shared")
+    assert world.state.agents["agent_shared"]["system"] is None
 
 
 async def test_an_own_agent_creates_no_agent(

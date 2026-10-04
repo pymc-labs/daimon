@@ -231,6 +231,7 @@ from daimon.core.turn.thread_queue import (
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import (
     build_handoff_notice,
+    holds_current_channel_admin_grant,
     render_turn_origin,
     turn_origin,
 )
@@ -2408,6 +2409,7 @@ class SlackApp:
                         responder_handle=responder_handle(self.runtime.settings),
                         responder_account=account,
                         session_state=session_state,
+                        is_channel_admin=is_channel_admin,
                     )
                     + "\n"
                     + full_message
@@ -2470,6 +2472,14 @@ class SlackApp:
                     started_at=datetime.now(tz=UTC),
                 )
                 await s.commit()
+            is_channel_admin = await holds_current_channel_admin_grant(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                account_id=admission.account_id,
+                platform="slack",
+                parent_channel_id=channel,
+                role=Role.ADMIN if is_admin else Role.USER,
+            )
             try:
                 async with turn_origin(
                     self.runtime.sessionmaker,
@@ -2498,6 +2508,7 @@ class SlackApp:
                                 responder_handle=responder_handle(self.runtime.settings),
                                 responder_account=account,
                                 session_state=session_state,
+                                is_channel_admin=is_channel_admin,
                             )
                             + "\n"
                             + user_message
@@ -2902,6 +2913,7 @@ class SlackApp:
                     responder_handle=responder_handle(self.runtime.settings),
                     responder_account=account,
                     handoff=handoff_notice,
+                    is_channel_admin=is_channel_admin,
                 )
                 + "\n"
                 + seed_user_message
@@ -2937,6 +2949,14 @@ class SlackApp:
                 )
             return new_lifecycle
 
+        is_channel_admin = await holds_current_channel_admin_grant(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=follow_admission.account_id,
+            platform="slack",
+            parent_channel_id=channel,
+            role=role,
+        )
         try:
             async with turn_origin(
                 self.runtime.sessionmaker,
@@ -2968,6 +2988,7 @@ class SlackApp:
                             responder_handle=responder_handle(self.runtime.settings),
                             responder_account=account,
                             handoff=handoff_notice,
+                            is_channel_admin=is_channel_admin,
                         )
                         + "\n"
                         + seed_user_message

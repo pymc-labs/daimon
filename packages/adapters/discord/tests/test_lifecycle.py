@@ -1561,7 +1561,9 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
 ) -> None:
     tenant = await make_tenant(db_session)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("12.50"))
-    await make_channel_budget(db_session, tenant=tenant, channel_id="C1", limit_usd=Decimal("5"))
+    await make_channel_budget(
+        db_session, tenant=tenant, channel_id="C1", window="total", limit_usd=Decimal("5")
+    )
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("-1.25"), channel_id="C1")
     await make_channel_budget(
         db_session,
@@ -1586,3 +1588,27 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
         assert footers[channel].endswith("· $11.25 left"), (
             f"{channel}: an inactive or missing budget shows the tenant balance"
         )
+
+
+@pytest.mark.asyncio
+async def test_answer_keeps_the_channel_budget_footer_on_the_visible_message(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await make_channel_budget(
+        db_session, tenant=tenant, channel_id="C1", window="total", limit_usd=Decimal("25")
+    )
+    await db_session.commit()
+    lc, _sends, edits = _make_lifecycle(
+        sessionmaker=db_session_factory, tenant_id=tenant.id, budget_channel_id="C1"
+    )
+    await lc.post_initial()
+    await lc.on_terminal_success(_make_success_state())
+
+    assert _terminal_embed(edits).footer.text.endswith("· $25.00 of channel budget left")
+    final_edit = edits[-1][1]
+    assert final_edit["content"] == "Hello response"
+    assert "embed" not in final_edit, "editing the answer must retain the terminal embed"
+    assert await lc.prepend_revealed_answer("Recovered files.")
+    assert "embed" not in edits[-1][1], "a later answer edit must retain the footer too"
