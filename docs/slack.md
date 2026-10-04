@@ -63,6 +63,22 @@ most 200 messages per call. `read_channel` returns a cursor for older messages;
 `read_thread` returns a cursor for newer replies, starting from the root. No
 automatic multi-page sweep runs during a turn.
 
+A top-level mention starts a new thread with no history of its own, so its
+first turn gets the channel instead: one `conversations.history` page of 25
+messages ending at the mention, the mention itself left out, shown oldest
+first in a `<channel_context source="slack" trust="untrusted">` block. Nothing
+posted after the mention is included; earlier answers from the bot account
+are. The channel is read as `read_channel` would read it for that turn: the
+answering agent must be allowed to read it from the new thread, and a thread
+whose readers are limited on its own is withheld (its root and broadcast
+replies), before any file link is minted. `truncated="true"` says older
+messages exist; some installs get only 15. When the access policy can't be
+read, the read is refused, or Slack fails, rate-limits or takes over 10
+seconds, the block is `status="unavailable"` and the turn runs without it; the
+fetch never waits out a rate limit. A recovery re-seed rebuilds the same
+window on the policy as it is then. A first turn inside an existing thread
+replays that thread as before.
+
 The replay leaves out the turn's own status card, which is posted before
 history is read. Every other message stays, including earlier answers from the
 bot account and other bots' posts. The turn's controls name the bot account

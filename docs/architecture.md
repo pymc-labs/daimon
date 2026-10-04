@@ -258,8 +258,8 @@ token bound to neither can't claim one. A single thread can take
 `channel_id:thread_ts`. Such a thread, its messages and (on Discord) its name
 are withheld from outside turns: in `read_thread` and `get_message`, in
 channel history (a Slack thread's root and broadcast replies; Discord's
-thread-created notice, whose text is the name), in `list_threads` and in
-search. Once any readers are limited, search reports only the hits it shows
+thread-created notice, whose text is the name), in the channel context a Slack
+top-level mention starts with, in `list_threads` and in search. Once any readers are limited, search reports only the hits it shows
 as its total, scoped or not, on both platforms, and Discord hints at more
 results only when a full page of visible hits came back, so neither the count
 nor the hint can reveal hidden matches. A turn inside a limited channel or

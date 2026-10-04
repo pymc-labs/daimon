@@ -82,7 +82,12 @@ from daimon.adapters.slack.boot_sweep import (
 )
 from daimon.adapters.slack.budget_notice import with_budget_notifier
 from daimon.adapters.slack.channel_admin_groups import user_group_ids
-from daimon.adapters.slack.context import build_context_xml, build_delta_xml
+from daimon.adapters.slack.channel_reads import load_channel_reads
+from daimon.adapters.slack.context import (
+    build_channel_context_xml,
+    build_context_xml,
+    build_delta_xml,
+)
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.credential_requests import (
     CredentialSubmissionDecision,
@@ -295,6 +300,16 @@ def _compose_queued_content(events: list[dict[str, Any]]) -> str:
     if len(user_ids) == 1:
         return "\n\n".join(str(e.get("text", "")) for e in events)
     return "\n\n".join(f"[{_author_id(e)}]: {e.get('text', '')}" for e in events)
+
+
+def _is_top_level(event: dict[str, Any]) -> bool:
+    """Whether the event was posted in the channel itself, not in a thread.
+
+    Decided from the event, never from the session: a first turn in an
+    existing thread still replays that thread.
+    """
+    thread_ts = event.get("thread_ts")
+    return not thread_ts or thread_ts == event.get("ts")
 
 
 def _envelope_event_time(payload: dict[str, Any]) -> datetime | None:
@@ -1789,7 +1804,9 @@ class SlackApp:
         against the mapping row.
 
         On first mention for a thread: creates a new MA session + ``thread_sessions``
-        row, replays thread history via ``build_context_xml`` (one Slack page).
+        row, replays thread history via ``build_context_xml`` (one Slack page),
+        or for a top-level mention the channel's preceding messages via
+        ``build_channel_context_xml``.
         On follow-up mentions: reuses the existing MA session, replays only the
         delta since the watermark via ``build_delta_xml``.
 
@@ -2292,9 +2309,33 @@ class SlackApp:
             user_text = (
                 content_override if content_override is not None else str(event.get("text") or "")
             )
-            if not reused:
-                # First turn: replay thread history (one Slack page from the root).
-                user_message = await build_context_xml(
+
+            async def _first_turn_context() -> str:
+                """A top-level mention's channel up to the mention, else its thread.
+
+                Rebuilt on a recovery reseed with the same cutoff (the
+                trigger) and the access policy as it is then.
+                """
+                if _is_top_level(event):
+                    return await build_channel_context_xml(
+                        web_client,
+                        channel=channel,
+                        trigger_ts=str(event.get("ts") or thread_id),
+                        user_query=user_text,
+                        reads=await load_channel_reads(
+                            self.runtime.sessionmaker,
+                            tenant_id=tenant_id,
+                            grant=admission.grant,
+                            channel_id=channel,
+                            thread_ts=thread_id,
+                        ),
+                        author_id=author_id,
+                        is_admin=is_admin,
+                        proxy=proxy_ctx,
+                        key_names=key_names,
+                        status_ts=lifecycle.status_ts,
+                    )
+                return await build_context_xml(
                     web_client,
                     channel=channel,
                     thread_ts=thread_id,
@@ -2306,6 +2347,9 @@ class SlackApp:
                     page_limit=self._history_page_limit(),
                     status_ts=lifecycle.status_ts,
                 )
+
+            if not reused:
+                user_message = await _first_turn_context()
             elif watermark is not None:
                 # Continuation: replay only messages since the last watermark.
                 user_message = await build_delta_xml(
@@ -2376,18 +2420,7 @@ class SlackApp:
 
             async def _reseed_user_message() -> str:
                 """Full history re-seed for the recreated session (dead-session recovery)."""
-                full_message = await build_context_xml(
-                    web_client,
-                    channel=channel,
-                    thread_ts=thread_id,
-                    user_query=user_text,
-                    author_id=author_id,
-                    is_admin=is_admin,
-                    proxy=proxy_ctx,
-                    key_names=key_names,
-                    page_limit=self._history_page_limit(),
-                    status_ts=lifecycle.status_ts,
-                )
+                full_message = await _first_turn_context()
                 if synthetic_prefix:
                     full_message = synthetic_prefix + "\n" + full_message
                 async with self.runtime.sessionmaker() as session:
