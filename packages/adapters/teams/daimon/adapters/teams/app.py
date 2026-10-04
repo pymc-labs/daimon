@@ -89,6 +89,7 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.named_agent import name_after_mention
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.permissions import home_of
@@ -120,6 +121,7 @@ from daimon.core.turn.admission import (
 )
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
+    NamedAgentRefused,
     SessionAgentMismatch,
     SessionBusyError,
     SessionPreparationFailed,
@@ -854,7 +856,13 @@ class TeamsApp:
                 now=datetime.now(UTC),
                 is_dm=inbound.kind == "dm",
                 external=ExternalFinding(inbound.is_external, inbound.is_external_known),
+                requested_agent_name=name_after_mention(inbound.text),
             )
+        except NamedAgentRefused as err:
+            await self._say(inbound, str(err))
+            if reraise:
+                raise
+            return
         except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
             refusal = _admission_refusal(err, tenant_id)
             if refusal is not None and continuation is None:  # queued work settles silently

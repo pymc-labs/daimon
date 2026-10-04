@@ -180,6 +180,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.named_agent import name_after_mention
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.slack_oauth import build_slack_connect_url
@@ -210,6 +211,7 @@ from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn import turn_deadline
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.errors import (
+    NamedAgentRefused,
     SessionAgentMismatch,
     SessionBusyError,
     SessionPreparationFailed,
@@ -1823,6 +1825,7 @@ class SlackApp:
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- D-01 admit(). ---
         try:
+            bot_user_id = self._bot_user_ids.get(team_id)
             admission = await admit(
                 self.runtime.turn_deps,
                 tenant_id=tenant_id,
@@ -1839,7 +1842,17 @@ class SlackApp:
                     )
                 ),
                 now=datetime.now(UTC),
+                requested_agent_name=name_after_mention(
+                    str(event.get("text") or ""), f"<@{bot_user_id}>"
+                )
+                if bot_user_id is not None
+                else None,
             )
+        except NamedAgentRefused as err:
+            await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel, thread_ts=thread_id, text=str(err)
+            )
+            return
         except MissingTurnConfigError as err:
             log.info(
                 "slack.missing_config",
