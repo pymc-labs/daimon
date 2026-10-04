@@ -256,13 +256,15 @@
         The first call only previews: name, description, files and the files the
         agent could run. Show that to the person; only when they confirm, call again
         with the same arguments plus the preview's ``content_hash``, and the person
-        approves the upload on a confirmation card. Where this conversation can't
-        show one, the preview's summary says to use Add skill in /agent-setup. The skill belongs to
-        this agent alone; ``sync_skills`` fills the shared library instead, and
-        ``remove_skill`` detaches it. A built-in agent is refused. Anyone may change an
-        agent nobody else uses (no default, bound thread, or other people's routine or
-        conversation); otherwise it takes a server admin or an admin of every channel
-        using it. Pass this turn's ``origin_context_id`` so its channel counts.
+        approves the upload on a confirmation card. Where no card can show, the
+        preview's summary says why (approval cards off on this deployment, or a reason
+        this conversation can't show one) and points to Add skill in /agent-setup. The
+        skill belongs to this agent alone; ``sync_skills`` fills the shared library
+        instead, and ``remove_skill`` detaches it. A built-in agent is refused. Anyone
+        may change an agent nobody else uses (no default, bound thread, or other
+        people's routine or conversation); otherwise it takes a server admin or an
+        admin of every channel using it. Pass this turn's ``origin_context_id`` so its
+        channel counts.
       ''',
       'parameters': dict({
         'additionalProperties': False,

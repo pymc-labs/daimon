@@ -10,10 +10,15 @@ These tests verify the ordering invariant.
 
 from __future__ import annotations
 
+import pytest
 from daimon.adapters.slack.mrkdwn import (
+    escape_markdown_block,
     escape_mrkdwn,
     escape_mrkdwn_preserving_mentions,
     linkify_emphasized_urls,
+    markdown_block_fallback,
+    prose_mentions,
+    seal_markdown_block,
 )
 
 
@@ -243,3 +248,104 @@ def test_linkify_keeps_query_punctuation_inside_the_url() -> None:
     assert linkify_emphasized_urls("**https://example.com/a?b=1&c=2**") == (
         "**[https://example.com/a?b=1&c=2](https://example.com/a?b=1&c=2)**"
     ), "punctuation inside the URL (before its last character) stays in the link"
+
+
+# ---------------------------------------------------------------------------
+# Code-aware escaping for markdown blocks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "`<a> & é 日本 &lt;`",
+        "``a `<b>` c``",
+        "```py\nif a < b and c > d: pass\n```",
+        "~~~\n<!channel> &amp;\n~~~",
+        "- item\n\n  ```\n  <a>\n  ```",
+        "```\n<unterminated>",
+        "1. step\n\n   ```bash\n   echo <a>\n   ```",
+        "```x<a>``` as inline code\n\n```\n<b>\n```",
+    ],
+)
+def test_markdown_block_sends_code_as_written(code: str) -> None:
+    assert escape_markdown_block(code) == code, "code is displayed verbatim, entities included"
+
+
+def test_markdown_block_escapes_prose_around_code() -> None:
+    assert escape_markdown_block("a < b `a < b` <!here> <@U1>") == (
+        "a &lt; b `a < b` &lt;!here&gt; <@U1>"
+    ), "prose keeps mrkdwn escaping and its user mentions"
+
+
+def test_markdown_block_can_drop_mentions_in_prose() -> None:
+    assert escape_markdown_block("<@U1> `<@U1>`", preserve_mentions=False) == (
+        "&lt;@U1&gt; `<@U1>`"
+    ), "without preserve_mentions only code keeps its brackets"
+
+
+def test_a_stray_backtick_before_a_blank_line_leaves_later_code_alone() -> None:
+    assert escape_markdown_block("a stray ` <x>\n\n`<y>`") == "a stray ` &lt;x&gt;\n\n`<y>`", (
+        "an inline span never crosses a blank line"
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "why"),
+    [
+        ("a ` b\n`<!channel>` c`", "an unpaired run on an earlier line may pair with this one"),
+        ("\\`<!channel>`", "a backslash-escaped backtick does not open a span"),
+        ("see https://example.com`<!channel>`", "GFM's autolinker takes the backtick"),
+        ("[a](x`<!channel>`)", "a link destination takes the backtick"),
+        ("[a\n](`<!channel>`)", "a link destination takes the backtick"),
+        ("[a]: `<!channel>`", "a reference definition is not inline text"),
+        ("x\n2. ```\n<!channel>\n```", "only an item numbered 1 interrupts a paragraph"),
+        ("1. ```\n  ```\n```\n<!channel>", "a closer left of the content opens a new fence"),
+        ("```\nx\n```\r<!channel>\n```", "a carriage return ends a line"),
+        ("\xa0\n2) ```\n<!channel>\n```", "a no-break space makes a line non-blank"),
+        ("para\n    ```\n    <!channel>\n    ```", "an indented fence continues the paragraph"),
+        ("- item\n  ```\n<!channel>\n  ```", "a less indented line ends the list item"),
+        ("| a |\n| --- |\n| `x|<!channel>|y` |", "table cells split on pipes inside code"),
+        ("- ```\n  x\n  ```\n  ok <!channel>", "a list item's fence closes at its own indent"),
+        ("> ```\n> x\n> ```\n```\n<!channel>\n```", "a quoted fence's closer may pair with ours"),
+    ],
+)
+def test_markdown_block_escapes_what_slack_may_not_read_as_code(text: str, why: str) -> None:
+    assert "<!channel>" not in escape_markdown_block(text), why
+
+
+def test_fallback_escapes_code_and_keeps_prose_mentions() -> None:
+    block = escape_markdown_block("<@U1> see `<!channel> <@U2> &lt;` & <#C1|general>")
+    assert markdown_block_fallback(block) == (
+        "<@U1> see `&lt;!channel&gt; &lt;@U2&gt; &amp;lt;` &amp; <#C1|general>"
+    ), "mrkdwn parses code in the fallback, so only prose mentions stay live"
+
+
+def test_fallback_escapes_stray_raw_angles_outside_detected_code() -> None:
+    assert markdown_block_fallback("```\n<!here>\n") == "```\n&lt;!here&gt;\n"
+    assert markdown_block_fallback("x <!here> y") == "x &lt;!here&gt; y"
+
+
+def test_seal_escapes_what_a_split_moved_out_of_its_fence() -> None:
+    assert seal_markdown_block("<a>\n```", mentions=frozenset()) == "&lt;a&gt;\n```", (
+        "a chunk holding only the tail of a fenced block shows that tail as prose"
+    )
+
+
+def test_seal_keeps_code_and_existing_entities() -> None:
+    assert seal_markdown_block("&lt; `<a> &lt;`", mentions=frozenset()) == "&lt; `<a> &lt;`", (
+        "sealing is idempotent on escaped prose and leaves code alone"
+    )
+
+
+def test_seal_keeps_only_listed_mentions() -> None:
+    text = "<@U1AUTHOR>\n<@U2> <#C1|general> <!here>"
+    assert seal_markdown_block(text, mentions={"<@U1AUTHOR>"}) == (
+        "<@U1AUTHOR>\n&lt;@U2&gt; &lt;#C1|general&gt; &lt;!here&gt;"
+    ), "a mention not listed is escaped, however well-formed"
+
+
+def test_prose_mentions_ignore_mentions_in_code() -> None:
+    assert prose_mentions("<@U1>\r\n`<@U2>` <#C1|x>\n```\n<@U3>\n```") == {"<@U1>", "<#C1|x>"}, (
+        "mentions inside inline code or a fence are not live"
+    )

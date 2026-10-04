@@ -1721,3 +1721,20 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
         assert footers[channel].endswith("· $11.25 left"), (
             f"{channel}: an inactive or missing budget shows the tenant balance"
         )
+
+
+async def test_code_is_raw_in_the_block_and_escaped_in_the_notification_text(
+    fake_slack_web_client: Any,
+) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    await lc.on_terminal_success(
+        TurnState(content=[TextBlock(kind="text", text="Try `<!channel> <@U2> a<b`")])
+    )
+    body = fake_slack_web_client.mock.requests[("POST", _UPDATE_URL)][-1].kwargs["json"]
+    assert body["blocks"][0]["text"] == "Try `<!channel> <@U2> a<b`", (
+        "the markdown block shows code verbatim"
+    )
+    assert body["text"] == "Try `&lt;!channel&gt; &lt;@U2&gt; a&lt;b`", (
+        "the mrkdwn fallback parses code too, so nothing in it may ping"
+    )

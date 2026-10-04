@@ -32,7 +32,7 @@ def base(platform):
 class Replay:
     def __init__(self, platform, old, fault="ok", cap=3, draining=False):
         self.platform, self.fault, self.cap = platform, fault, cap
-        self.effects, self.resumes = [], []
+        self.effects, self.resumes, self.cleared = [], [], []
         self.rows = ["handoff"]
         cls, namespace = base(platform) if old else (CLASSES[platform], vars(MODULES[platform]))
         self.namespace = namespace
@@ -76,9 +76,13 @@ class Replay:
         self.obj._say = self.say
         self.obj._spawn = self.spawn
         self.obj.spawn = self.spawn
-        self.client = SimpleNamespace(chat_postMessage=self.post)
+        # The base never removes ⌛, so removals stay out of the compared effects.
+        self.client = SimpleNamespace(chat_postMessage=self.post, reactions_remove=self.unreact)
         self.obj._notify_undrained_mentions = MethodType(
             slack.SlackApp._notify_undrained_mentions, self.obj
+        )
+        self.obj._clear_pending_reactions = MethodType(
+            slack.SlackApp._clear_pending_reactions, self.obj
         )
         self.key = 7 if platform == "discord" else "chat"
         self.thread = SimpleNamespace(id=self.key)
@@ -101,6 +105,9 @@ class Replay:
 
     async def post(self, **kwargs):
         self.effects.append(("response", kwargs))
+
+    async def unreact(self, **kwargs):
+        self.cleared.append(kwargs["timestamp"])
 
     async def say(self, item, text):
         self.effects.append(("response", item.activity_id, text))
@@ -349,6 +356,7 @@ async def test_slack_authorless_events_and_per_author_errors_match_base():
         results.append(run.result())
     assert results[0] == results[1]
     assert [effect[1] for effect in results[0][0] if effect[0] == "admit"] == ["1", "2"]
+    assert sorted(run.cleared) == ["1", "2", "3", "4"]
 
 
 async def test_teams_setup_threads_resume_in_order_with_merged_url_and_cap():

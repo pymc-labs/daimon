@@ -674,7 +674,8 @@ origin's responder with `add_skill` on `always_ask` (`has_confirmation_gate`),
 as MA reports the session or, only when it reports the agent's own tools
 (leaving the per-session overrides out), as the bind recorded sending them. Without that, as with tool safety off, an
 `agent_chat` session or one whose tools have not caught up yet, a chat
-confirm adds nothing and points to Add skill in
+confirm adds nothing; the preview and the refusal say which case it was and
+point to Add skill in
 the setup panels' Details (Discord takes a paste or a file, Slack a paste),
 where the person's own submit is the approval. The `skill_add` and
 `skill_remove` operations follow the shared-agent rule

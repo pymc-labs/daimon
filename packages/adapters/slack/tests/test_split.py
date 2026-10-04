@@ -60,3 +60,14 @@ class TestSplitForSlackSafe:
         text = "a" * 35400
         result = split_for_slack_safe(text)
         assert len(result) == 3, "35400 chars should produce 3 chunks at 11800 limit"
+
+
+def test_raw_code_survives_a_split_with_its_fence_repaired() -> None:
+    code = "<https://example.com|label>\n" * 500
+    result = split_for_slack_safe(f"```\n{code}```", limit=4000)
+    assert len(result) > 1, "the fenced block should span several chunks"
+    for chunk in result:
+        assert chunk.startswith("```") and chunk.endswith("```"), (
+            "every chunk must open and close its fence"
+        )
+        assert "&lt;" not in chunk, "splitting must not escape code"

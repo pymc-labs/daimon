@@ -63,7 +63,12 @@ from daimon.adapters.slack.blockkit import (
 )
 from daimon.adapters.slack.errors import bound_request_id
 from daimon.adapters.slack.feedback import build_feedback_actions_block
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
+from daimon.adapters.slack.mrkdwn import (
+    escape_mrkdwn_preserving_mentions,
+    markdown_block_fallback,
+    prose_mentions,
+    seal_markdown_block,
+)
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.support_escalation import build_ask_human_button
 from daimon.adapters.slack.tables import render_slack_tables
@@ -112,7 +117,8 @@ _NOTIFICATION_TEXT_MAX = 3000
 
 
 def _notification_text(chunk: str) -> str:
-    """Bound a content chunk for use as the `text` notification fallback."""
+    """Escape code and bound a markdown block's text for the mrkdwn `text` fallback."""
+    chunk = markdown_block_fallback(chunk)
     if len(chunk) <= _NOTIFICATION_TEXT_MAX:
         return chunk
     return chunk[: _NOTIFICATION_TEXT_MAX - 1] + "…"
@@ -553,9 +559,13 @@ class SlackTurnLifecycle:
                     and block.get("type") == "markdown"
                     and not first_markdown_prefixed
                 ):
+                    # Re-splitting can move code into prose; only the ping stays live.
                     deliveries[0:1] = [
                         (plain, {"type": "markdown", "text": plain})
-                        for plain in split_for_slack_safe(f"{mention}\n{chunk}")
+                        for plain in (
+                            seal_markdown_block(part, mentions=frozenset({mention}))
+                            for part in split_for_slack_safe(f"{mention}\n{chunk}")
+                        )
                     ]
                     first_markdown_prefixed = True
                     continue
@@ -594,10 +604,14 @@ class SlackTurnLifecycle:
                         raise
                     log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
                     # The renderer retains escaped original Markdown alongside
-                    # the native table. Avoid double-escaping it on retry.
+                    # the native table. Avoid double-escaping it on retry, but
+                    # seal each part: a split can move code into prose.
                     deliveries[index : index + 1] = [
                         (plain, {"type": "markdown", "text": plain})
-                        for plain in split_for_slack_safe(chunk)
+                        for plain in (
+                            seal_markdown_block(part, mentions=frozenset())
+                            for part in split_for_slack_safe(chunk)
+                        )
                     ]
                     continue
                 index += 1
@@ -634,7 +648,11 @@ class SlackTurnLifecycle:
         """
         if self._revealed_first_chunk is None or self._revealed_first_blocks is None:
             return False
-        updated = f"{escape_mrkdwn_preserving_mentions(notice)}\n\n{self._revealed_first_chunk}"
+        escaped_notice = escape_mrkdwn_preserving_mentions(notice)
+        updated = seal_markdown_block(
+            f"{escaped_notice}\n\n{self._revealed_first_chunk}",
+            mentions=prose_mentions(escaped_notice) | prose_mentions(self._revealed_first_chunk),
+        )
         if len(split_for_slack_safe(updated)) > 1:
             return False
         blocks = list(self._revealed_first_blocks)

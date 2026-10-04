@@ -72,8 +72,12 @@ passes the same sharing check as a repost: it is shared in a channel the caller 
 view and this turn may read, or in a 1:1 DM only when the turn is in a DM. It refuses a file over the
 skill size cap or not named `.md` or `.zip` before downloading it. Adding it
 needs the person's Approve on a confirmation card, which only tool safety
-shows; without it, use the setup panel's Add skill form, which takes a paste
-only, since Slack modals have no file input.
+(`DAIMON_TOOL_SAFETY__ENABLED=true`) shows, and only in a chat turn whose
+session asks before `add_skill`. When no card can show, the preview says which
+it is: approval cards are off for the deployment, or this conversation can't
+show one and why (a missing or stale `origin_context_id`, a session started
+before tool safety was on, a session daimon could not read). Without the card, use the setup panel's Add skill form, which
+takes a paste only, since Slack modals have no file input.
 
 ### Per-user Slack access (optional)
 
@@ -108,6 +112,9 @@ Completion notifications can be enabled per tenant with `DAIMON_COMPLETION_PINGS
 final answer as a fresh thread reply and mention only the requester. Trigger
 messages replace admission eyes with a check on success; default tenants keep eyes.
 Reaction permission errors do not fail turns.
+A mention that arrives while its thread is busy gets ⌛ and waits for the
+active turn. The ⌛ comes off once that request is answered, fails, is cancelled
+or is dropped unanswered.
 Agent-initiated DMs use `send_direct_message` with a workspace user ID. Existing
 installations need to reauthorize the app with the `im:write` bot scope; the
 [app manifest](slack-app-manifest.yaml) includes it. The tool checks live workspace
@@ -123,6 +130,18 @@ sends no messages.
 With the tenant enabled in `DAIMON_TABLE_RENDERING`, final-answer Markdown tables use native table blocks with wrapped cells, up to
 20 columns and 100 rows including the header. Larger tables retain their Markdown
 text. Surrounding prose and multiple tables are delivered in order.
+
+Final answers go out as `markdown` blocks. Slack shows text inside inline code
+and fenced blocks exactly as written, entities included, so daimon sends code
+unescaped and escapes only the prose around it: `<https://example.com|label>`
+in prose becomes a link, while the same text in code stays literal. Prose keeps
+user and channel mentions but not `<!channel>`, `<!here>` or `<!everyone>`. Each
+message is checked again as sent, since splitting a long answer can leave code
+lines outside their fence. Where the code boundary is ambiguous (an inline span
+across lines, a fence inside a blockquote, a span in a table cell holding `|`,
+a backtick a link or bare URL could take), the text is escaped as prose and its
+`<` shows as `&lt;`. The message's `text` field, which Slack parses as mrkdwn
+for notifications, escapes code as well.
 
 
 ### Ask a human

@@ -11,9 +11,10 @@ alone: the server confirms only from a chat turn's verified origin whose live
 session itself makes ``add_skill`` wait for the person's Approve on the card
 (`has_confirmation_gate`). Anything else (tool safety off, an ``agent_chat``
 or unattended run, a session whose tools have not caught up with tool safety
-yet) adds nothing and points to Add skill in ``/agent-setup``, which previews
-and adds on the person's own click. The pin and sharing gates run again on
-the fresh agent right before the upload and the attach.
+yet) adds nothing, says which it was, and points to Add skill in
+``/agent-setup``, which previews and adds on the person's own click. The pin
+and sharing gates run again on the fresh agent right before the upload and the
+attach.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._channel_policy import load_read_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
-from daimon.adapters.mcp.tools._session_gate import session_asks_first
+from daimon.adapters.mcp.tools._session_gate import session_card_gap
 from daimon.adapters.mcp.tools.agents import (
     _system_agent_rejection,  # pyright: ignore[reportPrivateUsage]
 )
@@ -74,6 +75,7 @@ from daimon.core.skills.ingest import (
     require_upload_suffix,
 )
 from daimon.core.slack_files import fetch_slack_file
+from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -100,18 +102,105 @@ _TOOL_NAME = "add_skill"
 _log = structlog.get_logger(__name__)
 
 
-def _no_card_refusal(agent_name: str, *, deployment_has_cards: bool) -> str:
-    why = (
-        "this conversation can't show one (it runs without a person, or its session "
-        "has not picked the card up yet; the next message does)"
-        if deployment_has_cards
-        else "this deployment shows none"
-    )
+NoCardReason = Literal[
+    "cards_off",
+    "agent_key",
+    "not_a_chat_turn",
+    "no_origin_context",
+    "unverified_origin",
+    "no_live_session",
+    "other_agents_session",
+    "session_not_gated",
+    "session_unreadable",
+]
+
+_PASS_ORIGIN = "Call add_skill again with this turn's origin_context_id."
+
+#: Why no card can show, and what lets the person get one, if anything does.
+_NO_CARD: dict[NoCardReason, tuple[str, str | None]] = {
+    "cards_off": (
+        "approval cards are turned off on this deployment (tool safety is disabled); an "
+        "operator can turn them on with the tool_safety.enabled setting",
+        None,
+    ),
+    "agent_key": ("this call runs on an agent key, not in a person's chat turn", None),
+    "not_a_chat_turn": (
+        "this call does not come from a chat turn (a direct MCP connection, for example)",
+        None,
+    ),
+    "no_origin_context": ("the call did not pass this turn's origin_context_id", _PASS_ORIGIN),
+    "unverified_origin": (
+        "the origin_context_id it passed is not this turn's (expired, malformed, or another "
+        "turn's or caller's)",
+        _PASS_ORIGIN,
+    ),
+    "no_live_session": ("this thread has no live session for the person", None),
+    "other_agents_session": (
+        "this thread's live session runs a different agent from the one answering",
+        None,
+    ),
+    "session_not_gated": (
+        "this thread's session does not ask before add_skill yet (it started before approval "
+        "cards were turned on, or its tools have not been updated)",
+        "The person's next message in this thread updates the session; preview again after it.",
+    ),
+    "session_unreadable": (
+        "Daimon could not read this thread's session to check for the card",
+        "Try again in a moment.",
+    ),
+}
+
+
+async def _no_card_reason(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow | None,
+    *,
+    origin_context_id: str | None,
+) -> NoCardReason | None:
+    """None when the person approves the upload on a card, else why no card can show."""
+    if not runtime.settings.tool_safety.enabled:
+        return "cards_off"
+    gap = await session_card_gap(runtime, auth, origin, tool_name=_TOOL_NAME)
+    if gap != "no_origin":
+        return gap
+    if auth.agent_id is not None:
+        return "agent_key"
+    if auth.platform is None or auth.chat_agent_id is None:
+        return "not_a_chat_turn"
+    return "no_origin_context" if not origin_context_id else "unverified_origin"
+
+
+def _no_card_text(reason: NoCardReason) -> tuple[str, str | None]:
+    why, fix = _NO_CARD[reason]
+    if reason != "cards_off":
+        why = (
+            "approval cards are on for this deployment, but this conversation can't show "
+            f"one: {why}"
+        )
+    return why, fix
+
+
+def _panel(agent_name: str) -> str:
     return (
-        "Nothing was added. Adding a skill from chat needs the person to press Approve on "
-        f"a confirmation card, and {why}. Tell them to run /agent-setup, open {agent_name} "
-        "and use Add skill: it shows the same preview and adds it on their own click. "
-        "Do not retry."
+        f"run /agent-setup, open {agent_name} and use Add skill: it shows the same preview "
+        "and adds it on their own click"
+    )
+
+
+def _no_card_preview(reason: NoCardReason, agent_name: str) -> str:
+    why, fix = _no_card_text(reason)
+    then = f"{fix} Otherwise they" if fix else "To add it they"
+    return f"Adding it from chat needs a confirmation card, and {why}. {then} {_panel(agent_name)}."
+
+
+def _no_card_refusal(reason: NoCardReason, agent_name: str) -> str:
+    why, fix = _no_card_text(reason)
+    then = f"{fix} Otherwise tell them" if fix else "Tell them"
+    end = "" if fix else " Do not retry."
+    return (
+        "Nothing was added. Adding a skill from chat needs the person to press Approve on a "
+        f"confirmation card, and {why}. {then} to {_panel(agent_name)}.{end}"
     )
 
 
@@ -333,13 +422,17 @@ async def _add_skill_impl(
         )
 
     await recheck(agent)
-    deployment_has_cards = runtime.settings.tool_safety.enabled
     try:
-        has_card = deployment_has_cards and await session_asks_first(
-            runtime, auth, origin, tool_name=_TOOL_NAME
-        )
-        if content_hash is not None and not has_card:
-            raise ToolError(_no_card_refusal(agent_name, deployment_has_cards=deployment_has_cards))
+        no_card = await _no_card_reason(runtime, auth, origin, origin_context_id=origin_context_id)
+        if no_card is not None:
+            _log.info(
+                "add_skill.no_card",
+                reason=no_card,
+                confirm=content_hash is not None,
+                agent_name=agent_name,
+            )
+        if content_hash is not None and no_card is not None:
+            raise ToolError(_no_card_refusal(no_card, agent_name))
         async with httpx.AsyncClient(timeout=30.0) as http:
             bundle, source = await _load_bundle(
                 runtime,
@@ -361,9 +454,8 @@ async def _add_skill_impl(
             then = (
                 f"Only after they say yes, call add_skill again with the same arguments and "
                 f"content_hash='{bound}'; they approve it once more on the card."
-                if has_card
-                else f"To add it they run /agent-setup, open {agent_name} and use Add skill; "
-                "adding from chat needs a confirmation card this conversation can't show."
+                if no_card is None
+                else _no_card_preview(no_card, agent_name)
             )
             return AddSkillResult(
                 status="preview",
@@ -444,13 +536,15 @@ def register_skill_upload_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         The first call only previews: name, description, files and the files the
         agent could run. Show that to the person; only when they confirm, call again
         with the same arguments plus the preview's ``content_hash``, and the person
-        approves the upload on a confirmation card. Where this conversation can't
-        show one, the preview's summary says to use Add skill in /agent-setup. The skill belongs to
-        this agent alone; ``sync_skills`` fills the shared library instead, and
-        ``remove_skill`` detaches it. A built-in agent is refused. Anyone may change an
-        agent nobody else uses (no default, bound thread, or other people's routine or
-        conversation); otherwise it takes a server admin or an admin of every channel
-        using it. Pass this turn's ``origin_context_id`` so its channel counts."""
+        approves the upload on a confirmation card. Where no card can show, the
+        preview's summary says why (approval cards off on this deployment, or a reason
+        this conversation can't show one) and points to Add skill in /agent-setup. The
+        skill belongs to this agent alone; ``sync_skills`` fills the shared library
+        instead, and ``remove_skill`` detaches it. A built-in agent is refused. Anyone
+        may change an agent nobody else uses (no default, bound thread, or other
+        people's routine or conversation); otherwise it takes a server admin or an
+        admin of every channel using it. Pass this turn's ``origin_context_id`` so its
+        channel counts."""
         return await _add_skill_impl(
             runtime,
             await _auth(ctx),

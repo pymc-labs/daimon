@@ -8,6 +8,8 @@ there was approved.
 
 from __future__ import annotations
 
+from typing import Literal
+
 import anthropic
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -22,11 +24,30 @@ from daimon.core.tool_safety import has_confirmation_gate
 
 _log = structlog.get_logger(__name__)
 
+CardGap = Literal[
+    "no_origin",
+    "no_live_session",
+    "other_agents_session",
+    "session_not_gated",
+    "session_unreadable",
+]
+"""Why a call's session can't show the card: no verified chat origin; no live
+session in the origin's thread for this caller; that session runs another
+agent than the turn's responder; it does not hold the tool on `always_ask`;
+MA could not be read."""
+
 
 async def session_asks_first(
     runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow | None, *, tool_name: str
 ) -> bool:
-    """Whether this call comes from a chat turn whose session waits for the person's Approve.
+    """Whether this call comes from a chat turn whose session waits for the person's Approve."""
+    return await session_card_gap(runtime, auth, origin, tool_name=tool_name) is None
+
+
+async def session_card_gap(
+    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow | None, *, tool_name: str
+) -> CardGap | None:
+    """None when this call's session waits for the person's Approve, else why it does not.
 
     Read from the session itself: the verified origin's live session must run
     the origin's responder and hold `tool_name` on `always_ask`, as MA reports
@@ -34,7 +55,7 @@ async def session_asks_first(
     An `agent_chat` or unattended session has no origin.
     """
     if origin is None:
-        return False
+        return "no_origin"
     async with runtime.session_factory() as session:
         live = await get_live_thread_session(
             session,
@@ -44,23 +65,23 @@ async def session_asks_first(
             account_id=auth.account_id,
         )
     if live is None:
-        return False
+        return "no_live_session"
     try:
         ma_session = await runtime.client.beta.sessions.retrieve(live.ma_session_id)
         if ma_session.agent.id != origin.responder_ma_agent_id:
-            return False
+            return "other_agents_session"
         if has_confirmation_gate(
             [tool.model_dump(mode="json") for tool in ma_session.agent.tools], tool_name=tool_name
-        ):
-            return True
-        return await _recorded_as_gated(
+        ) or await _recorded_as_gated(
             runtime,
             auth,
             live,
             tool_name=tool_name,
             ma_agent_id=ma_session.agent.id,
             reported_tools_sha256=hash_tools(ma_session.agent.tools),
-        )
+        ):
+            return None
+        return "session_not_gated"
     except anthropic.APIError as exc:
         # Unreadable (a deleted session, an outage) is not evidence of a card.
         _log.warning(
@@ -69,7 +90,7 @@ async def session_asks_first(
             ma_session_id=live.ma_session_id,
             error=str(exc),
         )
-        return False
+        return "session_unreadable"
 
 
 async def _recorded_as_gated(
