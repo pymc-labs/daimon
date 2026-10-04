@@ -173,7 +173,7 @@ def build_answering_map(
 
 
 def hide_across_homes(answering: AnsweringMap, viewer: RuleViewer) -> AnsweringMap:
-    """Only the routing on the reader's side of every isolated channel's line. Pure."""
+    """Only the routing on the reader's side of every `readers: own` boundary. Pure."""
     outside = viewer.inside_channel_id is None
     tenant_default = answering.tenant_default
     deployment_default = answering.deployment_default if outside else None
@@ -227,7 +227,7 @@ async def load_answering_map(
 ) -> AnsweringMap:
     """Read one install's config rows and live setup conversations, then fold them.
 
-    `viewer` hides what an isolated channel keeps from the caller.
+    `viewer` hides what a channel with `readers: own` keeps from the caller.
     """
     tenant_row, channel_rows = await list_propagations_for_tenant(session, tenant_id=tenant_id)
     policy = await load_access_policy(session, tenant_id=tenant_id)

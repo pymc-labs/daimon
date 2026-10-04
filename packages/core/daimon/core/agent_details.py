@@ -259,7 +259,7 @@ async def load_agent_details(
 
     `channel_id` is what makes `answers_here` answerable; passing the thread
     with it lets a bound thread report its own responder rather than the
-    channel's. A non-admin is refused an agent an isolated channel hides from
+    channel's. A non-admin is refused an agent a home channel hides from
     `channel_id`, as if it did not exist.
     """
     agent = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)

@@ -223,7 +223,7 @@ async def load_details_for(
 async def load_answering_map_for(runtime: DiscordRuntime, *, state: PanelState) -> AnsweringMap:
     """Read every tier of this install's routing, plus its setup conversations.
 
-    A non-admin sees only their side of every isolated channel's line.
+    A non-admin sees only their side of every `readers: own` boundary.
     """
     async with runtime.sessionmaker() as session:
         return await load_answering_map(
@@ -238,7 +238,7 @@ async def load_answering_map_for(runtime: DiscordRuntime, *, state: PanelState) 
 async def panel_viewer(
     session: AsyncSession, runtime: DiscordRuntime, *, state: PanelState
 ) -> RuleViewer | None:
-    """What this panel's reader sees of isolated channels; None for admins."""
+    """What this panel's reader sees across `readers: own` boundaries; None for admins."""
     return await load_rule_viewer(
         session,
         runtime.anthropic,

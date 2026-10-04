@@ -135,7 +135,7 @@ async def _set_agent_default_impl(
             and agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
         )
     else:
-        # The workspace default answers everywhere, so no pinned agent can be it.
+        # The workspace default answers everywhere, so an agent with `runs_in` cannot be it.
         policy = await load_policy_or_refuse(runtime, auth.tenant_id)
         if any_agent_rules(policy):
             if agent is None:
@@ -307,8 +307,8 @@ async def _explain_agent_resolution_impl(
     which agent answers are ordinary members. Gating it would leave the question
     unanswerable by exactly the callers who ask it.
 
-    Isolation still applies: a channel across a channel with `readers: own` from
-    the caller is refused, and agents the caller can't see are left out.
+    A channel across a `readers: own` boundary from the caller is refused,
+    and agents the caller cannot see are left out.
     """
     tenant_id: uuid.UUID = auth.tenant_id
     caller = await load_caller_view(runtime, auth)
