@@ -129,11 +129,11 @@ config). The order is load-bearing and documented as such in the module:
    and keeps the stored role. An external account's stored role is always
    `user`, and it administers no channel. `reauthorize` checks it again.
 5. Resolve config through the cascade
-   `thread → confidential channel → tenant → deployment`, in
+   `thread → channel with readers own → tenant → deployment`, in
    `packages/core/daimon/core/stores/scoped_config_read.py`. The tiers are
    named by `ConfigTier` in `packages/core/daimon/core/scope.py`; the bottom
    one comes from `defaults/config.yaml`, see [defaults.md](defaults.md).
-   Outside confidential (isolated) channels, a stored channel `agent_name` is
+   Outside channels with `readers: own`, a stored channel `agent_name` is
    ignored; a bare mention reaches the server default. The deployment setting
    `DAIMON_ROUTING__CHANNEL_DEFAULTS=legacy` restores channel defaults in all
    channels without changing stored rows. The operator command

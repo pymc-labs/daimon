@@ -488,13 +488,13 @@ async def test_explanation_calls_a_handed_over_thread_a_handoff_not_a_setup(
 
 
 @pytest.mark.asyncio
-async def test_confidential_only_refuses_mcp_shared_channel_default(
+async def test_own_channels_only_refuses_mcp_shared_channel_default(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id, account_id = await _seed(committing_sessionmaker)
     runtime = _runtime(committing_sessionmaker)
-    runtime.settings.routing.channel_defaults = "confidential_only"
-    with pytest.raises(ToolError, match="only in confidential channels"):
+    runtime.settings.routing.channel_defaults = "own_channels_only"
+    with pytest.raises(ToolError, match="only where `readers: own`"):
         await _set_agent_default_impl(
             runtime,
             _admin_auth(tenant_id=tenant_id, account_id=account_id),

@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from daimon.core.permissions import own_reader_channels
-from daimon.core.rule_views import RuleViewer (fix(routing): read confidential status through permissions)
+from daimon.core.rule_views import RuleViewer
 from daimon.core.scope import ChannelConfigRow, ConfigTier, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ThreadAgentBindingRow
@@ -114,7 +114,7 @@ def build_answering_map(
     default: DeploymentDefault,
     setup_threads: Sequence[ThreadAgentBindingRow],
     setup_threads_truncated: bool,
-    isolated_channel_ids: tuple[str, ...] = (),
+    own_reader_channel_ids: tuple[str, ...] = (),
 ) -> AnsweringMap:
     """Fold config rows and live setup conversations into one readable map.
 
@@ -136,7 +136,7 @@ def build_answering_map(
         for row in sorted(channels, key=lambda row: row.channel_id)
         if row.mode == "agent"
         and row.agent_name
-        and (default.channel_defaults == "legacy" or row.channel_id in isolated_channel_ids)
+        and (default.channel_defaults == "legacy" or row.channel_id in own_reader_channel_ids)
     )
     tenant_default: TenantAnswer | None = None
     if tenant is not None and tenant.mode == "agent" and tenant.agent_name:
@@ -240,6 +240,6 @@ async def load_answering_map(
         default=default,
         setup_threads=setup_threads,
         setup_threads_truncated=truncated,
-        isolated_channel_ids=confidential_channels(policy),
+        own_reader_channel_ids=own_reader_channels(policy),
     )
     return answering if viewer is None else hide_across_homes(answering, viewer)

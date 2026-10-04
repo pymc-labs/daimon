@@ -268,7 +268,7 @@ def routing_card(
     )
     routing_hint = (
         build_named_request(agent_name=request_agent or "an agent", channel_label="a channel")
-        if answering_map.channel_defaults == "confidential_only"
+        if answering_map.channel_defaults == "own_channels_only"
         else f"{lead}{request}"
     )
     body.append(

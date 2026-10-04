@@ -15,8 +15,8 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.permissions import any_agent_rules, any_own_readers, own_reader_channels
-from daimon.core.rule_views import binding_refusal, clear_refusal, render_binding_refusal (fix(routing): read confidential status through permissions)
+from daimon.core.permissions import any_agent_rules, any_own_readers, home_of, own_reader_channels
+from daimon.core.rule_views import binding_refusal, clear_refusal, render_binding_refusal
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -327,20 +327,20 @@ async def _refuse_shared_channel_default(
     scope: ScopeRef,
     channel_defaults: str,
 ) -> None:
-    if channel_defaults != "confidential_only" or not isinstance(scope, ChannelScopeRef):
+    if channel_defaults != "own_channels_only" or not isinstance(scope, ChannelScopeRef):
         return
     policy = await load_access_policy(session, tenant_id=scope.tenant_id)
-    if confidential_channel_of(policy, scope.channel_id) is None:
+    if home_of(policy, scope.channel_id) is None:
         console.print(
-            "[red]Channel defaults are available only in confidential channels. "
-            "Name the agent in a mention or mark the channel confidential.[/red]"
+            "[red]Channel defaults are available only where `readers: own`. "
+            "Name the agent in a mention or set the channel rule to `readers: own`.[/red]"
         )
         raise typer.Exit(1)
 
 
 @config_app.command("ignored-defaults")
 def config_ignored_defaults_command(ctx: typer.Context) -> None:
-    """List channel agent defaults retained but ignored by confidential-only routing."""
+    """List channel agent defaults retained but ignored outside channels with `readers: own`."""
     settings = load_settings()
     console = Console(highlight=False)
     run_cli(
@@ -359,7 +359,7 @@ async def _config_ignored_defaults_entry(
         policy = await load_access_policy(session, tenant_id=tenant_id)
         rows = _ignored_default_rows(
             channels,
-            isolated_channel_ids=confidential_channels(policy),
+            own_reader_channel_ids=own_reader_channels(policy),
             channel_defaults=rt.settings.routing.channel_defaults,
         )
         emit_rows(console, rows, columns=("channel_id", "agent_name"), as_json=False)
@@ -368,16 +368,16 @@ async def _config_ignored_defaults_entry(
 def _ignored_default_rows(
     channels: Sequence[ChannelConfigRow],
     *,
-    isolated_channel_ids: Sequence[str],
+    own_reader_channel_ids: Sequence[str],
     channel_defaults: str,
 ) -> list[_IgnoredDefaultRow]:
     if channel_defaults == "legacy":
         return []
-    isolated = set(isolated_channel_ids)
+    own_channels = set(own_reader_channel_ids)
     return [
         _IgnoredDefaultRow(channel_id=row.channel_id, agent_name=row.agent_name)
         for row in channels
-        if row.agent_name and row.mode == "agent" and row.channel_id not in isolated
+        if row.agent_name and row.mode == "agent" and row.channel_id not in own_channels
     ]
 
 

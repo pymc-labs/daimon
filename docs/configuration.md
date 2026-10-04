@@ -211,10 +211,10 @@ Agent default routing mode; see RoutingSettings.
 
 ### `DAIMON_ROUTING__CHANNEL_DEFAULTS`
 
-`'confidential_only' | 'legacy'` · optional · default `confidential_only`
+`'own_channels_only' | 'legacy'` · optional · default `own_channels_only`
 
-Use channel agent defaults only in confidential (isolated) channels. Set legacy to honor
-existing defaults in every channel during rollback.
+Use channel agent defaults only where the channel rule has readers own. Set legacy to
+honor existing defaults in every channel during rollback.
 
 ## Logging
 

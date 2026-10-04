@@ -1180,7 +1180,7 @@ def _routing_request_line(
 ) -> str:
     agent_name = unrouted_agent_name or _answering_name(answering_map, channel_id=channel_id)
     precedence = precedence_line(answering_map.channel_defaults)
-    if answering_map.channel_defaults == "confidential_only":
+    if answering_map.channel_defaults == "own_channels_only":
         return f"{precedence} " + build_named_request(
             agent_name=escape_mrkdwn(agent_name or "an agent"),
             channel_label=f"<#{channel_id}>",

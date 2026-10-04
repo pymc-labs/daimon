@@ -230,7 +230,7 @@ def build_routing_sentence(state: PanelState, answering_map: AnsweringMap) -> st
     precedence = precedence_line(answering_map.channel_defaults)
     if agent_name is None or state.channel_name is None:
         return precedence
-    if answering_map.channel_defaults == "confidential_only":
+    if answering_map.channel_defaults == "own_channels_only":
         return f"{precedence} " + build_named_request(
             agent_name=agent_name, channel_label=f"#{state.channel_name}"
         )

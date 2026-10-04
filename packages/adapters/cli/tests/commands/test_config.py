@@ -484,7 +484,7 @@ async def test_config_keeps_a_channels_own_agent_inside_it(db_session: AsyncSess
 
 
 @pytest.mark.asyncio
-async def test_confidential_only_refuses_channel_default_and_lists_ignored_rows(
+async def test_own_channels_only_refuses_channel_default_and_lists_ignored_rows(
     db_session: AsyncSession,
 ) -> None:
     from daimon.adapters.cli.commands.config import _config_set_entry
@@ -504,9 +504,9 @@ async def test_confidential_only_refuses_channel_default_and_lists_ignored_rows(
             key="agent_name",
             value="new",
             scope_str="channel:shared",
-            channel_defaults="confidential_only",
+            channel_defaults="own_channels_only",
         )
-    assert "only in confidential channels" in cast(StringIO, console.file).getvalue()
+    assert "only where `readers: own`" in cast(StringIO, console.file).getvalue()
     row = await get_scope(db_session, scope=scope)
     assert row is not None and row.agent_name == "old"
 
@@ -522,12 +522,12 @@ def test_ignored_defaults_read_shows_only_inactive_channel_rows() -> None:
         ChannelConfigRow(tenant_id=tenant_id, channel_id="empty"),
     ]
     ignored = _ignored_default_rows(
-        channels, isolated_channel_ids=("private",), channel_defaults="confidential_only"
+        channels, own_reader_channel_ids=("private",), channel_defaults="own_channels_only"
     )
     assert [(row.channel_id, row.agent_name) for row in ignored] == [("shared", "old")]
     assert (
         _ignored_default_rows(
-            channels, isolated_channel_ids=("private",), channel_defaults="legacy"
+            channels, own_reader_channel_ids=("private",), channel_defaults="legacy"
         )
         == []
     )

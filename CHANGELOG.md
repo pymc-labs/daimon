@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any of its coding-tool tokens, could call `create_agent`, and the new agent
   answered outside the channel with whatever prompt was written into it. Such
   calls, and `create_agent` from the channel's setup thread, are now refused
-  (`channel_isolated`), admins included, as is a chat turn's `create_agent`
+  (`channel_own`), admins included, as is a chat turn's `create_agent`
   naming no `origin_context_id` while a channel in its workspace is isolated.
   `list_timers` also showed the notes of timers set in an isolated channel
   from anywhere; they now list only inside that channel, as its routines do. A
@@ -85,7 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded as `admission_denied`, the same as the invoker allowlist, so
   `daimon usage turns` could not say which gate stopped it. These now record
   `admission_channel_protected`, `admission_agent_pinned_elsewhere` and
-  `admission_channel_isolated`, from chat and MCP turns alike. Migration
+  `admission_channel_own`, from chat and MCP turns alike. Migration
   `0045_admission_refusal_reasons` widens the `turn_outcomes.reason` check;
   its downgrade folds them back into `admission_denied`. Earlier rows keep
   `admission_denied`.

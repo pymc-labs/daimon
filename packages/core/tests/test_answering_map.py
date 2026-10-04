@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.answering_map import (
     AnsweringMap,
     ChannelAnswer,
@@ -89,7 +89,7 @@ def test_build_answering_map_orders_channel_overrides_and_carries_their_audit() 
     assert answering.channel_overrides[0].set_at == _NOW, "the override must carry when it was set"
 
 
-def test_confidential_only_map_omits_ignored_defaults() -> None:
+def test_own_channels_only_map_omits_ignored_defaults() -> None:
     tenant_id = uuid.uuid4()
     channels = [
         ChannelConfigRow(tenant_id=tenant_id, channel_id="shared", agent_name="old"),
@@ -98,10 +98,10 @@ def test_confidential_only_map_omits_ignored_defaults() -> None:
     answering = build_answering_map(
         tenant=None,
         channels=channels,
-        default=DeploymentDefault(agent_name="daimon", channel_defaults="confidential_only"),
+        default=DeploymentDefault(agent_name="daimon", channel_defaults="own_channels_only"),
         setup_threads=[],
         setup_threads_truncated=False,
-        isolated_channel_ids=("private",),
+        own_reader_channel_ids=("private",),
     )
     assert [(row.channel_id, row.agent_name) for row in answering.channel_overrides] == [
         ("private", "own")
@@ -298,7 +298,7 @@ def test_routed_agent_names_drops_the_deployment_default_behind_a_workspace_defa
     assert routed_agent_names(without_tenant) == {"alpha", "daimon"}, "it answers with no tenant"
 
 
-async def test_resolve_confidential_only_keeps_isolated_default_and_ignores_shared(
+async def test_resolve_own_channels_only_keeps_own_default_and_ignores_other_rules(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
@@ -314,14 +314,23 @@ async def test_resolve_confidential_only_keeps_isolated_default_and_ignores_shar
         tenant_id=tenant.id,
         agent_name="own",
     )
+    await scoped_config_write.set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="inside"),
+        tenant_id=tenant.id,
+        agent_name="inside-agent",
+    )
     await set_access_policy(
         db_session,
         tenant_id=tenant.id,
         policy=TenantAccessPolicy(
-            sealed_channel_ids=("private",), isolated_channel_ids=("private",)
+            channel_rules={
+                "private": ChannelRule(readers="own", writers="none"),
+                "inside": ChannelRule(readers="inside", writers="any"),
+            }
         ),
     )
-    default = DeploymentDefault(agent_name="daimon", channel_defaults="confidential_only")
+    default = DeploymentDefault(agent_name="daimon", channel_defaults="own_channels_only")
     shared = await resolve(
         db_session,
         context=ScopeContext(tenant_id=tenant.id, channel_id="shared"),
@@ -332,8 +341,14 @@ async def test_resolve_confidential_only_keeps_isolated_default_and_ignores_shar
         context=ScopeContext(tenant_id=tenant.id, channel_id="private"),
         default=default,
     )
+    inside = await resolve(
+        db_session,
+        context=ScopeContext(tenant_id=tenant.id, channel_id="inside"),
+        default=default,
+    )
     assert (shared.agent_name, shared.agent_name_tier) == ("daimon", "deployment")
     assert (private.agent_name, private.agent_name_tier) == ("own", "channel")
+    assert (inside.agent_name, inside.agent_name_tier) == ("daimon", "deployment")
     rollback = await resolve(
         db_session,
         context=ScopeContext(tenant_id=tenant.id, channel_id="shared"),

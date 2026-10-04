@@ -37,7 +37,7 @@ from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core.channel_environments import build_environment_resolution_note
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.permissions import any_agent_rules, own_reader_channels (fix(routing): read confidential status through permissions)
+from daimon.core.permissions import any_agent_rules, home_of
 from daimon.core.routing_facts import (
     build_clear_default_note,
     build_resolution_note,
@@ -118,12 +118,12 @@ async def _set_agent_default_impl(
             runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
         )
     if channel_id is not None:
-        if runtime.settings.routing.channel_defaults == "confidential_only":
-            policy = await load_isolation(runtime, auth.tenant_id)
-            if confidential_channel_of(policy, channel_id) is None:
+        if runtime.settings.routing.channel_defaults == "own_channels_only":
+            policy = await load_policy_or_refuse(runtime, auth.tenant_id)
+            if home_of(policy, channel_id) is None:
                 raise ToolError(
-                    "Channel defaults are available only in confidential channels. "
-                    "Name the agent in a mention or mark this channel confidential."
+                    "Channel defaults are available only where `readers: own`. "
+                    "Name the agent in a mention or set this channel rule to `readers: own`."
                 )
         await require_bindable_as_channel_default(
             runtime,
@@ -307,7 +307,7 @@ async def _explain_agent_resolution_impl(
     which agent answers are ordinary members. Gating it would leave the question
     unanswerable by exactly the callers who ask it.
 
-    Isolation still applies: a channel across an isolated channel's line from
+    Isolation still applies: a channel across a channel with `readers: own` from
     the caller is refused, and agents the caller can't see are left out.
     """
     tenant_id: uuid.UUID = auth.tenant_id
@@ -368,19 +368,19 @@ async def _explain_agent_resolution_impl(
 
     channel_cfg = channel_row if isinstance(channel_row, ChannelConfigRow) else None
     tenant_cfg = tenant_row if isinstance(tenant_row, TenantConfigRow) else None
-    channel_isolated = caller.isolated_place(channel_id) is not None
+    channel_own = home_of(caller.policy, channel_id) is not None
     resolved = merge(
         channel=channel_cfg,
         tenant=tenant_cfg,
         default=runtime.deployment_default,
-        channel_isolated=channel_isolated,
+        channel_own=channel_own,
     )
     hidden_winner = binding is None and _visible(caller, resolved.agent_name) is None
     ignored_channel_default = (
         channel_cfg is not None
         and channel_cfg.agent_name is not None
-        and runtime.deployment_default.channel_defaults == "confidential_only"
-        and not channel_isolated
+        and runtime.deployment_default.channel_defaults == "own_channels_only"
+        and not channel_own
     )
 
     return AgentResolutionExplanation(
@@ -391,14 +391,14 @@ async def _explain_agent_resolution_impl(
         winning_tier="thread" if binding else resolved.agent_name_tier,
         channel_default=channel_cfg.agent_name
         if channel_cfg is not None
-        and (runtime.deployment_default.channel_defaults == "legacy" or channel_isolated)
+        and (runtime.deployment_default.channel_defaults == "legacy" or channel_own)
         else None,
         tenant_default=_visible(caller, tenant_cfg.agent_name if tenant_cfg is not None else None),
         deployment_default=_visible(caller, runtime.deployment_default.agent_name),
         effective_environment_name=resolved.environment_name,
         environment_winning_tier=resolved.environment_name_tier,
         channel_environment=channel_cfg.environment_name if channel_cfg is not None else None,
-        # An isolated channel's insiders see no workspace picks (`hide_across_homes`).
+        # A home channel's insiders see no workspace picks (`hide_across_homes`).
         tenant_environment=tenant_cfg.environment_name
         if tenant_cfg is not None and caller.inside_channel_id is None
         else None,
@@ -437,13 +437,13 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel_id: str | None = None,
         expected_ma_agent_id: str | None = None,
     ) -> SetDefaultResult:
-        """Make an agent answer in a confidential channel or become the workspace default.
-        For example, make churn-explorer answer in #growth when #growth is
-        confidential. Shared channels use the workspace default; name an agent
+        """Make an agent answer in a channel with `readers: own` or become the workspace default.
+        For example, make churn-explorer answer in #growth when #growth has
+        `readers: own`. Other channels use the workspace default; name an agent
         in a mention to call it there. Use ``clear_agent_default`` to stop that routing.
 
         When ``channel_id`` is provided the default is scoped to that channel;
-        under confidential-only routing, the channel must be isolated.
+        under `own_channels_only` routing, the channel needs `readers: own`.
         Omit it to set the workspace-wide default. Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
         core).  Requires Manage Server (admin); an admin of the channel may set
@@ -500,7 +500,7 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         environment it runs in, and which routing tier decided each.
 
         Supply thread_id to include its binding. Thread responder wins, else
-        a confidential channel's own default, else the workspace default, else
+        a home channel's fixed default, else the workspace default, else
         the deployment default. Legacy mode also honors shared channel defaults.
         This reports the winner AND every tier's setting, so "why that agent" is answerable without
         starting a turn and reading its footer.

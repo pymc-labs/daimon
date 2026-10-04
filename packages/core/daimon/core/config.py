@@ -1135,10 +1135,10 @@ class DirectMessagePolicy(BaseModel):
 
 
 class RoutingSettings(BaseModel):
-    channel_defaults: Literal["confidential_only", "legacy"] = Field(
-        default="confidential_only",
+    channel_defaults: Literal["own_channels_only", "legacy"] = Field(
+        default="own_channels_only",
         description=(
-            "Use channel agent defaults only in confidential (isolated) channels. "
+            "Use channel agent defaults only where the channel rule has readers own. "
             "Set legacy to honor existing defaults in every channel during rollback."
         ),
     )

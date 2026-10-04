@@ -102,11 +102,11 @@ def roster_rows(state: PanelState, *, attributions: Mapping[str, str]) -> tuple[
     Pure — no I/O, no clock.
     """
     tenant_row, channel_rows = state.cascade_view
-    if state.deployment_default.channel_defaults == "confidential_only":
+    if state.deployment_default.channel_defaults == "own_channels_only":
         active_ids = (
             {row.channel_id for row in state.answering_map.channel_overrides}
             if state.answering_map is not None
-            else set(state.isolated_channel_ids)
+            else set(state.own_reader_channel_ids)
         )
         channel_rows = [row for row in channel_rows if row.channel_id in active_ids]
     rows: list[RosterRow] = []

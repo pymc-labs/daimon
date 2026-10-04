@@ -333,9 +333,9 @@ def test_the_rule_sentence_is_the_bare_rule_when_there_is_no_agent_to_name(
     ), "an empty roster gets the rule and no invented example"
 
 
-def test_confidential_only_panel_states_the_new_cascade(account_id: uuid.UUID) -> None:
+def test_own_channels_only_panel_states_the_new_cascade(account_id: uuid.UUID) -> None:
     answering_map = _map(deployment_default="daimon").model_copy(
-        update={"channel_defaults": "confidential_only"}
+        update={"channel_defaults": "own_channels_only"}
     )
     state = _state(answering_map, account_id=account_id)
     assert build_routing_sentence(state, answering_map).startswith(PRECEDENCE_LINE)

@@ -31,7 +31,7 @@ from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import RepoAccess, derive_repo_access
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.permissions import confidential_channels
+from daimon.core.permissions import own_reader_channels
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.rule_views import load_rule_viewer
 from daimon.core.scope import (
@@ -273,10 +273,10 @@ async def load_agent_details(
     tenant_row, channel_rows = await scoped_config_read.list_propagations_for_tenant(
         session, tenant_id=tenant_id
     )
-    if deployment_default.channel_defaults == "confidential_only":
+    if deployment_default.channel_defaults == "own_channels_only":
         policy = await load_access_policy(session, tenant_id=tenant_id)
         channel_rows = active_agent_channels(
-            channel_rows, deployment_default, confidential_channels(policy)
+            channel_rows, deployment_default, own_reader_channels(policy)
         )
     resolved_here: ResolvedConfig | None = None
     if channel_id is not None:

@@ -64,7 +64,7 @@ def build_resolution_note(
     has no setting of its own" tells the caller exactly where to change it.
     """
     ignored = (
-        " A stored channel default is ignored because this channel is not confidential."
+        " A stored channel default is ignored because this channel does not have `readers: own`."
         if ignored_channel_default
         else ""
     )
@@ -136,7 +136,7 @@ def build_unrouted_note(
     ask one. With no channel in hand there is nothing concrete to name, so the
     generic next step stands in.
     """
-    if channel_defaults == "confidential_only":
+    if channel_defaults == "own_channels_only":
         return (
             f"No channel has {agent_name} as its default. "
             f"Mention the bot and write {agent_name}: your request to reach it."

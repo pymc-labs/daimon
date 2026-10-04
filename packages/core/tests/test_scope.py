@@ -76,18 +76,18 @@ def test_merge_channel_tier_wins() -> None:
     assert result.agent_name_tier == "channel", "tier must be 'channel' when channel row wins"
 
 
-def test_confidential_only_ignores_shared_channel_default_but_preserves_environment() -> None:
+def test_own_channels_only_ignores_shared_channel_default_but_preserves_environment() -> None:
     tenant_id = uuid.uuid4()
     channel = ChannelConfigRow(
         tenant_id=tenant_id, channel_id="room", agent_name="old", environment_name="sandbox"
     )
     tenant = TenantConfigRow(tenant_id=tenant_id, agent_name="workspace")
-    default = DeploymentDefault(agent_name="daimon", channel_defaults="confidential_only")
+    default = DeploymentDefault(agent_name="daimon", channel_defaults="own_channels_only")
     shared = merge(channel=channel, tenant=tenant, default=default)
     assert (shared.agent_name, shared.agent_name_tier) == ("workspace", "tenant")
     assert (shared.environment_name, shared.environment_name_tier) == ("sandbox", "channel")
-    isolated = merge(channel=channel, tenant=tenant, default=default, channel_isolated=True)
-    assert (isolated.agent_name, isolated.agent_name_tier) == ("old", "channel")
+    own = merge(channel=channel, tenant=tenant, default=default, channel_own=True)
+    assert (own.agent_name, own.agent_name_tier) == ("old", "channel")
     rollback = merge(
         channel=channel,
         tenant=tenant,
