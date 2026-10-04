@@ -6,6 +6,7 @@ import uuid
 
 import structlog
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.permissions import agent_permissions
@@ -37,18 +38,20 @@ async def sync_agent_roles(
             stored = {
                 row.ma_agent_id: row for row in await list_roles(session, tenant_id=tenant_id)
             }
-        eligible = {
-            agent.id: agent
-            for agent in agents
-            if agent_permissions(policy, agent_pin_names(agent.name, agent.metadata)).own_channel
-            is None
-        }
+        eligible: dict[str, BetaManagedAgentsAgent] = {}
+        for agent in agents:
+            permissions = agent_permissions(policy, agent_pin_names(agent.name, agent.metadata))
+            runnable = not permissions.runs_in or bool(
+                set(permissions.runs_in[0]).intersection(*permissions.runs_in[1:])
+            )
+            if permissions.home is None and runnable:
+                eligible[agent.id] = agent
         for agent_id, row in stored.items():
             if agent_id in eligible:
                 continue
             role = guild.get_role(int(row.role_id))
             if role is not None:
-                await role.delete(reason="Agent archived or confined to a confidential channel")
+                await role.delete(reason="Agent archived or has a home or runs nowhere")
             async with sessionmaker.begin() as session:
                 await delete_role(session, tenant_id=tenant_id, ma_agent_id=agent_id)
         for agent_id, agent in eligible.items():

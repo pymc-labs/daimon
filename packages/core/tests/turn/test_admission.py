@@ -568,9 +568,19 @@ async def test_named_agent_uses_the_normal_admission_and_refuses_a_thread_switch
         )
     with pytest.raises(NamedAgentRefused, match="Start a new thread or ask for a handoff"):
         await admit(deps, **args, thread_id="thread", requested_agent_name="Planner")
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                agent_rules={"Planner": AgentRule(runs_in=("another-channel",))}
+            ),
+        )
+    with pytest.raises(AdmissionDenied, match="runs_elsewhere"):
+        await admit(deps, **args, requested_agent_name="Planner")
 
 
-async def test_named_agent_in_an_isolated_channel_names_its_own_agent(
+async def test_named_agent_in_an_own_readers_channel_names_its_own_agent(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -589,9 +599,8 @@ async def test_named_agent_in_an_isolated_channel_names_its_own_agent(
         db_session,
         tenant_id=tenant.id,
         policy=TenantAccessPolicy(
-            sealed_channel_ids=("private",),
-            isolated_channel_ids=("private",),
-            agent_channel_pins={"local": ("private",)},
+            channel_rules={"private": ChannelRule(readers="own", writers="own")},
+            agent_rules={"local": AgentRule(runs_in=("private",))},
         ),
     )
     await db_session.commit()
@@ -600,7 +609,7 @@ async def test_named_agent_in_an_isolated_channel_names_its_own_agent(
     router = MARouter()
     router.add_agent_list(local, visitor)
     deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
-    with pytest.raises(NamedAgentRefused, match="local's confidential channel"):
+    with pytest.raises(NamedAgentRefused, match="This channel answers as local"):
         await admit(
             deps,
             tenant_id=tenant.id,

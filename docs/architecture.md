@@ -144,10 +144,12 @@ config). The order is load-bearing and documented as such in the module:
    first token after the mention (case-insensitive NFKC match). Discord also
    accepts a mention of a bot-managed agent role, even without a bot mention.
    The named choice overrides the unbound default but still enters `admit()`
-   for invoker, pin, isolation and budget checks. A bound thread rejects a
+   through `authorize(RUN_AGENT)` for the agent's `runs_in` and home rules,
+   plus the usual invoker and budget checks. A bound thread rejects a
    different named agent and asks for a new thread or explicit handoff. An
-   isolated channel accepts only its own agent and names that agent in the
-   refusal. Discord reconciles roles on boot and regularly; a missing Manage
+   channel with `readers: own` accepts only its own agent and names that agent
+   in the refusal. Discord reconciles roles on boot and regularly, excluding
+   agents with a home or a rule that runs nowhere; a missing Manage
    Roles permission logs a warning while the text form remains available.
 6. Raise `MissingTurnConfigError` if no agent or environment resolved — before
    any MA call, so a misconfigured tenant sees the config error rather than a

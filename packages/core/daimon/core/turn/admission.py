@@ -64,6 +64,7 @@ from daimon.core.permissions import (
     dm_source_limited,
     home_of,
     limiting_ids_at,
+    run_refusal,
 )
 from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
@@ -401,7 +402,6 @@ async def admit_impl(
                 raise NamedAgentRefused(
                     "This thread belongs to another agent. Start a new thread or ask for a handoff."
                 )
-            inside = confidential_channel_of(policy, thread_id, channel_id)
             named_permissions = agent_permissions(
                 policy, (named_agent.name, named_agent.metadata.get("daimon_name"))
             )
@@ -410,10 +410,10 @@ async def admit_impl(
                 channel_id=thread_id or channel_id,
                 parent_channel_id=channel_id if thread_id is not None else None,
             )
-            if inside is not None and not at_home(named_permissions, here):
+            if here.home is not None and run_refusal(named_permissions, here) is not None:
                 own = parent_config.agent_name or "this channel's agent"
                 raise NamedAgentRefused(
-                    f"This is {own}'s confidential channel. Name that agent here instead."
+                    f"This channel answers as {own}. Name that agent here instead."
                 )
             config = config.model_copy(
                 update={

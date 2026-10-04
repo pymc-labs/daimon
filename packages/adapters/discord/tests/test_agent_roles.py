@@ -6,7 +6,7 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from daimon.adapters.discord.agent_roles import sync_agent_roles
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.stores.discord_agent_roles import list_roles, roles_mentioned
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -82,7 +82,7 @@ async def test_missing_manage_roles_is_a_nonfatal_fallback(
     guild.create_role.assert_not_awaited()
 
 
-async def test_confidential_channels_own_agent_has_no_mentionable_role(
+async def test_agents_with_a_home_or_no_run_channel_have_no_mentionable_role(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -95,15 +95,20 @@ async def test_confidential_channels_own_agent_has_no_mentionable_role(
         patch(
             "daimon.adapters.discord.agent_roles.list_agents_by_tenant",
             new_callable=AsyncMock,
-            return_value=[ma_agent(id="local", name="local", tenant_id=tenant.id)],
+            return_value=[
+                ma_agent(id="local", name="local", tenant_id=tenant.id),
+                ma_agent(id="stopped", name="stopped", tenant_id=tenant.id),
+            ],
         ),
         patch(
             "daimon.adapters.discord.agent_roles.load_access_policy",
             new_callable=AsyncMock,
             return_value=TenantAccessPolicy(
-                sealed_channel_ids=("private",),
-                isolated_channel_ids=("private",),
-                agent_channel_pins={"local": ("private",)},
+                channel_rules={"private": ChannelRule(readers="own", writers="own")},
+                agent_rules={
+                    "local": AgentRule(runs_in=("private",)),
+                    "stopped": AgentRule(runs_in=()),
+                },
             ),
         ),
     ):
