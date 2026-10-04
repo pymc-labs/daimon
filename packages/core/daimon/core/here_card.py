@@ -12,12 +12,19 @@ from collections.abc import Awaitable, Callable, Collection, Sequence
 from datetime import datetime
 
 from anthropic import AsyncAnthropic
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
-from daimon.core.channel_isolation import load_isolation_viewer, routine_destination_channel
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.permissions import (
+    agent_permissions,
+    channel_permissions,
+    channel_rule,
+    memory_writable,
+    runs_only_in,
+)
 from daimon.core.roster import load_roster
+from daimon.core.rule_views import load_rule_viewer, routine_destination_channel
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -54,10 +61,19 @@ class HereCard(BaseModel):
     tier: str | None
     set_at: datetime | None = None
     configuration_target_name: str | None = None
-    sealed: bool
-    isolated: bool
-    channel_pin_agent_names: tuple[str, ...] = ()
-    pin_channels: tuple[str, ...] = ()
+    channel_rule: ChannelRule
+    thread_rule: ChannelRule | None = None
+    category_rule: ChannelRule | None = None
+    effective_readers: str
+    effective_writers: str
+    agent_runs_in: tuple[str, ...] | None = None
+    agent_home: str | None = None
+    who_may_answer: str
+    agent_can_answer_here: bool | None = None
+    reads_kept_inside: bool
+    memory_writable_here: bool | None = None
+    publishing_needs_approval: bool | None = None
+    own_agent_names: tuple[str, ...] = ()
     bot_can_view: bool | None = None
     caller_can_view: bool | None = None
     agent_can_read_here: bool | None = None
@@ -71,11 +87,15 @@ class HereCard(BaseModel):
 def assemble_here_card(
     *,
     channel_id: str,
+    platform: Platform = "discord",
+    thread_id: str | None = None,
+    category_id: str | None = None,
     agent_name: str | None,
     tier: str | None,
     channel: ChannelConfigRow | None,
     tenant: TenantConfigRow | None,
     configuration_target_name: str | None,
+    setup_thread: bool = False,
     set_by_label: str | None = None,
     channel_level_only: bool = False,
     thread_set_by_account_id: uuid.UUID | None = None,
@@ -93,7 +113,6 @@ def assemble_here_card(
     visible_channel_ids: Collection[str] | None = None,
     bot_can_view: bool | None = None,
     caller_can_view: bool | None = None,
-    agent_can_read_here: bool | None = None,
     category_channels_bot_can_view: Sequence[str] = (),
 ) -> HereCard:
     """Build the complete card from visible facts; never accept a token value."""
@@ -109,16 +128,87 @@ def assemble_here_card(
         else (source.agent_name_set_at if source is not None else None)
     )
     visible = set(visible_channel_ids) if visible_channel_ids is not None else None
-    channel_pins = tuple(
-        sorted(
-            name
-            for name, pinned in policy.agent_channel_pins.items()
-            if channel_id in pinned and (visible_agent_names is None or name in visible_agent_names)
-        )
+    stored_channel_rule = channel_rule(policy, channel_id)
+    thread_key = (
+        (f"{channel_id}:{thread_id}" if platform == "slack" else thread_id)
+        if thread_id is not None
+        else None
     )
-    pins = tuple(sorted(policy.agent_channel_pins.get(agent_name or "", ())))
-    if visible is not None:
-        pins = tuple(channel for channel in pins if channel in visible)
+    stored_thread_rule = channel_rule(policy, thread_key) if thread_key is not None else None
+    stored_category_rule = policy.category_rules.get(category_id) if category_id else None
+    here = channel_permissions(
+        policy,
+        channel_id=thread_id or channel_id,
+        parent_channel_id=channel_id if thread_id is not None else None,
+        category_id=category_id,
+    )
+    names = details.rule_names if details is not None and details.rule_names else (agent_name,)
+    permissions = agent_permissions(policy, names)
+    running: set[str] | None = None
+    for rule in permissions.runs_in:
+        running = set(rule) if running is None else running.intersection(rule)
+    runs_in: tuple[str, ...] | None = tuple(sorted(running)) if running is not None else None
+    shown_runs_in = (
+        tuple(cid for cid in runs_in if visible is None or cid in visible)
+        if runs_in is not None
+        else None
+    )
+    own_agents = (
+        tuple(
+            name
+            for name in runs_only_in(policy, channel_id)
+            if visible_agent_names is None or name in visible_agent_names
+        )
+        if here.home == channel_id
+        else ()
+    )
+    agent_ref = AgentRef.of(*names) if agent_name is not None else AgentRef.none()
+    place = Place(
+        channel_id=thread_id or channel_id,
+        parent_channel_id=channel_id if thread_id is not None else None,
+        category_id=category_id,
+        setup_thread=setup_thread,
+    )
+    can_answer = (
+        authorize(policy, subject=Subject(), action=Action.START_TURN, place=place).allowed
+        and authorize(
+            policy, subject=Subject(), action=Action.RUN_AGENT, agent=agent_ref, place=place
+        ).allowed
+        if agent_name is not None
+        else None
+    )
+    origin_ids = {channel_id}
+    if thread_id is not None:
+        origin_ids.update((thread_id, f"{channel_id}:{thread_id}"))
+    can_read = (
+        authorize(
+            policy,
+            subject=Subject(),
+            action=Action.READ_CHANNEL,
+            agent=agent_ref,
+            place=place,
+            origin_channel_ids=frozenset(origin_ids),
+            origin=place,
+        ).allowed
+        if agent_name is not None
+        else None
+    )
+    can_write_memory = memory_writable(permissions, here) if agent_name is not None else None
+    needs_approval = (
+        authorize(
+            policy, subject=Subject(), action=Action.PUBLISH, agent=agent_ref, origin=place
+        ).reason
+        == "needs_approval"
+        if agent_name is not None
+        else None
+    )
+    who_may_answer = (
+        "nobody"
+        if here.writers == "none"
+        else "this channel's own agents"
+        if here.writers == "own"
+        else "the agent selected by routing, if its rule allows this place"
+    )
     credentials: list[CredentialStatus] = []
     token_urls = {url.rstrip("/") for url in mcp_token_urls}
     defaults: tuple[str, ...] = ()
@@ -192,7 +282,7 @@ def assemble_here_card(
                         policy,
                         subject=Subject(),
                         action=Action.RUN_AGENT,
-                        agent=AgentRef.of(agent_name),
+                        agent=agent_ref,
                         place=Place(channel_id=cid),
                     ).allowed
                 )
@@ -208,9 +298,9 @@ def assemble_here_card(
                     policy,
                     subject=Subject(),
                     action=Action.READ_CHANNEL,
-                    agent=AgentRef.of(agent_name),
+                    agent=agent_ref,
                     place=Place(channel_id=routine_destination_channel(row)),
-                    origin_channel_ids=frozenset({channel_id}),
+                    origin_channel_ids=frozenset(origin_ids),
                 ).allowed
             )
         )
@@ -227,14 +317,45 @@ def assemble_here_card(
         lines.append(
             "Slack /here shows channel-level routing; slash commands provide no thread context."
         )
+    publication = (
+        "approval required"
+        if needs_approval
+        else "allowed without approval"
+        if needs_approval is False
+        else "unknown"
+    )
     lines.extend(
         [
-            f"Channel: {'sealed' if channel_id in policy.sealed_channel_ids else 'unsealed'}, "
-            f"{'isolated' if channel_id in policy.isolated_channel_ids else 'shared'}.",
+            f"Channel rule: readers {stored_channel_rule.readers}; "
+            f"writers {stored_channel_rule.writers}.",
+            f"Effective here: readers {here.readers}; writers {here.writers}.",
+            f"Who may answer: {who_may_answer}.",
+            f"Agent rule: runs_in (visible) {_runs_in_label(shown_runs_in)}; "
+            f"home {permissions.home or 'none'}.",
+            f"Responding agent may answer here: {_yes(can_answer)}; "
+            f"reads kept inside: {_yes(here.readers != 'any')}; "
+            f"memory writable: {_yes(can_write_memory)}.",
+            f"Publishing: {publication}.",
             f"Can view here: bot {_yes(bot_can_view)}; you {_yes(caller_can_view)}.",
-            f"Agent read policy here: {_yes(agent_can_read_here)}.",
+            f"Agent can read here: {_yes(can_read)} (Daimon rule; platform access separate).",
         ]
     )
+    if stored_thread_rule is not None and _reader_rank(stored_thread_rule.readers) > _reader_rank(
+        stored_channel_rule.readers
+    ):
+        lines.append(
+            f"Thread rule: readers {stored_thread_rule.readers}; "
+            f"writers {stored_thread_rule.writers}."
+        )
+    if (
+        stored_category_rule is not None
+        and stored_category_rule.writers == "none"
+        and stored_channel_rule.writers != "none"
+    ):
+        lines.append(
+            f"Category rule: readers {stored_category_rule.readers}; "
+            f"writers {stored_category_rule.writers}."
+        )
     if category_channels_bot_can_view:
         lines.append(
             "Bot view in other category channels: " + _summary(category_channels_bot_can_view) + "."
@@ -257,10 +378,8 @@ def assemble_here_card(
     )
     lines.append("Credential session usability: unknown (live mount status is unavailable).")
     lines.append("Other defaults: " + (_summary(defaults) if defaults else "none visible") + ".")
-    lines.append("Pin channels: " + (_summary(pins) if pins else "none visible") + ".")
-    lines.append(
-        "Agents pinned here: " + (_summary(channel_pins) if channel_pins else "none visible") + "."
-    )
+    if own_agents:
+        lines.append("Own agents here: " + _summary(own_agents) + ".")
     lines.append(
         "Routines: "
         + (_summary(routine_labels, separator="; ") if routine_labels else "none visible")
@@ -271,13 +390,22 @@ def assemble_here_card(
         tier=tier,
         set_at=set_at,
         configuration_target_name=configuration_target_name,
-        sealed=channel_id in policy.sealed_channel_ids,
-        isolated=channel_id in policy.isolated_channel_ids,
-        channel_pin_agent_names=channel_pins,
-        pin_channels=pins,
+        channel_rule=stored_channel_rule,
+        thread_rule=stored_thread_rule,
+        category_rule=stored_category_rule,
+        effective_readers=here.readers,
+        effective_writers=here.writers,
+        agent_runs_in=shown_runs_in,
+        agent_home=permissions.home,
+        who_may_answer=who_may_answer,
+        agent_can_answer_here=can_answer,
+        reads_kept_inside=here.readers != "any",
+        memory_writable_here=can_write_memory,
+        publishing_needs_approval=needs_approval,
+        own_agent_names=own_agents,
         bot_can_view=bot_can_view,
         caller_can_view=caller_can_view,
-        agent_can_read_here=agent_can_read_here,
+        agent_can_read_here=can_read,
         category_channels_bot_can_view=tuple(category_channels_bot_can_view),
         credentials=tuple(credentials),
         default_channels=defaults,
@@ -288,6 +416,16 @@ def assemble_here_card(
 
 def _yes(value: bool | None) -> str:
     return "yes" if value is True else "no" if value is False else "unknown"
+
+
+def _reader_rank(value: str) -> int:
+    return {"any": 0, "inside": 1, "own": 2}[value]
+
+
+def _runs_in_label(channels: tuple[str, ...] | None) -> str:
+    if channels is None:
+        return "any channel"
+    return _summary(channels) if channels else "no visible channels"
 
 
 def _short(value: str, limit: int = 120) -> str:
@@ -316,6 +454,7 @@ async def load_here_card(
     platform: Platform,
     channel_id: str,
     thread_id: str | None,
+    category_id: str | None = None,
     default: DeploymentDefault,
     github: GitHubDeploymentFacts,
     public_mcp_url: str | None,
@@ -330,7 +469,7 @@ async def load_here_card(
 ) -> HereCard:
     """Load the current routing and credential names for one caller's place."""
     policy = await load_access_policy(session, tenant_id=tenant_id)
-    viewer = await load_isolation_viewer(
+    viewer = await load_rule_viewer(
         session, anthropic, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
     )
     roster = await load_roster(
@@ -358,7 +497,7 @@ async def load_here_card(
     )
     agent_name = roster.answering.name if roster.answering is not None else None
     if resolved.thread_binding_kind == "setup" and resolved.agent_name is not None:
-        # The built-in setup responder may be outside an isolated channel's
+        # The built-in setup responder may be outside a channel's own-agent
         # agent roster while still answering this very setup thread.
         agent_name = resolved.agent_name
     details = None
@@ -448,20 +587,11 @@ async def load_here_card(
         for cid, label in category_channels_bot_can_view
         if viewer is None or viewer.sees_place(cid)
     )
-    can_read = (
-        authorize(
-            policy,
-            subject=Subject(),
-            action=Action.READ_CHANNEL,
-            agent=AgentRef.of(agent_name),
-            place=Place(channel_id=channel_id),
-            origin_channel_ids=frozenset({channel_id}),
-        ).allowed
-        if agent_name is not None
-        else None
-    )
     return assemble_here_card(
         channel_id=channel_id,
+        platform=platform,
+        thread_id=thread_id,
+        category_id=category_id,
         agent_name=agent_name,
         tier=resolved.agent_name_tier if agent_name is not None else None,
         channel=channel_row if isinstance(channel_row, ChannelConfigRow) else None,
@@ -469,6 +599,7 @@ async def load_here_card(
         configuration_target_name=resolved.configuration_target_name
         if viewer is None or viewer.sees(resolved.configuration_target_name)
         else None,
+        setup_thread=resolved.thread_binding_kind == "setup",
         thread_set_by_account_id=binding.creator_account_id if binding is not None else None,
         thread_set_at=binding.created_at if binding is not None else None,
         set_by_label=set_by_label,
@@ -476,7 +607,7 @@ async def load_here_card(
         policy=policy,
         details=details,
         visible_agent_names={
-            name for name in policy.agent_channel_pins if viewer is None or viewer.sees(name)
+            name for name in runs_only_in(policy, channel_id) if viewer is None or viewer.sees(name)
         },
         channels=channels,
         deployment_default=default,
@@ -488,6 +619,5 @@ async def load_here_card(
         visible_channel_ids=visible_channel_ids,
         bot_can_view=bot_can_view,
         caller_can_view=caller_can_view,
-        agent_can_read_here=can_read,
         category_channels_bot_can_view=category_labels,
     )

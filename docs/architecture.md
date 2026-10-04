@@ -1078,10 +1078,16 @@ admission before any of this runs.
   names, then renders one ephemeral card through `daimon.core.here_card`.
   `where_am_i` in the MCP adapter returns that same card and structured facts
   when the agent is asked about its identity, reach or credentials. The model
-  does not compose the card. Its channel-turn view uses member visibility even
-  for an admin, because the model's answer may be posted to the channel. Slack
-  slash commands have no thread identifier, so Slack `/here` reports channel
-  routing and says when thread routing could not be checked.
+  does not compose the card. The card shows the channel's stored reader/writer
+  rule, a stricter thread or category rule, and the resulting rule here. It
+  shows the responding agent's visible `runs_in` channels and home, whether
+  that agent may answer and read here, whether reads stay inside and memory is
+  writable, and whether publishing needs the requester's approval. These
+  answers use `daimon.core.permissions` and `authorize`. Its channel-turn view
+  uses member visibility even for an admin, because the model's answer may be
+  posted to the channel. Slack slash commands have no thread identifier, so
+  Slack `/here` reports channel routing and says when thread routing could not
+  be checked.
 
 - **Scheduled routines** go through
   `packages/core/daimon/core/headless_runner.py`, which creates a session with

@@ -42,14 +42,14 @@ def _runtime() -> MagicMock:
 
 async def test_admin_channel_turn_gets_member_card_and_unknown_bot_visibility() -> None:
     runtime = _runtime()
-    caller = SimpleNamespace(inside_channel_id=None, isolated_place=lambda _id: None)
+    caller = SimpleNamespace(inside_channel_id=None, home_place=lambda _id: None)
     rows = [
         ChannelRow(id="here", name="here", type="text", category_id="cat"),
         ChannelRow(id="sibling", name="sibling", type="text", category_id="cat"),
     ]
     with (
         patch(
-            "daimon.adapters.mcp.tools.here.load_caller_isolation",
+            "daimon.adapters.mcp.tools.here.load_caller_view",
             new=AsyncMock(return_value=caller),
         ),
         patch(
@@ -60,6 +60,7 @@ async def test_admin_channel_turn_gets_member_card_and_unknown_bot_visibility() 
         await _where_am_i_impl(runtime, _auth(), "here", None)
     assert load.await_args.kwargs["is_admin"] is False
     assert load.await_args.kwargs["bot_can_view"] is None
+    assert load.await_args.kwargs["category_id"] == "cat"
     assert "category_channels_bot_can_view" not in load.await_args.kwargs
     assert callable(load.await_args.kwargs["resolve_setter_display"])
 
@@ -94,18 +95,18 @@ async def test_discord_setter_uses_plain_member_name() -> None:
 @pytest.mark.parametrize(
     ("isolation", "rows", "message"),
     [
-        ("isolated", (), "isolated channel's line"),
+        ("home", (), "outside this conversation's home"),
         (None, (), "missing channel access"),
     ],
 )
-async def test_tool_refuses_isolation_line_and_missing_channel_access(
+async def test_tool_refuses_home_boundary_and_missing_channel_access(
     isolation: str | None, rows: tuple[ChannelRow, ...], message: str
 ) -> None:
     runtime = _runtime()
-    caller = SimpleNamespace(inside_channel_id=None, isolated_place=lambda _id: isolation)
+    caller = SimpleNamespace(inside_channel_id=None, home_place=lambda _id: isolation)
     with (
         patch(
-            "daimon.adapters.mcp.tools.here.load_caller_isolation",
+            "daimon.adapters.mcp.tools.here.load_caller_view",
             new=AsyncMock(return_value=caller),
         ),
         patch(

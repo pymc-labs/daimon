@@ -98,6 +98,7 @@ class HereCog(commands.Cog):
                     platform="discord",
                     channel_id=str(channel.id),
                     thread_id=thread_id,
+                    category_id=str(channel.category_id) if channel.category_id else None,
                     default=runtime.deployment_default,
                     github=GitHubDeploymentFacts(
                         has_fallback_pat=github.fallback_pat is not None,

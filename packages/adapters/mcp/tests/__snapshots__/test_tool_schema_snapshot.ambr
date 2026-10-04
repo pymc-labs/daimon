@@ -6374,11 +6374,12 @@
       'description': '''
         Return the fixed /here card with structured facts and rendered text.
         Use this when someone asks which agent you are, who answers here, whether
-        you can see a channel, or whose token or sign-in you hold. Never guess
-        these facts from the conversation. Pass the parent channel id from turn
-        controls and the current thread id when present. A bound coding token
-        can omit channel_id. Discord and Slack channel turns only. Unknown
-        visibility is reported as unknown.
+        you can see a channel, which channel or agent rule applies, whether
+        publishing needs approval, or whose token or sign-in you hold. Never
+        guess these facts from the conversation. Pass the parent channel id
+        from turn controls and the current thread id when present. A bound
+        coding token can omit channel_id. Discord and Slack channel turns only.
+        Unknown visibility is reported as unknown.
       ''',
       'parameters': dict({
         'additionalProperties': False,

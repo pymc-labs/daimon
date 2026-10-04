@@ -8,7 +8,7 @@ import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._isolation import load_caller_isolation
+from daimon.adapters.mcp.tools._rule_view import load_caller_view
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
@@ -62,14 +62,16 @@ async def _where_am_i_impl(
     channel_id = channel_id or token_channel_id(auth)
     if channel_id is None:
         raise ToolError("The current channel is unknown; pass its parent channel id.")
-    caller = await load_caller_isolation(runtime, auth)
-    if caller.isolated_place(channel_id) != caller.inside_channel_id:
-        raise ToolError("That channel is across an isolated channel's line.")
+    caller = await load_caller_view(runtime, auth)
+    if caller.home_place(channel_id) != caller.inside_channel_id:
+        raise ToolError("That channel is outside this conversation's home.")
+    category_id: str | None = None
     if auth.platform == "discord":
         rows = await _list_channels_impl(runtime, auth)
         visible = {row.id for row in rows}
         if channel_id not in visible:
             raise ToolError("missing channel access")
+        category_id = next(row.category_id for row in rows if row.id == channel_id)
     elif auth.platform == "slack":
         visible = {row.id for row in await _slack_list_channels_impl(runtime, auth)}
         if channel_id not in visible:
@@ -85,6 +87,7 @@ async def _where_am_i_impl(
             platform=auth.platform,
             channel_id=channel_id,
             thread_id=thread_id,
+            category_id=category_id,
             default=runtime.deployment_default,
             github=GitHubDeploymentFacts(
                 has_fallback_pat=github.fallback_pat is not None,
@@ -113,10 +116,11 @@ def register_here_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> HereCard:
         """Return the fixed /here card with structured facts and rendered text.
         Use this when someone asks which agent you are, who answers here, whether
-        you can see a channel, or whose token or sign-in you hold. Never guess
-        these facts from the conversation. Pass the parent channel id from turn
-        controls and the current thread id when present. A bound coding token
-        can omit channel_id. Discord and Slack channel turns only. Unknown
-        visibility is reported as unknown.
+        you can see a channel, which channel or agent rule applies, whether
+        publishing needs approval, or whose token or sign-in you hold. Never
+        guess these facts from the conversation. Pass the parent channel id
+        from turn controls and the current thread id when present. A bound
+        coding token can omit channel_id. Discord and Slack channel turns only.
+        Unknown visibility is reported as unknown.
         """
         return await _where_am_i_impl(runtime, await _auth(ctx), channel_id, thread_id)

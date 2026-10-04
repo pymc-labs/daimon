@@ -9,11 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import daimon.core.here_card as here_card_module
 import pytest
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, KeyEntry, McpServerEntry
-from daimon.core.channel_isolation import IsolationViewer
 from daimon.core.here_card import assemble_here_card, load_here_card
 from daimon.core.roster import Roster, RosterAgent
+from daimon.core.rule_views import RuleViewer
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfig, TenantConfigRow
 from daimon.core.stores.domain import McpOAuthGrantRow
 
@@ -70,7 +70,7 @@ def test_winning_tier_and_attribution(tier: str, expected_setter: uuid.UUID | No
     assert ("Configuration target: target." in card.text) == (tier == "thread")
 
 
-def test_isolation_and_invisible_credentials_are_omitted() -> None:
+def test_own_readers_and_invisible_credentials_are_omitted() -> None:
     details = _details("hidden", (KeyEntry(name="SECRET_NAME", updated_at=NOW),))
     card = assemble_here_card(
         channel_id="private",
@@ -80,15 +80,15 @@ def test_isolation_and_invisible_credentials_are_omitted() -> None:
         tenant=None,
         configuration_target_name=None,
         policy=TenantAccessPolicy(
-            sealed_channel_ids=("private",),
-            isolated_channel_ids=("private",),
-            agent_channel_pins={"helper": ("private", "outside")},
+            channel_rules={"private": ChannelRule(readers="own", writers="own")},
+            agent_rules={"helper": AgentRule(runs_in=("private", "outside"))},
         ),
         details=details,
         visible_channel_ids={"private"},
     )
-    assert card.sealed and card.isolated
-    assert card.pin_channels == ("private",)
+    assert card.channel_rule.readers == "own"
+    assert card.agent_runs_in == ("private",)
+    assert card.reads_kept_inside
     assert "SECRET_NAME" not in card.text
     assert card.credentials == ()
 
@@ -108,6 +108,84 @@ def test_key_names_only_and_session_status_unknown() -> None:
     assert card.credentials[0].name == "API_KEY"
     assert card.credentials[0].usable_in_session is None
     assert card.text.count("Credential session usability: unknown") == 1
+    assert card.publishing_needs_approval is False
+    assert card.memory_writable_here
+
+
+def test_channel_and_agent_rules_show_derived_limits() -> None:
+    card = assemble_here_card(
+        channel_id="home",
+        agent_name="helper",
+        tier="channel",
+        channel=None,
+        tenant=None,
+        configuration_target_name=None,
+        policy=TenantAccessPolicy(
+            channel_rules={"home": ChannelRule(readers="own", writers="own")},
+            agent_rules={"helper": AgentRule(runs_in=("home",))},
+        ),
+        details=_details("helper"),
+        visible_channel_ids={"home"},
+    )
+    assert card.channel_rule == ChannelRule(readers="own", writers="own")
+    assert card.effective_readers == "own"
+    assert card.agent_runs_in == ("home",)
+    assert card.agent_home == "home"
+    assert card.who_may_answer == "this channel's own agents"
+    assert card.agent_can_answer_here
+    assert card.reads_kept_inside
+    assert card.memory_writable_here
+    assert card.publishing_needs_approval
+    assert "Publishing: approval required." in card.text
+    assert "sealed" not in card.text
+
+
+def test_stricter_thread_and_category_rules_are_shown() -> None:
+    card = assemble_here_card(
+        channel_id="123",
+        thread_id="456",
+        category_id="category",
+        agent_name="helper",
+        tier="thread",
+        channel=None,
+        tenant=None,
+        configuration_target_name=None,
+        policy=TenantAccessPolicy(
+            channel_rules={"456": ChannelRule(readers="inside")},
+            category_rules={"category": ChannelRule(writers="none")},
+        ),
+        details=_details("helper"),
+    )
+    assert card.channel_rule == ChannelRule()
+    assert card.thread_rule == ChannelRule(readers="inside")
+    assert card.category_rule == ChannelRule(writers="none")
+    assert (card.effective_readers, card.effective_writers) == ("inside", "none")
+    assert not card.agent_can_answer_here
+    assert card.who_may_answer == "nobody"
+    assert not card.memory_writable_here
+    assert "Thread rule: readers inside" in card.text
+    assert "Category rule: readers any; writers none" in card.text
+
+
+def test_agent_alias_rules_intersect() -> None:
+    details = _details("helper").model_copy(update={"rule_names": ("helper", "alias")})
+    card = assemble_here_card(
+        channel_id="home",
+        agent_name="helper",
+        tier="channel",
+        channel=None,
+        tenant=None,
+        configuration_target_name=None,
+        policy=TenantAccessPolicy(
+            agent_rules={
+                "helper": AgentRule(runs_in=("home", "second")),
+                "alias": AgentRule(runs_in=("second",)),
+            }
+        ),
+        details=details,
+    )
+    assert card.agent_runs_in == ("second",)
+    assert not card.agent_can_answer_here
 
 
 def test_thread_setter_and_visible_workspace_defaults() -> None:
@@ -133,7 +211,7 @@ def test_thread_setter_and_visible_workspace_defaults() -> None:
     assert card.configuration_target_name == "configured-agent"
 
 
-def test_default_places_respect_pins_and_isolation() -> None:
+def test_default_places_respect_agent_and_channel_rules() -> None:
     card = assemble_here_card(
         channel_id="home",
         agent_name="helper",
@@ -142,9 +220,8 @@ def test_default_places_respect_pins_and_isolation() -> None:
         tenant=None,
         configuration_target_name=None,
         policy=TenantAccessPolicy(
-            sealed_channel_ids=("isolated",),
-            isolated_channel_ids=("isolated",),
-            agent_channel_pins={"helper": ("home", "allowed")},
+            channel_rules={"isolated": ChannelRule(readers="own", writers="own")},
+            agent_rules={"helper": AgentRule(runs_in=("home", "allowed"))},
         ),
         details=_details("helper"),
         deployment_default=DeploymentDefault(agent_name="helper"),
@@ -196,15 +273,17 @@ def test_only_callers_personal_grant_is_named() -> None:
     assert not any(item.kind == "personal OAuth" for item in card.credentials)
 
 
-async def test_loader_filters_setup_thread_for_non_admin_inside_isolated_channel(
+async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = TenantAccessPolicy(
-        sealed_channel_ids=("private",),
-        isolated_channel_ids=("private",),
-        agent_channel_pins={"daimon": ("private",), "target": ("private",)},
+        channel_rules={"private": ChannelRule(readers="own", writers="own")},
+        agent_rules={
+            "daimon": AgentRule(runs_in=("private",)),
+            "target": AgentRule(runs_in=("private",)),
+        },
     )
-    viewer = IsolationViewer(policy, inside_channel_id="private")
+    viewer = RuleViewer(policy, inside_channel_id="private")
     responder = RosterAgent(
         name="daimon", ma_agent_id="agent-id", model_id="test-model", is_built_in=True
     )
@@ -213,8 +292,8 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_isolated_channel
     )
     other = uuid.uuid4()
     monkeypatch.setattr(here_card_module, "load_access_policy", AsyncMock(return_value=policy))
-    isolation_load = AsyncMock(return_value=viewer)
-    monkeypatch.setattr(here_card_module, "load_isolation_viewer", isolation_load)
+    rule_load = AsyncMock(return_value=viewer)
+    monkeypatch.setattr(here_card_module, "load_rule_viewer", rule_load)
     monkeypatch.setattr(
         here_card_module, "load_roster", AsyncMock(return_value=Roster(answering=responder))
     )
@@ -295,7 +374,7 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_isolated_channel
     assert not any(item.kind == "personal OAuth" for item in card.credentials)
     assert card.routines == ()
     routines_load.assert_not_awaited()
-    assert isolation_load.await_args.kwargs["is_admin"] is False
+    assert rule_load.await_args.kwargs["is_admin"] is False
     resolve_display.return_value = None
     unknown = await load_here_card(
         MagicMock(),
