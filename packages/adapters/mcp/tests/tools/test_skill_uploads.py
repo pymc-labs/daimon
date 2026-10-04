@@ -289,24 +289,45 @@ async def test_a_skill_that_changed_since_its_preview_is_not_uploaded(
     assert world.created == []
 
 
-@pytest.mark.parametrize(
-    "where", ["no_origin", "ungated_session", "another_agents_session", "no_live_session"]
-)
+#: What a preview says for each reason a chat turn can't show the card.
+_NO_CARD_REASONS = {
+    "no_origin_context": "did not pass this turn's origin_context_id",
+    "unverified_origin": "is not this turn's",
+    "not_a_chat_turn": "does not come from a chat turn",
+    "agent_key": "runs on an agent key",
+    "no_live_session": "has no live session",
+    "other_agents_session": "runs a different agent",
+    "session_not_gated": "does not ask before add_skill yet",
+    "session_unreadable": "could not read this thread's session",
+}
+
+
+@pytest.mark.parametrize("where", sorted(_NO_CARD_REASONS))
 async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_first(
     db_session_factory: async_sessionmaker[AsyncSession], where: str
 ) -> None:
-    """With tool safety on, an agent_chat or unattended call (no origin), a session created
-    before the gate, or an origin whose live session is not its own adds nothing."""
+    """With tool safety on, a call from outside a verified chat turn, a session created
+    before the gate, or an origin whose live session is not its own adds nothing, and
+    the preview and the refusal both say which it was."""
     world = await _world(db_session_factory)
     auth, origin = await _chat_turn(
-        world, gated=where != "ungated_session", live=where != "no_live_session"
+        world, gated=where != "session_not_gated", live=where != "no_live_session"
     )
-    if where == "another_agents_session":
+    if where == "other_agents_session":
         frozen = ma_session_agent(id="agent_other", tools=[_daimon_toolset(gated=True)])
         world.sessions[f"sesn_{CHAT_THREAD}"] = ma_session(
             id=f"sesn_{CHAT_THREAD}", agent=frozen
         ).model_dump(mode="json")
-    context = None if where == "no_origin" else origin
+    if where == "session_unreadable":
+        del world.sessions[f"sesn_{CHAT_THREAD}"]
+    if where == "not_a_chat_turn":
+        auth = world.auth()
+    if where == "agent_key":
+        auth = dataclasses.replace(auth, agent_id=auth.chat_agent_id, chat_agent_id=None)
+    context: str | None = {
+        "no_origin_context": None,
+        "unverified_origin": str(uuid.uuid4()),
+    }.get(where, origin)
 
     async def add(**extra: Any) -> AddSkillResult:
         return await _add_skill_impl(
@@ -320,9 +341,14 @@ async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_firs
         )
 
     preview = await add()
-    assert "content_hash=" not in preview.summary and "/agent-setup" in preview.summary
-    with pytest.raises(ToolError, match="this conversation can't show one"):
+    summary = preview.summary
+    assert "content_hash=" not in summary and "/agent-setup" in summary
+    assert "this conversation can't show one" in summary
+    assert _NO_CARD_REASONS[where] in summary, "the preview names why no card can show"
+    assert "turned off on this deployment" not in summary, "the deployment has cards on"
+    with pytest.raises(ToolError, match="this conversation can't show one") as refused:
         await add(content_hash=preview.preview.content_hash)
+    assert _NO_CARD_REASONS[where] in str(refused.value)
     assert world.created == [], "nothing was uploaded"
 
 
@@ -427,32 +453,6 @@ async def test_a_session_reported_with_other_tools_is_taken_at_its_word(
         )
 
     preview = await add()
-    with pytest.raises(ToolError, match="this conversation can't show one"):
-        await add(content_hash=preview.preview.content_hash)
-    assert world.created == [], "nothing was uploaded"
-
-
-async def test_a_session_that_cannot_be_read_previews_but_never_confirms(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A live row whose MA session is gone fails closed with the no-card refusal."""
-    world = await _world(db_session_factory)
-    auth, origin = await _chat_turn(world)
-    del world.sessions[f"sesn_{CHAT_THREAD}"]
-
-    async def add(**extra: Any) -> AddSkillResult:
-        return await _add_skill_impl(
-            world.runtime,
-            auth,
-            agent_name="helper",
-            expected_ma_agent_id="agent_helper",
-            skill_md=_MD,
-            origin_context_id=origin,
-            **extra,
-        )
-
-    preview = await add()
-    assert "/agent-setup" in preview.summary, "the preview still shows, pointing at the panel"
     with pytest.raises(ToolError, match="this conversation can't show one"):
         await add(content_hash=preview.preview.content_hash)
     assert world.created == [], "nothing was uploaded"
@@ -917,25 +917,35 @@ async def test_a_pin_or_share_added_during_the_fetch_still_refuses_the_upload(
     assert world.state.agents["agent_helper"]["skills"] == []
 
 
-async def test_without_a_confirmation_card_chat_adds_nothing_and_points_to_the_panel(
-    db_session_factory: async_sessionmaker[AsyncSession],
+@pytest.mark.parametrize("caller", ["chat_turn", "direct"])
+async def test_with_approval_cards_off_the_preview_says_the_deployment_turned_them_off(
+    db_session_factory: async_sessionmaker[AsyncSession], caller: str
 ) -> None:
+    """Even from a chat turn whose session is gated, tool safety off means no card,
+    and the preview and refusal blame the deployment, not the conversation."""
     world = await _world(db_session_factory)
     world.runtime.settings.tool_safety = ToolSafetyPolicy(enabled=False)
+    auth, origin = await _chat_turn(world) if caller == "chat_turn" else (world.auth(), None)
 
-    preview = await _add_skill_impl(
-        world.runtime, world.auth(), agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
-    )
-    assert "/agent-setup" in preview.summary and "content_hash=" not in preview.summary
-    with pytest.raises(ToolError, match="shows none"):
-        await _add_skill_impl(
+    async def add(**extra: Any) -> AddSkillResult:
+        return await _add_skill_impl(
             world.runtime,
-            world.auth(),
+            auth,
             agent_name="helper",
-            expected_ma_agent_id=None,
+            expected_ma_agent_id="agent_helper",
             skill_md=_MD,
-            content_hash=preview.preview.content_hash,
+            origin_context_id=origin,
+            **extra,
         )
+
+    preview = await add()
+    summary = preview.summary
+    assert "/agent-setup" in summary and "content_hash=" not in summary
+    assert "approval cards are turned off on this deployment" in summary
+    assert "tool_safety.enabled" in summary, "the operator is told which setting"
+    assert "this conversation can't show one" not in summary
+    with pytest.raises(ToolError, match="approval cards are turned off on this deployment"):
+        await add(content_hash=preview.preview.content_hash)
     assert world.created == [], "the confirm staged and uploaded nothing"
 
 
