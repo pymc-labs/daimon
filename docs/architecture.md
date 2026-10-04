@@ -144,7 +144,6 @@ config). The order is load-bearing and documented as such in the module:
    in the refusal. Discord reconciles roles on boot and regularly, excluding
    agents with a home or a rule that runs nowhere; a missing Manage Roles
    permission logs a warning while the text form remains available.
- (fix(routing): honor agent rules for named turns and roles)
 6. Raise `MissingTurnConfigError` if no agent or environment resolved — before
    any MA call, so a misconfigured tenant sees the config error rather than a
    billing one.

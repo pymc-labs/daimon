@@ -1479,7 +1479,21 @@ class DaimonBot(commands.Bot):
         role_mentions = (
             message.role_mentions if isinstance(cast(object, message.role_mentions), list) else []
         )
-        bot_mentioned = directly_mentioned or bool(role_mentions)
+        managed_role_mentioned = False
+        if role_mentions and not directly_mentioned and message.guild is not None:
+            tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
+            try:
+                async with self.runtime.sessionmaker() as session:
+                    managed_role_mentioned = bool(
+                        await roles_mentioned(
+                            session,
+                            tenant_id=tenant_id,
+                            role_ids=[str(item.id) for item in role_mentions],
+                        )
+                    )
+            except Exception:
+                log.exception("agent_roles.mention_lookup_failed", guild_id=str(message.guild.id))
+        bot_mentioned = directly_mentioned or managed_role_mentioned
         if not should_process_message(
             author_is_bot=message.author.bot,
             author_id=str(message.author.id),

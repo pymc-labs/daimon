@@ -137,6 +137,21 @@ class TestInflightCapRejection:
             await bot.on_message(message)
         bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportAttributeAccessIssue]
 
+    async def test_unmanaged_role_mention_keeps_ordinary_message_behavior(
+        self, db_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        bot = make_bot(_make_runtime(db_session_factory))
+        bot._handle_mention = AsyncMock()  # type: ignore[method-assign]  # test seam
+        bot._ensure_provisioning = AsyncMock()  # type: ignore[method-assign]  # test seam
+        message = _make_channel_message(content="<@&456> plan")
+        message.mentions = []
+        message.role_mentions = [SimpleNamespace(id=456)]  # type: ignore[list-item]  # fake role
+
+        await bot.on_message(message)
+
+        bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportAttributeAccessIssue]
+        bot._ensure_provisioning.assert_not_awaited()  # pyright: ignore[reportAttributeAccessIssue]
+
     async def test_tenant_override_admits_above_deployment_default(
         self, db_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
