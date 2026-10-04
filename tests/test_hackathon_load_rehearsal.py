@@ -25,6 +25,16 @@ def test_realistic_prompts_require_code_and_cover_three_tasks() -> None:
     assert "PyMC" in module.REALISTIC_PROMPTS[2]
 
 
+def test_reuse_fills_200_slots_from_195_threads() -> None:
+    slots = list(range(195))
+    result = module.reuse_thread_slots(slots, 200)
+    assert len(result) == 200
+    assert result[:195] == slots
+    assert result[195:] == slots[:5]
+    with pytest.raises(ValueError, match="more than once"):
+        module.reuse_thread_slots(slots, 391)
+
+
 def test_peak_tokens_uses_rolling_minute() -> None:
     start = datetime.now(UTC)
     assert (
