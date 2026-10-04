@@ -29,11 +29,14 @@ log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
-class ChannelReads:
-    """The tenant policy and the turn facts a channel read is decided on."""
+class ChannelReadPolicy:
+    """The tenant policy and the turn facts a channel read is decided on.
+
+    `READ_CHANNEL` decides on the agent and the origin, not on who asks, so no
+    subject is kept; the MCP read policy asks with an empty one too.
+    """
 
     policy: TenantAccessPolicy
-    subject: Subject
     agent: AgentRef
     origin: Place
     channel_id: str
@@ -43,7 +46,7 @@ class ChannelReads:
         return bool(
             authorize(
                 self.policy,
-                subject=self.subject,
+                subject=Subject(),
                 action=Action.READ_CHANNEL,
                 agent=self.agent,
                 place=place,
@@ -70,14 +73,14 @@ def origin_ids(channel_id: str, thread_ts: str) -> frozenset[str]:
     return frozenset({channel_id, thread_ts, f"{channel_id}:{thread_ts}"})
 
 
-async def load_channel_reads(
+async def load_channel_read_policy(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
     grant: AdmissionGrant | None,
     channel_id: str,
     thread_ts: str,
-) -> ChannelReads | None:
+) -> ChannelReadPolicy | None:
     """The read decision for ``channel_id`` from this turn, on the policy as it is now.
 
     None when no history may be shown: the policy can't be read (never treated
@@ -89,7 +92,8 @@ async def load_channel_reads(
     try:
         async with sessionmaker() as session:
             policy = await load_access_policy(session, tenant_id=tenant_id)
-    except (AccessPolicyUnreadable, SQLAlchemyError) as exc:
+    # OSError: asyncpg raises a refused or dropped connection unwrapped.
+    except (AccessPolicyUnreadable, SQLAlchemyError, OSError) as exc:
         log.warning(
             "slack.channel_context.policy_unreadable",
             tenant_id=str(tenant_id),
@@ -97,12 +101,11 @@ async def load_channel_reads(
             error=str(exc),
         )
         return None
-    reads = ChannelReads(
+    read_policy = ChannelReadPolicy(
         policy=policy,
-        subject=grant.subject,
         agent=grant.agent,
         origin=grant.run_place,
         channel_id=channel_id,
         origin_ids=origin_ids(channel_id, thread_ts),
     )
-    return reads if reads.channel_readable() else None
+    return read_policy if read_policy.channel_readable() else None

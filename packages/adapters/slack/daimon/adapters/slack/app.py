@@ -82,7 +82,7 @@ from daimon.adapters.slack.boot_sweep import (
 )
 from daimon.adapters.slack.budget_notice import with_budget_notifier
 from daimon.adapters.slack.channel_admin_groups import user_group_ids
-from daimon.adapters.slack.channel_reads import load_channel_reads
+from daimon.adapters.slack.channel_reads import load_channel_read_policy
 from daimon.adapters.slack.context import (
     build_channel_context_xml,
     build_context_xml,
@@ -2322,7 +2322,7 @@ class SlackApp:
                         channel=channel,
                         trigger_ts=str(event.get("ts") or thread_id),
                         user_query=user_text,
-                        reads=await load_channel_reads(
+                        read_policy=await load_channel_read_policy(
                             self.runtime.sessionmaker,
                             tenant_id=tenant_id,
                             grant=admission.grant,
@@ -2333,7 +2333,6 @@ class SlackApp:
                         is_admin=is_admin,
                         proxy=proxy_ctx,
                         key_names=key_names,
-                        status_ts=lifecycle.status_ts,
                     )
                 return await build_context_xml(
                     web_client,

@@ -32,7 +32,7 @@ from xml.sax.saxutils import escape, quoteattr
 import aiohttp
 import structlog
 from daimon.adapters.slack.attachments import ProxyUrlContext, build_proxy_url
-from daimon.adapters.slack.channel_reads import ChannelReads
+from daimon.adapters.slack.channel_reads import ChannelReadPolicy
 from daimon.adapters.slack.vision import SlackFile
 from daimon.core.turn_keys import render_keys_element
 from daimon.core.untrusted import untrusted_block
@@ -50,8 +50,7 @@ DEFAULT_PAGE_LIMIT = 100
 # matching Discord's CHANNEL_BACKFILL_LIMIT.
 CHANNEL_BACKFILL_LIMIT = 25
 
-# Upper bound on the channel fetch. Channel context is optional, so a slow
-# Slack answer costs the turn its context, not its start.
+# Upper bound on the channel fetch; past it the block is marked unavailable.
 CHANNEL_FETCH_TIMEOUT_S = 10.0
 
 
@@ -252,8 +251,7 @@ def _without_rate_limit_wait(client: AsyncWebClient) -> AsyncWebClient:
     """The same client minus its 429 retry.
 
     That retry waits out ``Retry-After``, a full minute on an install held to
-    one history call a minute, before the turn could start. Channel context
-    is optional, so a rate-limited fetch reports it unavailable instead.
+    one history call a minute, before the turn could start.
     """
     return AsyncWebClient(
         token=client.token,
@@ -266,8 +264,9 @@ def _without_rate_limit_wait(client: AsyncWebClient) -> AsyncWebClient:
 
 
 def _before(message: dict[str, Any], trigger_ts: str) -> bool:
-    """Strictly older than the trigger. Compared as decimals: a Slack ts has
-    16 significant digits, more than a float keeps."""
+    """Strictly older than the trigger. ``latest`` already ends the page at
+    the trigger; this drops the trigger itself and holds the cutoff for any
+    message a page returns past it."""
     try:
         return Decimal(str(message.get("ts", ""))) < Decimal(trigger_ts)
     except InvalidOperation:
@@ -296,12 +295,11 @@ async def build_channel_context_xml(
     channel: str,
     trigger_ts: str,
     user_query: str,
-    reads: ChannelReads | None,
+    read_policy: ChannelReadPolicy | None,
     author_id: str = "",
     is_admin: bool = False,
     proxy: ProxyUrlContext | None = None,
     key_names: Sequence[str] = (),
-    status_ts: str | None = None,
     limit: int = CHANNEL_BACKFILL_LIMIT,
 ) -> str:
     """Build XML context from channel history for a top-level mention's first turn.
@@ -309,20 +307,22 @@ async def build_channel_context_xml(
     One ``conversations.history`` page of ``limit`` messages ending at the
     trigger (``latest=trigger_ts``, inclusive), so nothing posted after the
     mention is shown and a recovery reseed rebuilds the same window. The
-    trigger and this turn's status card are left out; earlier answers from
-    the bot stay. Messages render oldest first in a
+    trigger is left out; earlier answers from the bot stay. This turn's
+    status card is a reply in the new thread, so channel history never
+    returns it. Messages render oldest first in a
     ``<context>/<channel_context>`` block, followed by the ``<user_query>``.
 
-    ``reads`` decides what may be shown (`load_channel_reads`); None renders
+    ``read_policy`` decides what may be shown (`load_channel_read_policy`); None renders
     the block ``status="unavailable"`` without fetching, as does a fetch that
     fails, is rate limited or times out. Messages in a thread whose readers
     are limited on their own are withheld before any attachment URL is
     minted. ``truncated="true"`` says older messages exist beyond the window:
-    Slack may return fewer than ``limit`` (some installs are held to 15).
+    Slack may return fewer than ``limit`` (15 for apps distributed outside
+    the Marketplace).
     """
     history = (
         None
-        if reads is None
+        if read_policy is None
         else await _channel_history(client, channel=channel, trigger_ts=trigger_ts, limit=limit)
     )
 
@@ -332,7 +332,7 @@ async def build_channel_context_xml(
         render_keys_element(key_names),
     ]
     lines = [line for line in lines if line]
-    if reads is None or history is None:
+    if read_policy is None or history is None:
         lines.extend(
             untrusted_block("channel_context", [], {"source": "slack", "status": "unavailable"})
         )
@@ -340,8 +340,8 @@ async def build_channel_context_xml(
         messages, has_more = history
         shown = [
             m
-            for m in reversed(_replayed(messages, status_ts=status_ts))
-            if _before(m, trigger_ts) and reads.message_readable(m)
+            for m in reversed(messages)
+            if _before(m, trigger_ts) and read_policy.message_readable(m)
         ]
         attrs = {"source": "slack", "count": str(len(shown))}
         if has_more:
