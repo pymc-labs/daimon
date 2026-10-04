@@ -5,7 +5,6 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from daimon.core.stores.accounts import set_platform_role_ids
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.turn_origins import get_active_origin, update_origin_target
@@ -175,14 +174,13 @@ async def test_channel_admin_status_uses_only_the_current_channels_stored_grant(
         tenant=tenant,
         account=account,
     )
-    await set_platform_role_ids(db_session, account.id, ["333333333333333333"])
     await set_channel_admins(
         db_session,
         tenant_id=tenant.id,
         platform="discord",
         channel_id="111111111111111111",
-        role_ids=["333333333333333333"],
-        user_ids=[],
+        role_ids=[],
+        user_ids=["444444444444444444"],
         actor_account_id=None,
     )
     await db_session.commit()
