@@ -2424,7 +2424,7 @@
         environment it runs in, and which routing tier decided each.
         
         Supply thread_id to include its binding. Thread responder wins, else
-        a confidential channel's own default, else the workspace default, else
+        a home channel's fixed default, else the workspace default, else
         the deployment default. Legacy mode also honors shared channel defaults.
         This reports the winner AND every tier's setting, so "why that agent" is answerable without
         starting a turn and reading its footer.
