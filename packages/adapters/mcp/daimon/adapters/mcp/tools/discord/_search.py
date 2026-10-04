@@ -26,6 +26,8 @@ from daimon.adapters.mcp.tools.discord._client import (
 )
 from daimon.adapters.mcp.tools.discord._models import AttachmentRow, MessageRow, SearchResult
 from daimon.adapters.mcp.tools.discord._visibility import (
+    _bot_lacks_read_permission,  # pyright: ignore[reportPrivateUsage]
+    _bot_read_error,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
 )
@@ -164,7 +166,12 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         #    channel belonging to another tenant's guild.
         if channel_ids:
             for ch_id in channel_ids:
-                raw_ch = await _resolve_channel(c, ch_id)
+                try:
+                    raw_ch = await _resolve_channel(c, ch_id)
+                except discord.Forbidden as exc:
+                    if exc.code == 50001:
+                        raise _bot_read_error(ch_id) from exc
+                    raise
                 guild_ch = _require_guild_channel(raw_ch, guild_id)
                 if isinstance(guild_ch, discord.Thread):
                     await _check_thread_view(c, guild_ch, member, user_id)
@@ -207,7 +214,17 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
             "/guilds/{guild_id}/messages/search",
             guild_id=int(guild_id),
         )
-        body: dict[str, object] = await c.http.request(route, params=params)  # type: ignore[assignment]  # discord.py http.request returns Any
+        try:
+            body: dict[str, object] = await c.http.request(route, params=params)  # type: ignore[assignment]  # discord.py http.request returns Any
+        except discord.Forbidden as exc:
+            if exc.code == 50001:
+                if channel_ids:
+                    raise _bot_read_error(channel_ids[0]) from exc
+                raise ToolError(
+                    "daimon's Discord role can't search this server; a server admin can grant "
+                    "View Channel and Read Message History"
+                ) from exc
+            raise
 
         # 7. Parse strictly — fail loudly on unexpected shapes
         try:
@@ -376,6 +393,17 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
             # would reveal that hidden matches exist — the same count oracle
             # the suppressed total closes.
 
+        if not rows and channel_ids:
+            for ch_id in channel_ids:
+                try:
+                    raw_ch = await _resolve_channel(c, ch_id)
+                except discord.Forbidden as exc:
+                    if exc.code == 50001:
+                        raise _bot_read_error(ch_id) from exc
+                    raise
+                guild_ch = _require_guild_channel(raw_ch, guild_id)
+                if await _bot_lacks_read_permission(guild, guild_ch):
+                    raise _bot_read_error(guild_ch)
         return SearchResult(
             total_results=effective_total,
             showing=showing,

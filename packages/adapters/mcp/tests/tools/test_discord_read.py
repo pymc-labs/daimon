@@ -85,6 +85,7 @@ def _auth(*, external_id: str = "111", platform_user_id: str = "42") -> AuthIden
 _VIEW_CHANNEL = 1 << 10  # 1024
 _SEND_MESSAGES = 1 << 11  # 2048
 _MANAGE_THREADS = 1 << 34  # 17179869184
+_READ_MESSAGE_HISTORY = 1 << 16
 
 
 def _guild_payload(*, guild_id: str = "111", owner_id: str = "1") -> dict[str, Any]:
@@ -314,6 +315,51 @@ async def test_read_channel_happy_path_oldest_first(monkeypatch: pytest.MonkeyPa
     assert result.trust == "untrusted" and result.trust_note == UNTRUSTED_NOTE, (
         "other people's messages come back marked as untrusted data"
     )
+
+
+async def test_empty_read_explains_missing_bot_history_permission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload(owner_id="99")
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload("1" if route.url.endswith("/1") else "42")
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload(
+                permission_overwrites=[
+                    {"id": "1", "type": 1, "allow": "0", "deny": str(_READ_MESSAGE_HISTORY)}
+                ]
+            )
+        if route.path == "/channels/{channel_id}/messages":
+            return []
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    with pytest.raises(ToolError, match="daimon's Discord role can't view #general"):
+        await _read_channel_impl(_runtime_with_discord_token(), _auth(), channel_id="222")
+
+
+async def test_read_channel_403_missing_access_is_plain(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            raise discord.Forbidden(
+                MagicMock(status=403, reason="Forbidden"),
+                {"code": 50001, "message": "Missing Access"},
+            )
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    with pytest.raises(ToolError, match="View Channel and Read Message History"):
+        await _read_channel_impl(_runtime_with_discord_token(), _auth(), channel_id="222")
 
 
 async def test_read_channel_full_page_returns_cursor(monkeypatch: pytest.MonkeyPatch) -> None:

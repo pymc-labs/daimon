@@ -65,9 +65,10 @@ def test_winning_tier_and_attribution(tier: str, expected_setter: uuid.UUID | No
         details=None,
     )
     assert card.tier == tier
-    assert ("Set by: Alex" in card.text) == (expected_setter is not None)
+    assert ("set by Alex" in card.text) == (expected_setter is not None)
     assert "set_by_account_id" not in card.model_dump()
-    assert ("Configuration target: target." in card.text) == (tier == "thread")
+    assert ("configuring target" in card.text) == (tier == "thread")
+    assert sum(line.startswith("Who answers:") for line in card.text.splitlines()) == 1
 
 
 def test_own_readers_and_invisible_credentials_are_omitted() -> None:
@@ -188,7 +189,7 @@ def test_agent_alias_rules_intersect() -> None:
     assert not card.agent_can_answer_here
 
 
-def test_thread_setter_and_visible_workspace_defaults() -> None:
+def test_thread_setter_and_configuration_target_share_routing_line() -> None:
     details = _details("helper")
     card = assemble_here_card(
         channel_id="one",
@@ -202,16 +203,15 @@ def test_thread_setter_and_visible_workspace_defaults() -> None:
         set_by_label="Alex",
         policy=TenantAccessPolicy(),
         details=details,
-        channels=(ChannelConfigRow(tenant_id=TENANT, channel_id="override", agent_name="other"),),
-        deployment_default=DeploymentDefault(agent_name="other"),
         visible_channel_ids={"one", "two", "override"},
     )
-    assert "Set by: Alex" in card.text
-    assert card.default_channels == ("two",)
+    assert "Who answers: helper (thread; configuring configured-agent; set by Alex at" in card.text
+    assert "Other defaults" not in card.text
+    assert "Routines:" not in card.text
     assert card.configuration_target_name == "configured-agent"
 
 
-def test_default_places_respect_agent_and_channel_rules() -> None:
+def test_card_shows_only_visible_runs_in_places() -> None:
     card = assemble_here_card(
         channel_id="home",
         agent_name="helper",
@@ -224,10 +224,10 @@ def test_default_places_respect_agent_and_channel_rules() -> None:
             agent_rules={"helper": AgentRule(runs_in=("home", "allowed"))},
         ),
         details=_details("helper"),
-        deployment_default=DeploymentDefault(agent_name="helper"),
         visible_channel_ids={"home", "allowed", "outside", "isolated"},
     )
-    assert card.default_channels == ("allowed",)
+    assert card.agent_runs_in == ("allowed", "home")
+    assert "Other defaults" not in card.text
 
 
 def test_large_server_card_stays_under_discord_limit() -> None:
@@ -240,7 +240,6 @@ def test_large_server_card_stays_under_discord_limit() -> None:
         configuration_target_name=None,
         policy=TenantAccessPolicy(),
         details=_details("helper"),
-        deployment_default=DeploymentDefault(agent_name="helper"),
         visible_channel_ids={"home", *(f"channel-{i}" for i in range(300))},
         category_channels_bot_can_view=tuple(f"#channel-{i}: yes" for i in range(300)),
     )
@@ -338,8 +337,6 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
             ]
         ),
     )
-    routines_load = AsyncMock(return_value=[])
-    monkeypatch.setattr(here_card_module, "list_routines_for_tenant", routines_load)
     monkeypatch.setattr(
         here_card_module,
         "get_binding",
@@ -367,13 +364,12 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
     )
     assert card.agent_name == "daimon"
     assert card.configuration_target_name == "target"
-    assert "Set by: Alex ＠team ‹＠123›" in card.text
+    assert "set by Alex ＠team ‹＠123›" in card.text
     assert "set_by_account_id" not in card.model_dump()
     resolve_display.assert_awaited_once_with("123")
     assert "outside" not in card.text
     assert not any(item.kind == "personal OAuth" for item in card.credentials)
-    assert card.routines == ()
-    routines_load.assert_not_awaited()
+    assert "Routines:" not in card.text
     assert rule_load.await_args.kwargs["is_admin"] is False
     resolve_display.return_value = None
     unknown = await load_here_card(
@@ -390,5 +386,5 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
         caller_account_id=uuid.uuid4(),
         resolve_setter_display=resolve_display,
     )
-    assert "Set by: unknown" in unknown.text
+    assert "set by unknown" in unknown.text
     assert "<@123>" not in unknown.text

@@ -37,6 +37,8 @@ from daimon.adapters.mcp.tools.discord._models import (
     _to_message_row,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._visibility import (
+    _bot_lacks_read_permission,  # pyright: ignore[reportPrivateUsage]
+    _bot_read_error,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
 )
@@ -144,8 +146,13 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
     before_obj = _before_object(before)
 
     async with rest_client(token) as c:
-        _, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
-        raw_channel = await _resolve_channel(c, channel_id)
+        guild, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
+        try:
+            raw_channel = await _resolve_channel(c, channel_id)
+        except discord.Forbidden as exc:
+            if exc.code == 50001:
+                raise _bot_read_error(channel_id) from exc
+            raise
         channel = _require_guild_channel(raw_channel, guild_id)
 
         if isinstance(channel, discord.Thread):
@@ -155,13 +162,20 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
         read_policy.require(str(channel.id))
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support message history")
-        rows, next_before, hint = await _history_page(
-            channel,
-            limit=bounded_limit,
-            before=before_obj,
-            read_policy=read_policy,
-            parent_id=str(channel.id),
-        )
+        try:
+            rows, next_before, hint = await _history_page(
+                channel,
+                limit=bounded_limit,
+                before=before_obj,
+                read_policy=read_policy,
+                parent_id=str(channel.id),
+            )
+        except discord.Forbidden as exc:
+            if exc.code == 50001:
+                raise _bot_read_error(channel) from exc
+            raise
+        if not rows and await _bot_lacks_read_permission(guild, channel):
+            raise _bot_read_error(channel)
         return ReadChannelResult(rows=rows, next_before=next_before, hint=hint)
 
 
@@ -222,7 +236,12 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
 
     async with rest_client(token) as c:
         _, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
-        raw_channel = await _resolve_channel(c, channel_id)
+        try:
+            raw_channel = await _resolve_channel(c, channel_id)
+        except discord.Forbidden as exc:
+            if exc.code == 50001:
+                raise _bot_read_error(channel_id) from exc
+            raise
         channel = _require_guild_channel(raw_channel, guild_id)
 
         if isinstance(channel, discord.Thread):
@@ -238,6 +257,10 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
             message = await channel.fetch_message(int(message_id))
         except discord.NotFound as e:
             raise ToolError("message not found") from e
+        except discord.Forbidden as exc:
+            if exc.code == 50001:
+                raise _bot_read_error(channel) from exc
+            raise
         sealed_thread = _sealed_thread_named(message, read_policy, parent_id=str(channel.id))
         if sealed_thread:
             read_policy.require(sealed_thread, str(channel.id))  # refuses: it's sealed
@@ -322,8 +345,13 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
     before_obj = _before_object(before)
 
     async with rest_client(token) as c:
-        _, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
-        raw_channel = await _resolve_channel(c, thread_id)
+        guild, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
+        try:
+            raw_channel = await _resolve_channel(c, thread_id)
+        except discord.Forbidden as exc:
+            if exc.code == 50001:
+                raise _bot_read_error(thread_id) from exc
+            raise
         channel = _require_guild_channel(raw_channel, guild_id)
 
         if not isinstance(channel, discord.Thread):
@@ -332,13 +360,20 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
         await _check_thread_view(c, channel, member, _require_discord_identity(auth))
         read_policy.require(str(channel.id), str(channel.parent_id))
 
-        rows, next_before, hint = await _history_page(
-            channel,
-            limit=bounded_limit,
-            before=before_obj,
-            read_policy=read_policy,
-            parent_id=str(channel.id),
-        )
+        try:
+            rows, next_before, hint = await _history_page(
+                channel,
+                limit=bounded_limit,
+                before=before_obj,
+                read_policy=read_policy,
+                parent_id=str(channel.id),
+            )
+        except discord.Forbidden as exc:
+            if exc.code == 50001:
+                raise _bot_read_error(channel) from exc
+            raise
+        if not rows and await _bot_lacks_read_permission(guild, channel):
+            raise _bot_read_error(channel)
         return ReadThreadResult(rows=rows, next_before=next_before, hint=hint)
 
 

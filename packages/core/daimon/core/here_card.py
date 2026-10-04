@@ -21,10 +21,9 @@ from daimon.core.permissions import (
     channel_permissions,
     channel_rule,
     memory_writable,
-    runs_only_in,
 )
 from daimon.core.roster import load_roster
-from daimon.core.rule_views import load_rule_viewer, routine_destination_channel
+from daimon.core.rule_views import load_rule_viewer
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -32,16 +31,14 @@ from daimon.core.scope import (
     ScopeContext,
     TenantConfigRow,
     TenantScopeRef,
-    merge,
 )
 from daimon.core.stores import agent_mcp_credentials, mcp_oauth_flows, scoped_config_read
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.domain import McpOAuthGrantRow, Platform, RoutineRow
+from daimon.core.stores.domain import McpOAuthGrantRow, Platform
 from daimon.core.stores.identity import (
     get_discord_principal_for_account,
     get_slack_principal_for_account,
 )
-from daimon.core.stores.routines import list_routines_for_tenant
 from daimon.core.stores.thread_agent_bindings import get_binding
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -73,14 +70,11 @@ class HereCard(BaseModel):
     reads_kept_inside: bool
     memory_writable_here: bool | None = None
     publishing_needs_approval: bool | None = None
-    own_agent_names: tuple[str, ...] = ()
     bot_can_view: bool | None = None
     caller_can_view: bool | None = None
     agent_can_read_here: bool | None = None
     category_channels_bot_can_view: tuple[str, ...] = ()
     credentials: tuple[CredentialStatus, ...] = ()
-    default_channels: tuple[str, ...] = ()
-    routines: tuple[str, ...] = ()
     text: str
 
 
@@ -102,14 +96,9 @@ def assemble_here_card(
     thread_set_at: datetime | None = None,
     policy: TenantAccessPolicy,
     details: AgentDetails | None,
-    visible_agent_names: Collection[str] | None = None,
-    channels: Sequence[ChannelConfigRow] = (),
-    deployment_default: DeploymentDefault | None = None,
-    show_routines: bool = False,
     mcp_token_urls: Collection[str] = (),
     personal_grants: Sequence[McpOAuthGrantRow] = (),
     caller_account_id: uuid.UUID | None = None,
-    routines: Sequence[RoutineRow] = (),
     visible_channel_ids: Collection[str] | None = None,
     bot_can_view: bool | None = None,
     caller_can_view: bool | None = None,
@@ -152,15 +141,6 @@ def assemble_here_card(
         tuple(cid for cid in runs_in if visible is None or cid in visible)
         if runs_in is not None
         else None
-    )
-    own_agents = (
-        tuple(
-            name
-            for name in runs_only_in(policy, channel_id)
-            if visible_agent_names is None or name in visible_agent_names
-        )
-        if here.home == channel_id
-        else ()
     )
     agent_ref = AgentRef.of(*names) if agent_name is not None else AgentRef.none()
     place = Place(
@@ -211,8 +191,6 @@ def assemble_here_card(
     )
     credentials: list[CredentialStatus] = []
     token_urls = {url.rstrip("/") for url in mcp_token_urls}
-    defaults: tuple[str, ...] = ()
-    routine_labels: tuple[str, ...] = ()
     if details is not None and details.name == agent_name:
         credentials.extend(
             CredentialStatus(
@@ -266,53 +244,13 @@ def assemble_here_card(
                             usable_in_session=None,
                         )
                     )
-        if visible is not None and deployment_default is not None:
-            defaults = tuple(
-                sorted(
-                    cid
-                    for cid in visible
-                    if cid != channel_id
-                    and merge(
-                        channel=next((row for row in channels if row.channel_id == cid), None),
-                        tenant=tenant,
-                        default=deployment_default,
-                    ).agent_name
-                    == agent_name
-                    and authorize(
-                        policy,
-                        subject=Subject(),
-                        action=Action.RUN_AGENT,
-                        agent=agent_ref,
-                        place=Place(channel_id=cid),
-                    ).allowed
-                )
-            )
-        routine_labels = tuple(
-            sorted(
-                f"{row.cron_expr} ({row.timezone}) → {row.destination_id or 'no destination'}"
-                for row in routines
-                if show_routines
-                if (row.agent_id == details.ma_agent_id or row.agent_name == agent_name)
-                and (visible is None or (routine_destination_channel(row) in visible))
-                and authorize(
-                    policy,
-                    subject=Subject(),
-                    action=Action.READ_CHANNEL,
-                    agent=agent_ref,
-                    place=Place(channel_id=routine_destination_channel(row)),
-                    origin_channel_ids=frozenset(origin_ids),
-                ).allowed
-            )
-        )
-    lines = [
-        "**Here**",
-        f"Who answers: {_short(agent_name or 'No agent')} ({tier or 'unconfigured'}).",
-    ]
+    routing = f"Who answers: {_short(agent_name or 'No agent')} ({tier or 'unconfigured'}"
+    if configuration_target_name is not None:
+        routing += f"; configuring {_short(configuration_target_name)}"
     if set_by is not None or set_at is not None:
         when = set_at.isoformat() if set_at else "unknown"
-        lines.append(f"Set by: {set_by_label or 'unknown'}; at: {when}.")
-    if configuration_target_name is not None:
-        lines.append(f"Configuration target: {_short(configuration_target_name)}.")
+        routing += f"; set by {set_by_label or 'unknown'} at {when}"
+    lines = ["**Here**", routing + ")."]
     if channel_level_only:
         lines.append(
             "Slack /here shows channel-level routing; slash commands provide no thread context."
@@ -332,16 +270,17 @@ def assemble_here_card(
             f"Who may answer: {who_may_answer}.",
             f"Agent rule: runs_in (visible) {_runs_in_label(shown_runs_in)}; "
             f"home {permissions.home or 'none'}.",
-            f"Responding agent may answer here: {_yes(can_answer)}; "
-            f"reads kept inside: {_yes(here.readers != 'any')}; "
+            f"Reads kept inside: {_yes(here.readers != 'any')}; "
             f"memory writable: {_yes(can_write_memory)}.",
             f"Publishing: {publication}.",
             f"Can view here: bot {_yes(bot_can_view)}; you {_yes(caller_can_view)}.",
             f"Agent can read here: {_yes(can_read)} (Daimon rule; platform access separate).",
         ]
     )
-    if stored_thread_rule is not None and _reader_rank(stored_thread_rule.readers) > _reader_rank(
-        stored_channel_rule.readers
+    if stored_thread_rule is not None and (
+        _reader_rank(stored_thread_rule.readers) > _reader_rank(stored_channel_rule.readers)
+        or stored_thread_rule.writers == "none"
+        and stored_channel_rule.writers != "none"
     ):
         lines.append(
             f"Thread rule: readers {stored_thread_rule.readers}; "
@@ -377,14 +316,6 @@ def assemble_here_card(
         + "."
     )
     lines.append("Credential session usability: unknown (live mount status is unavailable).")
-    lines.append("Other defaults: " + (_summary(defaults) if defaults else "none visible") + ".")
-    if own_agents:
-        lines.append("Own agents here: " + _summary(own_agents) + ".")
-    lines.append(
-        "Routines: "
-        + (_summary(routine_labels, separator="; ") if routine_labels else "none visible")
-        + "."
-    )
     return HereCard(
         agent_name=agent_name,
         tier=tier,
@@ -402,14 +333,11 @@ def assemble_here_card(
         reads_kept_inside=here.readers != "any",
         memory_writable_here=can_write_memory,
         publishing_needs_approval=needs_approval,
-        own_agent_names=own_agents,
         bot_can_view=bot_can_view,
         caller_can_view=caller_can_view,
         agent_can_read_here=can_read,
         category_channels_bot_can_view=tuple(category_channels_bot_can_view),
         credentials=tuple(credentials),
-        default_channels=defaults,
-        routines=routine_labels,
         text="\n".join(lines)[:3900],
     )
 
@@ -531,12 +459,8 @@ async def load_here_card(
                 tenant_id=tenant_id,
                 server_urls=(server.url for server in details.mcp_servers),
             )
-    routines = await list_routines_for_tenant(session, tenant_id=tenant_id) if is_admin else []
     if visible_channel_ids is not None and viewer is not None:
         visible_channel_ids = {cid for cid in visible_channel_ids if viewer.sees_place(cid)}
-    _, channels = await scoped_config_read.list_propagations_for_tenant(
-        session, tenant_id=tenant_id
-    )
     binding = (
         await get_binding(
             session,
@@ -606,16 +530,9 @@ async def load_here_card(
         channel_level_only=channel_level_only,
         policy=policy,
         details=details,
-        visible_agent_names={
-            name for name in runs_only_in(policy, channel_id) if viewer is None or viewer.sees(name)
-        },
-        channels=channels,
-        deployment_default=default,
-        show_routines=is_admin,
         mcp_token_urls=mcp_urls,
         personal_grants=grants,
         caller_account_id=caller_account_id,
-        routines=routines,
         visible_channel_ids=visible_channel_ids,
         bot_can_view=bot_can_view,
         caller_can_view=caller_can_view,
