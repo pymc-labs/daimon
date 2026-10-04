@@ -5,6 +5,7 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.turn_origins import get_active_origin, update_origin_target
 from daimon.core.turn_origin import (
@@ -12,10 +13,11 @@ from daimon.core.turn_origin import (
     HandoffNotice,
     ResponderAccount,
     SessionState,
+    holds_current_channel_admin_grant,
     render_turn_origin,
     turn_origin,
 )
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -157,6 +159,61 @@ def _controls(rendered: str) -> dict[str, object]:
     payload = rendered.split("<turn_controls>\n", 1)[1].split("\n", 1)[0]
     parsed: dict[str, object] = json.loads(payload)
     return parsed
+
+
+async def test_channel_admin_status_uses_only_the_current_channels_stored_grant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session,
+        platform="discord",
+        external_id="444444444444444444",
+        tenant=tenant,
+        account=account,
+    )
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="111111111111111111",
+        role_ids=[],
+        user_ids=["444444444444444444"],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+
+    async def holds(channel: str, role: Role) -> bool:
+        return await holds_current_channel_admin_grant(
+            db_session_factory,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="discord",
+            parent_channel_id=channel,
+            role=role,
+        )
+
+    assert await holds("111111111111111111", Role.USER)
+    assert not await holds("222222222222222222", Role.USER)
+    assert not await holds("111111111111111111", Role.ADMIN)
+
+
+def test_controls_distinguish_channel_admin_member_and_server_admin() -> None:
+    member = _controls(render_turn_origin(_origin()))
+    channel_admin_text = render_turn_origin(_origin(), is_channel_admin=True)
+    channel_admin = _controls(channel_admin_text)
+    server_admin = _controls(render_turn_origin(_origin(role=Role.ADMIN)))
+
+    assert member["current_role"] == "user"
+    assert "channel_admin_scope" not in member
+    assert channel_admin["current_role"] == "channel_admin"
+    assert channel_admin["channel_admin_scope"] == {"channel_id": "C_PARENT"}
+    assert "instructions, skills and keys" in channel_admin_text
+    assert "Channel budgets, channel rules and channel-admin grants" in channel_admin_text
+    assert server_admin["current_role"] == "admin"
+    assert "channel_admin_scope" not in server_admin
 
 
 def test_controls_omit_continuity_blocks_and_their_instructions_on_an_ordinary_turn() -> None:

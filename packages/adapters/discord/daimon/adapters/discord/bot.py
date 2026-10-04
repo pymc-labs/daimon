@@ -123,7 +123,13 @@ from daimon.core.turn.thread_queue import (
     release_thread,
 )
 from daimon.core.turn_keys import list_mounted_key_names
-from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
+from daimon.core.turn_origin import (
+    HandoffNotice,
+    SessionState,
+    holds_current_channel_admin_grant,
+    render_turn_origin,
+    turn_origin,
+)
 from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -2171,6 +2177,7 @@ class DaimonBot(commands.Bot):
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
                     handoff=handoff_notice,
+                    is_channel_admin=is_channel_admin,
                 )
                 + "\n"
                 + seed_message
@@ -2202,6 +2209,14 @@ class DaimonBot(commands.Bot):
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
 
+        is_channel_admin = await holds_current_channel_admin_grant(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=admission.account_id,
+            platform="discord",
+            parent_channel_id=row.parent_channel_id,
+            role=role,
+        )
         outcome: RunOutcome | None = None
         try:
             async with turn_origin(
@@ -2232,6 +2247,7 @@ class DaimonBot(commands.Bot):
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
                             handoff=handoff_notice,
+                            is_channel_admin=is_channel_admin,
                         )
                         + "\n"
                         + seed_message
@@ -2939,6 +2955,7 @@ class DaimonBot(commands.Bot):
                     recovery_origin,
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
+                    is_channel_admin=is_channel_admin,
                 )
                 + "\n"
                 + full_message
@@ -2985,6 +3002,14 @@ class DaimonBot(commands.Bot):
             thread_id=thread.id,
             session_id=prepared.ma_session_id,
         )
+        is_channel_admin = await holds_current_channel_admin_grant(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=admission.account_id,
+            platform="discord",
+            parent_channel_id=parent_channel_id,
+            role=role,
+        )
         outcome: RunOutcome | None = None
         try:
             async with turn_origin(
@@ -3013,6 +3038,7 @@ class DaimonBot(commands.Bot):
                             origin,
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
+                            is_channel_admin=is_channel_admin,
                         )
                         + "\n"
                         + user_message
