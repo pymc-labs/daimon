@@ -5,6 +5,8 @@ tests/performance/test_discord_admission_latency.py`` against a test Postgres.
 The normal test suite skips this load benchmark. The output reports phase
 latencies, per-admission database checkouts and statements, pool wait,
 loop lag, and Managed Agents request counts with a 200 ms fake API.
+Set ``DAIMON_BENCH_PHASE_LAG=1`` to attribute loop-lag samples to active
+phases; this diagnostic adds overhead and phases may overlap.
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 _SIZES = (100, 200)
+_MEASURE_PHASE_LAG = os.environ.get("DAIMON_BENCH_PHASE_LAG") == "1"
 _CHANNELS = 65
 _NOW = datetime.now(UTC)
 _TIMINGS: contextvars.ContextVar[dict[str, float] | None] = contextvars.ContextVar(
@@ -263,7 +266,7 @@ async def _run_batch(
         await started.wait()
         timings: dict[str, float] = {}
         token = _TIMINGS.set(timings)
-        phase_token = _PHASE_HOOK.set(phase_hook)
+        phase_token = _PHASE_HOOK.set(phase_hook if _MEASURE_PHASE_LAG else None)
         begin = time.perf_counter()
         try:
             await admit(
