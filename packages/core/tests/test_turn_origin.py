@@ -10,6 +10,7 @@ from daimon.core.stores.turn_origins import get_active_origin, update_origin_tar
 from daimon.core.turn_origin import (
     MAX_REQUESTED_WORK_CHARS,
     HandoffNotice,
+    ResponderAccount,
     SessionState,
     render_turn_origin,
     turn_origin,
@@ -290,4 +291,44 @@ def test_controls_omit_the_handle_and_its_instruction_when_no_handle_is_supplied
     )
     assert "never ask whether they are the same" not in rendered, (
         "the identity sentence points at a field that is not rendered"
+    )
+
+
+def test_responder_account_ties_the_native_mention_to_a_custom_agent() -> None:
+    """A custom agent named unlike the bot is still who `<@U…>` addresses.
+
+    The person's message carries only the native mention, so without the
+    account the ID matches neither the agent name nor the display handle.
+    """
+    rendered = render_turn_origin(
+        _origin(),
+        responder_handle="@daimon",
+        responder_account=ResponderAccount(user_id="U0WS1BOT", mention="<@U0WS1BOT>"),
+    )
+
+    assert _controls(rendered)["responder"] == {
+        "name": "stats-bot",
+        "ma_agent_id": "agt_stats",
+        "handle": "@daimon",
+        "platform_user_id": "U0WS1BOT",
+        "mention": "<@U0WS1BOT>",
+    }, "the mention must sit inside the responder it addresses, beside the custom name"
+    assert "A message that mentions it is addressed to you" in rendered, (
+        "the controls must say a native mention of the account addresses this responder"
+    )
+    assert "&lt;" in rendered, "the model must be told how the mention appears once XML-escaped"
+    assert "may have come from a different agent" in rendered, (
+        "the account is shared across agents, so its earlier posts must not be claimed"
+    )
+
+
+def test_controls_omit_the_account_and_its_instruction_when_none_is_supplied() -> None:
+    rendered = render_turn_origin(_origin(), responder_handle="@daimon")
+
+    responder = _controls(rendered)["responder"]
+    assert "platform_user_id" not in responder and "mention" not in responder, (
+        "a caller with no verified bot account must not invent one"
+    )
+    assert "responder.mention" not in rendered, (
+        "the account sentence points at fields that are not rendered"
     )

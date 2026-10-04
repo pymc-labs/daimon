@@ -15,6 +15,7 @@ faked at the transport (`fake_slack_web_client`), never method-mocked.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -343,12 +344,82 @@ async def _run_continuation_and_capture_controls(
             tenant_id=tenant.id,
             channel=_CHANNEL,
             thread_id=_THREAD_ID,
+            team_id="T_CONT_ENTRY",
         )
 
     assert run_turn.await_args is not None, "the follow-up turn should have run"
     user_message = run_turn.await_args.kwargs["user_message"]
     assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
     return user_message
+
+
+@pytest.mark.parametrize("reason", ["task_handoff", "private_input_applied"])
+async def test_continuation_names_the_workspace_bot_account_as_the_custom_responder(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    reason: ContinuationReason,
+) -> None:
+    """A continuation can be the process's first turn for a workspace.
+
+    With no mention gate before it, the bot account is resolved through
+    auth.test, and the custom agent (`uat-agent`, shown in Slack as
+    `@daimon`) is still the one its `<@U…>` mention addresses.
+    """
+    message = await _run_continuation_and_capture_controls(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id=f"T_CONT_ENTRY_ACCOUNT_{reason}",
+        reason=reason,
+    )
+
+    responder = json.loads(message.splitlines()[1])["responder"]
+    assert responder == {
+        "name": "uat-agent",
+        "ma_agent_id": _AGENT_ID,
+        "handle": "@daimon",
+        "platform_user_id": "U_BOT",
+        "mention": "<@U_BOT>",
+    }, "the continuation's controls must tie the bot account's mention to this responder"
+    assert any(
+        url.path == "/api/auth.test" for _method, url in fake_slack_web_client.mock.requests
+    ), "a cold cache must ask Slack for this workspace's bot user"
+
+
+async def test_continuation_runs_without_the_account_when_auth_test_fails(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The account is context, not a precondition.
+
+    A raising continuation is settled as failed and never retried, so a
+    failed lookup must not cost the requester their handoff.
+    """
+    fake_slack_web_client.mock.clear()
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/chat.postMessage",
+        payload={"ok": True, "ts": "9300000020.000001", "channel": _CHANNEL},
+        repeat=True,
+    )
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/auth.test", payload={"ok": False, "error": "ratelimited"}
+    )
+
+    message = await _run_continuation_and_capture_controls(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_ENTRY_ACCOUNT_FAILED",
+        reason="task_handoff",
+    )
+
+    responder = json.loads(message.splitlines()[1])["responder"]
+    assert "platform_user_id" not in responder and "mention" not in responder, (
+        "a failed auth.test must render no account rather than fail the continuation"
+    )
+    assert responder["handle"] == "@daimon", "the rest of the responder is unchanged"
 
 
 async def test_continuation_turn_omits_handoff_notice_for_private_input(
@@ -503,6 +574,7 @@ async def _run_continuation_with_card_intent(
                 tenant_id=tenant.id,
                 channel=_CHANNEL,
                 thread_id=_THREAD_ID,
+                team_id="T_CONT_ENTRY",
             )
         except BaseException as caught:
             error = caught
@@ -536,6 +608,9 @@ async def test_continuation_commits_intent_before_post_and_records_response_id(
     fake_slack_web_client.mock.clear()
     fake_slack_web_client.mock.post(
         "https://slack.com/api/chat.postMessage", callback=verify_committed_intent
+    )
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/auth.test", payload={"ok": True, "user_id": "U_BOT"}
     )
 
     async def complete_turn(*_args: Any, **_kwargs: Any) -> RunOutcome:
@@ -573,6 +648,9 @@ async def test_continuation_retains_prepared_intent_when_slack_accepts_then_lose
         raise TimeoutError("accepted post response was lost")
 
     fake_slack_web_client.mock.clear()
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/auth.test", payload={"ok": True, "user_id": "U_BOT"}
+    )
     fake_slack_web_client.mock.post(
         "https://slack.com/api/chat.postMessage", callback=accept_then_drop
     )
@@ -899,6 +977,7 @@ async def test_a_timer_set_with_another_agent_is_refused_before_bind(
             tenant_id=tenant.id,
             channel=_CHANNEL,
             thread_id=_THREAD_ID,
+            team_id="T_CONT_ENTRY",
         )
 
     bind.assert_not_called()
@@ -953,6 +1032,7 @@ async def test_continuation_admits_a_dm_scope_as_a_dm(
             tenant_id=tenant.id,
             channel=_CHANNEL,
             thread_id=thread_id,
+            team_id="T_CONT_ENTRY",
         )
 
     assert admit.await_args is not None

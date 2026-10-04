@@ -44,6 +44,21 @@ class SessionState(BaseModel):
     lost: tuple[str, ...] = ()
 
 
+class ResponderAccount(BaseModel):
+    """The platform account the responder answers through, as the platform names it.
+
+    `user_id` is the bot user the platform verified for this install (Slack's
+    `auth.test`), `mention` the native token that addresses it (`<@U0123>`).
+    One account can front several agents over a thread's life, so the account
+    identifies who is being addressed now, not who wrote an earlier message.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    user_id: str
+    mention: str
+
+
 class HandoffNotice(BaseModel):
     """One-time notice that this turn is the first after a task was handed over.
 
@@ -141,6 +156,7 @@ def render_turn_origin(
     origin: TurnOriginRow,
     *,
     responder_handle: str | None = None,
+    responder_account: ResponderAccount | None = None,
     session_state: SessionState | None = None,
     handoff: HandoffNotice | None = None,
 ) -> str:
@@ -152,6 +168,11 @@ def render_turn_origin(
     name — they are routinely different, and a model that sees only the name
     reads the difference as two agents. Rendering both under one `responder`
     says they are one identity.
+
+    `responder_account` is the bot account a native mention in the person's
+    message names. Without it a native mention (`<@U0123>`) is an opaque ID
+    that matches neither the name nor the handle, and the model reads its own
+    account as another bot.
 
     `session_state` and `handoff` are optional server-supplied facts about the
     workspace this turn runs in. They are rendered inside the same JSON object
@@ -169,6 +190,9 @@ def render_turn_origin(
     }
     if responder_handle is not None:
         responder["handle"] = responder_handle
+    if responder_account is not None:
+        responder["platform_user_id"] = responder_account.user_id
+        responder["mention"] = responder_account.mention
     controls: dict[str, object] = {
         "origin_context_id": str(origin.id),
         "is_setup": origin.is_setup,
@@ -215,6 +239,15 @@ def render_turn_origin(
             "responder.name, and any casing of either are the same agent — never ask whether "
             "they are the same, and never treat that difference as target ambiguity. Ask about "
             "the target only when a different agent is named."
+        )
+    if responder_account is not None:
+        rendered += (
+            "\nresponder.mention is the native mention of the account you answer through, "
+            "responder.platform_user_id. In thread history and the user query it appears "
+            "XML-escaped (< as &lt;, > as &gt;). A message that mentions it is addressed to "
+            "you: never treat it as another agent or bot, and never hand it off for that "
+            "reason. Earlier messages posted by that account may have come from a different "
+            "agent that answered through it then; judge them by what they say."
         )
     rendered += (
         "\nUse the explicitly requested target when named; otherwise configure the "
