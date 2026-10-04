@@ -37,6 +37,7 @@ from anthropic.types.beta import (
 from daimon.core.access_policy import (
     TenantAccessPolicy,
 )
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -403,7 +404,7 @@ async def admit_impl(
                     "This thread belongs to another agent. Start a new thread or ask for a handoff."
                 )
             named_permissions = agent_permissions(
-                policy, (named_agent.name, named_agent.metadata.get("daimon_name"))
+                policy, agent_pin_names(named_agent.name, named_agent.metadata)
             )
             here = channel_permissions(
                 policy,
