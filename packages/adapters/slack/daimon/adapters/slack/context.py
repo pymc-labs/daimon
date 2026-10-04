@@ -43,6 +43,20 @@ def _history_attrs(*, truncated: bool) -> dict[str, str]:
     return attrs
 
 
+def _replayed(messages: list[dict[str, Any]], *, status_ts: str | None) -> list[dict[str, Any]]:
+    """Thread messages minus this turn's own status card.
+
+    The card is posted before history is fetched, so a replay would show the
+    model a fresh bot message (`Thinking · 0s`) from the account it answers
+    through, which it reads as another agent already handling the request.
+    Only the bot message at exactly that ts is dropped: earlier answers from
+    the same account stay, since they may belong to a different agent.
+    """
+    if status_ts is None:
+        return messages
+    return [m for m in messages if not ("bot_id" in m and m.get("ts") == status_ts)]
+
+
 def _render_message(msg: dict[str, Any], *, proxy: ProxyUrlContext | None) -> list[str]:
     """Render a single Slack message dict as XML lines.
 
@@ -110,6 +124,7 @@ async def build_context_xml(
     proxy: ProxyUrlContext | None = None,
     key_names: Sequence[str] = (),
     page_limit: int = DEFAULT_PAGE_LIMIT,
+    status_ts: str | None = None,
 ) -> str:
     """Build XML context from thread history for the first turn.
 
@@ -126,6 +141,8 @@ async def build_context_xml(
 
     ``key_names`` names this agent's stored keys, names only (see
     `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
+
+    ``status_ts`` is this turn's own status card, left out of the replay.
     """
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
         channel=channel, ts=thread_ts, limit=page_limit
@@ -139,7 +156,11 @@ async def build_context_xml(
         render_keys_element(key_names),
     ]
     lines = [line for line in lines if line]
-    body = [line for msg in messages for line in _render_message(msg, proxy=proxy)]
+    body = [
+        line
+        for msg in _replayed(messages, status_ts=status_ts)
+        for line in _render_message(msg, proxy=proxy)
+    ]
     lines.extend(untrusted_block("thread_history", body, _history_attrs(truncated=truncated)))
     lines.append("</context>")
     lines.append("")
@@ -160,6 +181,7 @@ async def build_delta_xml(
     proxy: ProxyUrlContext | None = None,
     key_names: Sequence[str] = (),
     page_limit: int = DEFAULT_PAGE_LIMIT,
+    status_ts: str | None = None,
 ) -> str:
     """Build XML context for a continuation turn (delta since watermark).
 
@@ -173,6 +195,8 @@ async def build_delta_xml(
 
     ``key_names`` names this agent's stored keys, names only (see
     `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
+
+    ``status_ts`` is this turn's own status card, left out of the replay.
     """
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
         channel=channel,
@@ -190,7 +214,11 @@ async def build_delta_xml(
         render_keys_element(key_names),
     ]
     lines = [line for line in lines if line]
-    body = [line for msg in messages for line in _render_message(msg, proxy=proxy)]
+    body = [
+        line
+        for msg in _replayed(messages, status_ts=status_ts)
+        for line in _render_message(msg, proxy=proxy)
+    ]
     lines.extend(untrusted_block("thread_delta", body, _history_attrs(truncated=truncated)))
     lines.append("</context>")
     lines.append("")

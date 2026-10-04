@@ -1128,6 +1128,9 @@ async def test_initial_card_post_failure_keeps_prepared_intent(
     app, _ = make_orchestrate_app(db_session_factory)
     fake_slack_web_client.mock.clear()
     fake_slack_web_client.mock.post(
+        "https://slack.com/api/auth.test", payload={"ok": True, "user_id": "U_BOT"}
+    )
+    fake_slack_web_client.mock.post(
         "https://slack.com/api/chat.postMessage",
         payload={"ok": False, "error": "channel_not_found"},
     )
@@ -1333,6 +1336,9 @@ async def test_cancelled_initial_card_post_keeps_prepared_intent(
         return CallbackResult(payload={"ok": True, "ts": "1000000000.000001"})
 
     fake_slack_web_client.mock.clear()
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/auth.test", payload={"ok": True, "user_id": "U_BOT"}
+    )
     fake_slack_web_client.mock.post("https://slack.com/api/chat.postMessage", callback=hold_post)
     event = {
         "type": "app_mention",

@@ -63,6 +63,14 @@ most 200 messages per call. `read_channel` returns a cursor for older messages;
 `read_thread` returns a cursor for newer replies, starting from the root. No
 automatic multi-page sweep runs during a turn.
 
+The replay leaves out the turn's own status card, which is posted before
+history is read. Every other message stays, including earlier answers from the
+bot account and other bots' posts. The turn's controls name the bot account
+(`platform_user_id`, the `auth.test` user for the workspace) and its native
+`<@U…>` mention as the responder, so a mention of the app addresses the agent
+answering, whatever its name. The bot account can front different agents over a
+thread's life, so its earlier messages are not attributed to the current one.
+
 ### Skill files
 
 A `.md` or `.zip` attached in a message reaches `add_skill` as the file link
