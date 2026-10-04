@@ -108,6 +108,14 @@ def round_robin_threads(teams: list[list[str]]) -> list[str]:
     ]
 
 
+def reuse_thread_slots[T](slots: list[T], count: int) -> list[T]:
+    """Fill a burst from existing threads, repeating the first few slots once."""
+    extra = count - len(slots)
+    if extra > len(slots):
+        raise ValueError("cannot reuse a thread more than once in one burst")
+    return [*slots, *slots[: max(0, extra)]]
+
+
 def staging_guard(
     *,
     acknowledged: bool,
@@ -204,6 +212,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--discord-precreated", action="store_true")
     p.add_argument("--discord-layout-state", type=Path)
     p.add_argument("--discord-layout-new-chats", action="store_true")
+    p.add_argument("--discord-reuse-extra", action="store_true")
     p.add_argument("--discord-arrival-seconds", type=float, default=0)
     p.add_argument("--prompt-set", choices=("simple", "realistic"), default="simple")
     p.add_argument("--cleanup", action="store_true")
@@ -233,7 +242,8 @@ def plan(args: argparse.Namespace) -> str:
         f"discord={args.discord} discord_turns={args.discord_turns if args.discord else 0} "
         f"discord_concurrency={args.discord_concurrency} discord_model=tenant-default "
         f"discord_watch_seconds={args.discord_watch_seconds} "
-        f"discord_precreated={args.discord_precreated} prompt_set={args.prompt_set} "
+        f"discord_precreated={args.discord_precreated} "
+        f"discord_reuse_extra={args.discord_reuse_extra} prompt_set={args.prompt_set} "
         f"arrival_seconds={args.arrival_seconds} max_usd={args.max_usd} "
         f"cleanup={args.cleanup}"
     )
@@ -815,12 +825,13 @@ async def _discord_phase(
             )
             if not precreated:
                 raise RuntimeError("layout state has no working threads")
-            # A 65 x 3 layout has 195 threads. For the 200-mention stage,
-            # add five temporary threads so each concurrent mention has its
-            # own thread, then remove only those five during cleanup.
+            if args.discord_reuse_extra:
+                precreated = reuse_thread_slots(precreated, args.discord_concurrency)
+            # A 65 x 3 layout has 195 threads. The caller may reuse five
+            # slots in a 200-mention stage, or create five temporary threads.
             for index in range(
                 max(0, args.discord_concurrency - len(precreated))
-                if not args.discord_layout_new_chats
+                if not args.discord_layout_new_chats and not args.discord_reuse_extra
                 else 0
             ):
                 channel_id = layout_channels[index % len(layout_channels)]
@@ -1255,6 +1266,10 @@ def main() -> None:
         raise SystemExit(
             "--discord-layout-new-chats requires layout state and no --discord-precreated"
         )
+    if args.discord_reuse_extra and (
+        args.discord_layout_state is None or args.discord_layout_new_chats
+    ):
+        raise SystemExit("--discord-reuse-extra requires layout state and existing threads")
     if args.discord and (
         not args.discord_guild_id or any(g not in DISCORD_QA_GUILDS for g in args.discord_guild_id)
     ):

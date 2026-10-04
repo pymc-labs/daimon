@@ -84,8 +84,8 @@ def test_setup_is_resumable_and_teardown_lifts_everything(tmp_path: Path, monkey
 
     def fake_cli(*args: str) -> str:
         calls.append(args)
-        if args[:3] == ("channels", "isolation", "set"):
-            return "discord:1 channel 123: isolated; its own agent\nis team-a-copy, copied from daimon."
+        if args[:3] == ("channels", "rule", "set"):
+            return "discord:1 channel 123: now readers own, writers own.\nteam-a-copy, a copy of daimon, is its own agent."
         return "ok"
 
     monkeypatch.setattr(layout, "cli", fake_cli)
@@ -108,10 +108,20 @@ def test_setup_is_resumable_and_teardown_lifts_everything(tmp_path: Path, monkey
         cast("layout.Discord", api), args, json.loads(args.state.read_text()), "Team A", ["123"]
     )
     assert len([call for call in api.calls if call[0] == "POST"]) == created
-    assert len([call for call in calls if call[:3] == ("channels", "isolation", "set")]) == 1
+    assert len([call for call in calls if call[:3] == ("channels", "rule", "set")]) == 1
     layout.teardown_team(cast("layout.Discord", api), args, state, "team-a")
     assert state["teams"] == {}
-    assert ("channels", "isolation", "lift", "discord", args.guild_id, state_id(api)) in calls
+    assert (
+        "channels",
+        "rule",
+        "set",
+        "discord",
+        args.guild_id,
+        state_id(api),
+        "--readers",
+        "any",
+        "--release-agents",
+    ) in calls
     assert any(
         call[:2] == ("agents", "--guild") and "archive" in call and "team-a-copy" in call
         for call in calls
@@ -124,8 +134,8 @@ def test_roleless_layout_uses_public_channel_and_member_admin(tmp_path: Path, mo
     def fake_cli(*args: str) -> str:
         calls.append(args)
         return (
-            "discord:1 channel 123: isolated; its own agent\nis team-a-copy, copied from daimon."
-            if args[:3] == ("channels", "isolation", "set")
+            "discord:1 channel 123: now readers own, writers own.\nteam-a-copy, a copy of daimon, is its own agent."
+            if args[:3] == ("channels", "rule", "set")
             else "ok"
         )
 
@@ -165,12 +175,13 @@ def state_id(api: FakeDiscord) -> str:
 @pytest.mark.parametrize(
     "output",
     [
-        "discord:1 channel 123: isolated; its own agent\nis team-a-copy, copied from daimon.",
-        "discord:1 channel 123: already isolated; its own agent is team-a-copy.\n"
+        "discord:1 channel 123: now readers own, writers own.\nteam-a-copy, a copy of daimon, is its own agent.",
+        "discord:1 channel 123: already readers own, writers own.\n"
+        "team-a-copy is its own agent and runs only there.\n"
         "This channel runs an environment with open network; a server admin should\n"
         "confirm or change it.",
     ],
 )
 def test_parse_agent_reads_the_name_alone(output: str) -> None:
-    """A rerun on an isolated channel prints no "copied from", and a warning may follow."""
+    """A rerun on an own channel prints no copy source, and a warning may follow."""
     assert layout.parse_agent(output) == "team-a-copy"
