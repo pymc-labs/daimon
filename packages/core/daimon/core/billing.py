@@ -90,6 +90,7 @@ async def is_over_cap(
     tenant_id: uuid.UUID,
     user_id: str,
     now: datetime,
+    session: AsyncSession | None = None,
 ) -> bool:
     """Adapter-edge admission decision.
 
@@ -101,20 +102,17 @@ async def is_over_cap(
     the clock here, per guideline:architecture — keeps the decision pure and
     testable without monkeypatching.
     """
-    async with sessionmaker() as s:
-        cap = await tenant_user_caps.get_effective_cap(
-            s,
-            tenant_id=tenant_id,
-            user_id=user_id,
-        )
+
+    async def check(s: AsyncSession) -> bool:
+        cap = await tenant_user_caps.get_effective_cap(s, tenant_id=tenant_id, user_id=user_id)
         if cap is None:
-            return False  # no row = uncapped
-        period_start = month_start(now)
+            return False
         spent = await usage_events.cost_for_user_in_tenant_since(
-            s,
-            tenant_id=tenant_id,
-            platform_user_id=user_id,
-            since=period_start,
+            s, tenant_id=tenant_id, platform_user_id=user_id, since=month_start(now)
         )
-    # Pitfall 8 — compare in Decimal to avoid float drift
-    return Decimal(str(spent)) >= cap
+        return Decimal(str(spent)) >= cap
+
+    if session is not None:
+        return await check(session)
+    async with sessionmaker() as opened:
+        return await check(opened)

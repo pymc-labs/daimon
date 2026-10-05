@@ -54,7 +54,13 @@ from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
-from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
+from daimon.core.ma_resolver import (
+    MAResolverMissError,
+    resolve_agent,
+    resolve_environment,
+    retrieve_agent_cached,
+    retrieve_environment_cached,
+)
 from daimon.core.permissions import (
     agent_permissions,
     at_home,
@@ -72,6 +78,7 @@ from daimon.core.stores.accounts import (
     set_platform_role_ids,
     set_role,
 )
+from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
@@ -316,52 +323,41 @@ async def admit_impl(
                 ),
             )
         )
-    mark("policy_and_admins")
+        mark("policy_and_admins")
 
-    # --- Channel protection, first of the policy gates: the turn's reply
-    # would land in its thread or channel, so a protected target refuses the
-    # turn itself -- before any thread, reply or upload exists, and before the
-    # invoker gate, whose refusal the adapters would otherwise post there.
-    # Admins get no exemption. `category_id` is the Discord category the
-    # channel sits in; `category_unresolved` says the adapter couldn't look it
-    # up, which fails closed when any category is protected. ---
-    # --- Invoker policy: a tenant may restrict who can start a turn. Only a
-    # live ADMIN role passed by the adapter exempts the caller; no role means
-    # non-admin, never a stored role the user may have lost. An unreadable
-    # policy raised `AccessPolicyUnreadable` above -- refused, never open.
-    # Both gates are `authorize(START_TURN)`, protection first. ---
-    subject = build_subject(
-        is_admin=role is Role.ADMIN,
-        platform_user_id=external_user_id,
-        administered_channel_ids=administered,
-    )
-    turn_place = build_turn_place(
-        channel_id=channel_id,
-        thread_id=thread_id,
-        category_id=category_id,
-        category_unresolved=category_unresolved,
-    )
-    _require_turn_start(policy, subject, turn_place)
-    # --- External participant: someone from another organisation (a Teams
-    # shared channel's B2B direct connect participant) is answered only
-    # inside an isolated channel, its threads included, never in a DM. ---
-    _require_external_inside_home(
-        policy, is_external=is_external, is_dm=is_dm, channel_id=channel_id, thread_id=thread_id
-    )
-    mark("start_policy")
+        # Refusals must happen before config is read. Keeping the session here
+        # reuses its connection for the config cascade after authorization.
+        subject = build_subject(
+            is_admin=role is Role.ADMIN,
+            platform_user_id=external_user_id,
+            administered_channel_ids=administered,
+        )
+        turn_place = build_turn_place(
+            channel_id=channel_id,
+            thread_id=thread_id,
+            category_id=category_id,
+            category_unresolved=category_unresolved,
+        )
+        _require_turn_start(policy, subject, turn_place)
+        _require_external_inside_home(
+            policy,
+            is_external=is_external,
+            is_dm=is_dm,
+            channel_id=channel_id,
+            thread_id=thread_id,
+        )
+        mark("start_policy")
 
-    if (observation := current_outcome.get()) is not None:
-        observation.account_id = principal.account_id
+        if (observation := current_outcome.get()) is not None:
+            observation.account_id = principal.account_id
 
-    # --- Config resolution (per turn) ---
-    scope = ScopeContext(
-        account_id=principal.account_id,
-        tenant_id=tenant_id,
-        channel_id=channel_id,
-        platform=platform,
-        thread_id=thread_id,
-    )
-    async with deps.sessionmaker() as session:
+        scope = ScopeContext(
+            account_id=principal.account_id,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            platform=platform,
+            thread_id=thread_id,
+        )
         config = await resolve_config(session, context=scope, default=deps.deployment_default)
     mark("config")
 
@@ -431,7 +427,9 @@ async def admit_impl(
         agent = await get_setup_responder(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
     else:
         try:
-            agent = await deps.anthropic.beta.agents.retrieve(agent_id)
+            agent = await retrieve_agent_cached(
+                deps.anthropic, deps.resolver_cache, tenant_id, agent_id
+            )
         except APIStatusError as err:
             if err.status_code not in (400, 404):
                 raise
@@ -442,7 +440,9 @@ async def admit_impl(
     if (observation := current_outcome.get()) is not None:
         observation.agent_id = agent.id
     try:
-        environment = await deps.anthropic.beta.environments.retrieve(env_id)
+        environment = await retrieve_environment_cached(
+            deps.anthropic, deps.resolver_cache, tenant_id, env_id
+        )
     except APIStatusError as err:
         if err.status_code not in (400, 404):
             raise
@@ -460,11 +460,13 @@ async def admit_impl(
     # adapter catch sites renders unchanged -- no new error taxonomy. ---
     if agent.archived_at is not None:
         deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
+        deps.resolver_cache.agents.pop((tenant_id, agent_id), None)
         async with deps.sessionmaker() as session, session.begin():
             await clear_agent_references(session, tenant_id=tenant_id, agent_name=config.agent_name)
         raise MAResolverMissError(kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name)
     if environment.archived_at is not None:
         deps.resolver_cache.pop((tenant_id, "environment", config.environment_name), None)
+        deps.resolver_cache.environments.pop((tenant_id, env_id), None)
         raise MAResolverMissError(
             kind="environment", tenant_id=tenant_id, daimon_tag=config.environment_name
         )
@@ -497,35 +499,49 @@ async def admit_impl(
     _require_run_agent(policy, grant)
     mark("agent_policy")
 
-    # --- Admission gate: per-tenant balance -- independent of Stripe config ---
-    if await is_over_balance(sessionmaker=deps.sessionmaker, tenant_id=tenant_id):
-        raise AdmissionDenied(reason="balance_depleted")
-    mark("balance")
-
-    # --- Admission gate: monthly usage cap ---
-    if await is_over_cap(
-        billing_config=deps.billing_config,
-        sessionmaker=deps.sessionmaker,
-        tenant_id=tenant_id,
-        user_id=external_user_id,
-        now=now,
-    ):
-        raise AdmissionDenied(reason="cap_exceeded")
-    mark("user_cap")
-
-    # --- Admission gate: channel budget; a DM counts toward the channel it came from,
-    # and an isolated channel's own agent toward that channel wherever an exempt
-    # caller (an admin, or that channel's admin) runs it ---
     budget_channel_id = agent_permissions(policy, grant.agent.names).budget_channel or (
         dm_source_channel_id if is_dm else channel_id
     )
-    if await is_over_channel_budget(
-        sessionmaker=deps.sessionmaker,
-        tenant_id=tenant_id,
-        platform=platform,
-        channel_id=budget_channel_id,
-        now=now,
-    ):
+    # The three independent billing decisions still run in their original
+    # order, under READ COMMITTED, but share one checked-out connection.
+    async with deps.sessionmaker() as billing_session:
+        # --- Per-tenant balance -- independent of Stripe config ---
+        if await is_over_balance(
+            sessionmaker=deps.sessionmaker, tenant_id=tenant_id, session=billing_session
+        ):
+            raise AdmissionDenied(reason="balance_depleted")
+        mark("balance")
+
+        # --- Monthly usage cap ---
+        if await is_over_cap(
+            billing_config=deps.billing_config,
+            sessionmaker=deps.sessionmaker,
+            tenant_id=tenant_id,
+            user_id=external_user_id,
+            now=now,
+            session=billing_session,
+        ):
+            raise AdmissionDenied(reason="cap_exceeded")
+        mark("user_cap")
+
+        # --- Channel budget, including the source of a DM or isolated agent ---
+        budget_exceeded = await is_over_channel_budget(
+            sessionmaker=deps.sessionmaker,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=budget_channel_id,
+            now=now,
+            session=billing_session,
+        )
+        mark("channel_budget")
+        channel_skill_rows = (
+            []
+            if is_dm or budget_exceeded
+            else await list_channel_skills(
+                billing_session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+            )
+        )
+    if budget_exceeded:
         if tenant_id not in deps.budget_notices_off:
             spawn_budget_notice(
                 sessionmaker=deps.sessionmaker,
@@ -537,7 +553,6 @@ async def admit_impl(
                 group_members=deps.group_members,
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
-    mark("channel_budget")
 
     # Every id that seals the turn: its channel, and the thread sealed on its
     # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
@@ -559,6 +574,7 @@ async def admit_impl(
             channel_id=channel_id,
             agent=agent,
             agent_names=grant.agent.names,
+            rows=channel_skill_rows,
         )
     )
 

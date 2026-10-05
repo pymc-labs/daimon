@@ -7,31 +7,51 @@ responding in an existing thread.
 Mirrors ``packages/adapters/discord/daimon/adapters/discord/context.py``:
 - ``build_context_xml``: first-turn fetch, one page from the thread root.
 - ``build_delta_xml``: continuation fetch, delta since the watermark timestamp.
+- ``build_channel_context_xml``: first turn of a top-level mention, the
+  channel's messages up to the mention.
 
-Both fetch a single page. Slack clamps apps commercially distributed outside
+Each fetches a single page. Slack clamps apps commercially distributed outside
 the Marketplace to 15 messages and one call a minute; an internal install gets
 the page it requests. When Slack reports ``has_more`` the block is marked
 ``truncated="true"`` so the model knows the window is partial.
 
 All message text is escaped via ``xml.sax.saxutils`` (T-80-XML mitigation).
-No try/except — exceptions propagate to the listener boundary.
+Thread history is the turn's own conversation, so its fetch errors propagate to
+the listener boundary. Channel context is optional: a failed fetch renders it
+``status="unavailable"`` and the turn goes ahead.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
+from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 from xml.sax.saxutils import escape, quoteattr
 
+import aiohttp
+import structlog
 from daimon.adapters.slack.attachments import ProxyUrlContext, build_proxy_url
+from daimon.adapters.slack.channel_reads import ChannelReadPolicy
 from daimon.adapters.slack.vision import SlackFile
 from daimon.core.turn_keys import render_keys_element
 from daimon.core.untrusted import untrusted_block
+from slack_sdk.errors import SlackApiError
+from slack_sdk.http_retry.builtin_async_handlers import AsyncRateLimitErrorRetryHandler
 from slack_sdk.web.async_client import AsyncWebClient
+
+log = structlog.get_logger(__name__)
 
 # Requested page size, matching the 100 messages Discord replays; Slack may
 # grant fewer and report has_more.
 DEFAULT_PAGE_LIMIT = 100
+
+# Channel messages fetched for a top-level mention, the trigger included,
+# matching Discord's CHANNEL_BACKFILL_LIMIT.
+CHANNEL_BACKFILL_LIMIT = 25
+
+# Upper bound on the channel fetch; past it the block is marked unavailable.
+CHANNEL_FETCH_TIMEOUT_S = 10.0
 
 
 def _history_attrs(*, truncated: bool) -> dict[str, str]:
@@ -220,6 +240,114 @@ async def build_delta_xml(
         for line in _render_message(msg, proxy=proxy)
     ]
     lines.extend(untrusted_block("thread_delta", body, _history_attrs(truncated=truncated)))
+    lines.append("</context>")
+    lines.append("")
+    lines.append(f"{_user_query_open_tag(author_id, is_admin)}{escape(user_query)}</user_query>")
+
+    return "\n".join(lines)
+
+
+def _without_rate_limit_wait(client: AsyncWebClient) -> AsyncWebClient:
+    """The same client minus its 429 retry.
+
+    That retry waits out ``Retry-After``, a full minute on an install held to
+    one history call a minute, before the turn could start.
+    """
+    return AsyncWebClient(
+        token=client.token,
+        base_url=client.base_url,
+        timeout=client.timeout,
+        retry_handlers=[
+            h for h in client.retry_handlers if not isinstance(h, AsyncRateLimitErrorRetryHandler)
+        ],
+    )
+
+
+def _before(message: dict[str, Any], trigger_ts: str) -> bool:
+    """Strictly older than the trigger. ``latest`` already ends the page at
+    the trigger; this drops the trigger itself and holds the cutoff for any
+    message a page returns past it."""
+    try:
+        return Decimal(str(message.get("ts", ""))) < Decimal(trigger_ts)
+    except InvalidOperation:
+        return False
+
+
+async def _channel_history(
+    client: AsyncWebClient, *, channel: str, trigger_ts: str, limit: int
+) -> tuple[list[dict[str, Any]], bool] | None:
+    """One newest-first page ending at the trigger, or None when it can't be had."""
+    try:
+        async with asyncio.timeout(CHANNEL_FETCH_TIMEOUT_S):
+            resp = await _without_rate_limit_wait(client).conversations_history(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel, latest=trigger_ts, inclusive=True, limit=limit
+            )
+    except (SlackApiError, aiohttp.ClientError, TimeoutError) as exc:
+        log.warning("slack.channel_context.unavailable", channel_id=channel, error=str(exc))
+        return None
+    messages = cast(list[dict[str, Any]], resp["messages"])  # pyright: ignore[reportUnknownVariableType]
+    return messages, bool(resp.get("has_more"))  # pyright: ignore[reportUnknownMemberType]
+
+
+async def build_channel_context_xml(
+    client: AsyncWebClient,
+    *,
+    channel: str,
+    trigger_ts: str,
+    user_query: str,
+    read_policy: ChannelReadPolicy | None,
+    author_id: str = "",
+    is_admin: bool = False,
+    proxy: ProxyUrlContext | None = None,
+    key_names: Sequence[str] = (),
+    limit: int = CHANNEL_BACKFILL_LIMIT,
+) -> str:
+    """Build XML context from channel history for a top-level mention's first turn.
+
+    One ``conversations.history`` page of ``limit`` messages ending at the
+    trigger (``latest=trigger_ts``, inclusive), so nothing posted after the
+    mention is shown and a recovery reseed rebuilds the same window. The
+    trigger is left out; earlier answers from the bot stay. This turn's
+    status card is a reply in the new thread, so channel history never
+    returns it. Messages render oldest first in a
+    ``<context>/<channel_context>`` block, followed by the ``<user_query>``.
+
+    ``read_policy`` decides what may be shown (`load_channel_read_policy`); None renders
+    the block ``status="unavailable"`` without fetching, as does a fetch that
+    fails, is rate limited or times out. Messages in a thread whose readers
+    are limited on their own are withheld before any attachment URL is
+    minted. ``truncated="true"`` says older messages exist beyond the window:
+    Slack may return fewer than ``limit`` (15 for apps distributed outside
+    the Marketplace).
+    """
+    history = (
+        None
+        if read_policy is None
+        else await _channel_history(client, channel=channel, trigger_ts=trigger_ts, limit=limit)
+    )
+
+    lines: list[str] = [
+        "<context>",
+        f"<channel platform={quoteattr('slack')} id={quoteattr(channel)}/>",
+        render_keys_element(key_names),
+    ]
+    lines = [line for line in lines if line]
+    if read_policy is None or history is None:
+        lines.extend(
+            untrusted_block("channel_context", [], {"source": "slack", "status": "unavailable"})
+        )
+    else:
+        messages, has_more = history
+        shown = [
+            m
+            for m in reversed(messages)
+            if _before(m, trigger_ts) and read_policy.message_readable(m)
+        ]
+        attrs = {"source": "slack", "count": str(len(shown))}
+        if has_more:
+            attrs["truncated"] = "true"
+        body = [line for msg in shown for line in _render_message(msg, proxy=proxy)]
+        lines.extend(untrusted_block("channel_context", body, attrs))
     lines.append("</context>")
     lines.append("")
     lines.append(f"{_user_query_open_tag(author_id, is_admin)}{escape(user_query)}</user_query>")

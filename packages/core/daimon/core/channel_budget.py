@@ -238,6 +238,7 @@ async def is_over_channel_budget(
     platform: str,
     channel_id: str | None,
     now: datetime,
+    session: AsyncSession | None = None,
 ) -> bool:
     """True iff the channel has an active budget whose spend has reached its limit.
 
@@ -246,7 +247,12 @@ async def is_over_channel_budget(
     """
     if channel_id is None:
         return False
-    async with sessionmaker() as session:
+    if session is None:
+        async with sessionmaker() as opened:
+            status = await get_channel_budget_status(
+                opened, tenant_id=tenant_id, platform=platform, channel_id=channel_id, now=now
+            )
+    else:
         status = await get_channel_budget_status(
             session, tenant_id=tenant_id, platform=platform, channel_id=channel_id, now=now
         )

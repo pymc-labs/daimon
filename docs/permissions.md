@@ -115,7 +115,10 @@ publishes.
   routines and handoffs. Nothing writes where `writers` is `none`.
 - **Channel admins** of a `readers: own` channel have the same exemption for
   its own agents. They configure an agent whose rule names only channels
-  they administer, and read those channels' sessions from the hub.
+  they administer, and read those channels' sessions from the hub. In Discord
+  and Slack chat, the agent is told when the requester administers the current
+  channel, so it can try the requested setup tool. Each tool still checks the
+  target agent's reach before changing instructions, skills or keys.
 - A **setup thread** under a `readers: own` channel answers as the built-in
   agent.
 

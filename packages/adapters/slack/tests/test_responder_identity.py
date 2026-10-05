@@ -3,8 +3,8 @@
 Slack delivers the app mention as the bot account's user id, which matches
 neither a custom agent's name nor the display handle. These tests drive the
 real turn path with a custom agent whose name differs from the Slack display
-name, for a fresh turn, its recovery re-seed and a queued turn, and check what
-the model receives: the workspace's bot account inside the
+name, for a fresh top-level turn, its recovery re-seed and a queued turn, and
+check what the model receives: the workspace's bot account inside the
 trusted responder, the mention still XML-escaped in the query, and history
 without the turn's own status card but with the account's earlier answers and
 other bots' messages.
@@ -41,6 +41,7 @@ _CHANNEL = "C_IDENTITY"
 _THREAD_TS = "1900000000.000001"
 _AGENT_NAME = "qa-specialist"
 _REPLIES = re.compile(r"https://slack\.com/api/conversations\.replies.*")
+_HISTORY = re.compile(r"https://slack\.com/api/conversations\.history.*")
 
 
 class _Thread:
@@ -74,6 +75,26 @@ class _Thread:
             messages.append({"user": _BOT_USER_ID, "bot_id": "B_SELF", "text": text, "ts": ts})
         return CallbackResult(payload={"ok": True, "messages": messages, "has_more": False})
 
+    def channel_history(self, _url: Any, **_kwargs: Any) -> CallbackResult:
+        """The channel up to the first mention, newest first: an earlier answer
+        from this bot account and another bot's note precede it."""
+        messages: list[dict[str, str]] = [
+            {"user": "U_PERSON", "text": f"<@{_BOT_USER_ID}> first question", "ts": _THREAD_TS},
+            {
+                "user": "U_OTHER_BOT",
+                "bot_id": "B_OTHER",
+                "text": "Other bot note",
+                "ts": "1899999999.000002",
+            },
+            {
+                "user": _BOT_USER_ID,
+                "bot_id": "B_SELF",
+                "text": "Earlier channel answer",
+                "ts": "1899999999.000001",
+            },
+        ]
+        return CallbackResult(payload={"ok": True, "messages": messages, "has_more": False})
+
 
 @pytest.fixture
 def thread() -> _Thread:
@@ -89,6 +110,7 @@ def web_client(thread: _Thread) -> Iterator[AsyncWebClient]:
             "https://slack.com/api/chat.postMessage", callback=thread.post, repeat=True
         )
         mock.get(_REPLIES, callback=thread.replies, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        mock.get(_HISTORY, callback=thread.channel_history, repeat=True)  # pyright: ignore[reportUnknownMemberType]
         _register_slack_defaults(mock)
         yield AsyncWebClient(token="xoxb-test")
 
@@ -99,19 +121,23 @@ def _controls(user_message: str) -> dict[str, Any]:
 
 
 def _history(user_message: str) -> str:
-    return user_message.split("<thread_", 1)[1].split("</context>", 1)[0]
+    return re.split(r"<thread_|<channel_context", user_message, maxsplit=1)[1].split(
+        "</context>", 1
+    )[0]
 
 
-def _event(ts: str, text: str) -> dict[str, Any]:
-    return {
+def _event(ts: str, text: str, *, in_thread: bool = True) -> dict[str, Any]:
+    event = {
         "type": "app_mention",
         "ts": ts,
         "event_ts": ts,
-        "thread_ts": _THREAD_TS,
         "channel": _CHANNEL,
         "user": "U_PERSON",
         "text": text,
     }
+    if in_thread:
+        event["thread_ts"] = _THREAD_TS
+    return event
 
 
 async def test_fresh_reseed_and_queued_messages_name_the_mentioned_account_as_the_responder(
@@ -148,7 +174,7 @@ async def test_fresh_reseed_and_queued_messages_name_the_mentioned_account_as_th
         await kwargs["lifecycle"].on_terminal_success(state)
         return state
 
-    first = _event(_THREAD_TS, f"<@{_BOT_USER_ID}> first question")
+    first = _event(_THREAD_TS, f"<@{_BOT_USER_ID}> first question", in_thread=False)
     queued = _event("1900000002.000001", f"<@{_BOT_USER_ID}> queued question")
     # Queued behind the first mention, as `_orchestrate` would have while it ran.
     app._pending[_THREAD_TS] = [queued]  # pyright: ignore[reportPrivateUsage]
@@ -199,7 +225,13 @@ async def test_fresh_reseed_and_queued_messages_name_the_mentioned_account_as_th
         "the first turn must not replay its own status card as another bot's post"
     )
     assert "Other bot note" in first_history, "other bots' messages stay in history"
-    assert "Thinking" not in _history(sent[1][2]), "the recovery re-seed omits the card too"
+    assert "Earlier channel answer" in first_history, (
+        "an earlier answer from the same account stays in the channel context"
+    )
+    assert "first question" not in first_history, "the mention itself is the query, not history"
+    assert _history(sent[1][2]) == first_history, (
+        "the recovery re-seed rebuilds the same channel context"
+    )
 
     queued_message = sent[2][2]
     assert "queued question" in queued_message.split("<user_query", 1)[1]

@@ -1256,6 +1256,8 @@ async def test_terminal_render_followed_by_raise_still_retires_card_intent(
     admission.config.agent_name = "test-agent"
     admission.config.configuration_target_ma_agent_id = None
     admission.config.configuration_target_name = None
+    # Hand-built admission: no grant to decide a channel read on.
+    admission.grant = None
     prepared = SimpleNamespace(
         ma_session_id="session-terminal-then-raise",
         mapping_id=None,
