@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from aioresponses import aioresponses
+from aioresponses import CallbackResult, aioresponses
 from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy
+from daimon.adapters.mcp.tools.slack._models import SlackThreadResult
 from daimon.adapters.mcp.tools.slack._read import (  # pyright: ignore[reportPrivateUsage]
     _slack_get_message_impl,
     _slack_list_channels_impl,
@@ -47,6 +50,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from yarl import URL
 
 _CONVERSATIONS_INFO = re.compile(r"https://slack\.com/api/conversations\.info.*")
 _CONVERSATIONS_HISTORY = re.compile(r"https://slack\.com/api/conversations\.history.*")
@@ -1459,7 +1463,26 @@ async def test_read_thread_caps_limit_at_one_page(
         m.get(_CONVERSATIONS_REPLIES, payload={"ok": True, "messages": []})  # pyright: ignore[reportUnknownMemberType]
         await _slack_read_thread_impl(runtime, auth, thread_id="C1:1.0", limit=5000)
         limit = _recorded_limit(m, "/api/conversations.replies")
-    assert limit == "200"
+    assert limit == "199", "Slack adds the root to every page, so 199 replies make 200 messages"
+
+
+@pytest.mark.asyncio
+async def test_read_thread_limit_one_still_requests_a_reply(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Slack refuses limit=0, so the smallest page is the root and one reply."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(_CONVERSATIONS_REPLIES, payload={"ok": True, "messages": []})  # pyright: ignore[reportUnknownMemberType]
+        await _slack_read_thread_impl(runtime, auth, thread_id="C1:1.0", limit=1)
+        limit = _recorded_limit(m, "/api/conversations.replies")
+    assert limit == "1"
 
 
 @pytest.mark.asyncio
@@ -1480,7 +1503,7 @@ async def test_read_thread_passes_the_requested_limit_through(
         )
         result = await _slack_read_thread_impl(runtime, auth, thread_id="C1:1.0", limit=50)
         limit = _recorded_limit(m, "/api/conversations.replies")
-    assert limit == "50"
+    assert limit == "49", "the root Slack adds to the page counts toward the caller's limit"
     assert result.has_more is True, "truncation must reach the caller"
 
 
@@ -1814,6 +1837,9 @@ async def test_read_thread_has_more_returns_next_cursor_and_a_hint_naming_it(
     assert result.hint is not None and "cursor=CURSOR_NEXT" in result.hint, (
         "the hint must hand the agent the exact argument to pass next"
     )
+    assert "older" in result.hint and "newer" not in result.hint, (
+        "Slack pages a thread from its newest replies back, so the cursor reaches older ones"
+    )
 
 
 @pytest.mark.asyncio
@@ -1873,3 +1899,114 @@ async def test_read_thread_reply_ts_refetch_by_parent_keeps_the_cursor(
         cursors = _recorded_query(m, "/api/conversations.replies", "cursor")
     assert result.thread_ts == "1.0"
     assert cursors == ["CURSOR_3", "CURSOR_3"], "both lookups page from the same continuation"
+
+
+_ROOT_TS = "1000.000000"
+_FACT_TS = [f"{1001 + i}.000000" for i in range(205)]
+
+
+def _replies_callback(reply_ts: list[str]) -> Callable[..., CallbackResult]:
+    """conversations.replies as staging served a 205-reply thread.
+
+    Each page is the root plus the newest `limit` replies not yet returned,
+    oldest-first; the cursor names the newest reply left, which the next page
+    includes. A reply's own ts returns just that reply, as Slack does.
+    """
+
+    def callback(url: URL, **kwargs: Any) -> CallbackResult:
+        query = {**url.query, **(kwargs.get("params") or {})}
+        root = {"ts": _ROOT_TS, "user": "U_A", "text": "root", "thread_ts": _ROOT_TS}
+        if str(query["ts"]) != _ROOT_TS:
+            reply = {"ts": query["ts"], "user": "U_A", "text": "reply", "thread_ts": _ROOT_TS}
+            return CallbackResult(payload={"ok": True, "has_more": False, "messages": [reply]})
+        cursor = query.get("cursor")
+        remaining = (
+            reply_ts
+            if not cursor
+            else [ts for ts in reply_ts if float(ts) <= float(str(cursor).removeprefix("next_ts:"))]
+        )
+        limit = int(query["limit"])
+        page = remaining[-limit:]
+        has_more = len(remaining) > limit
+        payload: dict[str, Any] = {
+            "ok": True,
+            "has_more": has_more,
+            "messages": [
+                root,
+                *(
+                    {"ts": ts, "user": "U_A", "text": f"fact {ts}", "thread_ts": _ROOT_TS}
+                    for ts in page
+                ),
+            ],
+        }
+        if has_more:
+            payload["response_metadata"] = {"next_cursor": f"next_ts:{remaining[-limit - 1]}"}
+        return CallbackResult(payload=payload)
+
+    return callback
+
+
+def _mock_thread(m: aioresponses, reply_ts: list[str]) -> None:
+    m.get(  # pyright: ignore[reportUnknownMemberType]
+        _CONVERSATIONS_INFO,
+        payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        repeat=True,
+    )
+    m.get(_USERS_INFO, payload=_FULL_MEMBER, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+    m.get(_CONVERSATIONS_REPLIES, callback=_replies_callback(reply_ts), repeat=True)  # pyright: ignore[reportUnknownMemberType]
+
+
+async def _read_every_page(
+    runtime: McpRuntime, auth: AuthIdentity, *, thread_id: str, limit: int
+) -> list[SlackThreadResult]:
+    pages = [await _slack_read_thread_impl(runtime, auth, thread_id=thread_id, limit=limit)]
+    while pages[-1].next_cursor is not None:
+        pages.append(
+            await _slack_read_thread_impl(
+                runtime, auth, thread_id=thread_id, limit=limit, cursor=pages[-1].next_cursor
+            )
+        )
+    return pages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_ts", [_ROOT_TS, _FACT_TS[100]], ids=["root", "reply-alias"])
+async def test_read_thread_pages_a_long_thread_within_200_and_reaches_every_reply(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], target_ts: str
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        _mock_thread(m, _FACT_TS)
+        pages = await _read_every_page(runtime, auth, thread_id=f"C1:{target_ts}", limit=1000)
+    first, last = pages[0], pages[-1]
+    assert len(first.messages) == 200, "the root counts toward the 200-message ceiling"
+    assert first.messages[0].text == "root" and first.thread_ts == _ROOT_TS
+    assert first.hint is not None and "older" in first.hint
+    assert all(len(page.messages) <= 200 for page in pages)
+    assert last.has_more is False and last.next_cursor is None and last.hint is None
+    replies = [m_.ts for page in pages for m_ in page.messages if m_.ts != _ROOT_TS]
+    assert sorted(replies, key=float) == _FACT_TS, "every reply exactly once, none skipped"
+    assert max(float(m_.ts) for m_ in pages[1].messages[1:]) < min(
+        float(m_.ts) for m_ in first.messages[1:]
+    ), "the cursor reaches older replies, as the hint says"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [1, 0, -5])
+async def test_read_thread_below_two_reads_the_root_and_one_reply_per_page(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], limit: int
+) -> None:
+    """Slack refuses limit=0, so a page always holds the root and one reply."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        _mock_thread(m, _FACT_TS[:3])
+        pages = await _read_every_page(runtime, auth, thread_id=f"C1:{_ROOT_TS}", limit=limit)
+        limits = _recorded_query(m, "/api/conversations.replies", "limit")
+    assert set(limits) == {"1"}
+    assert [[m_.text for m_ in page.messages] for page in pages] == [
+        ["root", f"fact {_FACT_TS[2]}"],
+        ["root", f"fact {_FACT_TS[1]}"],
+        ["root", f"fact {_FACT_TS[0]}"],
+    ]
