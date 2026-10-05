@@ -174,8 +174,8 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
             if exc.code == 50001:
                 raise _bot_read_error(channel) from exc
             raise
-        if not rows and await _bot_lacks_read_permission(guild, channel):
-            raise _bot_read_error(channel)
+        if not rows and (missing := await _bot_lacks_read_permission(guild, channel)):
+            raise _bot_read_error(channel, missing_history=missing == "history")
         return ReadChannelResult(rows=rows, next_before=next_before, hint=hint)
 
 
@@ -372,8 +372,8 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
             if exc.code == 50001:
                 raise _bot_read_error(channel) from exc
             raise
-        if not rows and await _bot_lacks_read_permission(guild, channel):
-            raise _bot_read_error(channel)
+        if not rows and (missing := await _bot_lacks_read_permission(guild, channel)):
+            raise _bot_read_error(channel, missing_history=missing == "history")
         return ReadThreadResult(rows=rows, next_before=next_before, hint=hint)
 
 

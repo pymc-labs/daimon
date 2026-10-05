@@ -56,6 +56,33 @@ async def _setter_display_name(
     return None
 
 
+async def _require_thread_in_channel(
+    runtime: McpRuntime, auth: AuthIdentity, channel_id: str, thread_id: str
+) -> None:
+    """Reject a thread from another channel before loading its rule or binding."""
+    if auth.platform == "discord":
+        try:
+            async with rest_client(_require_bot_token(runtime)) as client:
+                thread = await client.fetch_channel(int(thread_id))
+        except (discord.HTTPException, ValueError) as exc:
+            raise ToolError("thread does not belong to this channel") from exc
+        if not isinstance(thread, discord.Thread) or str(thread.parent_id) != channel_id:
+            raise ToolError("thread does not belong to this channel")
+    elif auth.platform == "slack":
+        if auth.external_id is None:
+            raise ToolError("thread does not belong to this channel")
+        try:
+            client = await slack_web_client(runtime, team_id=auth.external_id)
+            response = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_id, ts=thread_id, limit=1
+            )
+        except (SlackApiError, ToolError) as exc:
+            raise ToolError("thread does not belong to this channel") from exc
+        messages = cast(list[dict[str, Any]], response.get("messages") or [])
+        if not messages or str(messages[0].get("ts")) != thread_id:
+            raise ToolError("thread does not belong to this channel")
+
+
 async def _where_am_i_impl(
     runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None, thread_id: str | None
 ) -> HereCard:
@@ -78,6 +105,8 @@ async def _where_am_i_impl(
             raise ToolError("missing channel access")
     else:
         raise ToolError("/here is available for Discord and Slack channel turns")
+    if thread_id is not None:
+        await _require_thread_in_channel(runtime, auth, channel_id, thread_id)
     github = runtime.settings.github
     async with runtime.session_factory() as session:
         return await load_here_card(

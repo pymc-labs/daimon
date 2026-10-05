@@ -402,8 +402,8 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                         raise _bot_read_error(ch_id) from exc
                     raise
                 guild_ch = _require_guild_channel(raw_ch, guild_id)
-                if await _bot_lacks_read_permission(guild, guild_ch):
-                    raise _bot_read_error(guild_ch)
+                if missing := await _bot_lacks_read_permission(guild, guild_ch):
+                    raise _bot_read_error(guild_ch, missing_history=missing == "history")
         return SearchResult(
             total_results=effective_total,
             showing=showing,

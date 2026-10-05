@@ -6,10 +6,12 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools.discord._models import ChannelRow
 from daimon.adapters.mcp.tools.here import (  # pyright: ignore[reportPrivateUsage]
+    _require_thread_in_channel,
     _setter_display_name,
     _where_am_i_impl,
 )
@@ -90,6 +92,54 @@ async def test_discord_setter_uses_plain_member_name() -> None:
         patch("daimon.adapters.mcp.tools.here.rest_client", return_value=context),
     ):
         assert await _setter_display_name(_runtime(), _auth(), "789") == "Alex"
+
+
+async def test_discord_thread_must_belong_to_requested_channel() -> None:
+    client = MagicMock()
+    client.fetch_channel = AsyncMock(return_value=MagicMock(spec=discord.Thread, parent_id=999))
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=client)
+    context.__aexit__ = AsyncMock(return_value=None)
+    with (
+        patch("daimon.adapters.mcp.tools.here._require_bot_token", return_value="token"),
+        patch("daimon.adapters.mcp.tools.here.rest_client", return_value=context),
+        pytest.raises(ToolError, match="thread does not belong to this channel"),
+    ):
+        await _require_thread_in_channel(_runtime(), _auth(), "222", "333")
+
+
+async def test_slack_thread_must_belong_to_requested_channel() -> None:
+    client = MagicMock()
+    client.conversations_replies = AsyncMock(return_value={"messages": [{"ts": "111.000001"}]})
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.here.slack_web_client", new=AsyncMock(return_value=client)
+        ),
+        pytest.raises(ToolError, match="thread does not belong to this channel"),
+    ):
+        await _require_thread_in_channel(_runtime(), _auth(platform="slack"), "C1", "222.000002")
+
+
+async def test_tool_checks_thread_before_loading_card() -> None:
+    caller = SimpleNamespace(inside_channel_id=None, home_place=lambda _id: None)
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.here.load_caller_view", new=AsyncMock(return_value=caller)
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.here._list_channels_impl",
+            new=AsyncMock(return_value=[ChannelRow(id="here", name="here", type="text")]),
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.here._require_thread_in_channel",
+            new=AsyncMock(side_effect=ToolError("thread does not belong to this channel")),
+        ) as check,
+        patch("daimon.adapters.mcp.tools.here.load_here_card", new=AsyncMock()) as load,
+        pytest.raises(ToolError, match="thread does not belong to this channel"),
+    ):
+        await _where_am_i_impl(_runtime(), _auth(), "here", "thread")
+    check.assert_awaited_once()
+    load.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

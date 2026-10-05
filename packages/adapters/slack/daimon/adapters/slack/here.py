@@ -9,6 +9,7 @@ from daimon.adapters.slack.errors import generate_request_id, surface_command_er
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_details import GitHubDeploymentFacts
+from daimon.core.errors import DaimonError
 from daimon.core.here_card import load_here_card
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import find_platform_principal
@@ -60,13 +61,26 @@ def _plain_blocks(card_text: str) -> list[dict[str, Any]]:
             {
                 "type": "section",
                 "text": {
-                    "type": "mrkdwn" if line.startswith("Set by: <@") else "plain_text",
+                    "type": "plain_text",
                     "text": line,
                 },
             }
             for line in body.splitlines()
         ),
     ]
+
+
+async def _setter_display_name(client: AsyncWebClient, external_id: str) -> str | None:
+    """Resolve the setter to a plain name; never return a Slack mention."""
+    try:
+        response = await client.users_info(user=external_id)  # pyright: ignore[reportUnknownMemberType]
+    except SlackApiError:
+        return None
+    user = cast(dict[str, Any], response.get("user") or {})
+    profile = cast(dict[str, Any], user.get("profile") or {})
+    return (
+        str(profile.get("display_name") or user.get("real_name") or user.get("name") or "") or None
+    )
 
 
 async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
@@ -114,6 +128,9 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 else None,
                 is_admin=await resolve_is_admin(client, user_id=user_id),
                 caller_account_id=principal.account_id if principal else None,
+                resolve_setter_display=lambda external_id: _setter_display_name(
+                    client, external_id
+                ),
                 visible_channel_ids=visible_ids,
                 bot_can_view=bot_view,
                 caller_can_view=caller_view,
@@ -134,7 +151,7 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 parse="none",
                 link_names=False,
             )
-    except SlackApiError as exc:
+    except (SlackApiError, DaimonError) as exc:
         await surface_command_error(
             client,
             exc,

@@ -74,6 +74,8 @@ class HereCard(BaseModel):
     publishing_needs_approval: bool | None = None
     bot_can_view: bool | None = None
     caller_can_view: bool | None = None
+    bot_can_read_history: bool | None = None
+    caller_can_read_history: bool | None = None
     agent_can_read_here: bool | None = None
     category_channels_bot_can_view: tuple[str, ...] = ()
     credentials: tuple[CredentialStatus, ...] = ()
@@ -105,6 +107,8 @@ def assemble_here_card(
     visible_channel_ids: Collection[str] | None = None,
     bot_can_view: bool | None = None,
     caller_can_view: bool | None = None,
+    bot_can_read_history: bool | None = None,
+    caller_can_read_history: bool | None = None,
     category_channels_bot_can_view: Sequence[str] = (),
 ) -> HereCard:
     """Build the complete card from visible facts; never accept a token value."""
@@ -280,6 +284,11 @@ def assemble_here_card(
             f"Agent can read here: {_yes(can_read)} (Daimon rule; platform access separate).",
         ]
     )
+    if bot_can_read_history is not None or caller_can_read_history is not None:
+        lines.append(
+            f"Can read history: bot {_yes(bot_can_read_history)}; "
+            f"you {_yes(caller_can_read_history)}."
+        )
     if stored_thread_rule is not None and (
         _reader_rank(stored_thread_rule.readers) > _reader_rank(stored_channel_rule.readers)
         or stored_thread_rule.writers == "none"
@@ -338,6 +347,8 @@ def assemble_here_card(
         publishing_needs_approval=needs_approval,
         bot_can_view=bot_can_view,
         caller_can_view=caller_can_view,
+        bot_can_read_history=bot_can_read_history,
+        caller_can_read_history=caller_can_read_history,
         agent_can_read_here=can_read,
         category_channels_bot_can_view=tuple(category_channels_bot_can_view),
         credentials=tuple(credentials),
@@ -396,6 +407,8 @@ async def load_here_card(
     visible_channel_ids: Collection[str] | None = None,
     bot_can_view: bool | None = None,
     caller_can_view: bool | None = None,
+    bot_can_read_history: bool | None = None,
+    caller_can_read_history: bool | None = None,
     category_channels_bot_can_view: Sequence[tuple[str, str]] = (),
 ) -> HereCard:
     """Load the current routing and credential names for one caller's place."""
@@ -436,6 +449,9 @@ async def load_here_card(
     mcp_urls: set[str] = set()
     grants: tuple[McpOAuthGrantRow, ...] = ()
     if roster.answering is not None:
+        ma_agent = await get_setup_agent(
+            anthropic, tenant_id=tenant_id, ma_agent_id=roster.answering.ma_agent_id
+        )
         details = await load_agent_details(
             session,
             anthropic,
@@ -449,12 +465,9 @@ async def load_here_card(
             public_mcp_url=public_mcp_url,
             is_admin=is_admin,
             channel_label=channel_id,
+            preloaded_agent=ma_agent,
         )
-        # Keep alias lookup local to this card; AgentDetails is also returned
-        # by get_agent and must not gain a new public field for /here.
-        ma_agent = await get_setup_agent(
-            anthropic, tenant_id=tenant_id, ma_agent_id=details.ma_agent_id
-        )
+        # Keep aliases local to this card; get_agent's response stays unchanged.
         rule_names = agent_pin_names(ma_agent.name, ma_agent.metadata)
         agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=details.ma_agent_id)
         mcp_urls = {
@@ -547,5 +560,7 @@ async def load_here_card(
         visible_channel_ids=visible_channel_ids,
         bot_can_view=bot_can_view,
         caller_can_view=caller_can_view,
+        bot_can_read_history=bot_can_read_history,
+        caller_can_read_history=caller_can_read_history,
         category_channels_bot_can_view=category_labels,
     )

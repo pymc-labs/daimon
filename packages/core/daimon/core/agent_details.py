@@ -242,11 +242,13 @@ async def load_agent_details(
     public_mcp_url: str | None,
     is_admin: bool,
     channel_label: str | None,
+    preloaded_agent: BetaManagedAgentsAgent | None = None,
 ) -> AgentDetails:
     """Read everything `build_agent_details` needs, then fold it.
 
-    Exactly one MA retrieve, through `get_setup_agent`, so an agent from
+    At most one MA retrieve, through `get_setup_agent`, so an agent from
     another install or an archived one is refused before any of this is read.
+    A caller may pass an agent it already retrieved through that check.
     The skills listing is a second call, which `resolve_custom_skill_titles`
     skips entirely unless a custom skill is attached — built-in skills need no
     title lookup.
@@ -256,7 +258,9 @@ async def load_agent_details(
     channel's. A non-admin is refused an agent an isolated channel hides from
     `channel_id`, as if it did not exist.
     """
-    agent = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+    agent = preloaded_agent or await get_setup_agent(
+        anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id
+    )
     viewer = await load_rule_viewer(
         session, anthropic, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
     )

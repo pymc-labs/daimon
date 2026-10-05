@@ -64,12 +64,16 @@ class HereCog(commands.Cog):
                 and item.permissions_for(bot_member).view_channel
             }
             bot_view: bool | None = None
+            bot_history: bool | None = None
             try:
                 await interaction.guild.fetch_channel(channel.id)
-                bot_view = True
+                bot_perms = channel.permissions_for(bot_member)
+                bot_view = bot_perms.view_channel
+                bot_history = bot_perms.read_message_history if bot_view else False
             except discord.Forbidden as exc:
                 if exc.code == 50001:
                     bot_view = False
+                    bot_history = False
                 else:
                     raise
             category_visible: list[tuple[str, str]] = []
@@ -84,6 +88,7 @@ class HereCog(commands.Cog):
                         (str(sibling.id), f"#{sibling.name}: {'yes' if bot_can_view else 'no'}")
                     )
             github = runtime.settings.github
+            caller_perms = channel.permissions_for(member) if member is not None else None
             async with runtime.sessionmaker() as session:
                 principal = await find_platform_principal(
                     session,
@@ -112,8 +117,11 @@ class HereCog(commands.Cog):
                     caller_account_id=principal.account_id if principal else None,
                     visible_channel_ids=visible_ids,
                     bot_can_view=bot_view,
-                    caller_can_view=member is not None
-                    and channel.permissions_for(member).view_channel,
+                    caller_can_view=caller_perms.view_channel if caller_perms else None,
+                    bot_can_read_history=bot_history,
+                    caller_can_read_history=caller_perms.read_message_history
+                    if caller_perms
+                    else None,
                     category_channels_bot_can_view=category_visible,
                 )
             await interaction.edit_original_response(

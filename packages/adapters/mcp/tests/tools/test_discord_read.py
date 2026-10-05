@@ -338,7 +338,7 @@ async def test_empty_read_explains_missing_bot_history_permission(
         raise AssertionError(f"unexpected route {route.method} {route.path}")
 
     patch_discord_http(monkeypatch, handler)
-    with pytest.raises(ToolError, match="daimon's Discord role can't view #general"):
+    with pytest.raises(ToolError, match="daimon's Discord role can't read #general"):
         await _read_channel_impl(_runtime_with_discord_token(), _auth(), channel_id="222")
 
 

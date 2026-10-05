@@ -113,6 +113,24 @@ def test_key_names_only_and_session_status_unknown() -> None:
     assert card.memory_writable_here
 
 
+def test_discord_card_reports_history_separately_from_view() -> None:
+    card = assemble_here_card(
+        channel_id="one",
+        agent_name="helper",
+        tier="channel",
+        channel=None,
+        tenant=None,
+        configuration_target_name=None,
+        policy=TenantAccessPolicy(),
+        details=None,
+        bot_can_view=True,
+        caller_can_view=True,
+        bot_can_read_history=False,
+        caller_can_read_history=True,
+    )
+    assert "Can read history: bot no; you yes." in card.text
+
+
 def test_channel_and_agent_rules_show_derived_limits() -> None:
     card = assemble_here_card(
         channel_id="home",
@@ -319,11 +337,8 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
         AsyncMock(return_value=(None, [])),
     )
     monkeypatch.setattr(here_card_module, "load_agent_details", AsyncMock(return_value=details))
-    monkeypatch.setattr(
-        here_card_module,
-        "get_setup_agent",
-        AsyncMock(return_value=SimpleNamespace(name="daimon", metadata={})),
-    )
+    setup_agent = AsyncMock(return_value=SimpleNamespace(name="daimon", metadata={}))
+    monkeypatch.setattr(here_card_module, "get_setup_agent", setup_agent)
     monkeypatch.setattr(
         here_card_module.agent_mcp_credentials,
         "list_credentials",
@@ -368,6 +383,11 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
         category_channels_bot_can_view=(("private", "#private: yes"), ("outside", "#outside: yes")),
     )
     assert card.agent_name == "daimon"
+    setup_agent.assert_awaited_once()
+    assert (
+        here_card_module.load_agent_details.await_args.kwargs["preloaded_agent"]
+        is setup_agent.return_value
+    )
     assert card.configuration_target_name == "target"
     assert "set by Alex ＠team ‹＠123›" in card.text
     assert "set_by_account_id" not in card.model_dump()
