@@ -31,6 +31,7 @@ from daimon.core.stores import channel_admins as channel_admins_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import github_credentials as github_credentials_store
+from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
@@ -75,6 +76,7 @@ class PurgePreview(BaseModel):
     account: PurgePreviewRow  # singular: 1 if row exists else 0
     user_skills: PurgePreviewRow
     github_credentials: PurgePreviewRow
+    github_user_links: PurgePreviewRow
     github_oauth_states: PurgePreviewRow
     mcp_tokens: PurgePreviewRow
     agent_github_binding: PurgePreviewRow
@@ -96,6 +98,7 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.user_configs, "user config row(s)"),
         (preview.user_skills, "synced skill(s)"),
         (preview.github_credentials, "GitHub token(s)"),
+        (preview.github_user_links, "GitHub user link(s)"),
         (preview.github_oauth_states, "OAuth handshake record(s)"),
         (preview.mcp_tokens, "MCP token(s)"),
         (preview.agent_github_binding, "per-agent GitHub link(s)"),
@@ -221,6 +224,12 @@ async def collect_purge_preview(
                     github_credentials_example = login
         github_credentials = PurgePreviewRow(
             count=github_credentials_total, example=github_credentials_example
+        )
+        github_user_links = PurgePreviewRow(
+            count=await github_links_store.count_users_orphaned_by_account_delete(
+                session, account_id=account_id
+            ),
+            example=None,
         )
 
         # 8. github_oauth_states — keyed by (platform, platform_user_id). Build
@@ -395,6 +404,7 @@ async def collect_purge_preview(
         account=account,
         user_skills=user_skills,
         github_credentials=github_credentials,
+        github_user_links=github_user_links,
         github_oauth_states=github_oauth_states,
         mcp_tokens=mcp_tokens,
         agent_github_binding=agent_github_binding,

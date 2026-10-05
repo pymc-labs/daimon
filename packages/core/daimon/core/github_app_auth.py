@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from collections.abc import Mapping
-from typing import cast
+from typing import Literal, cast
 
 import httpx
 import jwt
@@ -35,6 +35,47 @@ from daimon.core.github_rate_limit import (
 )
 
 _APP_INSTALL_URL_TEMPLATE = "https://github.com/apps/{slug}/installations/new"
+
+type PermissionProfile = Literal["read", "write"]
+READ_PERMISSIONS: Mapping[str, str] = {
+    "metadata": "read",
+    "contents": "read",
+    "issues": "read",
+    "pull_requests": "read",
+}
+WRITE_PERMISSIONS: Mapping[str, str] = {
+    "metadata": "read",
+    "contents": "write",
+    "issues": "write",
+    "pull_requests": "write",
+}
+PERMISSION_PROFILES: Mapping[PermissionProfile, Mapping[str, str]] = {
+    "read": READ_PERMISSIONS,
+    "write": WRITE_PERMISSIONS,
+}
+
+
+def group_repository_access(
+    grants: list[tuple[int, int, PermissionProfile]],
+) -> list[tuple[int, PermissionProfile, tuple[int, ...]]]:
+    """Group effective repository access into GitHub's 500-repository token limit."""
+    effective: dict[tuple[int, int], PermissionProfile] = {}
+    for installation_id, repo_id, profile in grants:
+        if installation_id <= 0 or repo_id <= 0:
+            raise ValueError("installation and repository IDs must be positive")
+        key = (installation_id, repo_id)
+        if key not in effective or profile == "write":
+            effective[key] = profile
+    groups: dict[tuple[int, PermissionProfile], list[int]] = {}
+    for (installation_id, repo_id), profile in effective.items():
+        group_key = (installation_id, profile)
+        group = groups.setdefault(group_key, [])
+        group.append(repo_id)
+    return [
+        (installation_id, profile, tuple(ids[start : start + 500]))
+        for (installation_id, profile), ids in groups.items()
+        for start in range(0, len(ids), 500)
+    ]
 
 
 def build_app_install_url(slug: str) -> str:
@@ -102,7 +143,9 @@ async def mint_installation_token(
     *,
     jwt: str,
     installation_id: int,
-    repository: str,
+    repository: str | None = None,
+    repository_ids: list[int] | None = None,
+    profile: PermissionProfile | None = None,
     permissions: Mapping[str, str] | None = None,
 ) -> str:
     """Exchange an App JWT for an installation access token (1h TTL).
@@ -111,21 +154,20 @@ async def mint_installation_token(
     with the required GitHub headers. Raises httpx.HTTPStatusError on non-2xx —
     never returns a sentinel (architecture rule: no exception-to-sentinel conversion).
 
-    The token is always narrowed to the one ``repository`` the caller is
-    authorized for. An installation typically covers many repositories and is
-    created by the repo owner for their own use, while every caller here acts
-    on behalf of a single binding whose recorded proof covers one repository;
-    an un-narrowed token would carry access to every repository in the
-    installation. ``repository`` is required so no caller can mint an
-    installation-wide token by omission.
+    The token is always narrowed to either a non-empty list of repository IDs
+    or one legacy repository name. Neither can be omitted, preventing an
+    installation-wide token.
 
     Args:
         http_client: Injected async HTTP client. Caller owns lifecycle.
         jwt: Signed App JWT from build_app_jwt.
         installation_id: Numeric GitHub installation ID.
-        repository: Repository name (no owner prefix) the token is scoped to.
+        repository: Legacy repository name (no owner prefix) the token is scoped to.
+        repository_ids: One to 500 repository IDs for agent-scoped access.
+        profile: Required permission profile when repository IDs are used.
         permissions: Optional permission subset (e.g. ``{"contents": "read"}``);
-            None keeps the installation's granted permissions.
+            applies only to legacy name-based calls. None keeps that
+            installation's granted permissions.
 
     Returns:
         The installation access token string from the JSON response.
@@ -135,11 +177,26 @@ async def mint_installation_token(
         httpx.HTTPStatusError: On other non-2xx responses from GitHub.
     """
     url = f"https://api.github.com/app/installations/{installation_id}/access_tokens"
-    if not repository or "/" in repository:
-        raise ValueError(
-            f"installation tokens must be scoped to one repository name, got {repository!r}"
-        )
-    request_body: dict[str, object] = {"repositories": [repository]}
+    if repository_ids is not None:
+        if (
+            repository is not None
+            or not repository_ids
+            or len(repository_ids) > 500
+            or any(repo_id <= 0 for repo_id in repository_ids)
+            or profile is None
+            or permissions is not None
+        ):
+            raise ValueError("ID-scoped installation tokens require 1..500 IDs and a profile")
+        request_body: dict[str, object] = {
+            "repository_ids": repository_ids,
+            "permissions": dict(PERMISSION_PROFILES[profile]),
+        }
+    else:
+        if not repository or "/" in repository or profile is not None:
+            raise ValueError(
+                f"installation tokens must be scoped to one repository name, got {repository!r}"
+            )
+        request_body = {"repositories": [repository]}
     if permissions is not None:
         request_body["permissions"] = dict(permissions)
     resp = await http_client.post(
