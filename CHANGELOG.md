@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Slack `/help` lists `/memory` and `/dm`.** Both commands worked but were missing from `/help`, so its list didn't match the commands Slack offers.
 - **A top-level Slack mention sees what was just said in the channel.** A fresh mention replayed only its own new thread, so a question about a message posted moments earlier went unanswered. Its first turn now gets up to 24 messages before it, as on Discord, read under `read_channel`'s rules. Mentions inside a thread replay that thread as before.
 - Concurrent mentions no longer rewrite an unchanged account role or platform roles on every admission. Policy and config share a database checkout, as do balance, user cap, channel budget and channel skills reads, while keeping their gate order. Managed Agents agent and environment retrieves share concurrent requests and cache live results for 30 seconds, reducing admission latency and API request pressure during bursts.
 - **Channel admins can ask their own agent to change its setup.** Discord and Slack turns now tell the agent when the requester administers the current channel, so it can call the setup tools for that channel's agent. The tools still check each target and refuse changes outside the caller's authority. Discord replies retain the active channel budget's remaining amount on the finished message.
