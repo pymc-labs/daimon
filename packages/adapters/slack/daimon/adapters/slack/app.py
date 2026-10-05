@@ -185,7 +185,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.named_agent import name_after_mention
+from daimon.core.named_agent import bind_named_thread, name_after_mention
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.slack_oauth import build_slack_connect_url
@@ -1868,7 +1868,7 @@ class SlackApp:
             )
         except NamedAgentRefused as err:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                channel=channel, thread_ts=thread_id, text=str(err)
+                channel=channel, thread_ts=thread_id, text=escape_mrkdwn(str(err))
             )
             return
         except MissingTurnConfigError as err:
@@ -1982,6 +1982,18 @@ class SlackApp:
             return
 
         agent = admission.agent
+        if not channel.startswith("D"):
+            await bind_named_thread(
+                self.runtime.sessionmaker,
+                config=admission.config,
+                tenant_id=tenant_id,
+                platform="slack",
+                parent_channel_id=channel,
+                thread_id=thread_id,
+                responder_ma_agent_id=agent.id,
+                responder_name=agent.name,
+                creator_account_id=admission.account_id,
+            )
         _lc_agent_name: str = agent.name
         _lc_model_id: str = agent.model.id
 

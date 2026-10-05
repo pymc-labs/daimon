@@ -21,6 +21,7 @@ from daimon.core.config import McpSettings
 from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
+from daimon.core.named_agent import bind_named_thread
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.stores.accounts import set_role
@@ -557,9 +558,33 @@ async def test_named_agent_uses_the_normal_admission_and_refuses_a_thread_switch
     assert selected.config.agent_name_tier == "named"
     assert (await admit(deps, **args, requested_agent_id=named.id)).agent.id == named.id
     assert (await admit(deps, **args, requested_agent_name="unknown")).agent.id == default.id
-    assert (
-        await admit(deps, **args, thread_id="new-thread", requested_agent_name="Planner")
-    ).agent.id == named.id
+    opening = await admit(deps, **args, thread_id="new-thread", requested_agent_name="Planner")
+    assert opening.agent.id == named.id
+    assert await bind_named_thread(
+        db_session_factory,
+        config=opening.config,
+        tenant_id=tenant.id,
+        platform=platform,
+        parent_channel_id="channel",
+        thread_id="new-thread",
+        responder_ma_agent_id=opening.agent.id,
+        responder_name=opening.agent.name,
+        creator_account_id=opening.account_id,
+    )
+    follow_up = await admit(deps, **args, thread_id="new-thread")
+    assert follow_up.agent.id == named.id
+    assert follow_up.config.thread_binding_kind == "handoff"
+    assert not await bind_named_thread(
+        db_session_factory,
+        config=follow_up.config,
+        tenant_id=tenant.id,
+        platform=platform,
+        parent_channel_id="channel",
+        thread_id="new-thread",
+        responder_ma_agent_id=named.id,
+        responder_name=named.name,
+        creator_account_id=follow_up.account_id,
+    )
     async with db_session_factory.begin() as session:
         await make_thread_session(
             session,
@@ -622,6 +647,144 @@ async def test_named_agent_in_an_own_readers_channel_names_its_own_agent(
             now=_NOW,
             requested_agent_name="visitor",
         )
+
+
+async def test_hidden_agent_name_and_id_behave_like_unknown_outside_its_home(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            channel_rules={"home": ChannelRule(readers="own", writers="own")},
+            agent_rules={"Planner": AgentRule(runs_in=("home",))},
+        ),
+    )
+    await db_session.commit()
+    default = ma_agent(id="ag_default", name="daimon", tenant_id=tenant.id)
+    hidden = ma_agent(id="ag_hidden", name="Planner", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", name="default", tenant_id=tenant.id)
+    router = MARouter()
+    router.add_agent_list(default, hidden)
+    router.add_agent(default)
+    router.add_agent(hidden)
+    router.add_environment_list(env)
+    router.add_environment(env)
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+    args = dict(
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="elsewhere",
+        now=_NOW,
+    )
+
+    ordinary = await admit(deps, **args)
+    guessed = await admit(deps, **args, requested_agent_name="Planner")
+    assert guessed.agent.id == ordinary.agent.id == default.id
+    assert guessed.config.agent_name_tier == ordinary.config.agent_name_tier
+    async with db_session_factory.begin() as session:
+        await make_thread_session(
+            session,
+            tenant=tenant,
+            platform="discord",
+            thread_id="thread",
+            ma_agent_id=default.id,
+            channel_id="elsewhere",
+        )
+    assert (
+        await admit(deps, **args, thread_id="thread", requested_agent_name="Planner")
+    ).agent.id == default.id
+    with pytest.raises(NamedAgentRefused, match="^That agent is unavailable"):
+        await admit(deps, **args, requested_agent_id=hidden.id)
+    assert (
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="home",
+            now=_NOW,
+            requested_agent_name="Planner",
+        )
+    ).agent.id == hidden.id
+
+
+async def test_hidden_agent_does_not_create_a_name_collision_or_refusal_in_another_home(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="other"),
+        tenant_id=tenant.id,
+        agent_name="local",
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            channel_rules={
+                "home": ChannelRule(readers="own", writers="own"),
+                "other": ChannelRule(readers="own", writers="own"),
+            },
+            agent_rules={
+                "planner": AgentRule(runs_in=("home",)),
+                "Secret": AgentRule(runs_in=("home",)),
+                "local": AgentRule(runs_in=("other",)),
+            },
+        ),
+    )
+    await db_session.commit()
+    default = ma_agent(id="ag_default", name="daimon", tenant_id=tenant.id)
+    local = ma_agent(id="ag_local", name="local", tenant_id=tenant.id)
+    hidden = ma_agent(id="ag_hidden", name="planner", tenant_id=tenant.id)
+    other_hidden = ma_agent(id="ag_other_hidden", name="Secret", tenant_id=tenant.id)
+    visible = ma_agent(id="ag_visible", name="Planner", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", name="default", tenant_id=tenant.id)
+    router = MARouter()
+    router.add_agent_list(default, local, hidden, other_hidden, visible)
+    router.add_agent(local)
+    router.add_agent(visible)
+    router.add_environment_list(env)
+    router.add_environment(env)
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+
+    assert (
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="outside",
+            now=_NOW,
+            requested_agent_name="Planner",
+        )
+    ).agent.id == visible.id
+    assert (
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="other",
+            now=_NOW,
+            requested_agent_name="Secret",
+        )
+    ).agent.id == local.id
 
 
 async def test_admit_gate_order_config_bail_wins_over_over_balance(

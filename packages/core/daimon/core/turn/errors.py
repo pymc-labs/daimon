@@ -119,7 +119,18 @@ class SessionBusyError(DaimonError):
 
 
 class NamedAgentRefused(DaimonError):
-    """A named request would switch an existing thread or leave its private room."""
+    """A named request cannot run here; a thread switch may offer Hand over."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        hand_over_agent_id: str | None = None,
+        hand_over_agent_name: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.hand_over_agent_id = hand_over_agent_id
+        self.hand_over_agent_name = hand_over_agent_name
 
 
 class SessionAgentMismatch(DaimonError):

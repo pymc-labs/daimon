@@ -89,7 +89,7 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.named_agent import name_after_mention
+from daimon.core.named_agent import bind_named_thread, name_after_mention
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.permissions import home_of
@@ -856,7 +856,9 @@ class TeamsApp:
                 now=datetime.now(UTC),
                 is_dm=inbound.kind == "dm",
                 external=ExternalFinding(inbound.is_external, inbound.is_external_known),
-                requested_agent_name=name_after_mention(inbound.text),
+                requested_agent_name=name_after_mention(inbound.text)
+                if inbound.bot_mentioned
+                else None,
             )
         except NamedAgentRefused as err:
             await self._say(inbound, str(err))
@@ -881,6 +883,18 @@ class TeamsApp:
                 admitted_ma_agent_id=admission.agent.id,
                 admitted_name=admission.agent.name,
                 asking_ma_agent_id=await self._asking_agent_id(continuation, tenant_id),
+            )
+        if inbound.kind == "channel":
+            await bind_named_thread(
+                self.runtime.sessionmaker,
+                config=admission.config,
+                tenant_id=tenant_id,
+                platform="teams",
+                parent_channel_id=inbound.channel_id,
+                thread_id=inbound.thread_id,
+                responder_ma_agent_id=admission.agent.id,
+                responder_name=admission.agent.name,
+                creator_account_id=admission.account_id,
             )
 
         # Committed before the post so a lost response still leaves a record. An

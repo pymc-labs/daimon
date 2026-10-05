@@ -17,6 +17,7 @@ import uuid
 
 import anthropic
 import structlog
+from daimon.adapters.discord.agent_roles import sync_agent_roles
 from daimon.adapters.discord.agent_setup.details_view import DetailsView
 from daimon.adapters.discord.agent_setup.hydrate import load_details_for, panel_viewer
 from daimon.adapters.discord.agent_setup.state import PanelState
@@ -165,6 +166,13 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                     ma_agent_id=created.anthropic_id,
                     channel_id=str(self.state.channel_id),
                     caller=channel_admin_caller(interaction.user),
+                )
+            if interaction.guild is not None:
+                await sync_agent_roles(
+                    guild=interaction.guild,
+                    tenant_id=tenant_id,
+                    anthropic=self.runtime.anthropic,
+                    sessionmaker=self.runtime.sessionmaker,
                 )
             async with self.runtime.sessionmaker() as session:
                 roster = await load_roster(

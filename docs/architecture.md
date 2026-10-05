@@ -136,14 +136,19 @@ config). The order is load-bearing and documented as such in the module:
    A direct bot mention may choose a named agent with `<agent-name>:` as the
    first token after the mention (case-insensitive NFKC match). Discord also
    accepts a mention of a bot-managed agent role, even without a bot mention.
+   An unknown name leaves ordinary routing in place without a notice. Agents
+   with a home cannot be named outside it, even if the caller guesses the name.
    The named choice overrides the unbound default but still enters `admit()`
    through `authorize(RUN_AGENT)` for the agent's `runs_in` and home rules,
-   plus the usual invoker and budget checks. A bound thread rejects a
+   plus the usual invoker and budget checks. A new named thread records a
+   `handoff` binding so later replies keep its agent. A bound thread rejects a
    different named agent and points to Hand over or `hand_off_task`. A
    channel with `readers: own` accepts only its own agent and names that agent
-   in the refusal. Discord reconciles roles on boot and regularly, excluding
-   agents with a home or a rule that runs nowhere; a missing Manage Roles
-   permission logs a warning while the text form remains available.
+   in the refusal. Discord reconciles roles after ready on processes running
+   the wake poller, every ten minutes, and after its agent-create and
+   channel-rule panel actions. It excludes agents with a home or a rule that
+   runs nowhere. Missing Manage Roles logs once per guild while the text form
+   remains available.
 6. Raise `MissingTurnConfigError` if no agent or environment resolved — before
    any MA call, so a misconfigured tenant sees the config error rather than a
    billing one.

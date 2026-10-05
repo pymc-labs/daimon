@@ -17,6 +17,7 @@ import anthropic as _anthropic
 import sentry_sdk
 import structlog
 import structlog.contextvars
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.agent_roles import sync_agent_roles
 from daimon.adapters.discord.attachments import build_attachment_url_prefix
@@ -68,7 +69,11 @@ from daimon.core.continuity.messages import (
     render_unexpected_loss,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_thread_wakes
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
+from daimon.core.defaults.ma_index import (
+    find_agent_by_daimon_tag,
+    list_agents_by_tenant,
+    list_agents_by_tenants,
+)
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
@@ -76,7 +81,7 @@ from daimon.core.errors import DaimonError, TurnError
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.named_agent import name_after_mention
+from daimon.core.named_agent import bind_named_thread, name_after_mention
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.routine_delivery import run_delivery_poller
@@ -607,13 +612,33 @@ class DaimonBot(commands.Bot):
     async def _agent_role_sync_loop(self) -> None:
         await self.wait_until_ready()
         while not self.draining and not self.is_closed():
-            for guild in self.guilds:
-                await self._sync_agent_roles(
-                    guild, derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
+            guild_tenants = {
+                guild.id: derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
+                for guild in self.guilds
+            }
+            try:
+                rosters = await list_agents_by_tenants(
+                    self.runtime.anthropic, tenant_ids=guild_tenants.values()
                 )
-            await asyncio.sleep(60)
+            except Exception:
+                log.exception("agent_roles.roster_lookup_failed")
+            else:
+                for guild in self.guilds:
+                    tenant_id = guild_tenants[guild.id]
+                    await self._sync_agent_roles(
+                        guild, tenant_id, agents=rosters.get(tenant_id, [])
+                    )
+            if self.draining or self.is_closed():
+                break
+            await asyncio.sleep(600)
 
-    async def _sync_agent_roles(self, guild: discord.Guild, tenant_id: uuid.UUID) -> None:
+    async def _sync_agent_roles(
+        self,
+        guild: discord.Guild,
+        tenant_id: uuid.UUID,
+        *,
+        agents: list[BetaManagedAgentsAgent] | None = None,
+    ) -> None:
         lock = self._agent_role_sync_locks.setdefault(guild.id, asyncio.Lock())
         async with lock:
             await sync_agent_roles(
@@ -621,6 +646,7 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id,
                 anthropic=self.runtime.anthropic,
                 sessionmaker=self.runtime.sessionmaker,
+                agents=agents,
             )
 
     async def setup_hook(self) -> None:
@@ -1574,12 +1600,16 @@ class DaimonBot(commands.Bot):
                 return
             # Only 'ready' proceeds.
             if role_mentions:
-                async with self.runtime.sessionmaker() as session:
-                    managed_roles = await roles_mentioned(
-                        session,
-                        tenant_id=tenant_id,
-                        role_ids=[str(item.id) for item in role_mentions],
-                    )
+                try:
+                    async with self.runtime.sessionmaker() as session:
+                        managed_roles = await roles_mentioned(
+                            session,
+                            tenant_id=tenant_id,
+                            role_ids=[str(item.id) for item in role_mentions],
+                        )
+                except Exception:
+                    log.exception("agent_roles.mention_lookup_failed", guild_id=guild_id)
+                    managed_roles = []
                 if len(managed_roles) > 1:
                     await message.channel.send("Name one agent at a time.")
                     return
@@ -2468,15 +2498,21 @@ class DaimonBot(commands.Bot):
         )
         try:
             if role_mentions:
-                async with self.runtime.sessionmaker() as session:
-                    selected_roles = await roles_mentioned(
-                        session,
-                        tenant_id=tenant_id,
-                        role_ids=[str(item.id) for item in role_mentions],
-                    )
+                try:
+                    async with self.runtime.sessionmaker() as session:
+                        selected_roles = await roles_mentioned(
+                            session,
+                            tenant_id=tenant_id,
+                            role_ids=[str(item.id) for item in role_mentions],
+                        )
+                except Exception:
+                    log.exception("agent_roles.mention_lookup_failed", guild_id=guild_id)
+                    selected_roles = []
             else:
                 selected_roles = []
             direct_mention = re.search(rf"<@!?{self.user.id}>", message.content)
+            if direct_mention is None and not selected_roles:
+                return
             admission = await admit(
                 self.runtime.turn_deps,
                 tenant_id=tenant_id,
@@ -2497,7 +2533,21 @@ class DaimonBot(commands.Bot):
                 else None,
             )
         except NamedAgentRefused as err:
-            await (thread or message.channel).send(str(err))
+            from daimon.adapters.discord.thread_handoff import hand_over_view
+
+            view = (
+                hand_over_view(agent_id=err.hand_over_agent_id, agent_name=err.hand_over_agent_name)
+                if err.hand_over_agent_id is not None and err.hand_over_agent_name is not None
+                else None
+            )
+            if view is None:
+                await (thread or message.channel).send(
+                    str(err), allowed_mentions=discord.AllowedMentions.none()
+                )
+            else:
+                await (thread or message.channel).send(
+                    str(err), view=view, allowed_mentions=discord.AllowedMentions.none()
+                )
             return
         except MissingTurnConfigError as err:
             log.info(
@@ -2652,6 +2702,17 @@ class DaimonBot(commands.Bot):
                 _open_thread(),
                 guild_id=guild_id,
                 after_s=discord_settings.thread_open_notice_after_s,
+            )
+            await bind_named_thread(
+                self.runtime.sessionmaker,
+                config=admission.config,
+                tenant_id=tenant_id,
+                platform="discord",
+                parent_channel_id=parent_channel_id,
+                thread_id=str(thread.id),
+                responder_ma_agent_id=agent.id,
+                responder_name=agent.name,
+                creator_account_id=admission.account_id,
             )
 
         # --- Wire lifecycle with send/edit callables ---

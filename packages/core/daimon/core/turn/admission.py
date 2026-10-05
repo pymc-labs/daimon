@@ -20,6 +20,7 @@ their pre-turn gate.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -383,11 +384,47 @@ async def admit_impl(
         )
     named_agent = None
     if requested_agent_name is not None or requested_agent_id is not None:
-        roster = await list_agents_by_tenant(deps.anthropic, tenant_id=tenant_id)
+        here = channel_permissions(
+            policy,
+            channel_id=thread_id or channel_id,
+            parent_channel_id=channel_id if thread_id is not None else None,
+        )
+        roster = deps.resolver_cache.named_rosters.get(tenant_id)
+        if roster is None:
+            pending = deps.resolver_cache.named_roster_reads.get(tenant_id)
+            if pending is None:
+
+                async def read_roster() -> list[BetaManagedAgentsAgent]:
+                    found = await list_agents_by_tenant(deps.anthropic, tenant_id=tenant_id)
+                    deps.resolver_cache.named_rosters[tenant_id] = found
+                    return found
+
+                pending = asyncio.create_task(read_roster())
+                deps.resolver_cache.named_roster_reads[tenant_id] = pending
+
+                def clear(done: asyncio.Task[list[BetaManagedAgentsAgent]]) -> None:
+                    if deps.resolver_cache.named_roster_reads.get(tenant_id) is done:
+                        del deps.resolver_cache.named_roster_reads[tenant_id]
+                    if not done.cancelled():
+                        done.exception()
+
+                pending.add_done_callback(clear)
+            roster = await asyncio.shield(pending)
+        visible = [
+            agent
+            for agent in roster
+            if (
+                agent_home := agent_permissions(
+                    policy, agent_names(agent.name, agent.metadata)
+                ).home
+            )
+            is None
+            or agent_home == here.home
+        ]
         named_agent = (
-            next((agent for agent in roster if agent.id == requested_agent_id), None)
+            next((agent for agent in visible if agent.id == requested_agent_id), None)
             if requested_agent_id is not None
-            else matching_agent(roster, requested_agent_name or "")
+            else matching_agent(visible, requested_agent_name or "")
         )
         if named_agent is None and requested_agent_id is not None:
             raise NamedAgentRefused(
@@ -406,17 +443,19 @@ async def admit_impl(
                 config.thread_binding_id is not None
                 and config.responder_ma_agent_id != named_agent.id
             ) or any(row.ma_agent_id != named_agent.id for row in live_sessions):
+                if config.thread_binding_kind == "setup":
+                    raise NamedAgentRefused(
+                        "This setup thread keeps its current agent. "
+                        "Start a new thread for another agent."
+                    )
                 raise NamedAgentRefused(
                     "This thread already belongs to another agent. Use Hand over where available "
-                    "or ask the current agent to call hand_off_task."
+                    "or ask the current agent to call hand_off_task.",
+                    hand_over_agent_id=named_agent.id,
+                    hand_over_agent_name=named_agent.name,
                 )
             named_permissions = agent_permissions(
                 policy, agent_names(named_agent.name, named_agent.metadata)
-            )
-            here = channel_permissions(
-                policy,
-                channel_id=thread_id or channel_id,
-                parent_channel_id=channel_id if thread_id is not None else None,
             )
             if here.home is not None and run_refusal(named_permissions, here) is not None:
                 own = parent_config.agent_name or "this channel's agent"

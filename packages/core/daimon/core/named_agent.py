@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import uuid
 from collections.abc import Sequence
 
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.scope import ResolvedConfig
+from daimon.core.stores.thread_agent_bindings import create_binding
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def normalized_name(name: str) -> str:
@@ -30,3 +34,33 @@ def matching_agent(
     matches = [agent for agent in agents if normalized_name(agent.name) == normalized_name(name)]
     # A collision after Unicode normalization is ambiguous, so do not guess.
     return matches[0] if len(matches) == 1 else None
+
+
+async def bind_named_thread(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    config: ResolvedConfig,
+    tenant_id: uuid.UUID,
+    platform: str,
+    parent_channel_id: str,
+    thread_id: str,
+    responder_ma_agent_id: str,
+    responder_name: str,
+    creator_account_id: uuid.UUID,
+) -> bool:
+    """Keep the first named responder for later turns through the handoff binding path."""
+    if config.agent_name_tier != "named" or config.thread_binding_id is not None:
+        return False
+    async with sessionmaker.begin() as session:
+        await create_binding(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            parent_channel_id=parent_channel_id,
+            thread_id=thread_id,
+            responder_ma_agent_id=responder_ma_agent_id,
+            responder_name=responder_name,
+            creator_account_id=creator_account_id,
+            kind="handoff",
+        )
+    return True

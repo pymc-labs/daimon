@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import discord
 
 log = structlog.get_logger()
+_missing_manage_roles: set[int] = set()
 
 
 async def sync_agent_roles(
@@ -25,53 +27,84 @@ async def sync_agent_roles(
     tenant_id: uuid.UUID,
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
+    agents: Sequence[BetaManagedAgentsAgent] | None = None,
 ) -> None:
     """Backfill, rename, and remove managed roles; never interrupt a chat turn."""
     member: discord.Member | None = getattr(guild, "me", None)
     if member is None or not member.guild_permissions.manage_roles:
-        log.warning("agent_roles.manage_roles_missing", guild_id=str(guild.id))
+        if guild.id not in _missing_manage_roles:
+            log.warning("agent_roles.manage_roles_missing", guild_id=str(guild.id))
+            _missing_manage_roles.add(guild.id)
         return
+    _missing_manage_roles.discard(guild.id)
     try:
-        agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        if agents is None:
+            agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
         async with sessionmaker() as session:
             policy = await load_access_policy(session, tenant_id=tenant_id)
             stored = {
                 row.ma_agent_id: row for row in await list_roles(session, tenant_id=tenant_id)
             }
         eligible: dict[str, BetaManagedAgentsAgent] = {}
+        undecided: set[str] = set()
         for agent in agents:
-            permissions = agent_permissions(policy, agent_names(agent.name, agent.metadata))
-            runnable = not permissions.runs_in or bool(
-                set(permissions.runs_in[0]).intersection(*permissions.runs_in[1:])
-            )
-            if permissions.home is None and runnable:
-                eligible[agent.id] = agent
-        for agent_id, row in stored.items():
-            if agent_id in eligible:
-                continue
-            role = guild.get_role(int(row.role_id))
-            if role is not None:
-                await role.delete(reason="Agent archived or has a home or runs nowhere")
-            async with sessionmaker.begin() as session:
-                await delete_role(session, tenant_id=tenant_id, ma_agent_id=agent_id)
-        for agent_id, agent in eligible.items():
-            row = stored.get(agent_id)
-            role = guild.get_role(int(row.role_id)) if row is not None else None
-            if role is None:
-                role = await guild.create_role(
-                    name=agent.name,
-                    mentionable=True,
-                    reason="Mentionable Daimon agent",
+            try:
+                permissions = agent_permissions(policy, agent_names(agent.name, agent.metadata))
+                runnable = not permissions.runs_in or bool(
+                    set(permissions.runs_in[0]).intersection(*permissions.runs_in[1:])
                 )
-            elif role.name != agent.name or not role.mentionable:
-                await role.edit(name=agent.name, mentionable=True, reason="Agent name changed")
-            async with sessionmaker.begin() as session:
-                await save_role(
-                    session,
-                    tenant_id=tenant_id,
-                    ma_agent_id=agent_id,
-                    role_id=str(role.id),
-                    agent_name=agent.name,
+                if permissions.home is None and runnable:
+                    eligible[agent.id] = agent
+            except Exception:
+                undecided.add(agent.id)
+                log.exception(
+                    "agent_roles.eligibility_failed", guild_id=str(guild.id), agent_id=agent.id
+                )
+        for agent_id, row in stored.items():
+            if agent_id in eligible or agent_id in undecided:
+                continue
+            try:
+                role = guild.get_role(int(row.role_id))
+                if role is not None:
+                    await role.delete(reason="Agent archived or has a home or runs nowhere")
+                async with sessionmaker.begin() as session:
+                    await delete_role(session, tenant_id=tenant_id, ma_agent_id=agent_id)
+            except Exception:
+                log.exception(
+                    "agent_roles.delete_failed", guild_id=str(guild.id), agent_id=agent_id
+                )
+        claimed = {row.role_id for row in stored.values()}
+        for agent_id, agent in eligible.items():
+            try:
+                row = stored.get(agent_id)
+                role = guild.get_role(int(row.role_id)) if row is not None else None
+                if role is None:
+                    candidates: list[discord.Role] = [
+                        candidate
+                        for candidate in guild.roles
+                        if candidate.name == agent.name and str(candidate.id) not in claimed
+                    ]
+                    role = candidates[0] if len(candidates) == 1 else None
+                if role is None:
+                    role = await guild.create_role(
+                        name=agent.name,
+                        mentionable=True,
+                        reason="Mentionable Daimon agent",
+                    )
+                elif role.name != agent.name or not role.mentionable:
+                    await role.edit(name=agent.name, mentionable=True, reason="Agent name changed")
+                async with sessionmaker.begin() as session:
+                    await save_role(
+                        session,
+                        tenant_id=tenant_id,
+                        ma_agent_id=agent_id,
+                        role_id=str(role.id),
+                        agent_name=agent.name,
+                    )
+                claimed.add(str(role.id))
+            except Exception:
+                log.exception(
+                    "agent_roles.agent_sync_failed", guild_id=str(guild.id), agent_id=agent_id
                 )
     except (discord.HTTPException, discord.ClientException) as exc:
         log.warning("agent_roles.sync_failed", guild_id=str(guild.id), error=str(exc))

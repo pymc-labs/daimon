@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Final
 
 import structlog
+from daimon.adapters.discord.agent_roles import sync_agent_roles
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import refuse_if_not_admin
@@ -191,6 +192,13 @@ class PermissionsView(PanelViewBase):
             notice = f"-# {exc} Nothing was changed."
         else:
             await audit(outcome="allowed", reason="completed")
+            if interaction.guild is not None:
+                await sync_agent_roles(
+                    guild=interaction.guild,
+                    tenant_id=tenant_id,
+                    anthropic=self.runtime.anthropic,
+                    sessionmaker=self.runtime.sessionmaker,
+                )
             log.info(
                 "agent_setup.channel_rule.saved",
                 readers=change.rule.readers,
