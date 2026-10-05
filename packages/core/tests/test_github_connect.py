@@ -31,6 +31,7 @@ from daimon.core.stores import (
     github_issued_tokens,
     github_links,
 )
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
@@ -167,9 +168,10 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
 
 @pytest.mark.asyncio
 async def test_refresh_serializes_for_one_github_user(
-    db_engine: AsyncEngine, db_clean: None
+    db_engine: AsyncEngine, db_nullpool_engine: AsyncEngine, db_clean: None
 ) -> None:
     sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
+    probe_sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     user_id = 98765
     async with sessionmaker.begin() as session:
@@ -189,10 +191,11 @@ async def test_refresh_serializes_for_one_github_user(
         nonlocal refreshes
 
         async def probe_row_lock() -> None:
-            async with sessionmaker.begin() as session:
+            async with probe_sessionmaker.begin() as session:
+                await session.execute(text("SET LOCAL lock_timeout = '3s'"))
                 assert await github_links.get_user_for_update(session, github_user_id=user_id)
 
-        await asyncio.wait_for(probe_row_lock(), timeout=1)
+        await asyncio.wait_for(probe_row_lock(), timeout=15)
         if request.url.path == "/login/oauth/access_token":
             refreshes += 1
             await asyncio.sleep(0.05)
