@@ -266,16 +266,18 @@ async def turn_channel_skills(
     channel_id: str,
     agent: BetaManagedAgentsAgent,
     agent_names: tuple[str | None, ...],
+    rows: Sequence[ChannelSkillRow] | None = None,
 ) -> tuple[BetaManagedAgentsCustomSkill, ...]:
     """The extra skills a turn in `channel_id` runs with, decided once per turn.
 
     One DB read; the skills list is read only when the channel adds something,
     to keep a clashing mount (which would fail the session) out.
     """
-    async with sessionmaker() as session:
-        rows = await list_channel_skills(
-            session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
-        )
+    if rows is None:
+        async with sessionmaker() as session:
+            rows = await list_channel_skills(
+                session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+            )
     if not rows:
         return ()
     bodies: dict[str, str] | None

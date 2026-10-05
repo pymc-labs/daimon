@@ -82,7 +82,12 @@ from daimon.adapters.slack.boot_sweep import (
 )
 from daimon.adapters.slack.budget_notice import with_budget_notifier
 from daimon.adapters.slack.channel_admin_groups import user_group_ids
-from daimon.adapters.slack.context import build_context_xml, build_delta_xml
+from daimon.adapters.slack.channel_reads import load_channel_read_policy
+from daimon.adapters.slack.context import (
+    build_channel_context_xml,
+    build_context_xml,
+    build_delta_xml,
+)
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.credential_requests import (
     CredentialSubmissionDecision,
@@ -139,6 +144,7 @@ from daimon.adapters.slack.runtime import (
     SlackRuntime,
     admission_refusal_message,
     resolve_bot_display_name,
+    responder_account,
     responder_handle,
 )
 from daimon.adapters.slack.setup_conversations import handle_setup_lifecycle
@@ -231,6 +237,7 @@ from daimon.core.turn.thread_queue import (
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import (
     build_handoff_notice,
+    holds_current_channel_admin_grant,
     render_turn_origin,
     turn_origin,
 )
@@ -294,6 +301,16 @@ def _compose_queued_content(events: list[dict[str, Any]]) -> str:
     if len(user_ids) == 1:
         return "\n\n".join(str(e.get("text", "")) for e in events)
     return "\n\n".join(f"[{_author_id(e)}]: {e.get('text', '')}" for e in events)
+
+
+def _is_top_level(event: dict[str, Any]) -> bool:
+    """Whether the event was posted in the channel itself, not in a thread.
+
+    Decided from the event, never from the session: a first turn in an
+    existing thread still replays that thread.
+    """
+    thread_ts = event.get("thread_ts")
+    return not thread_ts or thread_ts == event.get("ts")
 
 
 def _envelope_event_time(payload: dict[str, Any]) -> datetime | None:
@@ -1270,23 +1287,18 @@ class SlackApp:
             # nothing is posted into a thread that may never have mentioned it.
             # Dedup already recorded the event, so a Slack retry will not
             # re-deliver it — accepted for this once-per-process call.
-            bot_user_id = self._bot_user_ids.get(team_id)
-            if bot_user_id is None:
-                try:
-                    auth_resp = await client.auth_test()  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                except SlackApiError as exc:
-                    log.error(
-                        "slack.event_dropped.bot_user_id_unresolved",
-                        team_id=team_id,
-                        channel=channel,
-                        event_ts=event_ts,
-                        exc_info=exc,
-                    )
-                    capture_exception_with_scope(exc)
-                    return
-                bot_user_id = str(auth_resp.get("user_id") or "")
-                if bot_user_id:
-                    self._bot_user_ids[team_id] = bot_user_id
+            try:
+                bot_user_id = await self._bot_user_id(team_id, client)
+            except SlackApiError as exc:
+                log.error(
+                    "slack.event_dropped.bot_user_id_unresolved",
+                    team_id=team_id,
+                    channel=channel,
+                    event_ts=event_ts,
+                    exc_info=exc,
+                )
+                capture_exception_with_scope(exc)
+                return
             if not mentions_bot(event, bot_user_id=bot_user_id):
                 log.info(
                     "slack.event_dropped.no_explicit_mention",
@@ -1352,6 +1364,21 @@ class SlackApp:
                         thread_ts=event.get("thread_ts") or event_ts,
                         text=render_error(exc, request_id=request_id),
                     )
+
+    async def _bot_user_id(self, team_id: str, client: AsyncWebClient) -> str:
+        """This app's bot user in `team_id`, resolved via auth.test once per workspace.
+
+        Empty when Slack names no user; that result is not cached, so the next
+        event asks again. Raises `SlackApiError` when auth.test fails.
+        """
+        bot_user_id = self._bot_user_ids.get(team_id)
+        if bot_user_id is not None:
+            return bot_user_id
+        auth_resp = await client.auth_test()  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
+        bot_user_id = str(auth_resp.get("user_id") or "")
+        if bot_user_id:
+            self._bot_user_ids[team_id] = bot_user_id
+        return bot_user_id
 
     async def _maybe_post_connect_nudge(
         self,
@@ -1458,8 +1485,7 @@ class SlackApp:
             if setup_root is not None:
                 if str(event.get("ts") or "") == thread_id:
                     return
-                auth = await web_client.auth_test()  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                if event.get("user") == auth.get("user_id"):
+                if event.get("user") == await self._bot_user_id(team_id, web_client):
                     return
 
         assert self.runtime.settings.slack is not None, (
@@ -1781,7 +1807,9 @@ class SlackApp:
         against the mapping row.
 
         On first mention for a thread: creates a new MA session + ``thread_sessions``
-        row, replays thread history via ``build_context_xml`` (one Slack page).
+        row, replays thread history via ``build_context_xml`` (one Slack page),
+        or for a top-level mention the channel's preceding messages via
+        ``build_channel_context_xml``.
         On follow-up mentions: reuses the existing MA session, replays only the
         delta since the watermark via ``build_delta_xml``.
 
@@ -1792,6 +1820,10 @@ class SlackApp:
         No try/except — errors propagate to the listener boundary in
         ``_handle_app_mention``.
         """
+        # The bot account the mention names, resolved before anything is
+        # posted. The mention gate has cached it, so this is normally no Slack
+        # call.
+        account = responder_account(await self._bot_user_id(team_id, web_client))
         # --- Live admin lookup: one users.info per turn, before admit().
         # admin_status distinguishes "not an admin" (False) from "lookup failed"
         # (None) so the role write below can skip on failure rather than
@@ -2280,9 +2312,32 @@ class SlackApp:
             user_text = (
                 content_override if content_override is not None else str(event.get("text") or "")
             )
-            if not reused:
-                # First turn: replay thread history (one Slack page from the root).
-                user_message = await build_context_xml(
+
+            async def _first_turn_context() -> str:
+                """A top-level mention's channel up to the mention, else its thread.
+
+                Rebuilt on a recovery reseed with the same cutoff (the
+                trigger) and the access policy as it is then.
+                """
+                if _is_top_level(event):
+                    return await build_channel_context_xml(
+                        web_client,
+                        channel=channel,
+                        trigger_ts=str(event.get("ts") or thread_id),
+                        user_query=user_text,
+                        read_policy=await load_channel_read_policy(
+                            self.runtime.sessionmaker,
+                            tenant_id=tenant_id,
+                            grant=admission.grant,
+                            channel_id=channel,
+                            thread_ts=thread_id,
+                        ),
+                        author_id=author_id,
+                        is_admin=is_admin,
+                        proxy=proxy_ctx,
+                        key_names=key_names,
+                    )
+                return await build_context_xml(
                     web_client,
                     channel=channel,
                     thread_ts=thread_id,
@@ -2292,7 +2347,11 @@ class SlackApp:
                     proxy=proxy_ctx,
                     key_names=key_names,
                     page_limit=self._history_page_limit(),
+                    status_ts=lifecycle.status_ts,
                 )
+
+            if not reused:
+                user_message = await _first_turn_context()
             elif watermark is not None:
                 # Continuation: replay only messages since the last watermark.
                 user_message = await build_delta_xml(
@@ -2306,6 +2365,7 @@ class SlackApp:
                     proxy=proxy_ctx,
                     key_names=key_names,
                     page_limit=self._history_page_limit(),
+                    status_ts=lifecycle.status_ts,
                 )
             else:
                 # Reused session with no watermark (prior turn's final_ts was None).
@@ -2362,17 +2422,7 @@ class SlackApp:
 
             async def _reseed_user_message() -> str:
                 """Full history re-seed for the recreated session (dead-session recovery)."""
-                full_message = await build_context_xml(
-                    web_client,
-                    channel=channel,
-                    thread_ts=thread_id,
-                    user_query=user_text,
-                    author_id=author_id,
-                    is_admin=is_admin,
-                    proxy=proxy_ctx,
-                    key_names=key_names,
-                    page_limit=self._history_page_limit(),
-                )
+                full_message = await _first_turn_context()
                 if synthetic_prefix:
                     full_message = synthetic_prefix + "\n" + full_message
                 async with self.runtime.sessionmaker() as session:
@@ -2392,7 +2442,9 @@ class SlackApp:
                     render_turn_origin(
                         recovery_origin,
                         responder_handle=responder_handle(self.runtime.settings),
+                        responder_account=account,
                         session_state=session_state,
+                        is_channel_admin=is_channel_admin,
                     )
                     + "\n"
                     + full_message
@@ -2455,6 +2507,14 @@ class SlackApp:
                     started_at=datetime.now(tz=UTC),
                 )
                 await s.commit()
+            is_channel_admin = await holds_current_channel_admin_grant(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                account_id=admission.account_id,
+                platform="slack",
+                parent_channel_id=channel,
+                role=Role.ADMIN if is_admin else Role.USER,
+            )
             try:
                 async with turn_origin(
                     self.runtime.sessionmaker,
@@ -2481,7 +2541,9 @@ class SlackApp:
                             render_turn_origin(
                                 origin,
                                 responder_handle=responder_handle(self.runtime.settings),
+                                responder_account=account,
                                 session_state=session_state,
+                                is_channel_admin=is_channel_admin,
                             )
                             + "\n"
                             + user_message
@@ -2599,6 +2661,7 @@ class SlackApp:
                 channel=channel,
                 thread_id=thread_id,
                 account_id=admission.account_id,
+                team_id=team_id,
             )
 
             # Detached output sweep. `outcome.ma_session_id` is the post-recovery
@@ -2663,6 +2726,7 @@ class SlackApp:
         tenant_id: uuid.UUID,
         channel: str,
         thread_id: str,
+        team_id: str,
     ) -> None:
         with observe_turn(
             self.runtime.sessionmaker,
@@ -2679,6 +2743,7 @@ class SlackApp:
                 tenant_id=tenant_id,
                 channel=channel,
                 thread_id=thread_id,
+                team_id=team_id,
             )
 
     async def _run_continuation_turn_observed(
@@ -2690,6 +2755,7 @@ class SlackApp:
         tenant_id: uuid.UUID,
         channel: str,
         thread_id: str,
+        team_id: str,
     ) -> None:
         """Run the receiving agent's first turn for one dispatched continuation.
 
@@ -2725,6 +2791,21 @@ class SlackApp:
             else None
         )
 
+        # The bot account the mention names, resolved before the card posts.
+        # A continuation can be the first turn this process runs for the
+        # workspace, so the gate may not have cached it yet. A failed lookup
+        # runs the turn without it: the dispatcher settles a raising
+        # continuation as failed and never retries it.
+        try:
+            account = responder_account(await self._bot_user_id(team_id, web_client))
+        except (SlackApiError, aiohttp.ClientError, TimeoutError) as exc:
+            log.warning(
+                "slack.continuation.bot_user_id_unresolved",
+                team_id=team_id,
+                thread_id=thread_id,
+                exc_info=exc,
+            )
+            account = None
         # The follow-up runs as the requester, so it carries their role as it
         # stands NOW, read from Slack the way a mention reads it. A failed
         # lookup runs the turn as USER -- never more than the requester holds.
@@ -2865,7 +2946,9 @@ class SlackApp:
                 render_turn_origin(
                     recovery_origin,
                     responder_handle=responder_handle(self.runtime.settings),
+                    responder_account=account,
                     handoff=handoff_notice,
+                    is_channel_admin=is_channel_admin,
                 )
                 + "\n"
                 + seed_user_message
@@ -2901,6 +2984,14 @@ class SlackApp:
                 )
             return new_lifecycle
 
+        is_channel_admin = await holds_current_channel_admin_grant(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=follow_admission.account_id,
+            platform="slack",
+            parent_channel_id=channel,
+            role=role,
+        )
         try:
             async with turn_origin(
                 self.runtime.sessionmaker,
@@ -2930,7 +3021,9 @@ class SlackApp:
                         render_turn_origin(
                             follow_origin,
                             responder_handle=responder_handle(self.runtime.settings),
+                            responder_account=account,
                             handoff=handoff_notice,
+                            is_channel_admin=is_channel_admin,
                         )
                         + "\n"
                         + seed_user_message
@@ -2977,6 +3070,7 @@ class SlackApp:
         channel: str,
         thread_id: str,
         account_id: uuid.UUID,
+        team_id: str,
     ) -> None:
         """Claim and settle every pending continuation for this thread, guard held.
 
@@ -3015,6 +3109,7 @@ class SlackApp:
                 tenant_id=tenant_id,
                 channel=channel,
                 thread_id=thread_id,
+                team_id=team_id,
             ),
         )
 
@@ -3053,6 +3148,7 @@ class SlackApp:
                     channel=channel,
                     thread_id=thread_id,
                     account_id=account_id,
+                    team_id=team_id,
                 ),
                 lambda: self._drain_pending_mentions(
                     channel=channel,

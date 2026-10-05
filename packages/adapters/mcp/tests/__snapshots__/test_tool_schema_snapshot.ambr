@@ -3908,8 +3908,9 @@
         
         Discord: thread_id is the thread's channel id; use before for older messages.
         Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456).
-        Pages start at the root; pass next_cursor as cursor to read newer replies.
-        At most 200 messages per call; Slack may return a smaller page.
+        Returns the root and the newest replies; pass next_cursor as cursor for
+        older ones. At most 200 messages per call, the root included; a limit
+        below 2 still reads the root and one reply. Slack may return fewer.
         Teams: thread_id is <channel>;messageid=<root> (thread_id
         in turn_controls); returns the root and the newest 50 replies; pass
         next_cursor as cursor for older ones. cursor is Slack/Teams-only. Threads

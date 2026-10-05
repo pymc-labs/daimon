@@ -452,7 +452,6 @@ class DiscordTurnLifecycle:
                 await self._edit(
                     self._message_ref,
                     content=content,
-                    embed=None,
                     view=None,
                     allowed_mentions=mentions,
                     **({"attachments": files} if files else {}),
@@ -495,7 +494,6 @@ class DiscordTurnLifecycle:
         await self._edit(
             self._message_ref,
             content=updated,
-            embed=None,
             view=None,
             allowed_mentions=discord.AllowedMentions.none(),
         )

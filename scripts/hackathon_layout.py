@@ -124,11 +124,9 @@ def cli(*args: str) -> str:
 
 
 def parse_agent(output: str) -> str:
-    """The agent named by `channels isolation set`; Rich may wrap the line."""
+    """The agent named by `channels rule set`; Rich may wrap the line."""
     flat = " ".join(output.split())
-    # Agent names are slugs, so the match stops before ", copied from" or the
-    # sentence's full stop, and before any warning printed after it.
-    match = re.search(r"; its own agent is ([a-z0-9-]+)", flat)
+    match = re.search(r"([a-z0-9-]+)(?:, a copy of [a-z0-9-]+,)? is its own agent", flat)
     if match is None:
         raise RuntimeError(f"could not read isolated agent from CLI output: {output}")
     return match.group(1)
@@ -226,12 +224,16 @@ def setup_team(
         entry["agent_name"] = parse_agent(
             cli(
                 "channels",
-                "isolation",
+                "rule",
                 "set",
                 "discord",
                 guild,
                 channel_id,
-                "--fork-from",
+                "--readers",
+                "own",
+                "--writers",
+                "own",
+                "--copy-from",
                 args.fork_from,
             )
         )
@@ -336,7 +338,17 @@ def teardown_team(api: Discord, args: argparse.Namespace, state: dict, key: str)
     if channel:
         cli("channels", "budget", "clear", "discord", guild, channel)
         cli("channels", "admins", "clear", "discord", guild, channel)
-        cli("channels", "isolation", "lift", "discord", guild, channel)
+        cli(
+            "channels",
+            "rule",
+            "set",
+            "discord",
+            guild,
+            channel,
+            "--readers",
+            "any",
+            "--release-agents",
+        )
         if entry.get("agent_name"):
             cli("agents", "--guild", guild, "archive", entry["agent_name"], "--yes")
         api.request("DELETE", f"/channels/{channel}")

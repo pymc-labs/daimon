@@ -258,14 +258,15 @@ token bound to neither can't claim one. A single thread can take
 `channel_id:thread_ts`. Such a thread, its messages and (on Discord) its name
 are withheld from outside turns: in `read_thread` and `get_message`, in
 channel history (a Slack thread's root and broadcast replies; Discord's
-thread-created notice, whose text is the name), in `list_threads` and in
-search. Once any readers are limited, search reports only the hits it shows
-as its total, scoped or not, on both platforms, and Discord hints at more
-results only when a full page of visible hits came back, so neither the count
-nor the hint can reveal hidden matches. A turn inside a limited channel or
-thread gets read-only memory. An origin is any active one of the same account
-and responder, not only the current turn's: a member who copies an origin id
-out of such a turn can read that channel from elsewhere until it expires --
+thread-created notice, whose text is the name), in the channel context a Slack
+top-level mention starts with, in `list_threads` and in search. Once any
+readers are limited, search reports only the hits it shows as its total,
+scoped or not, on both platforms, and Discord hints at more results only when
+a full page of visible hits came back, so neither the count nor the hint can
+reveal hidden matches. A turn inside a limited channel or thread gets
+read-only memory. An origin is any active one of the same account and
+responder, not only the current turn's: a member who copies an origin id out
+of such a turn can read that channel from elsewhere until it expires --
 someone who could read it anyway. Outside reads are refused after the
 platform's own caller check, and search drops hidden hits.
 
@@ -432,7 +433,11 @@ Slack and Teams look up only the groups some grant names
 `TeamMember.Read.Group` consent), each cached for a minute, and a failed lookup
 grants nothing. `admit()` stores the member's matched group ids on the account
 (`accounts.platform_role_ids`) beside the role, so MCP tools test a grant
-without asking the platform for Discord roles. Every Slack member can edit
+without asking the platform for Discord roles. After admission, Discord and
+Slack turn controls also name a channel admin grant for the current parent
+channel; the model can then call setup tools, which independently check the
+target agent's reach. This does not change the account's server-admin role.
+Every Slack member can edit
 user groups by default, so a group grant admits whoever can join it and the
 workspace should limit group management to admins; outside a turn (the MCP
 verifier, hub reads, an OAuth callback, channel admin DMs) a stored Slack

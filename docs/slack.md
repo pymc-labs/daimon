@@ -59,9 +59,39 @@ reports the installed token lacks it.
 Thread context requests one page of `DAIMON_SLACK__HISTORY_PAGE_LIMIT` messages
 (default 100, range 1–1000). Slack may grant fewer depending on the app's rate
 limits; `has_more` still marks the replay as truncated. Message tools return at
-most 200 messages per call. `read_channel` returns a cursor for older messages;
-`read_thread` returns a cursor for newer replies, starting from the root. No
-automatic multi-page sweep runs during a turn.
+most 200 messages per call. `read_channel` returns a cursor for older messages.
+`read_thread` returns the root and the newest replies, with a cursor for older
+ones; the root counts toward its 200, and a limit below 2 still reads the root
+and one reply. No automatic multi-page sweep runs during a turn.
+
+A top-level mention starts a new thread with no history of its own, so its
+first turn gets the channel instead: one `conversations.history` page of 25
+messages ending at the mention, the mention itself left out, shown oldest
+first in a `<channel_context source="slack" trust="untrusted">` block. Nothing
+posted after the mention is included; earlier answers from the bot account
+are. A first turn inside an existing thread replays that thread as before.
+
+The channel is read as `read_channel` would read it for that turn: the
+answering agent must be allowed to read it from the new thread, and a thread
+whose readers are limited on its own is withheld (its root and broadcast
+replies) before any file link is minted.
+
+`truncated="true"` says older messages exist; apps distributed outside the
+Marketplace get at most 15. When the access policy can't be read, the read is
+refused, or Slack fails, rate-limits or takes over 10 seconds, the block is
+`status="unavailable"` and the turn runs without it; the fetch never waits out
+a rate limit. A recovery re-seed rebuilds the same window on the policy as it
+is then. On an install held to one history call a minute, this fetch spends
+that call, so a `read_channel` the agent makes straight after may wait up to a
+minute for Slack's limit to reset.
+
+The replay leaves out the turn's own status card, which is posted before
+history is read. Every other message stays, including earlier answers from the
+bot account and other bots' posts. The turn's controls name the bot account
+(`platform_user_id`, the `auth.test` user for the workspace) and its native
+`<@U…>` mention as the responder, so a mention of the app addresses the agent
+answering, whatever its name. The bot account can front different agents over a
+thread's life, so its earlier messages are not attributed to the current one.
 
 ### Skill files
 

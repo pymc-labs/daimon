@@ -3,34 +3,42 @@
 TDD test file (written before implementation, per Task 1 plan).
 
 Behavior asserted:
-- build_help_blocks() output text contains the five slash commands and the @bot entrypoint.
+- build_help_blocks() output text contains every slash command in the app manifest and the
+  @bot entrypoint.
 - handle_help_command posts chat.postEphemeral with the help blocks, never views.open.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import yaml
 from daimon.adapters.slack.runtime import SlackRuntime
 from yarl import URL
 
+_MANIFEST = Path(__file__).resolve().parents[4] / "docs" / "slack-app-manifest.yaml"
+
+
+def _manifest_commands() -> list[str]:
+    manifest = cast(dict[str, Any], yaml.safe_load(_MANIFEST.read_text()))
+    return [entry["command"] for entry in manifest["features"]["slash_commands"]]
+
 
 def test_build_help_blocks_contains_all_commands_and_at_bot_entrypoint() -> None:
-    """build_help_blocks() must include all five slash commands and the @bot entrypoint.
-
-    Acceptance: output text contains /routines, /billing, /privacy, /help, /agent-setup,
-    and the @bot conversational entrypoint (at-sign present per _CONVERSATIONAL constant).
-    """
+    """build_help_blocks() must include every manifest slash command and the @bot entrypoint."""
     from daimon.adapters.slack.help import build_help_blocks
 
     blocks = build_help_blocks()
     # Flatten to a single string to allow text to span across dicts / nested keys.
     all_text = str(blocks)
 
-    for cmd in ("/routines", "/billing", "/privacy", "/help", "/here", "/agent-setup"):
-        assert cmd in all_text, (
-            f"build_help_blocks() output must contain {cmd!r} "
+    commands = _manifest_commands()
+    assert "/memory" in commands and "/dm" in commands
+    for cmd in commands:
+        assert f"{cmd} —" in all_text, (
+            f"/help must list the manifest command {cmd!r} "
             f"(found keys: {[b.get('text', {}).get('text', '') if isinstance(b.get('text'), dict) else '' for b in blocks]!r})"
         )
 
