@@ -25,6 +25,7 @@ class IssuedToken(BaseModel):
     permissions: dict[str, str]
     grant_versions: dict[str, int]
     requester_account_id: uuid.UUID | None
+    github_user_id: int | None
     link_generation: int | None
     encrypted_token: bytes | None
     expires_at: datetime
@@ -49,8 +50,13 @@ async def create_pending(
     grant_versions: dict[str, int],
     expires_at: datetime,
     requester_account_id: uuid.UUID | None = None,
+    github_user_id: int | None = None,
     link_generation: int | None = None,
 ) -> IssuedToken:
+    if (requester_account_id is None) != (github_user_id is None) or (github_user_id is None) != (
+        link_generation is None
+    ):
+        raise ValueError("requester link identity and generation must be recorded together")
     if not repo_ids or len(repo_ids) > 500 or len(set(repo_ids)) != len(repo_ids):
         raise ValueError("token inventory requires 1..500 repository IDs")
     if any(
@@ -71,6 +77,7 @@ async def create_pending(
         permissions=permissions,
         grant_versions=grant_versions,
         requester_account_id=requester_account_id,
+        github_user_id=github_user_id,
         link_generation=link_generation,
         expires_at=expires_at,
         status="pending",
@@ -156,6 +163,7 @@ async def select_stale_tokens(
                   token.link_generation IS NOT NULL
                   AND (
                     user_link.github_user_id IS NULL
+                    OR user_link.github_user_id IS DISTINCT FROM token.github_user_id
                     OR user_link.status <> 'active'
                     OR user_link.link_generation IS DISTINCT FROM token.link_generation
                   )

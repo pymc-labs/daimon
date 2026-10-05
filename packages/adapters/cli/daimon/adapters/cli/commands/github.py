@@ -19,8 +19,6 @@ github_app = typer.Typer(help="GitHub App connection commands.")
 @github_app.command("connect-link")
 def connect_link(
     tenant: Annotated[uuid.UUID, typer.Option("--tenant", help="Destination workspace UUID.")],
-    workspace_name: Annotated[str | None, typer.Option("--workspace-name")] = None,
-    requested_by: Annotated[str | None, typer.Option("--requested-by")] = None,
 ) -> None:
     """Print a single-use connection invitation for a tenant admin."""
     settings = load_settings()
@@ -52,8 +50,7 @@ def connect_link(
                     session,
                     tenant_id=tenant,
                     requester_account_id=account_id,
-                    workspace_label=workspace_name,
-                    requester_label=requested_by or getpass.getuser(),
+                    requester_label=getpass.getuser(),
                 )
             console.print(f"{root}/oauth/github/connect/{token}")
         finally:

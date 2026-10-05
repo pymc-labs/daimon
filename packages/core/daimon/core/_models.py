@@ -2576,6 +2576,7 @@ class GitHubIssuedToken(Base):
     requester_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
     )
+    github_user_id: Mapped[int | None] = mapped_column(BigInteger)
     link_generation: Mapped[int | None] = mapped_column(Integer)
     encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

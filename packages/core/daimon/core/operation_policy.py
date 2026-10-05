@@ -156,7 +156,12 @@ def _decide_operation(
     if operation == "github_grant":
         return (
             "allow"
-            if is_admin or (target.is_local_to_caller_channels and target.is_held_by_caller)
+            if is_admin
+            or (
+                not target.is_daimon_managed
+                and target.is_local_to_caller_channels
+                and target.is_held_by_caller
+            )
             else "needs_admin"
         )
     decision = authorize(
@@ -201,7 +206,7 @@ def needs_reachability_read(
     if operation in _POSTED_TOKEN_OPERATIONS or operation == "github_connect":
         return False
     if operation == "github_grant":
-        return not is_admin
+        return not is_admin and not is_daimon_managed
     # Both remaining families only consult reachability once neither the
     # managed check nor the admin check has already settled the outcome.
     return not is_admin and not is_daimon_managed

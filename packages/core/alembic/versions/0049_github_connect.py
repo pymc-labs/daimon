@@ -13,6 +13,7 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
+    op.add_column("github_issued_tokens", sa.Column("github_user_id", sa.BigInteger()))
     op.create_table(
         "github_connect_invitations",
         sa.Column("token_hash", sa.Text(), primary_key=True),
@@ -74,6 +75,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_column("github_issued_tokens", "github_user_id")
     op.drop_table("tenant_github_org_scopes")
     op.drop_table("github_connect_flows")
     op.drop_table("github_connect_invitations")

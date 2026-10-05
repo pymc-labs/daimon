@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import html
+import logging
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from starlette.responses import RedirectResponse, Response
 RouteHandler = Callable[[Request], Awaitable[Response]]
 ClientFactory = Callable[[], httpx.AsyncClient]
 _COOKIE = "daimon_gh_connect"
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -131,7 +133,7 @@ async def _installations(client: httpx.AsyncClient, token: str) -> list[_Install
 
 async def _owned_orgs(client: httpx.AsyncClient, token: str) -> set[int]:
     rows = await list_github_pages(
-        client, "/user/memberships/orgs?state=active", token, "memberships"
+        client, "/user/memberships/orgs", token, "memberships", params={"state": "active"}
     )
     result: set[int] = set()
     for row in rows:
@@ -159,6 +161,7 @@ def build_oauth_github_routes(
     ):
         raise ValueError("GitHub connection is not configured")
     factory = client_factory or (lambda: httpx.AsyncClient(timeout=20.0, follow_redirects=False))
+    client_id = config.client_id
     secret = config.client_secret.get_secret_value()
     callback_url = f"{root}/oauth/github/callback"
 
@@ -265,7 +268,10 @@ def build_oauth_github_routes(
 
     async def confirm(request: Request) -> Response:
         if request.method == "POST":
-            fields = parse_qs((await request.body()).decode(), keep_blank_values=True)
+            try:
+                fields = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+            except UnicodeDecodeError:
+                return _error("Selection could not be verified.")
             state = fields.get("state", [""])[0]
         else:
             fields = {}
@@ -379,6 +385,18 @@ def build_oauth_github_routes(
                     )
             if not saved:
                 return _error()
+            try:
+                async with factory() as client:
+                    revocation = await client.request(
+                        "DELETE",
+                        f"https://api.github.com/applications/{client_id}/token",
+                        auth=(client_id, secret),
+                        json={"access_token": token},
+                        headers={"Accept": "application/vnd.github+json"},
+                    )
+                    revocation.raise_for_status()
+            except httpx.HTTPError:
+                _log.warning("GitHub connection token revocation failed")
             response = branded_page(
                 title="GitHub connected",
                 state_bar="",
@@ -393,7 +411,7 @@ def build_oauth_github_routes(
         parts = [
             f"<h1>{heading}</h1>",
             "<p>Select repositories and choose their maximum access.</p>",
-            '<form method="post" action="/oauth/github/confirm">',
+            f'<form method="post" action="{html.escape(root, quote=True)}/oauth/github/confirm">',
             f'<input type="hidden" name="state" value="{html.escape(state, quote=True)}">',
         ]
         access_options = '<option value="read">Read</option><option value="write">Write</option>'

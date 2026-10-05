@@ -79,7 +79,6 @@ async def test_connection_happy_path_and_rechecks(
             session,
             tenant_id=tenant_id,
             requester_account_id=account_id,
-            workspace_label="Example workspace",
             requester_label="Alex",
         )
     owner = True
@@ -92,6 +91,11 @@ async def test_connection_happy_path_and_rechecks(
             body = parse_qs(request.content.decode())
             assert body["code_verifier"][0]
             return httpx.Response(200, json={"access_token": "user-token"})
+        if request.url.path == "/applications/client/token":
+            assert request.method == "DELETE"
+            assert request.headers["authorization"].startswith("Basic ")
+            assert request.content == b'{"access_token":"user-token"}'
+            return httpx.Response(204)
         assert request.headers["authorization"] == "Bearer user-token"
         if request.url.path == "/user":
             return httpx.Response(200, json={"id": 17})
@@ -128,6 +132,7 @@ async def test_connection_happy_path_and_rechecks(
                 },
             )
         if request.url.path == "/user/memberships/orgs":
+            assert request.url.params["state"] == "active"
             return httpx.Response(
                 200,
                 json=[
@@ -188,7 +193,18 @@ async def test_connection_happy_path_and_rechecks(
         assert callback_response.status_code == 307
         page = await browser.get("/oauth/github/confirm", params={"state": state})
         assert page.status_code == 200
-        assert "Example workspace" in page.text and "Alex" in page.text
+        assert "discord workspace workspace" in page.text and "Alex" in page.text
+        assert 'action="https://mcp.test/oauth/github/confirm"' in page.text
+        assert page.headers["cache-control"] == "no-store"
+        assert page.headers["x-frame-options"] == "DENY"
+        assert page.headers["referrer-policy"] == "no-referrer"
+        malformed = await browser.post(
+            "/oauth/github/confirm",
+            content=b"\xff",
+            headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+        assert malformed.status_code == 400
+        assert malformed.headers["cache-control"] == "no-store"
         assert "example/one" in page.text and "example/two" not in page.text
         assert "All repos in this org" in page.text
         spoof = await browser.get(
@@ -252,4 +268,7 @@ async def test_connection_happy_path_and_rechecks(
             scope = await github_connect.get_org_scope(session, tenant_id=tenant_id, owner_id=55)
             assert scope is not None and scope.scope == "org_all"
             assert scope.installation_id == 77 and scope.max_access == "read"
+            repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
+            assert repos[0].max_access == "write"
     assert any(request.url.path == "/user/installations" for request in requests)
+    assert sum(request.url.path == "/applications/client/token" for request in requests) == 2

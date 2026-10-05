@@ -64,7 +64,6 @@ async def mint_invitation(
     *,
     tenant_id: uuid.UUID,
     requester_account_id: uuid.UUID,
-    workspace_label: str | None = None,
     requester_label: str | None = None,
 ) -> str:
     account = await session.get(Account, requester_account_id)
@@ -84,7 +83,7 @@ async def mint_invitation(
             token_hash=digest(token),
             tenant_id=tenant_id,
             requester_account_id=requester_account_id,
-            workspace_label=workspace_label or f"{tenant.external_id} ({tenant.platform})",
+            workspace_label=f"{tenant.platform} workspace {tenant.external_id}",
             requester_label=requester_label or str(requester_account_id),
             expires_at=datetime.now(UTC) + timedelta(days=7),
         )
@@ -242,7 +241,9 @@ async def confirm(
         existing.owner_id = repo.owner_id
         existing.installation_id = repo.installation_id
         existing.repo_full_name = repo.full_name
-        existing.max_access = repo.max_access
+        existing.max_access = (
+            "write" if existing.max_access == "write" or repo.max_access == "write" else "read"
+        )
         existing.authorized_by_github_user_id = github_user_id
         existing.authorized_by_account_id = invitation.requester_account_id
         existing.authorized_at = now
@@ -263,6 +264,8 @@ async def confirm(
         existing_org.authorized_by_account_id = invitation.requester_account_id
         existing_org.authorized_at = now
     invitation.used_at = now
-    await session.delete(flow)
+    await session.execute(
+        delete(GitHubConnectFlow).where(GitHubConnectFlow.invitation_hash == flow.invitation_hash)
+    )
     await session.flush()
     return True

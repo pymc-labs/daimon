@@ -12,10 +12,12 @@ from cryptography.fernet import Fernet
 from daimon.core._models import (
     Account,
     AccountGitHubLink,
+    AgentGitHubGrant,
     GitHubConnectFlow,
     GitHubConnectInvitation,
     GitHubUserLink,
     Tenant,
+    TenantGitHubRepo,
 )
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.github_requester_access import (
@@ -23,7 +25,12 @@ from daimon.core.github_requester_access import (
     effective_access,
     linked_permissions,
 )
-from daimon.core.stores import github_connect, github_links
+from daimon.core.stores import (
+    github_app_installations,
+    github_connect,
+    github_issued_tokens,
+    github_links,
+)
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
@@ -45,6 +52,16 @@ def test_effective_access_properties() -> None:
     assert effective_access({1: "read"}, {}, {}) == {1: "read"}
     with pytest.raises(ValueError, match="baseline exceeds ceiling"):
         effective_access({1: "write"}, {1: "read"}, {1: "write"})
+
+
+def test_permission_cache_evicts_least_recently_used() -> None:
+    cache = PermissionCache(max_entries=2)
+    cache.put(1, 1, 1, {1: "read"})
+    cache.put(1, 2, 1, {2: "read"})
+    assert cache.get(1, 1, 1) == {1: "read"}
+    cache.put(1, 3, 1, {3: "write"})
+    assert cache.get(1, 2, 1) is None
+    assert cache.get(1, 1, 1) == {1: "read"}
 
 
 @pytest.mark.asyncio
@@ -70,11 +87,10 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
         db_session,
         tenant_id=tenant_id,
         requester_account_id=admin_id,
-        workspace_label="Example workspace",
         requester_label="Alex",
     )
     invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
-    assert invitation is not None and invitation.workspace_label == "Example workspace"
+    assert invitation is not None and invitation.workspace_label == "discord workspace workspace"
     assert invitation.requester_label == "Alex"
     assert invitation.expires_at > datetime.now(UTC) + timedelta(days=6)
     admin = await db_session.get(Account, admin_id)
@@ -93,6 +109,13 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
     )
     assert await github_connect.get_flow(db_session, state="state", cookie="wrong") is None
     assert await github_connect.get_flow(db_session, state="state", cookie="cookie") is not None
+    await github_connect.create_flow(
+        db_session,
+        invitation_hash=github_connect.digest(token),
+        state="other-browser",
+        cookie="other-cookie",
+        encrypted_verifier=b"encrypted",
+    )
     saved = await github_connect.confirm(
         db_session,
         state="state",
@@ -110,6 +133,7 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
         orgs=[],
     )
     assert saved
+    assert await db_session.get(GitHubConnectFlow, github_connect.digest("other-browser")) is None
     assert await github_connect.get_invitation(db_session, github_connect.digest(token)) is None
     assert not await github_connect.confirm(
         db_session, state="state", cookie="cookie", github_user_id=17, repos=[], orgs=[]
@@ -163,6 +187,12 @@ async def test_refresh_serializes_for_one_github_user(
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal refreshes
+
+        async def probe_row_lock() -> None:
+            async with sessionmaker.begin() as session:
+                assert await github_links.get_user_for_update(session, github_user_id=user_id)
+
+        await asyncio.wait_for(probe_row_lock(), timeout=1)
         if request.url.path == "/login/oauth/access_token":
             refreshes += 1
             await asyncio.sleep(0.05)
@@ -202,6 +232,112 @@ async def test_refresh_serializes_for_one_github_user(
     async with sessionmaker() as session:
         row = await github_links.get_user(session, github_user_id=user_id)
     assert row is not None and row.token_generation == 2 and row.status == "active"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body", "broken"),
+    [
+        (200, {"error": "bad_refresh_token"}, True),
+        (503, {"message": "unavailable"}, False),
+        (429, {"message": "rate limited"}, False),
+        (200, {"error": "incorrect_client_credentials"}, False),
+    ],
+)
+async def test_refresh_only_breaks_invalid_grant(
+    db_engine: AsyncEngine,
+    db_clean: None,
+    status: int,
+    body: dict[str, str],
+    broken: bool,
+) -> None:
+    sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    async with sessionmaker.begin() as session:
+        session.add(
+            GitHubUserLink(
+                github_user_id=678,
+                login="alex",
+                encrypted_access_token=encrypt_token(fernet, "old"),
+                encrypted_refresh_token=encrypt_token(fernet, "refresh"),
+                access_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+                refresh_expires_at=datetime.now(UTC) + timedelta(days=1),
+            )
+        )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/login/oauth/access_token"
+        return httpx.Response(status, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        call = linked_permissions(
+            sessionmaker,
+            client,
+            user_id=678,
+            installation_id=88,
+            fernet=fernet,
+            client_id="client",
+            client_secret="secret",
+            cache=PermissionCache(),
+        )
+        if broken:
+            assert await call == {}
+        elif body.get("error"):
+            with pytest.raises(RuntimeError, match="incorrect_client_credentials"):
+                await call
+        else:
+            with pytest.raises(httpx.HTTPStatusError):
+                await call
+    async with sessionmaker() as session:
+        row = await github_links.get_user(session, github_user_id=678)
+    assert row is not None
+    assert (row.status == "broken") is broken
+    assert row.link_generation == (2 if broken else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [403, 404])
+async def test_repo_permission_denial_is_cached_as_empty(
+    db_engine: AsyncEngine, db_clean: None, status: int
+) -> None:
+    sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    async with sessionmaker.begin() as session:
+        session.add(
+            GitHubUserLink(
+                github_user_id=679,
+                login="alex",
+                encrypted_access_token=encrypt_token(fernet, "token"),
+                access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            )
+        )
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status, json={"message": "not available"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        cache = PermissionCache()
+        for _ in range(2):
+            assert (
+                await linked_permissions(
+                    sessionmaker,
+                    client,
+                    user_id=679,
+                    installation_id=88,
+                    fernet=fernet,
+                    client_id="client",
+                    client_secret="secret",
+                    cache=cache,
+                )
+                == {}
+            )
+    assert calls == 1
+    async with sessionmaker() as session:
+        row = await github_links.get_user(session, github_user_id=679)
+    assert row is not None and row.status == "active" and row.link_generation == 1
 
 
 @pytest.mark.asyncio
@@ -270,3 +406,119 @@ async def test_unlink_bumps_generation_and_deletes_last_token(db_session: AsyncS
     assert user is not None and user.link_generation == 2
     assert await github_links.unlink_account(db_session, account_id=account_b) == 1234
     assert await github_links.get_user(db_session, github_user_id=1234) is None
+
+
+@pytest.mark.asyncio
+async def test_issued_tokens_stale_after_bump_unlink_and_relink(db_session: AsyncSession) -> None:
+    tenant_id, account_id, agent_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    db_session.add(Account(id=account_id, tenant_id=tenant_id, role="user"))
+    await github_app_installations.upsert(
+        db_session, installation_id=909, account_login="example", repo_full_names=["example/repo"]
+    )
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=101,
+            owner_id=1,
+            installation_id=909,
+            repo_full_name="example/repo",
+            max_access="read",
+            authorized_by_github_user_id=501,
+            status="active",
+            version=1,
+        )
+    )
+    await db_session.flush()
+    db_session.add(
+        AgentGitHubGrant(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=101,
+            baseline_access="read",
+            ceiling_access="read",
+            staged=False,
+            is_working_repo=True,
+            version=1,
+        )
+    )
+    db_session.add(
+        GitHubUserLink(
+            github_user_id=501,
+            login="first",
+            encrypted_access_token=b"encrypted",
+            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+    )
+    await db_session.flush()
+    db_session.add(
+        AccountGitHubLink(
+            account_id=account_id,
+            github_user_id=501,
+            platform="discord",
+            platform_user_id="person",
+            verified_via="discord_oauth",
+        )
+    )
+    await db_session.flush()
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+
+    async def issued(generation: int) -> uuid.UUID:
+        row = await github_issued_tokens.create_pending(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            session_id=f"session-{generation}",
+            installation_id=909,
+            repo_ids=[101],
+            permissions={"contents": "read"},
+            grant_versions={"grant:101": 1, "authorization:101": 1},
+            requester_account_id=account_id,
+            github_user_id=501,
+            link_generation=generation,
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+        await github_issued_tokens.store_token(
+            db_session, token_id=row.token_id, token="issued", fernet=fernet
+        )
+        return row.token_id
+
+    first = await issued(1)
+    assert await github_issued_tokens.select_stale_tokens(db_session) == []
+    await github_links.bump_link_generation(db_session, github_user_id=501)
+    assert {row.token_id for row in await github_issued_tokens.select_stale_tokens(db_session)} == {
+        first
+    }
+    second = await issued(2)
+    assert {row.token_id for row in await github_issued_tokens.select_stale_tokens(db_session)} == {
+        first
+    }
+    assert await github_links.unlink_account(db_session, account_id=account_id) == 501
+    assert {row.token_id for row in await github_issued_tokens.select_stale_tokens(db_session)} == {
+        first,
+        second,
+    }
+    db_session.add(
+        GitHubUserLink(
+            github_user_id=777,
+            login="second",
+            encrypted_access_token=b"encrypted",
+            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+    )
+    await db_session.flush()
+    db_session.add(
+        AccountGitHubLink(
+            account_id=account_id,
+            github_user_id=777,
+            platform="discord",
+            platform_user_id="person",
+            verified_via="discord_oauth",
+        )
+    )
+    await db_session.flush()
+    assert {row.token_id for row in await github_issued_tokens.select_stale_tokens(db_session)} == {
+        first,
+        second,
+    }

@@ -69,6 +69,15 @@ def test_github_grant_requires_server_admin_or_local_channel_admin_holding_agent
             assert decide_operation("github_grant", is_admin=True, target=target) == "allow"
     assert needs_reachability_read("github_grant", is_admin=False, is_daimon_managed=False)
     assert not needs_reachability_read("github_grant", is_admin=True, is_daimon_managed=False)
+    managed = TargetFacts(
+        is_daimon_managed=True,
+        is_reachable_in_tenant=True,
+        is_local_to_caller_channels=True,
+        is_held_by_caller=True,
+    )
+    assert decide_operation("github_grant", is_admin=False, target=managed) == "needs_admin"
+    assert decide_operation("github_grant", is_admin=True, target=managed) == "allow"
+    assert not needs_reachability_read("github_grant", is_admin=False, is_daimon_managed=True)
 
 
 def test_posted_token_operations_allow_non_admin_on_shared_agent() -> None:
