@@ -571,6 +571,17 @@ async def test_named_agent_uses_the_normal_admission_and_refuses_a_thread_switch
         responder_name=opening.agent.name,
         creator_account_id=opening.account_id,
     )
+    assert not await bind_named_thread(
+        db_session_factory,
+        config=opening.config,
+        tenant_id=tenant.id,
+        platform=platform,
+        parent_channel_id="channel",
+        thread_id="new-thread",
+        responder_ma_agent_id=default.id,
+        responder_name=default.name,
+        creator_account_id=opening.account_id,
+    )
     follow_up = await admit(deps, **args, thread_id="new-thread")
     assert follow_up.agent.id == named.id
     assert follow_up.config.thread_binding_kind == "handoff"

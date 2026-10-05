@@ -10,6 +10,8 @@ import uuid
 from typing import Any, cast
 
 from daimon.core._models import (
+    Account,
+    AccountGitHubLink,
     AgentFile,
     AgentRepoBinding,
     ChannelConfig,
@@ -22,6 +24,7 @@ from daimon.core._models import (
     UsageEvent,
 )
 from daimon.core.errors import StoreError
+from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores.domain import FundingMode, Platform, TenantDependentCounts, TenantRow
 from daimon.core.stores.security_audit import erase_tenant
 from sqlalchemy import delete, func, select, update
@@ -144,16 +147,25 @@ async def delete_tenant(
     *,
     tenant_id: uuid.UUID,
 ) -> None:
-    """Delete a tenant row; DB ON DELETE CASCADE handles all child tables.
+    """Delete a tenant and GitHub user tokens orphaned by its account cascade.
 
     Raises StoreError when the tenant does not exist.
     """
+    github_user_ids = set(
+        await session.scalars(
+            select(AccountGitHubLink.github_user_id)
+            .join(Account, Account.id == AccountGitHubLink.account_id)
+            .where(Account.tenant_id == tenant_id)
+        )
+    )
     await erase_tenant(session, tenant_id=tenant_id)
     stmt = delete(Tenant).where(Tenant.id == tenant_id)
     result = await session.execute(stmt)
     if cast(CursorResult[Any], result).rowcount == 0:
         raise StoreError(f"tenant {tenant_id} not found")
     await session.flush()
+    for github_user_id in github_user_ids:
+        await github_links_store.delete_unlinked_user(session, github_user_id=github_user_id)
 
 
 async def get_tenant_dependent_counts(

@@ -736,6 +736,11 @@ class GitHubAppInstallationRow(BaseModel):
     installation_id: int
     account_login: str
     repo_full_names: tuple[str, ...]
+    account_id: int | None = None
+    account_type: str | None = None
+    repository_selection: str | None = None
+    permissions: dict[str, str] | None = None
+    suspended_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

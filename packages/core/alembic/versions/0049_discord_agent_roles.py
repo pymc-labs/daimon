@@ -9,8 +9,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0048_discord_agent_roles"
-down_revision: str | None = "0047_turn_origin_external"
+revision: str = "0049_discord_agent_roles"
+down_revision: str | None = "0048_github_access_foundation"
 branch_labels: str | None = None
 depends_on: str | None = None
 

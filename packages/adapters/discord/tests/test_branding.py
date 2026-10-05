@@ -83,6 +83,7 @@ def _make_preview() -> PurgePreview:
         account=PurgePreviewRow(count=1, example=None),
         user_skills=zero,
         github_credentials=zero,
+        github_user_links=zero,
         github_oauth_states=zero,
         mcp_tokens=zero,
         agent_github_binding=zero,

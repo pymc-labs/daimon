@@ -9,7 +9,7 @@ from collections.abc import Sequence
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.scope import ResolvedConfig
-from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.core.stores.thread_agent_bindings import create_named_binding_if_absent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -52,7 +52,7 @@ async def bind_named_thread(
     if config.agent_name_tier != "named" or config.thread_binding_id is not None:
         return False
     async with sessionmaker.begin() as session:
-        await create_binding(
+        return await create_named_binding_if_absent(
             session,
             tenant_id=tenant_id,
             platform=platform,
@@ -61,6 +61,4 @@ async def bind_named_thread(
             responder_ma_agent_id=responder_ma_agent_id,
             responder_name=responder_name,
             creator_account_id=creator_account_id,
-            kind="handoff",
         )
-    return True

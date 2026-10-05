@@ -963,6 +963,7 @@ class TestSetupHook:
 
         # Stub remaining Cogs via sys.modules to keep the test merge-order-independent.
         mock_help_cog = MagicMock()
+        mock_here_cog = MagicMock()
         mock_agent_setup_cog = MagicMock()
         mock_routines_cog = MagicMock()
         mock_billing_cog = MagicMock()
@@ -971,6 +972,8 @@ class TestSetupHook:
 
         help_mod = types.ModuleType("daimon.adapters.discord.commands.help")
         help_mod.HelpCog = mock_help_cog  # type: ignore[attr-defined]
+        here_mod = types.ModuleType("daimon.adapters.discord.commands.here")
+        here_mod.HereCog = mock_here_cog  # type: ignore[attr-defined]
         agent_setup_mod = types.ModuleType("daimon.adapters.discord.commands.agent_setup")
         agent_setup_mod.AgentSetupCog = mock_agent_setup_cog  # type: ignore[attr-defined]
         routines_mod = types.ModuleType("daimon.adapters.discord.commands.routines")
@@ -1002,6 +1005,7 @@ class TestSetupHook:
             "sys.modules",
             {
                 "daimon.adapters.discord.commands.help": help_mod,
+                "daimon.adapters.discord.commands.here": here_mod,
                 "daimon.adapters.discord.commands.agent_setup": agent_setup_mod,
                 "daimon.adapters.discord.commands.routines": routines_mod,
                 "daimon.adapters.discord.commands.billing": billing_mod,
@@ -1012,9 +1016,10 @@ class TestSetupHook:
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 8, "setup_hook should add exactly 8 Cogs"
+        assert len(add_cog_calls) == 9, "setup_hook should add exactly 9 Cogs"
         assert sum(isinstance(cog, DirectMessageCog) for cog in add_cog_calls) == 1
         mock_help_cog.assert_called_once_with(bot)
+        mock_here_cog.assert_called_once_with(bot)
         mock_agent_setup_cog.assert_called_once_with(bot)
         mock_routines_cog.assert_called_once_with(bot)
         mock_billing_cog.assert_called_once_with(bot)
@@ -2329,6 +2334,34 @@ class TestUnpromptedAdmission:
     """An unprompted (organic thread participation) turn that fails admission
     posts nothing: the notice a mention earns would otherwise be reposted on
     every quiet burst in the thread."""
+
+    @pytest.mark.parametrize(
+        ("content", "unprompted"),
+        [("and the priors?", True), ("hello", False)],
+    )
+    async def test_turn_without_a_literal_bot_token_still_reaches_admission(
+        self,
+        content: str,
+        unprompted: bool,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_thread_message(content=content)
+        with (
+            patch(
+                "daimon.adapters.discord.bot.admit",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("admission reached"),
+            ) as admission,
+            pytest.raises(RuntimeError, match="admission reached"),
+        ):
+            await bot._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                message, "123456", tenant.id, unprompted=unprompted
+            )
+        admission.assert_awaited_once()
+        assert admission.await_args.kwargs["requested_agent_name"] is None
 
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_missing_config_is_silent_when_unprompted(

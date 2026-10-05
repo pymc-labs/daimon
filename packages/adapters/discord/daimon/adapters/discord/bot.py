@@ -504,7 +504,6 @@ class DaimonBot(commands.Bot):
         self._participant: ThreadParticipant | None = None
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
-        self._agent_role_sync_locks: dict[int, asyncio.Lock] = {}
         self._agent_role_policy_versions: dict[uuid.UUID, datetime | None] = {}
         self._agent_role_last_sync_at: dict[uuid.UUID, float] = {}
         self._seed_sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
@@ -658,15 +657,13 @@ class DaimonBot(commands.Bot):
         *,
         agents: list[BetaManagedAgentsAgent] | None = None,
     ) -> None:
-        lock = self._agent_role_sync_locks.setdefault(guild.id, asyncio.Lock())
-        async with lock:
-            await sync_agent_roles(
-                guild=guild,
-                tenant_id=tenant_id,
-                anthropic=self.runtime.anthropic,
-                sessionmaker=self.runtime.sessionmaker,
-                agents=agents,
-            )
+        await sync_agent_roles(
+            guild=guild,
+            tenant_id=tenant_id,
+            anthropic=self.runtime.anthropic,
+            sessionmaker=self.runtime.sessionmaker,
+            agents=agents,
+        )
 
     async def setup_hook(self) -> None:
         """Arm orphan recovery and load command Cogs before on_ready syncs the tree."""
@@ -702,12 +699,14 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.billing import BillingCog
         from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
         from daimon.adapters.discord.commands.help import HelpCog
+        from daimon.adapters.discord.commands.here import HereCog
         from daimon.adapters.discord.commands.memory import MemoryCog
         from daimon.adapters.discord.commands.privacy import PrivacyCog
         from daimon.adapters.discord.commands.routines import RoutinesCog
         from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
 
         await self.add_cog(HelpCog(self))
+        await self.add_cog(HereCog(self))
         await self.add_cog(DirectMessageCog(self))
         await self.add_cog(AgentSetupCog(self))
         await self.add_cog(RoutinesCog(self))
@@ -2530,8 +2529,6 @@ class DaimonBot(commands.Bot):
             else:
                 selected_roles = []
             direct_mention = re.search(rf"<@!?{self.user.id}>", message.content)
-            if direct_mention is None and not selected_roles:
-                return
             admission = await admit(
                 self.runtime.turn_deps,
                 tenant_id=tenant_id,

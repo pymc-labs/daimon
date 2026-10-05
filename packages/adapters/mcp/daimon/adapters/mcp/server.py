@@ -62,6 +62,7 @@ from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
+from daimon.adapters.mcp.tools.here import register_here_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
 from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
@@ -394,6 +395,7 @@ def create_mcp_app(
     register_notebook_tools(mcp, runtime)  # notebook publish (raises when unconfigured)
     register_publish_tools(mcp, runtime)  # report publish/delete (raises when unconfigured)
     register_propagation_tools(mcp, runtime)  # set/clear agent default
+    register_here_tools(mcp, runtime)
     register_promo_code_tools(mcp, runtime)  # redeem a promo code for tenant credit
     register_channel_admin_tools(mcp, runtime)  # who administers a channel
     register_channel_rule_tools(mcp, runtime)  # who reads and posts in a channel; where agents run

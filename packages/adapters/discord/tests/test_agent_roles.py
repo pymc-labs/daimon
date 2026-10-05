@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -227,7 +228,7 @@ async def test_agents_with_a_home_or_no_run_channel_have_no_mentionable_role(
     guild.create_role.assert_not_awaited()
 
 
-async def test_sweep_adopts_an_unmapped_role_after_a_failed_save(
+async def test_sweep_never_adopts_an_unmapped_same_name_role_after_a_failed_save(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -236,18 +237,26 @@ async def test_sweep_adopts_an_unmapped_role_after_a_failed_save(
     guild = MagicMock()
     guild.id = 919
     guild.me.guild_permissions.manage_roles = True
-    role = MagicMock()
-    role.id = 818
-    role.name = "Planner"
-    role.mentionable = True
-    guild.roles = []
+    human_role = MagicMock()
+    human_role.id = 817
+    human_role.name = "Planner"
+    orphan = MagicMock()
+    orphan.id = 818
+    orphan.name = "Planner"
+    managed = MagicMock()
+    managed.id = 819
+    managed.name = "Planner"
+    guild.roles = [human_role]
     guild.get_role.return_value = None
-    guild.create_role = AsyncMock(return_value=role)
+    guild.create_role = AsyncMock(side_effect=[orphan, managed])
     agent = ma_agent(id="planner", name="Planner", tenant_id=tenant.id)
-    with patch(
-        "daimon.adapters.discord.agent_roles.save_role",
-        new_callable=AsyncMock,
-        side_effect=RuntimeError("save failed"),
+    with (
+        patch(
+            "daimon.adapters.discord.agent_roles.save_role",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("save failed"),
+        ),
+        patch("daimon.adapters.discord.agent_roles.log.warning") as warning,
     ):
         await sync_agent_roles(
             guild=guild,
@@ -256,7 +265,9 @@ async def test_sweep_adopts_an_unmapped_role_after_a_failed_save(
             sessionmaker=db_session_factory,
             agents=[agent],
         )
-    guild.roles = [role]
+    warning.assert_called_once()
+    assert warning.call_args.args[0] == "agent_roles.orphaned_role"
+    guild.roles = [human_role, orphan]
     await sync_agent_roles(
         guild=guild,
         tenant_id=tenant.id,
@@ -264,9 +275,53 @@ async def test_sweep_adopts_an_unmapped_role_after_a_failed_save(
         sessionmaker=db_session_factory,
         agents=[agent],
     )
-    guild.create_role.assert_awaited_once()
+    assert guild.create_role.await_count == 2
+    human_role.edit.assert_not_called()
+    human_role.delete.assert_not_called()
+    orphan.edit.assert_not_called()
     async with db_session_factory() as session:
-        assert (await list_roles(session, tenant_id=tenant.id))[0].role_id == "818"
+        assert (await list_roles(session, tenant_id=tenant.id))[0].role_id == "819"
+
+
+async def test_direct_role_syncs_share_the_guild_sweep_lock() -> None:
+    guild = MagicMock()
+    guild.id = 921
+    started = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+    peak = 0
+
+    async def sweep(**_kwargs: object) -> None:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        started.set()
+        await release.wait()
+        active -= 1
+
+    with patch("daimon.adapters.discord.agent_roles._sync_agent_roles_unlocked", side_effect=sweep):
+        first = asyncio.create_task(
+            sync_agent_roles(
+                guild=guild,
+                tenant_id=uuid.uuid4(),
+                anthropic=MagicMock(),
+                sessionmaker=MagicMock(),
+            )
+        )
+        await started.wait()
+        second = asyncio.create_task(
+            sync_agent_roles(
+                guild=guild,
+                tenant_id=uuid.uuid4(),
+                anthropic=MagicMock(),
+                sessionmaker=MagicMock(),
+            )
+        )
+        await asyncio.sleep(0)
+        assert peak == 1
+        release.set()
+        await asyncio.gather(first, second)
+    assert peak == 1
 
 
 async def test_one_agent_role_failure_does_not_stop_the_next_agent(

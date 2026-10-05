@@ -71,6 +71,16 @@ def _bounded_page(limit: int) -> int:
     return max(1, min(limit, _HISTORY_PAGE_CEILING))
 
 
+def _replies_page(limit: int) -> int:
+    """The conversations.replies limit for a read of `limit` messages.
+
+    Slack puts the thread's root on every page on top of the replies `limit`
+    asks for, so one fewer reply keeps the page within it. Slack refuses 0, so
+    a `limit` below 2 still reads the root and one reply.
+    """
+    return max(1, _bounded_page(limit) - 1)
+
+
 def _reraise_mapped(err: SlackApiError, *, as_user: bool = False) -> ToolError:
     mapped = map_slack_api_error(err, as_user=as_user)
     if mapped is not None:
@@ -385,7 +395,7 @@ async def _fetch_thread_replies(
     files: FileUrlMinter | None,
 ) -> SlackThreadResult:
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-        channel=channel_id, ts=thread_ts, limit=_bounded_page(limit), cursor=cursor
+        channel=channel_id, ts=thread_ts, limit=_replies_page(limit), cursor=cursor
     )
     raw = cast(list[dict[str, Any]], resp["messages"])  # already oldest-first
     result_thread_ts = thread_ts
@@ -400,21 +410,23 @@ async def _fetch_thread_replies(
             resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                 channel=channel_id,
                 ts=result_thread_ts,
-                limit=_bounded_page(limit),
+                limit=_replies_page(limit),
                 cursor=cursor,
             )
             raw = cast(list[dict[str, Any]], resp["messages"])
 
-    # Replies page oldest-first, so the continuation reaches NEWER messages.
-    # has_more stays the authority: Slack can send a next_cursor that only
-    # points past the end, and (rarely) report has_more without a cursor.
+    # Slack pages a long thread from its newest replies back: each page is
+    # the root and the newest replies not yet returned, oldest-first, so the
+    # continuation reaches OLDER replies. has_more stays the authority: Slack
+    # can send a next_cursor that only points past the end, and (rarely)
+    # report has_more without a cursor.
     has_more = bool(resp.get("has_more"))
     metadata = cast(dict[str, Any], resp.get("response_metadata") or {})
     next_cursor = (str(metadata.get("next_cursor") or "") or None) if has_more else None
     if next_cursor is not None:
         hint = (
             f"more replies available — pass thread_id={channel_id}:{result_thread_ts} "
-            f"and cursor={next_cursor} to read newer messages"
+            f"and cursor={next_cursor} to read older replies"
         )
     elif has_more:
         hint = "more replies exist, but Slack returned no continuation cursor"

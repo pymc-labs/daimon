@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Sequence
 
@@ -19,6 +20,7 @@ import discord
 
 log = structlog.get_logger()
 _missing_manage_roles: set[int] = set()
+_sync_locks: dict[int, asyncio.Lock] = {}
 
 
 async def sync_agent_roles(
@@ -30,6 +32,25 @@ async def sync_agent_roles(
     agents: Sequence[BetaManagedAgentsAgent] | None = None,
 ) -> None:
     """Backfill, rename, and remove managed roles; never interrupt a chat turn."""
+    lock = _sync_locks.setdefault(guild.id, asyncio.Lock())
+    async with lock:
+        await _sync_agent_roles_unlocked(
+            guild=guild,
+            tenant_id=tenant_id,
+            anthropic=anthropic,
+            sessionmaker=sessionmaker,
+            agents=agents,
+        )
+
+
+async def _sync_agent_roles_unlocked(
+    *,
+    guild: discord.Guild,
+    tenant_id: uuid.UUID,
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    agents: Sequence[BetaManagedAgentsAgent] | None,
+) -> None:
     member: discord.Member | None = getattr(guild, "me", None)
     if member is None or not member.guild_permissions.manage_roles:
         if guild.id not in _missing_manage_roles:
@@ -73,24 +94,18 @@ async def sync_agent_roles(
                 log.exception(
                     "agent_roles.delete_failed", guild_id=str(guild.id), agent_id=agent_id
                 )
-        claimed = {row.role_id for row in stored.values()}
         for agent_id, agent in eligible.items():
+            created_role_id: str | None = None
             try:
                 row = stored.get(agent_id)
                 role = guild.get_role(int(row.role_id)) if row is not None else None
-                if role is None:
-                    candidates: list[discord.Role] = [
-                        candidate
-                        for candidate in guild.roles
-                        if candidate.name == agent.name and str(candidate.id) not in claimed
-                    ]
-                    role = candidates[0] if len(candidates) == 1 else None
                 if role is None:
                     role = await guild.create_role(
                         name=agent.name,
                         mentionable=True,
                         reason="Mentionable Daimon agent",
                     )
+                    created_role_id = str(role.id)
                 elif role.name != agent.name or not role.mentionable:
                     await role.edit(name=agent.name, mentionable=True, reason="Agent name changed")
                 async with sessionmaker.begin() as session:
@@ -101,11 +116,17 @@ async def sync_agent_roles(
                         role_id=str(role.id),
                         agent_name=agent.name,
                     )
-                claimed.add(str(role.id))
             except Exception:
                 log.exception(
                     "agent_roles.agent_sync_failed", guild_id=str(guild.id), agent_id=agent_id
                 )
+                if created_role_id is not None:
+                    log.warning(
+                        "agent_roles.orphaned_role",
+                        guild_id=str(guild.id),
+                        agent_id=agent_id,
+                        role_id=created_role_id,
+                    )
     except (discord.HTTPException, discord.ClientException) as exc:
         log.warning("agent_roles.sync_failed", guild_id=str(guild.id), error=str(exc))
     except Exception:

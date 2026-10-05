@@ -59,9 +59,10 @@ reports the installed token lacks it.
 Thread context requests one page of `DAIMON_SLACK__HISTORY_PAGE_LIMIT` messages
 (default 100, range 1–1000). Slack may grant fewer depending on the app's rate
 limits; `has_more` still marks the replay as truncated. Message tools return at
-most 200 messages per call. `read_channel` returns a cursor for older messages;
-`read_thread` returns a cursor for newer replies, starting from the root. No
-automatic multi-page sweep runs during a turn.
+most 200 messages per call. `read_channel` returns a cursor for older messages.
+`read_thread` returns the root and the newest replies, with a cursor for older
+ones; the root counts toward its 200, and a limit below 2 still reads the root
+and one reply. No automatic multi-page sweep runs during a turn.
 
 A top-level mention starts a new thread with no history of its own, so its
 first turn gets the channel instead: one `conversations.history` page of 25

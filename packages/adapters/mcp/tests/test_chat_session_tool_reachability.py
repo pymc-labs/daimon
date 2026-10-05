@@ -37,6 +37,7 @@ from typing import NamedTuple
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.adapters.mcp.search_transform import APPROVAL_TOOLS
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
     AnthropicSettings,
@@ -318,7 +319,7 @@ async def test_agent_id_claim_session_discovers_agent_chat_and_self_edit_tools_o
 async def test_chat_execution_identity_preserves_exact_tools_list(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Execution identity must not bypass the two-tool search transform."""
+    """Execution identity must not bypass the search transform."""
     async with sessionmaker() as session, session.begin():
         tenant = await make_tenant(session, platform="discord", workspace_id="chat-list")
         account = await make_account(session, tenant=tenant)
@@ -333,4 +334,8 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
     import json
 
     assert json.dumps(chat["result"], sort_keys=True) == json.dumps(plain["result"], sort_keys=True)
-    assert {tool["name"] for tool in chat["result"]["tools"]} == {"call_tool", "search_tools"}
+    assert {tool["name"] for tool in chat["result"]["tools"]} == {
+        "call_tool",
+        "search_tools",
+        *APPROVAL_TOOLS,
+    }

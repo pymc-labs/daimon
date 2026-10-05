@@ -72,6 +72,9 @@ class TestBuildHelpView:
         view = build_help_view()
         assert "-# /help" in _joined_content(view), "joined content must list /help"
 
+    def test_joined_content_contains_here_command(self) -> None:
+        assert "-# /here" in _joined_content(build_help_view())
+
     def test_joined_content_contains_conversational_group(self) -> None:
         view = build_help_view()
         assert "💬 **Or just talk to your agent**" in _joined_content(view), (
