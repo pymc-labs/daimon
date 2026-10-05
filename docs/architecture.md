@@ -144,11 +144,12 @@ config). The order is load-bearing and documented as such in the module:
    `handoff` binding so later replies keep its agent. A bound thread rejects a
    different named agent and points to Hand over or `hand_off_task`. A
    channel with `readers: own` accepts only its own agent and names that agent
-   in the refusal. Discord reconciles roles after ready on processes running
-   the wake poller, every ten minutes, and after its agent-create and
-   channel-rule panel actions. It excludes agents with a home or a rule that
-   runs nowhere. Missing Manage Roles logs once per guild while the text form
-   remains available.
+   in the refusal. On processes running the wake poller, Discord reconciles
+   roles after ready, every ten minutes, within a minute of a policy change,
+   after its agent-create and channel-rule panel actions, and when a used role
+   has an outdated name. It excludes
+   agents with a home or a rule that runs nowhere. Missing Manage Roles logs
+   once per guild while the text form remains available.
 6. Raise `MissingTurnConfigError` if no agent or environment resolved — before
    any MA call, so a misconfigured tenant sees the config error rather than a
    billing one.

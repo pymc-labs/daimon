@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,6 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from daimon.adapters.discord.agent_roles import sync_agent_roles
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.access_policy import policy_revisions, set_access_policy
 from daimon.core.stores.discord_agent_roles import list_roles, roles_mentioned
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -106,10 +109,12 @@ async def test_role_sweep_uses_one_roster_listing_for_all_guilds() -> None:
     guilds = [SimpleNamespace(id=91), SimpleNamespace(id=92)]
     fake = SimpleNamespace(
         guilds=guilds,
-        runtime=SimpleNamespace(anthropic=MagicMock()),
+        runtime=SimpleNamespace(anthropic=MagicMock(), sessionmaker=MagicMock()),
         draining=False,
         is_closed=lambda: False,
         wait_until_ready=AsyncMock(),
+        _agent_role_policy_versions={},
+        _agent_role_last_sync_at={},
     )
     synced: list[int] = []
 
@@ -120,13 +125,67 @@ async def test_role_sweep_uses_one_roster_listing_for_all_guilds() -> None:
             fake.draining = True
 
     fake._sync_agent_roles = sync
-    with patch(
-        "daimon.adapters.discord.bot.list_agents_by_tenants", new_callable=AsyncMock
-    ) as read:
+    with (
+        patch("daimon.adapters.discord.bot.policy_revisions", new_callable=AsyncMock) as policy,
+        patch("daimon.adapters.discord.bot.list_agents_by_tenants", new_callable=AsyncMock) as read,
+    ):
+        policy.return_value = {}
         read.return_value = {}
         await DaimonBot._agent_role_sync_loop(cast(DaimonBot, fake))
     assert read.await_count == 1
     assert synced == [91, 92]
+
+
+async def test_role_sweep_rechecks_only_after_a_policy_write() -> None:
+    guild = SimpleNamespace(id=93)
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id="93")
+    fake = SimpleNamespace(
+        guilds=[guild],
+        runtime=SimpleNamespace(anthropic=MagicMock(), sessionmaker=MagicMock()),
+        draining=False,
+        is_closed=lambda: False,
+        wait_until_ready=AsyncMock(),
+        _agent_role_policy_versions={},
+        _agent_role_last_sync_at={},
+    )
+    synced: list[int] = []
+
+    async def sync(_guild: SimpleNamespace, _tenant_id: uuid.UUID, *, agents: object) -> None:
+        assert agents == []
+        synced.append(1)
+        if len(synced) == 2:
+            fake.draining = True
+
+    fake._sync_agent_roles = sync
+    with (
+        patch("daimon.adapters.discord.bot.policy_revisions", new_callable=AsyncMock) as policy,
+        patch("daimon.adapters.discord.bot.list_agents_by_tenants", new_callable=AsyncMock) as read,
+        patch("daimon.adapters.discord.bot.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        policy.side_effect = [{}, {}, {tenant_id: datetime.now(UTC)}]
+        read.return_value = {}
+        await DaimonBot._agent_role_sync_loop(cast(DaimonBot, fake))
+    assert policy.await_count == 3
+    assert read.await_count == 2
+    assert len(synced) == 2
+
+
+async def test_policy_revision_read_finds_a_new_rule(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    assert await policy_revisions(db_session_factory, tenant_ids=[tenant.id]) == {}
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                channel_rules={"home": ChannelRule(readers="own", writers="own")}
+            ),
+        )
+    assert tenant.id in await policy_revisions(db_session_factory, tenant_ids=[tenant.id])
 
 
 async def test_agents_with_a_home_or_no_run_channel_have_no_mentionable_role(

@@ -85,6 +85,7 @@ from daimon.core.named_agent import bind_named_thread, name_after_mention
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.routine_delivery import run_delivery_poller
+from daimon.core.stores.access_policy import policy_revisions
 from daimon.core.stores.discord_agent_roles import roles_mentioned
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
@@ -504,6 +505,8 @@ class DaimonBot(commands.Bot):
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
         self._agent_role_sync_locks: dict[int, asyncio.Lock] = {}
+        self._agent_role_policy_versions: dict[uuid.UUID, datetime | None] = {}
+        self._agent_role_last_sync_at: dict[uuid.UUID, float] = {}
         self._seed_sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
         # Gateway lifecycle callbacks run as separate tasks. Serialize only the
         # tenant provision/archive transitions so an earlier remove cannot
@@ -617,20 +620,36 @@ class DaimonBot(commands.Bot):
                 for guild in self.guilds
             }
             try:
-                rosters = await list_agents_by_tenants(
-                    self.runtime.anthropic, tenant_ids=guild_tenants.values()
+                revisions = await policy_revisions(
+                    self.runtime.sessionmaker, tenant_ids=guild_tenants.values()
+                )
+                now = asyncio.get_running_loop().time()
+                due = {
+                    tenant_id
+                    for tenant_id in guild_tenants.values()
+                    if tenant_id not in self._agent_role_policy_versions
+                    or self._agent_role_policy_versions[tenant_id] != revisions.get(tenant_id)
+                    or now - self._agent_role_last_sync_at.get(tenant_id, 0) >= 600
+                }
+                rosters = (
+                    await list_agents_by_tenants(self.runtime.anthropic, tenant_ids=due)
+                    if due
+                    else {}
                 )
             except Exception:
-                log.exception("agent_roles.roster_lookup_failed")
+                log.exception("agent_roles.sweep_lookup_failed")
             else:
                 for guild in self.guilds:
                     tenant_id = guild_tenants[guild.id]
-                    await self._sync_agent_roles(
-                        guild, tenant_id, agents=rosters.get(tenant_id, [])
-                    )
+                    if tenant_id in due:
+                        await self._sync_agent_roles(
+                            guild, tenant_id, agents=rosters.get(tenant_id, [])
+                        )
+                        self._agent_role_policy_versions[tenant_id] = revisions.get(tenant_id)
+                        self._agent_role_last_sync_at[tenant_id] = now
             if self.draining or self.is_closed():
                 break
-            await asyncio.sleep(600)
+            await asyncio.sleep(60)
 
     async def _sync_agent_roles(
         self,
@@ -2656,6 +2675,8 @@ class DaimonBot(commands.Bot):
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
 
         agent = admission.agent
+        if selected_roles and selected_roles[0].agent_name != agent.name and message.guild:
+            self._spawn(self._sync_agent_roles(message.guild, tenant_id))
 
         # --- Create thread + status embed BEFORE session create ---
         # MA sessions.create can hold its HTTP response for minutes while it
