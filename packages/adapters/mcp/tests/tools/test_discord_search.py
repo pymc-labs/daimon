@@ -278,6 +278,53 @@ def _standard_guild_member_routes() -> dict[str, Any]:
     }
 
 
+async def test_scoped_empty_search_explains_bot_history_permission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history = 1 << 16
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload(owner_id="99")
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL | history)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload("1" if route.url.endswith("/1") else "42")
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload(
+                permission_overwrites=[{"id": "1", "type": 1, "allow": "0", "deny": str(history)}]
+            )
+        if route.path == "/guilds/{guild_id}/channels":
+            return [_text_channel_payload()]
+        if route.path == "/guilds/{guild_id}/messages/search":
+            return _search_response(messages=[], total_results=0)
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    with pytest.raises(ToolError, match="View Channel and Read Message History"):
+        await _search_messages_impl(
+            _runtime_with_discord_token(), _auth(), content="hello", channel_ids=["222"]
+        )
+
+
+async def test_search_403_missing_access_is_plain(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path in _standard_guild_member_routes():
+            return _standard_guild_member_routes()[route.path]
+        if route.path == "/guilds/{guild_id}/channels":
+            return [_text_channel_payload()]
+        if route.path == "/guilds/{guild_id}/messages/search":
+            raise discord.Forbidden(
+                MagicMock(status=403, reason="Forbidden"),
+                {"code": 50001, "message": "Missing Access"},
+            )
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    with pytest.raises(ToolError, match="can't search this server"):
+        await _search_messages_impl(_runtime_with_discord_token(), _auth(), content="hello")
+
+
 # ---------------------------------------------------------------------------
 # Params encoding
 # ---------------------------------------------------------------------------
