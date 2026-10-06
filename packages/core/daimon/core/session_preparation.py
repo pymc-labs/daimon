@@ -684,6 +684,9 @@ async def _prepare_session_for_turn_locked(
             tenant_id=tenant_id,
             agent_uuid=agent_uuid,
             account_id=admission.account_id,
+            github_app=deps.agent_github_app,
+            fernet=deps.fernet,
+            is_external=admission.is_external,
             recorded=recorded,
             tool_safety=deps.tool_safety,
             public_url=deps.public_url,
@@ -821,6 +824,8 @@ async def _prepare_session_for_turn_locked(
                 github_fallback_pat=deps.github_fallback_pat,
                 github_app_id=deps.github_app_id,
                 github_app_private_key=deps.github_app_private_key,
+                agent_github_app=deps.agent_github_app,
+                is_external=admission.is_external,
                 now=moment,
                 asks_before_publishing=admission.asks_before_publishing,
             )

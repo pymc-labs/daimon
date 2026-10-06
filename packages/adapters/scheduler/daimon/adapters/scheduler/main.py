@@ -53,6 +53,12 @@ from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
+from daimon.core.github_app_session import (
+    effective_repo_urls,
+    revoke_session_tokens,
+    revoke_token,
+    rotate_live_app_tokens,
+)
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_installation_reconcile import (
     drain_github_installation_reconciliations,
@@ -95,10 +101,21 @@ from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.github_connect import delete_expired_flows
+from daimon.core.stores.github_issued_tokens import (
+    decrypt_issued_token,
+    list_closed_app_sessions,
+    list_live_app_sessions,
+    mark_revoked,
+    record_revoke_attempt,
+    select_deactivated_tokens,
+    select_stale_tokens,
+)
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import record_result, update_routine_agent_id
 from daimon.core.stores.scoped_config_read import resolve
+from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.thread_sessions import mark_dead
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.outcomes import current_outcome, drain_outcomes
 from daimon.core.turn.state import TurnState
@@ -468,6 +485,7 @@ async def _build_fire(
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
+            agent_github_app=settings.github_app,
             tool_safety=settings.tool_safety,
             budget_channel_id=row.channel_id,
             # Stamped like a turn in the destination, so an isolated or sealed
@@ -585,6 +603,137 @@ async def _sweep_github_connect_flows(sm: async_sessionmaker[AsyncSession]) -> N
             await delete_expired_flows(session, now=datetime.now(UTC))
     except SQLAlchemyError:
         log.exception("scheduler.github_connect_flow_sweep.failed")
+
+
+async def _sweep_github_app_tokens(
+    sm: async_sessionmaker[AsyncSession], *, fernet: MultiFernet | None
+) -> None:
+    if fernet is None:
+        return
+    async with sm() as session:
+        stale = await select_stale_tokens(session)
+        stale.extend(await select_deactivated_tokens(session))
+    stale = list({row.token_id: row for row in stale}.values())
+    async with httpx.AsyncClient() as github:
+        for row in stale:
+            token = decrypt_issued_token(row, fernet=fernet)
+            if token is None:
+                continue
+            try:
+                await revoke_token(github, token)
+            except httpx.HTTPError:
+                async with sm.begin() as session:
+                    await record_revoke_attempt(session, token_id=row.token_id)
+                log.exception("scheduler.github_token_revoke.failed", token_id=str(row.token_id))
+                continue
+            async with sm.begin() as session:
+                await mark_revoked(session, token_id=row.token_id)
+                await append_github_token_event(
+                    session,
+                    tenant_id=row.tenant_id,
+                    agent_id=row.agent_id,
+                    account_id=row.requester_account_id,
+                    kind="github_token_revoke",
+                    outcome="allowed",
+                    reason="stale access",
+                    token_id=row.token_id,
+                    session_id=row.session_id,
+                    installation_id=row.installation_id,
+                    repo_ids=row.repo_ids,
+                    permissions=row.permissions,
+                    expires_at=row.expires_at,
+                    grant_versions=row.grant_versions,
+                )
+
+
+_last_app_access_checks: dict[str, datetime] = {}
+
+
+async def _refresh_github_app_sessions(
+    anthropic_client: AsyncAnthropic,
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    settings: Settings,
+    fernet: MultiFernet | None,
+) -> None:
+    if fernet is None:
+        return
+    now = datetime.now(UTC)
+    async with sm() as session:
+        live = await list_live_app_sessions(session)
+    for item in live:
+        snapshot = item.mapping.effective_config
+        if snapshot is None or snapshot.vault_id is None:
+            continue
+        due_for_expiry = item.expires_at <= now + timedelta(minutes=15)
+        last_check = _last_app_access_checks.get(item.mapping.ma_session_id)
+        due_for_access = item.has_linked_requester and (
+            last_check is None or last_check <= now - timedelta(minutes=5)
+        )
+        if not due_for_expiry and not due_for_access:
+            continue
+        try:
+            desired_urls = await effective_repo_urls(
+                sm,
+                tenant_id=item.mapping.tenant_id,
+                agent_id=item.agent_id,
+                account_id=item.mapping.account_id,
+                is_external=False,
+                config=settings.github_app,
+                fernet=fernet,
+            )
+            if desired_urls != snapshot.repo_urls:
+                await anthropic_client.beta.sessions.archive(item.mapping.ma_session_id)
+                async with sm.begin() as session:
+                    await mark_dead(session, id=item.mapping.id)
+                async with httpx.AsyncClient() as github:
+                    await revoke_session_tokens(
+                        sm, github, session_id=item.mapping.ma_session_id, fernet=fernet
+                    )
+                await anthropic_client.beta.vaults.archive(snapshot.vault_id)
+                continue
+            await rotate_live_app_tokens(
+                anthropic_client,
+                sm,
+                session_id=item.mapping.ma_session_id,
+                tenant_id=item.mapping.tenant_id,
+                agent_id=item.agent_id,
+                account_id=item.mapping.account_id,
+                is_external=False,
+                vault_id=snapshot.vault_id,
+                resource_ids=snapshot.repo_resource_ids,
+                config=settings.github_app,
+                fernet=fernet,
+            )
+            _last_app_access_checks[item.mapping.ma_session_id] = now
+        except Exception:
+            log.exception(
+                "scheduler.github_app_session_refresh.failed",
+                session_id=item.mapping.ma_session_id,
+            )
+
+
+async def _close_github_app_sessions(
+    anthropic_client: AsyncAnthropic,
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    fernet: MultiFernet | None,
+) -> None:
+    if fernet is None:
+        return
+    async with sm() as session:
+        closed = await list_closed_app_sessions(session, now=datetime.now(UTC))
+    async with httpx.AsyncClient() as github:
+        for item in closed:
+            try:
+                await revoke_session_tokens(sm, github, session_id=item.session_id, fernet=fernet)
+                if item.vault_id is not None:
+                    await anthropic_client.beta.vaults.archive(item.vault_id)
+            except Exception:
+                log.exception(
+                    "scheduler.github_app_session_close.failed",
+                    session_id=item.session_id,
+                )
 
 
 async def _settle_promo_credit(sm: async_sessionmaker[AsyncSession]) -> None:
@@ -741,6 +890,11 @@ async def run(
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
             await _sweep_github_connect_flows(sm)
+            await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
+            await _refresh_github_app_sessions(
+                client, sm, settings=settings, fernet=push_resync_fernet
+            )
+            await _close_github_app_sessions(client, sm, fernet=push_resync_fernet)
             await _settle_promo_credit(sm)
             await _drain_github_push_resync(
                 engine=engine,
@@ -775,6 +929,11 @@ async def run(
                 await _sweep_retired_turn_card_intents(sm)
                 await _sweep_hub_oauth_kv(sm)
                 await _sweep_github_connect_flows(sm)
+                await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
+                await _refresh_github_app_sessions(
+                    client, sm, settings=settings, fernet=push_resync_fernet
+                )
+                await _close_github_app_sessions(client, sm, fernet=push_resync_fernet)
                 await _settle_promo_credit(sm)
                 await _drain_github_push_resync(
                     engine=engine,

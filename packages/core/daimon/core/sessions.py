@@ -38,7 +38,7 @@ from daimon.core.agent_mcp_credentials import (
     resolve_agent_mcp_credentials,
     resolve_hidden_mcp_server_names,
 )
-from daimon.core.config import McpSettings
+from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import upload_env_and_mount
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -48,10 +48,20 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_TENANT,
 )
 from daimon.core.errors import StoreError
+from daimon.core.github_app_session import (
+    REQUESTER_CACHE,
+    AppSessionAccess,
+    add_app_credentials,
+    create_session_vault,
+    finish_app_delivery,
+    prepare_app_access,
+    revoke_app_access,
+)
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import resolve_clone_token
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.mcp_vault import (
+    GITHUB_COPILOT_MCP_URL,
     add_github_copilot_credential,
     ensure_agent_mcp_vault,
     hold_agent_vault_lock,
@@ -61,6 +71,7 @@ from daimon.core.repo_resource import build_repo_resource
 from daimon.core.session_seal import origin_stamp
 from daimon.core.session_snapshot import session_mcp_servers, session_skills, session_tools
 from daimon.core.stores.agent_repo_binding import get_binding
+from daimon.core.stores.github_access import get_agent_mode
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -116,6 +127,9 @@ async def create_session(
     github_fallback_pat: str | None = None,
     github_app_id: str | None = None,
     github_app_private_key: str | None = None,
+    agent_github_app: GithubAppSettings | None = None,
+    is_external: bool = False,
+    requester_is_headless: bool = False,
     http_client: httpx.AsyncClient | None = None,
     extra_resources: Sequence[Resource] = (),
     billing_exempt: ExemptReason | None = None,
@@ -226,8 +240,32 @@ async def create_session(
 
     On MA failure: ``anthropic.APIError`` propagates uncaught.
     """
+    app_mode = False
+    if tenant_id is not None and agent_uuid is not None and session_factory is not None:
+        async with session_factory() as session:
+            app_mode = (
+                await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid) == "app"
+            )
     vault_id: str | None = None
-    if (
+    if app_mode:
+        assert tenant_id is not None and agent_uuid is not None
+        vault_id = await create_session_vault(
+            anthropic,
+            tenant_id=tenant_id,
+            agent_id=agent_uuid,
+            account_id=account_id,
+            public_url=(
+                str(mcp_settings.public_url)
+                if mcp_settings is not None and mcp_settings.public_url is not None
+                else None
+            ),
+            jwt_secret=(
+                mcp_settings.jwt_secret.get_secret_value().encode()
+                if mcp_settings is not None and mcp_settings.jwt_secret is not None
+                else None
+            ),
+        )
+    elif (
         mcp_settings is not None
         and mcp_settings.public_url is not None
         and mcp_settings.jwt_secret is not None
@@ -260,7 +298,12 @@ async def create_session(
     # (above the session create). Requires fernet to decrypt it; None when no
     # fernet, no overlay binding, or no stored PAT — all mean "no GitHub".
     per_agent_pat: str | None = None
-    if agent_uuid is not None and session_factory is not None and fernet is not None:
+    if (
+        not app_mode
+        and agent_uuid is not None
+        and session_factory is not None
+        and fernet is not None
+    ):
         per_agent_pat = await get_pat(
             principal_id=agent_uuid,
             agent_id=agent_uuid,
@@ -318,6 +361,12 @@ async def create_session(
             tenant_id=tenant_id,
             agent_id=agent_uuid,
         )
+        if app_mode:
+            credentials = tuple(
+                credential
+                for credential in credentials
+                if credential.mcp_server_url != GITHUB_COPILOT_MCP_URL
+            )
         # Locked so a person's OAuth grant replacing a shared token at the same
         # URL never sees this recreate it between its delete and its create.
         async with hold_agent_vault_lock(
@@ -328,9 +377,15 @@ async def create_session(
             )
 
     resources: list[Resource] = list(extra_resources)
+    app_access: AppSessionAccess | None = None
+    provisional_session_id = f"pending:{uuid.uuid4()}"
     if tenant_id is not None and agent_uuid is not None and session_factory is not None:
         mount = await upload_env_and_mount(
-            anthropic, session_factory, tenant_id=tenant_id, agent_id=agent_uuid
+            anthropic,
+            session_factory,
+            tenant_id=tenant_id,
+            agent_id=agent_uuid,
+            exclude_github=app_mode,
         )
         if mount is not None:
             resources.append(mount)
@@ -338,7 +393,11 @@ async def create_session(
         # Fetch the binding unconditionally — the resolver needs it even when
         # there is no per-agent PAT (App/fallback branches).
         async with session_factory() as session:
-            binding = await get_binding(session, tenant_id=tenant_id, agent_id=agent_uuid)
+            binding = (
+                None
+                if app_mode
+                else await get_binding(session, tenant_id=tenant_id, agent_id=agent_uuid)
+            )
         if binding is not None:
             app_private_key_secret = (
                 SecretStr(github_app_private_key) if github_app_private_key is not None else None
@@ -486,16 +545,57 @@ async def create_session(
             )
         )
 
-    if before_create is not None:
-        # The caller's last access decision, after every await above.
-        await before_create()
-    return await anthropic.beta.sessions.create(
-        agent=agent_argument,
-        environment_id=environment.id,
-        metadata=metadata if metadata else omit,
-        vault_ids=[vault_id] if vault_id is not None else omit,
-        resources=resources if resources else omit,
-    )
+    created: BetaManagedAgentsSession | None = None
+    try:
+        if app_mode:
+            assert tenant_id is not None and agent_uuid is not None and session_factory is not None
+            async with httpx.AsyncClient() as app_client:
+                app_access = await prepare_app_access(
+                    session_factory,
+                    app_client,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    account_id=None if requester_is_headless else account_id,
+                    is_external=is_external,
+                    provisional_session_id=provisional_session_id,
+                    config=agent_github_app or GithubAppSettings(),
+                    fernet=fernet,
+                    cache=REQUESTER_CACHE,
+                )
+            resources.extend(app_access.resources)
+            if vault_id is not None:
+                await add_app_credentials(anthropic, vault_id=vault_id, access=app_access)
+        if before_create is not None:
+            # The caller's last access decision, after every await above.
+            await before_create()
+        created = await anthropic.beta.sessions.create(
+            agent=agent_argument,
+            environment_id=environment.id,
+            metadata=metadata if metadata else omit,
+            vault_ids=[vault_id] if vault_id is not None else omit,
+            resources=resources if resources else omit,
+        )
+        if app_access is not None:
+            assert session_factory is not None
+            async with httpx.AsyncClient() as app_client:
+                await finish_app_delivery(
+                    session_factory,
+                    app_client,
+                    access=app_access,
+                    provisional_session_id=provisional_session_id,
+                    session_id=created.id,
+                )
+        return created
+    except Exception:
+        if created is not None and app_mode:
+            await anthropic.beta.sessions.archive(created.id)
+        if app_access is not None:
+            assert session_factory is not None
+            async with httpx.AsyncClient() as app_client:
+                await revoke_app_access(session_factory, app_client, app_access)
+        if app_mode and vault_id is not None:
+            await anthropic.beta.vaults.archive(vault_id)
+        raise
 
 
 async def create_isolated_session(

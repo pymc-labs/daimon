@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from typing import Literal
+from typing import Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
@@ -59,7 +59,7 @@ from daimon.core.tool_safety import (
     session_tools_for_policy,
     trusted_servers_for,
 )
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 type MaSkill = BetaManagedAgentsAnthropicSkill | BetaManagedAgentsCustomSkill
@@ -82,6 +82,8 @@ _IDENTITY_FIELDS = (
     "system_sha256",
     "skills_sha256",
     "environment_id",
+    "github_mode",
+    "repo_urls",
     "repo_url",
     "repo_branch",
     "memory_store_id",
@@ -104,6 +106,8 @@ class SessionSnapshot(BaseModel):
     system_sha256: str | None
     skills_sha256: str
     environment_id: str
+    github_mode: Literal["legacy", "app"] = "legacy"
+    repo_urls: tuple[str, ...] = ()
     repo_url: str | None
     repo_branch: str | None
     memory_store_id: str | None
@@ -119,6 +123,7 @@ class SessionSnapshot(BaseModel):
     env_file_id: str | None = None
     env_resource_id: str | None = None
     repo_resource_id: str | None = None
+    repo_resource_ids: dict[str, str] = Field(default_factory=dict)
     repo_mount_path: str | None = None
     repo_token_issued_at: int | None = None
 
@@ -190,6 +195,7 @@ def snapshot_from_created_session(
     env_file_id: str | None,
     repo_token_issued_at: int | None,
     vault_id: str | None,
+    github_mode: Literal["legacy", "app"] = "legacy",
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
 
@@ -203,6 +209,7 @@ def snapshot_from_created_session(
         env_file_id=env_file_id,
         repo_token_issued_at=repo_token_issued_at,
         vault_id=vault_id,
+        github_mode=github_mode,
     )
 
 
@@ -235,10 +242,13 @@ def _snapshot_from_session(
     env_file_id: str | None,
     repo_token_issued_at: int | None,
     vault_id: str | None,
+    github_mode: Literal["legacy", "app"] = "legacy",
 ) -> SessionSnapshot:
     env_resource_id: str | None = None
     resolved_env_file_id = env_file_id
     repo_resource_id: str | None = None
+    repo_resource_ids: dict[str, str] = {}
+    repo_urls: list[str] = []
     repo_url: str | None = None
     repo_branch: str | None = None
     repo_mount_path: str | None = None
@@ -251,6 +261,10 @@ def _snapshot_from_session(
                 env_resource_id = resource.id
                 resolved_env_file_id = resolved_env_file_id or resource.file_id
         elif isinstance(resource, BetaManagedAgentsGitHubRepositoryResource):
+            repo_urls.append(resource.url)
+            resource_id = cast(str | None, resource.id)
+            if resource_id is not None:
+                repo_resource_ids[resource.url] = resource_id
             repo_resource_id = resource.id
             repo_url = resource.url
             repo_mount_path = resource.mount_path
@@ -267,8 +281,10 @@ def _snapshot_from_session(
         system_sha256=hash_system(agent.system),
         skills_sha256=hash_skills(agent.skills),
         environment_id=session.environment_id,
-        repo_url=repo_url,
-        repo_branch=repo_branch,
+        github_mode=github_mode,
+        repo_urls=tuple(sorted(repo_urls)),
+        repo_url=None if github_mode == "app" else repo_url,
+        repo_branch=None if github_mode == "app" else repo_branch,
         memory_store_id=memory_store_id,
         memory_read_only=memory_read_only,
         vault_id=vault_id if vault_id is not None else next(iter(session.vault_ids), None),
@@ -278,6 +294,7 @@ def _snapshot_from_session(
         env_file_id=resolved_env_file_id,
         env_resource_id=env_resource_id,
         repo_resource_id=repo_resource_id,
+        repo_resource_ids=repo_resource_ids,
         repo_mount_path=repo_mount_path,
         repo_token_issued_at=repo_token_issued_at,
         agent_version=agent.version,
@@ -345,6 +362,8 @@ def desired_snapshot(
     environment_id: str,
     env_sha256: str | None,
     repo_url: str | None,
+    github_mode: Literal["legacy", "app"] = "legacy",
+    repo_urls: tuple[str, ...] = (),
     repo_branch: str | None,
     memory_store_id: str | None,
     vault_id: str | None,
@@ -378,6 +397,8 @@ def desired_snapshot(
         system_sha256=hash_system(agent.system),
         skills_sha256=hash_skills(session_skills(agent, channel_skills)),
         environment_id=environment_id,
+        github_mode=github_mode,
+        repo_urls=repo_urls or ((repo_url,) if repo_url is not None else ()),
         repo_url=repo_url,
         repo_branch=repo_branch,
         memory_store_id=memory_store_id,

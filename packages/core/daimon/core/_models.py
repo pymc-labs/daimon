@@ -2494,6 +2494,20 @@ class AgentGitHubGrant(Base):
     version: Mapped[int] = mapped_column(Integer, server_default="1")
 
 
+class GitHubNewRepoNotice(Base):
+    """A new installation repository awaiting a workspace-admin announcement."""
+
+    __tablename__ = "github_new_repo_notices"
+    __table_args__ = (PrimaryKeyConstraint("tenant_id", "installation_id", "repo_full_name"),)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    installation_id: Mapped[int] = mapped_column(BigInteger)
+    repo_full_name: Mapped[str] = mapped_column(Text)
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class AgentGitHubMode(Base):
     __tablename__ = "agent_github_mode"
     __table_args__ = (
@@ -2608,6 +2622,8 @@ class SecurityAuditEvent(Base):
     github_installation_id: Mapped[int | None] = mapped_column(BigInteger)
     github_repo_ids: Mapped[list[int] | None] = mapped_column(ARRAY(BigInteger))
     github_permissions: Mapped[dict[str, str] | None] = mapped_column(JSONB)
+    github_grant_versions: Mapped[dict[str, int] | None] = mapped_column(JSONB)
+    github_turn_origin_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     github_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Set only by the channel tidy tools: which message an edit or delete
     # touched, a keyed HMAC of the text it replaced, and the turn it ran in.

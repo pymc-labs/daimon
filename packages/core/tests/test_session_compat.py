@@ -15,6 +15,7 @@ from daimon.core.session_compat import (
     ReplaceSession,
     ReplaceToolsAndMcpServers,
     ReuseAsIs,
+    RotateAppTokens,
     RotateRepoToken,
     UpdateInPlace,
     decide_session_compatibility,
@@ -56,6 +57,39 @@ def test_decision_is_reuse_when_recorded_and_desired_are_identical() -> None:
         now=NOW,
     )
     assert decision == ReuseAsIs(), "identical snapshots must reuse the session untouched"
+
+
+def test_app_token_swap_keeps_session_but_repo_set_change_replaces_it() -> None:
+    url = "https://github.com/example/one"
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_url=None,
+        repo_branch=None,
+        repo_urls=(url,),
+        repo_resource_ids={url: "repo-resource"},
+        vault_id="session-vault",
+    )
+    desired = recorded.model_copy(update={"repo_resource_ids": {}})
+    decision = decide_session_compatibility(
+        recorded=recorded,
+        desired=desired,
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+    )
+    assert decision == UpdateInPlace(
+        ops=(
+            RotateAppTokens(resource_ids={url: "repo-resource"}),
+            RemirrorVaultCredentials(),
+        ),
+        reasons=("repo_token_age",),
+    )
+    expanded = desired.model_copy(update={"repo_urls": (url, "https://github.com/example/two")})
+    assert decide_session_compatibility(
+        recorded=recorded,
+        desired=expanded,
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+    ) == ReplaceSession(reasons=("repo_set",))
 
 
 def test_decision_ignores_handles_and_diagnostics_when_only_those_differ() -> None:

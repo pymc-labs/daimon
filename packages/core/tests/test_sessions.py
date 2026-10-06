@@ -5,6 +5,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -18,7 +19,7 @@ from cryptography.fernet import Fernet, MultiFernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
-from daimon.core.config import McpSettings
+from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BILLING_EXEMPT,
@@ -1340,8 +1341,9 @@ async def test_create_session_provisions_copilot_credential_from_pat(
 async def test_create_session_skips_copilot_when_no_pat(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Vault ensured but the agent has no resolvable PAT → no Copilot cred POST."""
+    """A configured new App never enters the legacy session's mint path."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
     account_id = uuid.UUID("00000000-0000-0000-0000-0000000000c1")
@@ -1363,6 +1365,8 @@ async def test_create_session_skips_copilot_when_no_pat(
             session_id="sess_nocopilot",
         )
     )
+    app_mint = AsyncMock()
+    monkeypatch.setattr("daimon.core.sessions.prepare_app_access", app_mint)
 
     await create_session(
         client,
@@ -1374,8 +1378,10 @@ async def test_create_session_skips_copilot_when_no_pat(
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
         fernet=fernet,
+        agent_github_app=GithubAppSettings(app_id="new", private_key=SecretStr("unused")),
     )
 
+    app_mint.assert_not_awaited()
     assert len(cred_bodies) == 0, "no Copilot credential POST when there is no PAT"
     assert len(session_bodies) == 1
 

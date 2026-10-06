@@ -132,6 +132,7 @@ source_modules = [
     "daimon.core.direct_messages",
     "daimon.core.errors",
     "daimon.core.github_app_auth",
+    "daimon.core.github_app_session",
     "daimon.core.github_credentials",
     "daimon.core.github_installation_reconcile",
     "daimon.core.github_rate_limit",

@@ -54,6 +54,7 @@ from daimon.core.sessions import create_session
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import TransferKind
+from daimon.core.stores.github_access import get_agent_mode
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
     get_live_thread_session,
@@ -175,6 +176,9 @@ async def _env_bytes_sha256(
     """
     async with deps.sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
+        mode = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid)
+    if mode == "app":
+        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
     if not rows:
         return None
     return hash_env_bytes(assemble_env_bytes(rows))
@@ -271,6 +275,8 @@ async def create_ma_session(
             )
 
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
+    async with deps.sessionmaker() as session:
+        github_mode = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid)
     env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
     ma_session = await create_session(
         deps.anthropic,
@@ -285,6 +291,8 @@ async def create_ma_session(
         github_fallback_pat=deps.github_fallback_pat,
         github_app_id=deps.github_app_id,
         github_app_private_key=deps.github_app_private_key,
+        agent_github_app=deps.agent_github_app,
+        is_external=admission.is_external,
         extra_resources=extra_resources,
         memory_read_only=admission.memory_read_only,
         tool_safety=deps.tool_safety,
@@ -314,6 +322,7 @@ async def create_ma_session(
         # `create_session` call above, so "now" is when it was issued.
         repo_token_issued_at=int(time.time()) if has_repo else None,
         vault_id=next(iter(ma_session.vault_ids), None),
+        github_mode=github_mode,
     )
     return CreatedSession(
         ma_session_id=ma_session.id,

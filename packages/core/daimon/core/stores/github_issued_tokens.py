@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from cryptography.fernet import MultiFernet
-from daimon.core._models import GitHubIssuedToken
+from daimon.core._models import GitHubIssuedToken, ThreadSession
 from daimon.core.github_credentials import decrypt_token, encrypt_token
+from daimon.core.stores.domain import ThreadSessionRow
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,6 +37,20 @@ class IssuedToken(BaseModel):
 
 class GitHubTokenRowClosedError(ValueError):
     """The issued-token row was closed before its minted token could be stored."""
+
+
+class LiveAppSession(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    mapping: ThreadSessionRow
+    agent_id: uuid.UUID
+    expires_at: datetime
+    has_linked_requester: bool
+
+
+class ClosedAppSession(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    session_id: str
+    vault_id: str | None
 
 
 async def erase_requester_identity(session: AsyncSession, *, account_id: uuid.UUID) -> None:
@@ -192,6 +207,7 @@ async def select_stale_tokens(
                      OR auth_row.repo_id IS NULL
                      OR auth_row.status <> 'active'
                      OR auth_row.installation_id <> token.installation_id
+                     OR NOT (auth_row.repo_full_name = ANY(installation.repo_full_names))
                      OR token.grant_versions ->> ('grant:' || repo.repo_id::text)
                         IS DISTINCT FROM grant_row.version::text
                      OR token.grant_versions ->> ('authorization:' || repo.repo_id::text)
@@ -205,3 +221,104 @@ async def select_stale_tokens(
     )
     rows = await session.scalars(statement, {"now": current})
     return [IssuedToken.model_validate(row) for row in rows]
+
+
+async def set_session_id(
+    session: AsyncSession, *, provisional_session_id: str, session_id: str
+) -> None:
+    await session.execute(
+        update(GitHubIssuedToken)
+        .where(GitHubIssuedToken.session_id == provisional_session_id)
+        .values(session_id=session_id)
+    )
+
+
+async def list_session_tokens(session: AsyncSession, *, session_id: str) -> list[IssuedToken]:
+    rows = await session.scalars(
+        select(GitHubIssuedToken).where(
+            GitHubIssuedToken.session_id == session_id,
+            GitHubIssuedToken.status.in_(("stored", "delivered")),
+        )
+    )
+    return [IssuedToken.model_validate(row) for row in rows]
+
+
+async def select_deactivated_tokens(session: AsyncSession) -> list[IssuedToken]:
+    rows = await session.scalars(
+        select(GitHubIssuedToken).from_statement(
+            text(
+                """SELECT token.* FROM github_issued_tokens AS token
+                LEFT JOIN agent_github_mode AS mode
+                  ON mode.tenant_id = token.tenant_id AND mode.agent_id = token.agent_id
+                WHERE token.status IN ('stored', 'delivered')
+                  AND mode.mode IS DISTINCT FROM 'app'"""
+            )
+        )
+    )
+    return [IssuedToken.model_validate(row) for row in rows]
+
+
+async def list_live_app_sessions(session: AsyncSession) -> list[LiveAppSession]:
+    rows = await session.execute(
+        select(ThreadSession, GitHubIssuedToken)
+        .join(GitHubIssuedToken, GitHubIssuedToken.session_id == ThreadSession.ma_session_id)
+        .where(
+            ThreadSession.status == "live",
+            GitHubIssuedToken.status == "delivered",
+        )
+    )
+    grouped: dict[str, LiveAppSession] = {}
+    for mapping, token in rows:
+        mapped = ThreadSessionRow.model_validate(mapping)
+        if mapped.effective_config is None or mapped.effective_config.github_mode != "app":
+            continue
+        current = grouped.get(mapping.ma_session_id)
+        if current is None:
+            grouped[mapping.ma_session_id] = LiveAppSession(
+                mapping=mapped,
+                agent_id=token.agent_id,
+                expires_at=token.expires_at,
+                has_linked_requester=token.link_generation is not None,
+            )
+        else:
+            grouped[mapping.ma_session_id] = current.model_copy(
+                update={
+                    "expires_at": min(current.expires_at, token.expires_at),
+                    "has_linked_requester": current.has_linked_requester
+                    or token.link_generation is not None,
+                }
+            )
+    return list(grouped.values())
+
+
+async def list_closed_app_sessions(
+    session: AsyncSession, *, now: datetime
+) -> list[ClosedAppSession]:
+    """Delivered tokens whose MA mapping ended, after a one-minute create grace."""
+    ids = await session.scalars(
+        select(GitHubIssuedToken.session_id)
+        .where(
+            GitHubIssuedToken.status == "delivered",
+            GitHubIssuedToken.expires_at <= now + timedelta(minutes=54),
+        )
+        .distinct()
+    )
+    result: list[ClosedAppSession] = []
+    for session_id in ids:
+        mapping = await session.scalar(
+            select(ThreadSession)
+            .where(ThreadSession.ma_session_id == session_id)
+            .order_by(ThreadSession.created_at.desc())
+            .limit(1)
+        )
+        if mapping is not None and mapping.status == "live":
+            continue
+        mapped = ThreadSessionRow.model_validate(mapping) if mapping is not None else None
+        vault_id = mapped.effective_config.vault_id if mapped and mapped.effective_config else None
+        result.append(
+            ClosedAppSession(
+                session_id=session_id,
+                vault_id=vault_id,
+            )
+        )
+    return result

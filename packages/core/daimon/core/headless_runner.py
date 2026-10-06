@@ -57,7 +57,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from cryptography.fernet import MultiFernet
-from daimon.core.config import McpSettings
+from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.sessions import create_session
@@ -135,6 +135,7 @@ async def run_turn(
     github_fallback_pat: str | None = None,
     github_app_id: str | None = None,
     github_app_private_key: str | None = None,
+    agent_github_app: GithubAppSettings | None = None,
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     on_state: Callable[[TurnState], None] | None = None,
@@ -162,6 +163,7 @@ async def run_turn(
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
+            agent_github_app=agent_github_app,
             deadline=deadline,
             tool_safety=tool_safety,
             on_state=on_state,
@@ -189,6 +191,7 @@ async def run_turn(
                 github_fallback_pat=github_fallback_pat,
                 github_app_id=github_app_id,
                 github_app_private_key=github_app_private_key,
+                agent_github_app=agent_github_app,
                 deadline=deadline,
                 tool_safety=tool_safety,
                 on_state=on_state,
@@ -220,6 +223,7 @@ async def run_turn_impl(
     github_fallback_pat: str | None = None,
     github_app_id: str | None = None,
     github_app_private_key: str | None = None,
+    agent_github_app: GithubAppSettings | None = None,
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     on_state: Callable[[TurnState], None] | None = None,
@@ -321,6 +325,8 @@ async def run_turn_impl(
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
+            agent_github_app=agent_github_app,
+            requester_is_headless=True,
             billing_exempt=billing_exempt,
             memory_read_only=origin == "routine",
             tool_safety=tool_safety,

@@ -459,9 +459,16 @@ async def test_repo_permission_denial_is_cached_as_empty(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("headers", [{"x-ratelimit-remaining": "0"}, {"retry-after": "60"}])
+@pytest.mark.parametrize(
+    ("headers", "message"),
+    [
+        ({"x-ratelimit-remaining": "0"}, "rate limited"),
+        ({"retry-after": "60"}, "rate limited"),
+        ({}, "You have exceeded a secondary rate limit."),
+    ],
+)
 async def test_repo_permission_rate_limit_is_not_cached(
-    db_engine: AsyncEngine, db_clean: None, headers: dict[str, str]
+    db_engine: AsyncEngine, db_clean: None, headers: dict[str, str], message: str
 ) -> None:
     sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
@@ -479,7 +486,7 @@ async def test_repo_permission_rate_limit_is_not_cached(
     def handler(_request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(403, headers=headers, json={"message": "rate limited"})
+        return httpx.Response(403, headers=headers, json={"message": message})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         cache = PermissionCache()

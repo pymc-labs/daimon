@@ -51,6 +51,7 @@ An environment is a named cloud config — a package manifest and a networking
 policy — and nothing else. It is not an image, not a set of env vars and not a
 tool list. `defaults/environments/default.yaml` is the whole shape: a `config`
 block whose `packages` names `pip`, `apt`, `npm` and friends.
+The default environment includes the `gh` CLI as an apt package.
 
 There is one daimon-specific behaviour authors need to know.
 `EnvironmentSpec` fills in every package ecosystem with an explicit empty list
