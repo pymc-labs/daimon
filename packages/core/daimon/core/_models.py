@@ -2456,30 +2456,6 @@ class GitHubConnectFlow(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class TenantGitHubOrgScope(Base):
-    __tablename__ = "tenant_github_org_scopes"
-    __table_args__ = (
-        PrimaryKeyConstraint("tenant_id", "owner_id"),
-        CheckConstraint("max_access IN ('read', 'write')"),
-        CheckConstraint("scope = 'org_all'"),
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
-    )
-    owner_id: Mapped[int] = mapped_column(BigInteger)
-    installation_id: Mapped[int] = mapped_column(BigInteger)
-    owner_login: Mapped[str] = mapped_column(Text)
-    scope: Mapped[str] = mapped_column(Text, server_default="org_all")
-    max_access: Mapped[str] = mapped_column(Text)
-    authorized_by_github_user_id: Mapped[int] = mapped_column(BigInteger)
-    authorized_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
-    )
-    authorized_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-
 class AgentGitHubGrant(Base):
     __tablename__ = "agent_github_grants"
     __table_args__ = (

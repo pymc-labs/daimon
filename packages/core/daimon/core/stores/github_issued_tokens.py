@@ -10,7 +10,7 @@ from cryptography.fernet import MultiFernet
 from daimon.core._models import GitHubIssuedToken
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -36,6 +36,15 @@ class IssuedToken(BaseModel):
 
 class GitHubTokenRowClosedError(ValueError):
     """The issued-token row was closed before its minted token could be stored."""
+
+
+async def erase_requester_identity(session: AsyncSession, *, account_id: uuid.UUID) -> None:
+    """Remove the GitHub user ID before account deletion clears the requester FK."""
+    await session.execute(
+        update(GitHubIssuedToken)
+        .where(GitHubIssuedToken.requester_account_id == account_id)
+        .values(github_user_id=None)
+    )
 
 
 async def create_pending(

@@ -18,6 +18,7 @@ from daimon.core._models import (
     AgentGithubBinding,
     Base,
     CliPrincipal,
+    GitHubIssuedToken,
     GitHubUserLink,
     McpToken,
     MessageFeedback,
@@ -35,6 +36,7 @@ from daimon.core.purge import PurgeReport, purge_account
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import github_credentials as github_credentials_store
+from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
@@ -85,12 +87,36 @@ async def test_account_purge_deletes_github_user_after_last_link(
                 verified_via="discord_oauth",
             )
         )
+    token_ids: list[uuid.UUID] = []
+    for account in (first, second):
+        token = await github_issued_tokens_store.create_pending(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id=uuid.uuid4(),
+            session_id="privacy-test",
+            installation_id=77,
+            repo_ids=[101],
+            permissions={"contents": "read"},
+            grant_versions={"grant:101": 1, "authorization:101": 1},
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+            requester_account_id=account.id,
+            github_user_id=101,
+            link_generation=1,
+        )
+        token_ids.append(token.token_id)
     await db_session.commit()
 
     first_preview = await collect_purge_preview(sm=db_session_factory, account_id=first.id)
     assert first_preview.github_user_links.count == 0
     first_report = await purge_account(sm=db_session_factory, account_id=first.id)
     assert first_report.db.github_user_links == 0
+    async with db_session_factory() as session:
+        first_token = await session.get(GitHubIssuedToken, token_ids[0])
+        second_token = await session.get(GitHubIssuedToken, token_ids[1])
+        assert first_token is not None
+        assert first_token.requester_account_id is None and first_token.github_user_id is None
+        assert second_token is not None
+        assert second_token.requester_account_id == second.id and second_token.github_user_id == 101
 
     second_preview = await collect_purge_preview(sm=db_session_factory, account_id=second.id)
     assert second_preview.github_user_links.count == 1
@@ -886,12 +912,10 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # An invitation is single-use and disappears with its requesting
             # account; its encrypted flow rows cascade from the invitation.
             "github_connect_invitations",
-            # An org-wide authorization belongs to the tenant. Erasing the
-            # confirming admin severs nullable provenance, preserving access.
-            "tenant_github_org_scopes",
             "agent_github_grants",
             # The account link is removed by ON DELETE CASCADE. A token's
-            # requester reference is erased by SET NULL; its recorded link
+            # requester reference is erased by SET NULL and its GitHub user ID
+            # is explicitly cleared; its recorded link
             # generation then fails the inventory sweeper's link check.
             "account_github_links",
             "github_issued_tokens",

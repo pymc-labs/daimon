@@ -76,12 +76,24 @@ async def rotate_user_tokens(
 
 
 async def bump_link_generation(
-    session: AsyncSession, *, github_user_id: int, broken: bool = False
+    session: AsyncSession,
+    *,
+    github_user_id: int,
+    broken: bool = False,
+    expected_token_generation: int | None = None,
 ) -> GitHubUser | None:
     """Invalidate derived tokens; the inventory stale-token query sees the new generation."""
+    conditions = [GitHubUserLink.github_user_id == github_user_id]
+    if expected_token_generation is not None:
+        conditions.extend(
+            (
+                GitHubUserLink.token_generation == expected_token_generation,
+                GitHubUserLink.status == "active",
+            )
+        )
     row = await session.scalar(
         update(GitHubUserLink)
-        .where(GitHubUserLink.github_user_id == github_user_id)
+        .where(*conditions)
         .values(
             link_generation=GitHubUserLink.link_generation + 1,
             **({"status": "broken"} if broken else {}),

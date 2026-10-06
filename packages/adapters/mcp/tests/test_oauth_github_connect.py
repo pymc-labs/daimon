@@ -81,7 +81,6 @@ async def test_connection_happy_path_and_rechecks(
             requester_account_id=account_id,
             requester_label="Alex",
         )
-    owner = True
     repo_admin = True
     requests: list[httpx.Request] = []
 
@@ -130,18 +129,6 @@ async def test_connection_happy_path_and_rechecks(
                         },
                     ]
                 },
-            )
-        if request.url.path == "/user/memberships/orgs":
-            assert request.url.params["state"] == "active"
-            return httpx.Response(
-                200,
-                json=[
-                    {
-                        "organization": {"id": 55},
-                        "state": "active",
-                        "role": "admin" if owner else "member",
-                    }
-                ],
             )
         raise AssertionError(f"unexpected GitHub path {request.url.path}")
 
@@ -205,17 +192,18 @@ async def test_connection_happy_path_and_rechecks(
         )
         assert malformed.status_code == 400
         assert malformed.headers["cache-control"] == "no-store"
+        assert malformed.headers["x-frame-options"] == "DENY"
+        assert malformed.headers["referrer-policy"] == "no-referrer"
         assert "example/one" in page.text and "example/two" not in page.text
-        assert "All repos in this org" in page.text
+        assert "Select all repos you administer" in page.text
+        assert "All repos in this org" not in page.text
+        assert 'name="repo" value="101"' in page.text
+        assert 'name="repo" value="101" checked' not in page.text
         spoof = await browser.get(
             "/oauth/github/setup", params={"state": state, "installation_id": "999999"}
         )
         assert spoof.status_code == 307
         assert "installation_id" not in spoof.headers["location"]
-        owner = False
-        page_no_owner = await browser.get("/oauth/github/confirm", params={"state": state})
-        assert "All repos in this org" not in page_no_owner.text
-        owner = True
         repo_admin = False
         denied = await browser.post(
             "/oauth/github/confirm", data={"state": state, "repo": "101", "access_101": "write"}
@@ -252,23 +240,6 @@ async def test_connection_happy_path_and_rechecks(
             assert events[0].github_repo_ids == [101]
         reused = await browser.post("/oauth/github/confirm", data={"state": state, "repo": "101"})
         assert reused.status_code == 400
-        async with sessionmaker.begin() as session:
-            org_invitation = await github_connect.mint_invitation(
-                session, tenant_id=tenant_id, requester_account_id=account_id
-            )
-        org_start = await browser.get(f"/oauth/github/connect/{org_invitation}")
-        org_state = parse_qs(urlparse(org_start.headers["location"]).query)["state"][0]
-        await browser.get("/oauth/github/callback", params={"state": org_state, "code": "code"})
-        org_confirmed = await browser.post(
-            "/oauth/github/confirm",
-            data={"state": org_state, "org": "55", "org_access_55": "read"},
-        )
-        assert org_confirmed.status_code == 200
-        async with sessionmaker() as session:
-            scope = await github_connect.get_org_scope(session, tenant_id=tenant_id, owner_id=55)
-            assert scope is not None and scope.scope == "org_all"
-            assert scope.installation_id == 77 and scope.max_access == "read"
-            repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
-            assert repos[0].max_access == "write"
     assert any(request.url.path == "/user/installations" for request in requests)
-    assert sum(request.url.path == "/applications/client/token" for request in requests) == 2
+    assert all(request.url.path != "/user/memberships/orgs" for request in requests)
+    assert sum(request.url.path == "/applications/client/token" for request in requests) == 1

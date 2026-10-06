@@ -14,7 +14,6 @@ from daimon.core._models import (
     GitHubConnectFlow,
     GitHubConnectInvitation,
     Tenant,
-    TenantGitHubOrgScope,
     TenantGitHubRepo,
 )
 from pydantic import BaseModel, ConfigDict
@@ -172,30 +171,6 @@ class RepoConfirmation(BaseModel):
     max_access: Literal["read", "write"]
 
 
-class OrgConfirmation(BaseModel):
-    owner_id: int
-    installation_id: int
-    owner_login: str
-    max_access: Literal["read", "write"]
-
-
-class OrgScope(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-    tenant_id: uuid.UUID
-    owner_id: int
-    installation_id: int
-    owner_login: str
-    scope: Literal["org_all"]
-    max_access: Literal["read", "write"]
-
-
-async def get_org_scope(
-    session: AsyncSession, *, tenant_id: uuid.UUID, owner_id: int
-) -> OrgScope | None:
-    row = await session.get(TenantGitHubOrgScope, (tenant_id, owner_id))
-    return OrgScope.model_validate(row) if row is not None else None
-
-
 async def confirm(
     session: AsyncSession,
     *,
@@ -203,7 +178,6 @@ async def confirm(
     cookie: str,
     github_user_id: int,
     repos: list[RepoConfirmation],
-    orgs: list[OrgConfirmation],
 ) -> bool:
     """Consume the invitation and write confirmed rows in the caller's transaction."""
     flow = await session.get(GitHubConnectFlow, digest(state), with_for_update=True)
@@ -226,9 +200,7 @@ async def confirm(
         or account.is_external
     ):
         return False
-    if len({repo.repo_id for repo in repos}) != len(repos) or len(
-        {org.owner_id for org in orgs}
-    ) != len(orgs):
+    if len({repo.repo_id for repo in repos}) != len(repos):
         return False
     now = datetime.now(UTC)
     for repo in repos:
@@ -236,33 +208,23 @@ async def confirm(
         if existing is None:
             existing = TenantGitHubRepo(tenant_id=invitation.tenant_id, repo_id=repo.repo_id)
             session.add(existing)
+            keep_higher = False
         else:
+            keep_higher = existing.status == "active"
             existing.version += 1
         existing.owner_id = repo.owner_id
         existing.installation_id = repo.installation_id
         existing.repo_full_name = repo.full_name
         existing.max_access = (
-            "write" if existing.max_access == "write" or repo.max_access == "write" else "read"
+            "write"
+            if (keep_higher and existing.max_access == "write") or repo.max_access == "write"
+            else "read"
         )
         existing.authorized_by_github_user_id = github_user_id
         existing.authorized_by_account_id = invitation.requester_account_id
         existing.authorized_at = now
         existing.status = "active"
         existing.status_reason = None
-    for org in orgs:
-        existing_org = await session.get(TenantGitHubOrgScope, (invitation.tenant_id, org.owner_id))
-        if existing_org is None:
-            existing_org = TenantGitHubOrgScope(
-                tenant_id=invitation.tenant_id, owner_id=org.owner_id
-            )
-            session.add(existing_org)
-        existing_org.installation_id = org.installation_id
-        existing_org.owner_login = org.owner_login
-        existing_org.scope = "org_all"
-        existing_org.max_access = org.max_access
-        existing_org.authorized_by_github_user_id = github_user_id
-        existing_org.authorized_by_account_id = invitation.requester_account_id
-        existing_org.authorized_at = now
     invitation.used_at = now
     await session.execute(
         delete(GitHubConnectFlow).where(GitHubConnectFlow.invitation_hash == flow.invitation_hash)

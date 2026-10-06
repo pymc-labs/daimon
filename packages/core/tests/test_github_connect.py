@@ -131,13 +131,12 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
                 max_access="read",
             )
         ],
-        orgs=[],
     )
     assert saved
     assert await db_session.get(GitHubConnectFlow, github_connect.digest("other-browser")) is None
     assert await github_connect.get_invitation(db_session, github_connect.digest(token)) is None
     assert not await github_connect.confirm(
-        db_session, state="state", cookie="cookie", github_user_id=17, repos=[], orgs=[]
+        db_session, state="state", cookie="cookie", github_user_id=17, repos=[]
     )
     expired_token = await github_connect.mint_invitation(
         db_session, tenant_id=tenant_id, requester_account_id=admin_id
@@ -164,6 +163,63 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
     assert await github_connect.get_flow(db_session, state="expired-flow", cookie="cookie") is None
     assert await github_connect.delete_expired_flows(db_session, now=datetime.now(UTC)) == 1
     assert await db_session.get(GitHubConnectFlow, github_connect.digest("expired-flow")) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("previous_status", "expected_access"),
+    [("active", "write"), ("revoked", "read"), ("suspended", "read")],
+)
+async def test_reconfirmation_respects_inactive_repo_choice(
+    db_session: AsyncSession, previous_status: str, expected_access: str
+) -> None:
+    tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="workspace"))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=101,
+            owner_id=55,
+            installation_id=77,
+            repo_full_name="example/repo",
+            max_access="write",
+            authorized_by_github_user_id=17,
+            status=previous_status,
+            version=1,
+        )
+    )
+    await db_session.flush()
+    token = await github_connect.mint_invitation(
+        db_session, tenant_id=tenant_id, requester_account_id=admin_id
+    )
+    await github_connect.create_flow(
+        db_session,
+        invitation_hash=github_connect.digest(token),
+        state="state",
+        cookie="cookie",
+        encrypted_verifier=b"encrypted",
+    )
+    assert await github_connect.confirm(
+        db_session,
+        state="state",
+        cookie="cookie",
+        github_user_id=17,
+        repos=[
+            github_connect.RepoConfirmation(
+                repo_id=101,
+                owner_id=55,
+                installation_id=77,
+                full_name="example/repo",
+                max_access="read",
+            )
+        ],
+    )
+    repo = await db_session.get(TenantGitHubRepo, (tenant_id, 101))
+    assert repo is not None
+    assert repo.status == "active" and repo.max_access == expected_access
+    assert repo.version == 2
 
 
 @pytest.mark.asyncio
@@ -235,6 +291,65 @@ async def test_refresh_serializes_for_one_github_user(
     async with sessionmaker() as session:
         row = await github_links.get_user(session, github_user_id=user_id)
     assert row is not None and row.token_generation == 2 and row.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_bad_refresh_token_does_not_break_a_rotated_link(
+    db_engine: AsyncEngine, db_nullpool_engine: AsyncEngine, db_clean: None
+) -> None:
+    sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
+    probe_sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    async with sessionmaker.begin() as session:
+        session.add(
+            GitHubUserLink(
+                github_user_id=681,
+                login="alex",
+                encrypted_access_token=encrypt_token(fernet, "old"),
+                encrypted_refresh_token=encrypt_token(fernet, "refresh-old"),
+                access_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+                refresh_expires_at=datetime.now(UTC) + timedelta(days=1),
+            )
+        )
+    refreshes = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal refreshes
+        if request.url.path == "/login/oauth/access_token":
+            refreshes += 1
+            async with probe_sessionmaker.begin() as session:
+                assert await github_links.rotate_user_tokens(
+                    session,
+                    github_user_id=681,
+                    expected_generation=1,
+                    encrypted_access_token=encrypt_token(fernet, "new"),
+                    encrypted_refresh_token=encrypt_token(fernet, "refresh-new"),
+                    access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    refresh_expires_at=datetime.now(UTC) + timedelta(days=1),
+                )
+            return httpx.Response(200, json={"error": "bad_refresh_token"})
+        assert request.headers["authorization"] == "Bearer new"
+        return httpx.Response(
+            200, json={"repositories": [{"id": 101, "permissions": {"pull": True}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        permissions = await linked_permissions(
+            sessionmaker,
+            client,
+            user_id=681,
+            installation_id=88,
+            fernet=fernet,
+            client_id="client",
+            client_secret="secret",
+            cache=PermissionCache(),
+        )
+    assert permissions == {101: "read"}
+    assert refreshes == 1
+    async with sessionmaker() as session:
+        row = await github_links.get_user(session, github_user_id=681)
+    assert row is not None and row.status == "active"
+    assert row.token_generation == 2 and row.link_generation == 1
 
 
 @pytest.mark.asyncio
@@ -341,6 +456,46 @@ async def test_repo_permission_denial_is_cached_as_empty(
     async with sessionmaker() as session:
         row = await github_links.get_user(session, github_user_id=679)
     assert row is not None and row.status == "active" and row.link_generation == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headers", [{"x-ratelimit-remaining": "0"}, {"retry-after": "60"}])
+async def test_repo_permission_rate_limit_is_not_cached(
+    db_engine: AsyncEngine, db_clean: None, headers: dict[str, str]
+) -> None:
+    sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    async with sessionmaker.begin() as session:
+        session.add(
+            GitHubUserLink(
+                github_user_id=680,
+                login="alex",
+                encrypted_access_token=encrypt_token(fernet, "token"),
+                access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            )
+        )
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(403, headers=headers, json={"message": "rate limited"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        cache = PermissionCache()
+        for _ in range(2):
+            with pytest.raises(httpx.HTTPStatusError):
+                await linked_permissions(
+                    sessionmaker,
+                    client,
+                    user_id=680,
+                    installation_id=88,
+                    fernet=fernet,
+                    client_id="client",
+                    client_secret="secret",
+                    cache=cache,
+                )
+    assert calls == 2
 
 
 @pytest.mark.asyncio

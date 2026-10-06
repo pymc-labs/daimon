@@ -46,36 +46,9 @@ def upgrade() -> None:
         sa.Column("github_user_id", sa.BigInteger()),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
     )
-    op.create_table(
-        "tenant_github_org_scopes",
-        sa.Column(
-            "tenant_id", sa.UUID(), sa.ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-        ),
-        sa.Column("owner_id", sa.BigInteger(), nullable=False),
-        sa.Column("installation_id", sa.BigInteger(), nullable=False),
-        sa.Column("owner_login", sa.Text(), nullable=False),
-        sa.Column("scope", sa.Text(), server_default="org_all", nullable=False),
-        sa.Column("max_access", sa.Text(), nullable=False),
-        sa.Column("authorized_by_github_user_id", sa.BigInteger(), nullable=False),
-        sa.Column(
-            "authorized_by_account_id",
-            sa.UUID(),
-            sa.ForeignKey("accounts.id", ondelete="SET NULL"),
-        ),
-        sa.Column(
-            "authorized_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
-        sa.PrimaryKeyConstraint("tenant_id", "owner_id"),
-        sa.CheckConstraint("max_access IN ('read', 'write')"),
-        sa.CheckConstraint("scope = 'org_all'"),
-    )
 
 
 def downgrade() -> None:
     op.drop_column("github_issued_tokens", "github_user_id")
-    op.drop_table("tenant_github_org_scopes")
     op.drop_table("github_connect_flows")
     op.drop_table("github_connect_invitations")

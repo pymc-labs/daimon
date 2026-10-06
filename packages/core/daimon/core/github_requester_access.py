@@ -247,7 +247,14 @@ async def _linked_permissions_once(
                     "bad_refresh_token",
                     "invalid_grant",
                 ):
-                    await bump_link_generation(session, github_user_id=user_id, broken=True)
+                    broken = await bump_link_generation(
+                        session,
+                        github_user_id=user_id,
+                        broken=True,
+                        expected_token_generation=row.token_generation,
+                    )
+                    if broken is None:
+                        raise _RefreshRace
                     cache.drop_user(user_id)
                     return {}
                 response.raise_for_status()
@@ -281,6 +288,11 @@ async def _linked_permissions_once(
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code in (403, 404):
+            if exc.response.status_code == 403 and (
+                exc.response.headers.get("x-ratelimit-remaining") == "0"
+                or "retry-after" in exc.response.headers
+            ):
+                raise
             permissions = {}
         elif exc.response.status_code == 401:
             async with sessionmaker.begin() as session:

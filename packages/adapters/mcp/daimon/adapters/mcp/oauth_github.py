@@ -19,6 +19,7 @@ from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.github_requester_access import list_github_pages
 from daimon.core.stores import github_connect
 from daimon.core.stores.accounts import get_account_with_tenant
+from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
@@ -44,7 +45,6 @@ class _Installation:
     id: int
     owner_id: int
     owner_login: str
-    owner_type: str
     repos: tuple[_Repo, ...]
 
 
@@ -64,12 +64,6 @@ class _RepoPayload(BaseModel):
     owner: _OwnerPayload
     full_name: str = ""
     permissions: dict[str, bool] = Field(default_factory=dict)
-
-
-class _MembershipPayload(BaseModel):
-    organization: _OwnerPayload
-    state: str
-    role: str
 
 
 class _TokenPayload(BaseModel):
@@ -124,22 +118,9 @@ async def _installations(client: httpx.AsyncClient, token: str) -> list[_Install
                 id=installation_id,
                 owner_id=owner_id,
                 owner_login=parsed.account.login,
-                owner_type=parsed.account.type,
                 repos=tuple(repos),
             )
         )
-    return result
-
-
-async def _owned_orgs(client: httpx.AsyncClient, token: str) -> set[int]:
-    rows = await list_github_pages(
-        client, "/user/memberships/orgs", token, "memberships", params={"state": "active"}
-    )
-    result: set[int] = set()
-    for row in rows:
-        membership = _MembershipPayload.model_validate(row)
-        if membership.state == "active" and membership.role == "admin":
-            result.add(membership.organization.id)
     return result
 
 
@@ -293,33 +274,23 @@ def build_oauth_github_routes(
         try:
             async with factory() as client:
                 installations = await _installations(client, token)
-                owners = await _owned_orgs(client, token)
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
             return _error("GitHub could not verify repository access.", 502)
         if request.method == "POST":
             try:
                 selected_ids = [int(value) for value in fields.get("repo", [])]
-                org_ids = [int(value) for value in fields.get("org", [])]
             except ValueError:
                 return _error("Selection could not be verified.")
-            if not selected_ids and not org_ids:
-                return _error("Select at least one repository or organization.")
+            if not selected_ids:
+                return _error("Select at least one repository.")
             visible = {
                 repo.id: repo for install in installations for repo in install.repos if repo.admin
             }
-            orgs = {
-                install.owner_id: install
-                for install in installations
-                if install.owner_type == "Organization" and install.owner_id in owners
-            }
-            if len(set(selected_ids)) != len(selected_ids) or len(set(org_ids)) != len(org_ids):
+            if len(set(selected_ids)) != len(selected_ids):
                 return _error("Selection could not be verified.")
-            if any(repo_id not in visible for repo_id in selected_ids) or any(
-                owner_id not in orgs for owner_id in org_ids
-            ):
+            if any(repo_id not in visible for repo_id in selected_ids):
                 return _error("Selection could not be verified.", 403)
             repos: list[github_connect.RepoConfirmation] = []
-            scopes: list[github_connect.OrgConfirmation] = []
             for repo_id in selected_ids:
                 repo = visible[repo_id]
                 access = fields.get(f"access_{repo_id}", ["read"])[0]
@@ -334,30 +305,6 @@ def build_oauth_github_routes(
                         max_access=access,
                     )
                 )
-            for owner_id in org_ids:
-                org = orgs[owner_id]
-                access = fields.get(f"org_access_{owner_id}", ["read"])[0]
-                if access not in ("read", "write"):
-                    return _error("Selection could not be verified.")
-                for repo in org.repos:
-                    if repo.admin and repo.id not in selected_ids:
-                        repos.append(
-                            github_connect.RepoConfirmation(
-                                repo_id=repo.id,
-                                owner_id=repo.owner_id,
-                                installation_id=repo.installation_id,
-                                full_name=repo.full_name,
-                                max_access=access,
-                            )
-                        )
-                scopes.append(
-                    github_connect.OrgConfirmation(
-                        owner_id=org.owner_id,
-                        installation_id=org.id,
-                        owner_login=org.owner_login,
-                        max_access=access,
-                    )
-                )
             async with sessionmaker.begin() as session:
                 saved = await github_connect.confirm(
                     session,
@@ -365,11 +312,8 @@ def build_oauth_github_routes(
                     cookie=cookie,
                     github_user_id=flow.github_user_id,
                     repos=repos,
-                    orgs=scopes,
                 )
                 if saved:
-                    from daimon.core.stores.security_audit import append_event
-
                     await append_event(
                         session,
                         tenant_id=invitation.tenant_id,
@@ -413,11 +357,13 @@ def build_oauth_github_routes(
             "<p>Select repositories and choose their maximum access.</p>",
             f'<form method="post" action="{html.escape(root, quote=True)}/oauth/github/confirm">',
             f'<input type="hidden" name="state" value="{html.escape(state, quote=True)}">',
+            '<button type="button" onclick="this.form.querySelectorAll(\'input[name=repo]\')'
+            '.forEach(box => box.checked = true)">Select all repos you administer</button>',
         ]
         access_options = '<option value="read">Read</option><option value="write">Write</option>'
         for installation in installations:
             admin_repos = [repo for repo in installation.repos if repo.admin]
-            if not admin_repos and installation.owner_id not in owners:
+            if not admin_repos:
                 continue
             parts.append(f"<h2>{html.escape(installation.owner_login)}</h2>")
             for repo in admin_repos:
@@ -425,13 +371,6 @@ def build_oauth_github_routes(
                     f'<label><input type="checkbox" name="repo" value="{repo.id}">'
                     f"{html.escape(repo.full_name)}</label>"
                     f'<select name="access_{repo.id}">{access_options}</select><br>'
-                )
-            if installation.owner_type == "Organization" and installation.owner_id in owners:
-                parts.append(
-                    f'<label><input type="checkbox" name="org" value="{installation.owner_id}">'
-                    "All repos in this org, including future ones</label>"
-                    f'<select name="org_access_{installation.owner_id}">'
-                    f"{access_options}</select><br>"
                 )
         parts.append('<button type="submit">Connect selected</button></form>')
         install_url = (
