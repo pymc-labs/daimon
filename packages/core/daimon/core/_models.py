@@ -2428,6 +2428,34 @@ class TenantGitHubRepo(Base):
     version: Mapped[int] = mapped_column(Integer, server_default="1")
 
 
+class GitHubConnectInvitation(Base):
+    __tablename__ = "github_connect_invitations"
+    token_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    requester_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE")
+    )
+    workspace_label: Mapped[str] = mapped_column(Text)
+    requester_label: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GitHubConnectFlow(Base):
+    __tablename__ = "github_connect_flows"
+    state_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    invitation_hash: Mapped[str] = mapped_column(
+        Text, ForeignKey("github_connect_invitations.token_hash", ondelete="CASCADE")
+    )
+    cookie_hash: Mapped[str] = mapped_column(Text)
+    encrypted_verifier: Mapped[bytes] = mapped_column(LargeBinary)
+    encrypted_user_token: Mapped[bytes | None] = mapped_column(LargeBinary)
+    github_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class AgentGitHubGrant(Base):
     __tablename__ = "agent_github_grants"
     __table_args__ = (
@@ -2524,6 +2552,7 @@ class GitHubIssuedToken(Base):
     requester_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
     )
+    github_user_id: Mapped[int | None] = mapped_column(BigInteger)
     link_generation: Mapped[int | None] = mapped_column(Integer)
     encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

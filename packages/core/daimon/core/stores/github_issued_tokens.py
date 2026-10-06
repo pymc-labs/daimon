@@ -10,7 +10,7 @@ from cryptography.fernet import MultiFernet
 from daimon.core._models import GitHubIssuedToken
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -25,6 +25,7 @@ class IssuedToken(BaseModel):
     permissions: dict[str, str]
     grant_versions: dict[str, int]
     requester_account_id: uuid.UUID | None
+    github_user_id: int | None
     link_generation: int | None
     encrypted_token: bytes | None
     expires_at: datetime
@@ -35,6 +36,15 @@ class IssuedToken(BaseModel):
 
 class GitHubTokenRowClosedError(ValueError):
     """The issued-token row was closed before its minted token could be stored."""
+
+
+async def erase_requester_identity(session: AsyncSession, *, account_id: uuid.UUID) -> None:
+    """Remove the GitHub user ID before account deletion clears the requester FK."""
+    await session.execute(
+        update(GitHubIssuedToken)
+        .where(GitHubIssuedToken.requester_account_id == account_id)
+        .values(github_user_id=None)
+    )
 
 
 async def create_pending(
@@ -49,8 +59,13 @@ async def create_pending(
     grant_versions: dict[str, int],
     expires_at: datetime,
     requester_account_id: uuid.UUID | None = None,
+    github_user_id: int | None = None,
     link_generation: int | None = None,
 ) -> IssuedToken:
+    if (requester_account_id is None) != (github_user_id is None) or (github_user_id is None) != (
+        link_generation is None
+    ):
+        raise ValueError("requester link identity and generation must be recorded together")
     if not repo_ids or len(repo_ids) > 500 or len(set(repo_ids)) != len(repo_ids):
         raise ValueError("token inventory requires 1..500 repository IDs")
     if any(
@@ -71,6 +86,7 @@ async def create_pending(
         permissions=permissions,
         grant_versions=grant_versions,
         requester_account_id=requester_account_id,
+        github_user_id=github_user_id,
         link_generation=link_generation,
         expires_at=expires_at,
         status="pending",
@@ -156,6 +172,7 @@ async def select_stale_tokens(
                   token.link_generation IS NOT NULL
                   AND (
                     user_link.github_user_id IS NULL
+                    OR user_link.github_user_id IS DISTINCT FROM token.github_user_id
                     OR user_link.status <> 'active'
                     OR user_link.link_generation IS DISTINCT FROM token.link_generation
                   )

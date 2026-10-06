@@ -155,6 +155,28 @@ from an env var, and Slack will not redirect to `localhost`.
 [`slack.md`](slack.md) covers the trust model for per-user Slack access.
 Read it before enabling that feature.
 
+## GitHub App (optional)
+
+Register one GitHub App for this deployment. Set its user authorization callback
+to `<root>/oauth/github/callback` and its setup URL to
+`<root>/oauth/github/setup`, where `<root>` is the public MCP URL with the
+trailing `/mcp` removed. For example, if `DAIMON_MCP__PUBLIC_URL` is
+`https://example.com/mcp`, use `https://example.com/oauth/github/callback` and
+`https://example.com/oauth/github/setup`. GitHub must be able to reach those
+URLs, so a localhost URL only works with a suitable tunnel.
+
+Set `DAIMON_GITHUB_APP__APP_ID`, `APP_SLUG`, `PRIVATE_KEY`, `CLIENT_ID` and
+`CLIENT_SECRET` in `.env` using the values from that App. Set
+`DAIMON_CRYPTO__KEYS` to encrypt the short-lived user tokens. The connect routes
+are mounted only when these values and `DAIMON_MCP__PUBLIC_URL` are present.
+The scheduler removes expired connection flows, including their encrypted
+tokens. Run it alongside the MCP service.
+
+A server admin can print a seven-day, single-use invitation with
+`daimon github connect-link --tenant <workspace-uuid>`. The recipient signs in
+to GitHub and confirms the repositories they administer. No repository is
+preselected.
+
 ## Microsoft Teams (optional)
 
 Teams takes the most setup of the three platforms, because the pieces live in

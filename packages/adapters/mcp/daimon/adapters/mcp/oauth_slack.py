@@ -295,6 +295,13 @@ def _page(
     return HTMLResponse(doc, status_code=status)
 
 
+def render_branded_page(
+    *, title: str, state_bar: str, body_html: str, status: int = 200
+) -> HTMLResponse:
+    """Public page renderer shared by browser authorization flows."""
+    return _page(title=title, state_bar=state_bar, body_html=body_html, status=status)
+
+
 # ---------------------------------------------------------------------------
 # Page renderers
 # ---------------------------------------------------------------------------

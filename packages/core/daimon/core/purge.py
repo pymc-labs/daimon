@@ -105,6 +105,7 @@ from daimon.core.stores import channel_admins as channel_admins_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import github_credentials as github_credentials_store
+from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
@@ -508,6 +509,7 @@ async def purge_account(
         direct_message_count = await direct_messages_store.delete_conversations_for_account(
             session, account_id=account_id
         )
+        await github_issued_tokens_store.erase_requester_identity(session, account_id=account_id)
         account_count = await accounts_store.delete_account(session, account_id=account_id)
         github_user_links_count = (
             await github_links_store.delete_unlinked_user(
