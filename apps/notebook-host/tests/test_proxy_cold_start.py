@@ -98,6 +98,38 @@ def test_a_visit_to_a_stopped_notebook_starts_it_and_serves_the_page(
     assert len(p.forwarded) == 1, "and the same request was served by it"
 
 
+@pytest.mark.parametrize("query", ["", "?access_token=wrong", "?access_token="])
+def test_a_visit_without_the_notebooks_token_starts_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    """Slugs are visible to every notebook on the host, so they cannot authorize a start.
+
+    Starting one can stop another tenant's idle notebook to free a port, so
+    anyone who could start notebooks by slug could keep evicting others.
+    """
+    p = _Proxy(tmp_path, monkeypatch, origin_base=None)
+    p.register("pre-post")
+
+    assert p.client.get(f"/n/pre-post/{query}").status_code == 404
+    assert p.spawned == [], "only the link holder can start a stopped notebook"
+
+
+def test_a_websocket_never_starts_a_notebook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from starlette.websockets import WebSocketDisconnect
+
+    p = _Proxy(tmp_path, monkeypatch, origin_base=None)
+    p.register("pre-post")
+
+    with (
+        pytest.raises(WebSocketDisconnect),
+        p.client.websocket_connect("/n/pre-post/ws") as ws,
+    ):
+        ws.receive_text()
+    assert p.spawned == [], "a socket carries no token; the page load starts the notebook"
+
+
 def test_a_visit_to_an_unknown_slug_is_a_404_and_starts_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -124,7 +156,7 @@ def test_a_start_that_fails_asks_the_browser_to_retry(
     p.register("pre-slow")
     p.ready = False
 
-    r = p.client.get("/n/pre-slow/")
+    r = p.client.get("/n/pre-slow/?access_token=tok")
 
     assert r.status_code == 503
     assert r.headers["retry-after"], "the browser is told when to try again"
@@ -133,7 +165,7 @@ def test_a_start_that_fails_asks_the_browser_to_retry(
 def test_a_visit_records_activity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     p = _Proxy(tmp_path, monkeypatch, origin_base=None)
     p.register("pre-post")
-    p.client.get("/n/pre-post/")
+    p.client.get("/n/pre-post/?access_token=tok")
     np = p.state.processes["pre-post"]
     np.last_active = 0.0
 
@@ -155,7 +187,11 @@ def test_origin_mode_starts_a_notebook_only_on_its_own_origin(
     assert p.client.get("/n/pre-b/", headers={"host": other_host}).status_code == 404
     assert p.spawned == [], "a request on the wrong origin never starts a notebook"
 
-    assert p.client.get("/n/pre-b/", headers={"host": own_host}).status_code == 200
+    assert p.client.get("/n/pre-b/", headers={"host": own_host}).status_code == 404, (
+        "the origin label is visible in TLS SNI, so it alone does not start a notebook"
+    )
+    r = p.client.get("/n/pre-b/?access_token=tok-b", headers={"host": own_host})
+    assert r.status_code == 200
     assert p.spawned == ["pre-b"]
 
 
@@ -190,6 +226,7 @@ def test_an_open_websocket_is_counted_until_it_closes(
 
     monkeypatch.setattr(proxy_mod.websockets, "connect", lambda *_a, **_k: _Backend())
 
+    p.client.get("/n/pre-ws/?access_token=tok")
     with p.client.websocket_connect("/n/pre-ws/ws") as ws:
         ws.send_text("hello")
         deadline = time.time() + 5

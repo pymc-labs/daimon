@@ -258,6 +258,103 @@ async def test_a_full_pool_with_every_notebook_in_use_is_a_503(
     assert h.killed == [], "a notebook with an open session is never stopped to make room"
 
 
+async def test_a_full_pool_skips_a_notebook_whose_lock_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_host.lazy_spawn import ensure_running
+
+    h = _harness(tmp_path, monkeypatch, ports=2)
+    h.running("pre-busy", last_active=_NOW - 9000)
+    h.running("pre-free", last_active=_NOW - 10)
+    h.register("pre-new")
+
+    async with h.state.lock_for("pre-busy"):
+        assert await ensure_running(h.state, "pre-new", now=_NOW) is not None
+
+    assert h.killed == ["pre-free"], "a notebook being started, stopped or deleted is left alone"
+
+
+# ─── stopping frees the port only once the uid is empty ────────────────────
+
+
+def _jailed(monkeypatch: pytest.MonkeyPatch, h: _Harness, slug: str, uid: int) -> list[int]:
+    import notebook_host.lazy_spawn as lazy_mod
+    from notebook_host.jail import save_uid_registry
+
+    save_uid_registry(h.settings.resolved_uids_file, {slug: uid})
+    monkeypatch.setattr(lazy_mod, "can_apply_jail", lambda: True)
+    cleared: list[int] = []
+
+    def fake_kill_uid(uid: int) -> None:
+        assert any(np.slug == slug for np in h.state.processes.values()), (
+            "the port must stay reserved until the uid is empty"
+        )
+        cleared.append(uid)
+
+    monkeypatch.setattr(lazy_mod, "kill_uid_processes", fake_kill_uid)
+    return cleared
+
+
+async def test_an_idle_stop_kills_everything_its_uid_left_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cell's detached child outlives marimo's process group.
+
+    Left running, it could bind the freed port before the next notebook does
+    and receive that notebook's traffic, access token included.
+    """
+    from notebook_host.lazy_spawn import sweep_once
+
+    h = _harness(tmp_path, monkeypatch)
+    h.register("pre-idle")
+    h.running("pre-idle", last_active=_NOW - 601)
+    cleared = _jailed(monkeypatch, h, "pre-idle", 100042)
+
+    await sweep_once(h.state, now=_NOW)
+
+    assert cleared == [100042]
+    assert "pre-idle" not in h.state.processes
+
+
+async def test_eviction_kills_everything_the_victims_uid_left_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_host.lazy_spawn import ensure_running
+
+    h = _harness(tmp_path, monkeypatch, ports=1)
+    h.running("pre-old", last_active=_NOW - 500)
+    h.register("pre-new")
+    cleared = _jailed(monkeypatch, h, "pre-old", 100043)
+
+    assert await ensure_running(h.state, "pre-new", now=_NOW) is not None
+    assert cleared == [100043]
+
+
+async def test_a_uid_that_will_not_empty_keeps_its_port_reserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import notebook_host.lazy_spawn as lazy_mod
+    from notebook_host.jail import UidStillInUseError
+    from notebook_host.lazy_spawn import ensure_running, sweep_once
+
+    h = _harness(tmp_path, monkeypatch, ports=1)
+    h.register("pre-stuck")
+    h.running("pre-stuck", last_active=_NOW - 601)
+    _jailed(monkeypatch, h, "pre-stuck", 100044)
+
+    def survivor(uid: int) -> None:
+        raise UidStillInUseError(f"uid {uid} still has processes")
+
+    monkeypatch.setattr(lazy_mod, "kill_uid_processes", survivor)
+    h.register("pre-new")
+
+    await sweep_once(h.state, now=_NOW)
+    assert "pre-stuck" in h.state.processes, "its port is not handed to anyone else"
+    with pytest.raises(HTTPException) as err:
+        await ensure_running(h.state, "pre-new", now=_NOW)
+    assert err.value.status_code == 503, "no start may take a port a survivor could hold"
+
+
 # ─── sweep_once ──────────────────────────────────────────────────────────────
 
 

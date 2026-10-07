@@ -37,7 +37,9 @@ response). Re-uploading the same slug restarts its `ttl_days` from now.
 
 Both kinds survive host restarts. The host stops a notebook nobody has opened
 for a couple of hours and starts it again on the next visit, so a link that has
-been quiet can take a few seconds to load. That is expected, not an error.
+been quiet can take a few seconds to load. That is expected, not an error. Only
+the full link, with its `access_token`, starts a stopped notebook, so always
+share the whole URL from the curl response, never a shortened one.
 
 **Default to `permanent=False`.** Publish the scratch version, let the user look
 at it, and re-upload the *same slug* with `permanent=True` once it is worth

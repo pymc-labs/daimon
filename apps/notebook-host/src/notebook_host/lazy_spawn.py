@@ -27,8 +27,10 @@ from notebook_host.jail import (
     JailUnavailableError,
     UidPoolExhaustedError,
     UidStillInUseError,
+    can_apply_jail,
     ensure_slug_jail,
     kill_uid_processes,
+    load_uid_registry,
     remove_slug_tree,
     resolve_jail_uid,
 )
@@ -57,20 +59,59 @@ def _pool_full(state: AdminState) -> bool:
     return len(state.processes) >= capacity
 
 
+async def _stop(state: AdminState, np: NotebookProcess) -> bool:
+    """Kill a notebook and everything its uid runs, then free its port.
+
+    ``kill`` only signals marimo's process group, and a cell can start a
+    detached child that outlives it. Left running, that child could bind the
+    freed port before the next notebook's marimo does, and the proxy would
+    hand it that notebook's requests, access token included. So the port
+    stays in ``state.processes`` until the uid is empty. Returns False, port
+    still reserved, when something survives; the next sweep tries again.
+    """
+    await asyncio.to_thread(kill, np)
+    uid = (
+        load_uid_registry(state.settings.resolved_uids_file).get(np.slug)
+        if can_apply_jail()
+        else None
+    )
+    if uid is not None:
+        try:
+            await asyncio.to_thread(kill_uid_processes, uid)
+        except UidStillInUseError as err:
+            _log.error(
+                "notebook %r stopped but its uid still runs; keeping :%d: %s", np.slug, np.port, err
+            )
+            return False
+    if state.processes.get(np.slug) is np:
+        state.processes.pop(np.slug)
+    return True
+
+
 async def _make_room(state: AdminState) -> None:
     """Stop the least recently visited registered notebook nobody has open.
 
     The editor is never a candidate: it is not restarted on a visit, so
-    stopping it would lose it. Raises 503 when every running notebook is an
-    editor or has a websocket open.
+    stopping it would lose it. Nor is a notebook whose slug lock is held: it
+    is being started, stopped or deleted. Checking ``locked()`` and taking the
+    lock with no await between keeps this from ever waiting on another slug's
+    lock while holding its own. Raises 503 when no candidate can be stopped.
     """
-    candidates = [np for np in state.processes.values() if np.registered and np.open_sockets == 0]
-    if not candidates:
-        raise _unavailable("every notebook on this host is in use; try again shortly")
-    victim = min(candidates, key=lambda np: np.last_active)
-    _log.info("stopping idle notebook %r to start another", victim.slug)
-    state.processes.pop(victim.slug, None)
-    await asyncio.to_thread(kill, victim)
+    candidates = sorted(
+        (np for np in state.processes.values() if np.registered and np.open_sockets == 0),
+        key=lambda np: np.last_active,
+    )
+    for victim in candidates:
+        lock = state.lock_for(victim.slug)
+        if lock.locked():
+            continue
+        async with lock:
+            if state.processes.get(victim.slug) is not victim or victim.open_sockets:
+                continue
+            _log.info("stopping idle notebook %r to start another", victim.slug)
+            if await _stop(state, victim):
+                return
+    raise _unavailable("every notebook on this host is in use; try again shortly")
 
 
 async def _start(state: AdminState, slug: str) -> NotebookProcess:
@@ -154,8 +195,8 @@ async def ensure_running(state: AdminState, slug: str, *, now: float) -> Noteboo
         record = load_blogs(state.settings.resolved_blogs_file).get(slug)
         if record is None or is_expired(record, now=now):
             return None
-        if np is not None:
-            state.processes.pop(slug, None)
+        if np is not None and not await _stop(state, np):
+            raise _unavailable(f"notebook {slug!r} is still shutting down; try again shortly")
         return await _start(state, slug)
 
 
@@ -187,8 +228,8 @@ async def sweep_once(state: AdminState, *, now: float) -> SweepResult:
         if not should_reap(np, state.settings.subprocess_ttl_seconds):
             continue
         reason = "ttl" if np.is_alive() else "dead"
-        state.processes.pop(slug, None)
-        await asyncio.to_thread(kill, np)
+        if not await _stop(state, np):
+            continue
         remove_slug_tree(state.settings.data_dir, slug, uids_file=state.settings.resolved_uids_file)
         result.reaped.append({"slug": slug, "reason": reason})
 
@@ -203,9 +244,8 @@ async def sweep_once(state: AdminState, *, now: float) -> SweepResult:
             record = load_blogs(state.settings.resolved_blogs_file).get(slug)
             np = state.processes.get(slug)
             if record is not None and is_expired(record, now=now):
-                if np is not None:
-                    state.processes.pop(slug, None)
-                    await asyncio.to_thread(kill, np)
+                if np is not None and not await _stop(state, np):
+                    continue
                 unregister_blog(state.settings.resolved_blogs_file, slug)
                 remove_slug_tree(
                     state.settings.data_dir, slug, uids_file=state.settings.resolved_uids_file
@@ -215,10 +255,11 @@ async def sweep_once(state: AdminState, *, now: float) -> SweepResult:
             if np is None or not np.registered:
                 continue
             if not np.is_alive():
-                state.processes.pop(slug, None)
-                result.stopped.append({"slug": slug, "reason": "dead"})
+                reason = "dead"
             elif np.is_idle(warm_window, now=now):
-                state.processes.pop(slug, None)
-                await asyncio.to_thread(kill, np)
-                result.stopped.append({"slug": slug, "reason": "idle"})
+                reason = "idle"
+            else:
+                continue
+            if await _stop(state, np):
+                result.stopped.append({"slug": slug, "reason": reason})
     return result

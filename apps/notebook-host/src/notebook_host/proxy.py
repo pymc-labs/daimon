@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import logging
 import re
 import time
@@ -128,38 +129,49 @@ def _response_headers(
     return out
 
 
-def _may_start(state: AdminState, slug: str, headers: Mapping[str, str]) -> bool:
+def _may_start(
+    state: AdminState, slug: str, headers: Mapping[str, str], access_token: str | None
+) -> bool:
     """Whether this request may start the slug's stopped notebook.
 
-    In per-notebook-origin mode only a request on the notebook's own origin
-    can, checked against the label of its saved token before anything is
-    spawned. In path mode any request for the slug can; the registry lookup
-    in ``ensure_running`` decides whether there is anything to start.
+    Only the holder of its link can: the request must carry the notebook's
+    ``access_token``, and in per-notebook-origin mode arrive on its own
+    origin. Slugs are no secret (every notebook on the host can read them
+    from ``ps``) and the origin label travels in clear in TLS SNI, and a start
+    can stop another notebook to free a port, so neither may start one. A
+    websocket carries no token, so it never starts a notebook; the page load
+    before it does. A record without a token (written before tokens existed)
+    has no link that could open it, so it is never started.
     """
-    base = state.settings.origin_base
-    if base is None:
-        return True
+    if not access_token:
+        return False
     record = load_blogs(state.settings.resolved_blogs_file).get(slug)
     if record is None or not record.access_token:
         return False
+    if not hmac.compare_digest(access_token.encode(), record.access_token.encode()):
+        return False
+    base = state.settings.origin_base
+    if base is None:
+        return True
     own_host = f"{origin_label_for(record.access_token)}.{base}".lower()
     return headers.get("host", "").lower() == own_host
 
 
 async def _resolve(
-    state: AdminState, slug: str, headers: Mapping[str, str]
+    state: AdminState, slug: str, headers: Mapping[str, str], access_token: str | None = None
 ) -> tuple[NotebookProcess, str | None] | None:
     """The live notebook this request may reach, and the origin it must come from.
 
-    A registered notebook that is stopped is started first (``ensure_running``
-    raises 503 when it cannot be). Path mode (no ``origin_base``): by slug, no
+    A registered notebook that is stopped is started first when the request
+    may start it (``_may_start``; ``ensure_running`` raises 503 when it
+    cannot be started). Path mode (no ``origin_base``): by slug, no
     origin. Per-notebook-origin mode: the Host must be exactly
     ``<label>.<origin_base>`` for this slug's label, so ``/n/<slug>/`` on the
     shared host, or on another notebook's origin, reaches nothing.
     """
     np = state.processes.get(slug)
     if np is None or not np.is_alive():
-        if not _may_start(state, slug, headers):
+        if not _may_start(state, slug, headers, access_token):
             return None
         np = await ensure_running(state, slug, now=time.time())
         if np is None:
@@ -205,7 +217,9 @@ def create_proxy_router(state: AdminState) -> APIRouter:
     async def proxy_http(  # pyright: ignore[reportUnusedFunction]
         slug: str, path: str, request: Request
     ) -> Response:
-        resolved = await _resolve(state, slug, request.headers)
+        resolved = await _resolve(
+            state, slug, request.headers, request.query_params.get("access_token")
+        )
         if resolved is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no active notebook: {slug}")
         np, own_origin = resolved

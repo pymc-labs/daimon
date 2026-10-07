@@ -159,13 +159,23 @@ editors off (`allow_editable`) unless the host serves one client.
 Every read-only notebook is recorded in `blogs.json` (the name predates
 scratch notebooks living there) with its token and `expires_at` (null for a
 blog), so its link keeps working after its process stops or the host
-restarts. The host starts nothing at boot. A visit to a stopped notebook
-starts it under its slug lock and waits for it, up to `spawn_timeout_seconds`;
-if it is not ready by then the request gets a 503 with `Retry-After`. When all
-ports are taken, a start stops the least recently visited read-only notebook
-with no websocket open; if every port is an editor or an open session, it
-gets a 503. In per-notebook-origin mode only a request on the notebook's own
-origin can start it.
+restarts. The host starts nothing at boot. A request for a stopped notebook
+starts it only when it carries the notebook's `access_token` (and, in
+per-notebook-origin mode, arrives on its own origin): slugs are readable by
+every notebook on the host, the origin label travels in clear in TLS SNI, and
+a start can stop another notebook, so neither may start one. A bookmarked
+bare URL works while the notebook runs and 404s once it is stopped; the full
+link starts it. The start runs under the slug lock and waits up to
+`spawn_timeout_seconds`; if the notebook is not ready by then the request
+gets a 503 with `Retry-After`. When all ports are taken, a start stops the
+least recently visited read-only notebook with no websocket open whose slug
+lock is free; if there is none, it gets a 503.
+
+Stopping a notebook, for any reason, kills every process its jail uid runs
+before its port is freed. A cell's detached child would otherwise outlive
+marimo and could bind the port before the next notebook does, receiving that
+notebook's requests and token. If a process survives, the port stays
+reserved and the sweep tries again.
 
 The sweep (every `sweep_interval_seconds`, or `POST /admin/sweep`) deletes
 notebooks past `expires_at` and editors past `subprocess_ttl_seconds`, with
