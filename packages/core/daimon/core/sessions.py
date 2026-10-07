@@ -627,7 +627,7 @@ async def create_session(
                             session, session_id=created.id, vault_id=vault_id
                         )
             return created
-        except Exception:
+        except BaseException:
             if created is not None and app_mode:
                 await anthropic.beta.sessions.archive(created.id)
             if app_access is not None:
