@@ -172,8 +172,9 @@ are mounted only when these values and `DAIMON_MCP__PUBLIC_URL` are present.
 The scheduler removes expired connection flows, including their encrypted
 tokens. Run it alongside the MCP service.
 
-A server admin can print a seven-day, single-use invitation with
-`daimon github connect-link --tenant <workspace-uuid>`. The recipient signs in
+A deployment operator can print a seven-day, single-use invitation with
+`daimon github connect-link --tenant <workspace-uuid> --requester <platform-user-id>`.
+The invitation is minted on that workspace admin's behalf. The recipient signs in
 to GitHub and confirms the repositories they administer. No repository is
 preselected.
 The confirmation page has **Select all repos you administer** for bulk selection;

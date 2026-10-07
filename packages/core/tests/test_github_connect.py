@@ -13,9 +13,11 @@ from daimon.core._models import (
     Account,
     AccountGitHubLink,
     AgentGitHubGrant,
+    CliPrincipal,
     GitHubConnectFlow,
     GitHubConnectInvitation,
     GitHubUserLink,
+    PlatformPrincipal,
     Tenant,
     TenantGitHubRepo,
 )
@@ -163,6 +165,69 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
     assert await github_connect.get_flow(db_session, state="expired-flow", cookie="cookie") is None
     assert await github_connect.delete_expired_flows(db_session, now=datetime.now(UTC)) == 1
     assert await db_session.get(GitHubConnectFlow, github_connect.digest("expired-flow")) is None
+
+
+@pytest.mark.asyncio
+async def test_connect_link_requester_resolves_platform_admin_not_cli_operator(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = uuid.uuid4()
+    admin_id, cli_id, member_id, external_id = (uuid.uuid4() for _ in range(4))
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="workspace"))
+    await db_session.flush()
+    db_session.add_all(
+        [
+            Account(id=admin_id, tenant_id=tenant_id, role="admin"),
+            Account(id=cli_id, tenant_id=tenant_id, role="user"),
+            Account(id=member_id, tenant_id=tenant_id, role="user"),
+            Account(id=external_id, tenant_id=tenant_id, role="admin", is_external=True),
+        ]
+    )
+    await db_session.flush()
+    db_session.add_all(
+        [
+            CliPrincipal(tenant_id=tenant_id, os_user="operator", account_id=cli_id),
+            PlatformPrincipal(
+                tenant_id=tenant_id, platform="discord", external_id="123", account_id=admin_id
+            ),
+            PlatformPrincipal(
+                tenant_id=tenant_id, platform="discord", external_id="456", account_id=member_id
+            ),
+            PlatformPrincipal(
+                tenant_id=tenant_id, platform="discord", external_id="789", account_id=external_id
+            ),
+            PlatformPrincipal(
+                tenant_id=tenant_id,
+                platform="slack",
+                external_id="wrong-platform",
+                account_id=admin_id,
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    assert (
+        await github_connect.cli_account_id(db_session, tenant_id=tenant_id, os_user="operator")
+        == cli_id
+    )
+    requester_id = await github_connect.admin_account_for_platform_user(
+        db_session, tenant_id=tenant_id, external_id="123"
+    )
+    assert requester_id == admin_id
+    token = await github_connect.mint_invitation(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=requester_id,
+        requester_label="123",
+    )
+    invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
+    assert invitation is not None and invitation.requester_account_id == admin_id
+
+    for platform_user_id in ("456", "789", "wrong-platform", "missing"):
+        with pytest.raises(ValueError, match="workspace admin"):
+            await github_connect.admin_account_for_platform_user(
+                db_session, tenant_id=tenant_id, external_id=platform_user_id
+            )
 
 
 @pytest.mark.asyncio

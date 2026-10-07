@@ -24,7 +24,11 @@ from daimon.core.stores.github_access import (
     remove_grant,
     stage_grant,
 )
-from daimon.core.stores.github_connect import cli_account_id, mint_invitation
+from daimon.core.stores.github_connect import (
+    admin_account_for_platform_user,
+    cli_account_id,
+    mint_invitation,
+)
 from daimon.core.stores.thread_sessions import list_live_sessions_for_agent, mark_dead
 from rich.console import Console
 
@@ -216,8 +220,17 @@ def grants_deactivate(
 @github_app.command("connect-link")
 def connect_link(
     tenant: Annotated[uuid.UUID, typer.Option("--tenant", help="Destination workspace UUID.")],
+    requester: Annotated[
+        str,
+        typer.Option(
+            "--requester",
+            help=(
+                "Platform user ID of a workspace admin; mint the invitation on that admin's behalf."
+            ),
+        ),
+    ],
 ) -> None:
-    """Print a single-use connection invitation for a tenant admin."""
+    """Print a single-use connection invitation on a workspace admin's behalf."""
     settings = load_settings()
     config = settings.github_app
     root = settings.mcp.app_root_url
@@ -238,16 +251,14 @@ def connect_link(
         try:
             sessionmaker = build_session_factory(engine)
             async with sessionmaker.begin() as session:
-                account_id = await cli_account_id(
-                    session, tenant_id=tenant, os_user=getpass.getuser()
+                account_id = await admin_account_for_platform_user(
+                    session, tenant_id=tenant, external_id=requester
                 )
-                if account_id is None:
-                    raise ValueError("current CLI user has no account in this workspace")
                 token = await mint_invitation(
                     session,
                     tenant_id=tenant,
                     requester_account_id=account_id,
-                    requester_label=getpass.getuser(),
+                    requester_label=requester,
                 )
             console.print(f"{root}/oauth/github/connect/{token}")
         finally:

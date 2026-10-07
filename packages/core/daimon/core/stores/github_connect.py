@@ -13,6 +13,7 @@ from daimon.core._models import (
     CliPrincipal,
     GitHubConnectFlow,
     GitHubConnectInvitation,
+    PlatformPrincipal,
     Tenant,
     TenantGitHubRepo,
 )
@@ -34,6 +35,28 @@ async def cli_account_id(
             CliPrincipal.tenant_id == tenant_id, CliPrincipal.os_user == os_user
         )
     )
+
+
+async def admin_account_for_platform_user(
+    session: AsyncSession, *, tenant_id: uuid.UUID, external_id: str
+) -> uuid.UUID:
+    """Resolve an invitation requester through the tenant's platform principal."""
+    account_id = await session.scalar(
+        select(Account.id)
+        .join(PlatformPrincipal, PlatformPrincipal.account_id == Account.id)
+        .join(Tenant, Tenant.id == Account.tenant_id)
+        .where(
+            Tenant.id == tenant_id,
+            PlatformPrincipal.tenant_id == tenant_id,
+            PlatformPrincipal.platform == Tenant.platform,
+            PlatformPrincipal.external_id == external_id,
+            Account.role == "admin",
+            Account.is_external.is_(False),
+        )
+    )
+    if account_id is None:
+        raise ValueError("requester platform user ID must belong to a workspace admin")
+    return account_id
 
 
 class Invitation(BaseModel):
