@@ -16,15 +16,17 @@ handle_feedback_vote (real Postgres + transport-level FakeSlackWebClient):
   - a voter the tenant would not let start a turn there records nothing and
     sees why (the form is replaced);
   - an unregistered workspace records nothing;
-  - thread replies and DM answers both record against the answer's ts.
+  - thread replies and DM answers both record against the answer's ts, and a
+    top-level answer's ephemeral is not aimed at a thread;
+  - a views.open timeout still records the vote and offers the button.
 
 run_feedback_text_submission:
   - records the down-vote and attaches text and reasons on the submitter's row;
   - reason-only forms store NULL text; a later form replaces both fields;
   - someone else's answer only ever reaches the submitter's own row;
   - a refused submitter records nothing;
-  - a form opened before this change (row id in metadata) still attaches, and
-    never to someone else's row.
+  - a form opened before this change (row id only) writes nothing and says to
+    start again, since its place can't be authorized.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ import yarl
 from aioresponses import aioresponses as AioResponsesMock
 from cryptography.fernet import Fernet
 from daimon.adapters.slack import feedback as feedback_module
+from daimon.adapters.slack.click_replies import open_modal
 from daimon.adapters.slack.feedback import (
     FEEDBACK_DETAILS_ACTION_ID,
     FEEDBACK_TEXT_CALLBACK_ID,
@@ -52,7 +55,6 @@ from daimon.adapters.slack.feedback import (
     run_feedback_text_submission,
     vote_for_action_id,
 )
-from daimon.adapters.slack.modals import open_modal
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.message_feedback import FEEDBACK_REASONS
@@ -565,21 +567,64 @@ async def test_a_refused_submitter_records_nothing(
     assert ephemeral["text"] == "You can't leave feedback on this answer."
 
 
-async def test_a_form_opened_before_this_change_still_attaches_to_its_row(
+async def test_a_form_opened_before_this_change_writes_nothing_and_says_start_again(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Its metadata holds only a row id, so access can't be decided again."""
+    runtime = await _runtime(db_session, db_session_factory)
+    await handle_feedback_vote(runtime, _vote_payload(FEEDBACK_VOTE_DOWN))
+    row_id = str((await _rows(db_session_factory))[0]["id"])
+
+    await _submit(
+        runtime,
+        text="the numbers were wrong",
+        meta={"feedback_id": row_id, "channel_id": _CHANNEL_ID},
+    )
+
+    (row,) = await _rows(db_session_factory)
+    assert row["vote"] == "down", "the click-time vote stands"
+    assert row["feedback_text"] is None
+    (ephemeral,) = _calls(fake_slack_web_client, _EPHEMERAL_URL)
+    assert "expired" in ephemeral["text"]
+
+
+async def test_a_views_open_timeout_still_records_the_vote_and_offers_the_button(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
     runtime = await _runtime(db_session, db_session_factory)
-    await handle_feedback_vote(runtime, _vote_payload(FEEDBACK_VOTE_DOWN))
-    row_id = str((await _rows(db_session_factory))[0]["id"])
-    legacy = {"feedback_id": row_id, "channel_id": _CHANNEL_ID}
 
-    await _submit(runtime, user_id="U_SOMEONE_ELSE", text="hijack", meta=legacy)
-    await _submit(runtime, text="the numbers were wrong", meta=legacy)
+    async def timing_out(*args: Any, **kwargs: Any) -> Any:
+        raise TimeoutError
+
+    with patch.object(AsyncWebClient, "views_open", new=timing_out):
+        await handle_feedback_vote(runtime, _vote_payload(FEEDBACK_VOTE_DOWN))
 
     (row,) = await _rows(db_session_factory)
-    assert row["feedback_text"] == "the numbers were wrong"
+    assert row["vote"] == "down"
+    (ephemeral,) = _calls(fake_slack_web_client, _EPHEMERAL_URL)
+    assert ephemeral["blocks"][-1]["elements"][0]["action_id"] == FEEDBACK_DETAILS_ACTION_ID
+
+
+async def test_a_top_level_answer_gets_its_ephemeral_outside_any_thread(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Slack drops a threaded ephemeral aimed at a message with no thread."""
+    runtime = await _runtime(db_session, db_session_factory)
+
+    await handle_feedback_vote(
+        runtime,
+        _vote_payload(FEEDBACK_VOTE_UP, channel_id="D_DM", message_ts="1.5", thread_ts=None),
+    )
+
+    (ephemeral,) = _calls(fake_slack_web_client, _EPHEMERAL_URL)
+    assert ephemeral["channel"] == "D_DM"
+    assert "thread_ts" not in ephemeral
 
 
 async def test_open_modal_returns_none_when_slack_refuses() -> None:

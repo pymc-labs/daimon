@@ -39,21 +39,24 @@ import uuid
 from typing import Any, Final, Literal, cast
 
 import structlog
+from daimon.adapters.slack.click_replies import (
+    notice_modal,
+    open_modal,
+    post_ephemeral,
+    update_modal,
+)
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.modals import notice_modal, open_modal, update_modal
 from daimon.adapters.slack.place_access import check_place_access
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.message_feedback import FEEDBACK_REASONS, Vote, known_feedback_reasons
 from daimon.core.stores.message_feedback import (
     attach_feedback_details,
-    attach_feedback_text,
     record_vote,
 )
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_latest_thread_session
-from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
 __all__ = [
@@ -82,6 +85,10 @@ _POLICY_UNREADABLE: Final = (
     "Ask an admin to check it."
 )
 _FORM_DID_NOT_OPEN: Final = "Slack didn't open the form in time. Click the button again."
+_FORM_EXPIRED: Final = (
+    "This form has expired, so its details weren't saved. Your vote was. "
+    "Click \N{THUMBS DOWN SIGN} again to tell us what went wrong."
+)
 _TELL_US_PROMPT: Final = "Thanks — noted. Want to tell us what went wrong?"
 
 FEEDBACK_VOTE_UP: Final = "feedback_vote:up"
@@ -290,26 +297,6 @@ def evaluate_feedback_text_submission(payload: dict[str, Any]) -> FeedbackTextDe
     return dataclasses.replace(decision, proceed=True, text=raw_text, reasons=reasons)
 
 
-async def _ephemeral(
-    client: AsyncWebClient,
-    *,
-    channel_id: str,
-    user_id: str,
-    thread_ts: str,
-    text: str,
-    blocks: list[dict[str, Any]] | None = None,
-) -> None:
-    try:
-        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel_id, user=user_id, thread_ts=thread_ts or None, text=text, blocks=blocks
-        )
-    except SlackApiError as err:
-        log.info(
-            "feedback.ephemeral_failed",
-            error=str(err.response.get("error", "slack_api_error")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
-        )
-
-
 _RecordOutcome = Literal["recorded", "missing", "refused", "unreadable"]
 
 
@@ -427,21 +414,32 @@ async def handle_feedback_vote(runtime: SlackRuntime, payload: dict[str, Any]) -
             client, view_id=view_id, view=notice_modal(title="Feedback", text=text)
         ):
             return
-        await _ephemeral(
-            client, channel_id=channel_id, user_id=user_id, thread_ts=thread_ts, text=text
-        )
-        return
-
-    if vote == "up":
-        await _ephemeral(
-            client, channel_id=channel_id, user_id=user_id, thread_ts=thread_ts, text=_THANKS_VOTE
-        )
-    elif view_id is None:
-        await _ephemeral(
+        await post_ephemeral(
             client,
             channel_id=channel_id,
             user_id=user_id,
             thread_ts=thread_ts,
+            message_ts=message_ts,
+            text=text,
+        )
+        return
+
+    if vote == "up":
+        await post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            thread_ts=thread_ts,
+            message_ts=message_ts,
+            text=_THANKS_VOTE,
+        )
+    elif view_id is None:
+        await post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            thread_ts=thread_ts,
+            message_ts=message_ts,
             text=_TELL_US_PROMPT,
             blocks=_details_prompt_blocks(place),
         )
@@ -476,11 +474,12 @@ async def handle_feedback_details_click(runtime: SlackRuntime, payload: dict[str
         ),
     )
     if view_id is None:
-        await _ephemeral(
+        await post_ephemeral(
             client,
             channel_id=channel_id,
             user_id=user_id,
             thread_ts=thread_ts,
+            message_ts=message_ts,
             text=_FORM_DID_NOT_OPEN,
         )
 
@@ -506,21 +505,21 @@ async def run_feedback_text_submission(
     d = decision
 
     async def reply(text: str) -> None:
-        await _ephemeral(
-            client, channel_id=d.channel_id, user_id=user_id, thread_ts=d.thread_ts, text=text
+        await post_ephemeral(
+            client,
+            channel_id=d.channel_id,
+            user_id=user_id,
+            thread_ts=d.thread_ts,
+            message_ts=d.message_ts,
+            text=text,
         )
 
     if not d.message_ts:
-        try:
-            legacy_id = uuid.UUID(d.feedback_id)
-        except ValueError:
-            log.info("feedback.submission_bad_row_id")
-            return
-        async with runtime.sessionmaker() as session, session.begin():
-            legacy = await attach_feedback_text(
-                session, feedback_id=legacy_id, platform_user_id=user_id, feedback_text=d.text
-            )
-        await reply(_THANKS_TEXT if legacy is not None else _NO_LONGER_AVAILABLE)
+        # A form opened before forms carried the answer's place holds only a
+        # row id, which says nothing about where the answer is, so access
+        # cannot be decided again. Its vote was recorded at the click.
+        log.info("feedback.submission_legacy_form")
+        await reply(_FORM_EXPIRED)
         return
 
     place = _AnswerPlace(channel_id=d.channel_id, message_ts=d.message_ts, thread_ts=d.thread_ts)

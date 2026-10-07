@@ -53,9 +53,14 @@ from typing import Any, Final, cast
 
 import structlog
 from daimon.adapters.slack.channel_admin_groups import user_group_members
+from daimon.adapters.slack.click_replies import (
+    notice_modal,
+    open_modal,
+    post_ephemeral,
+    update_modal,
+)
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.modals import notice_modal, open_modal, update_modal
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.place_access import (
     check_place_access,
@@ -267,20 +272,6 @@ def evaluate_support_submission(payload: dict[str, Any]) -> SupportSubmission:
     return dataclasses.replace(base, proceed=True, note=note)
 
 
-async def _ephemeral(
-    client: AsyncWebClient, *, channel_id: str, user_id: str, thread_ts: str, text: str
-) -> None:
-    try:
-        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel_id, user=user_id, thread_ts=thread_ts or None, text=text
-        )
-    except SlackApiError as err:
-        log.info(
-            "support.ephemeral_failed",
-            error=str(err.response.get("error", "slack_api_error")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
-        )
-
-
 async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     """Open the note form, or say why not. Spends nothing.
 
@@ -317,8 +308,13 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
     support = runtime.settings.support
     if not slack_support_enabled(support):
         log.info("support.disabled", platform="slack")
-        await _ephemeral(
-            client, channel_id=channel_id, user_id=user_id, thread_ts=thread_ts, text=UNAVAILABLE
+        await post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            thread_ts=thread_ts,
+            message_ts=message_ts,
+            text=UNAVAILABLE,
         )
         return
 
@@ -333,8 +329,13 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
             client, view_id=view_id, view=notice_modal(title="Ask a human", text=text)
         ):
             return
-        await _ephemeral(
-            client, channel_id=channel_id, user_id=user_id, thread_ts=thread_ts, text=text
+        await post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            thread_ts=thread_ts,
+            message_ts=message_ts,
+            text=text,
         )
 
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
@@ -388,11 +389,12 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
     )
     if view_id is not None and await update_modal(client, view_id=view_id, view=form):
         return
-    await _ephemeral(
+    await post_ephemeral(
         client,
         channel_id=channel_id,
         user_id=user_id,
         thread_ts=thread_ts,
+        message_ts=message_ts,
         text=FORM_DID_NOT_OPEN,
     )
 
@@ -410,8 +412,13 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
         return
 
     async def reply(text: str) -> None:
-        await _ephemeral(
-            client, channel_id=s.channel_id, user_id=s.user_id, thread_ts=s.thread_ts, text=text
+        await post_ephemeral(
+            client,
+            channel_id=s.channel_id,
+            user_id=s.user_id,
+            thread_ts=s.thread_ts,
+            message_ts=s.message_ts,
+            text=text,
         )
 
     support = runtime.settings.support
