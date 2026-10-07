@@ -57,8 +57,10 @@ from daimon.core.stores.support_escalation import (
 )
 from daimon.core.stores.thread_sessions import get_latest_thread_session
 from daimon.core.support_escalation import (
+    ASK_THE_TEAM,
     CUSTOM_ID_TEMPLATE,
     EMPTY_NOTE,
+    ESCALATE,
     OUT_OF_CREDITS,
     RECORDED_UNDELIVERED,
     UNAVAILABLE,
@@ -81,7 +83,7 @@ _OUT_OF_CREDITS = OUT_OF_CREDITS
 _RECORDED_UNDELIVERED = RECORDED_UNDELIVERED
 
 
-class SupportModal(discord.ui.Modal, title="Ask a human"):
+class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
     """Free-text form; writing it is what spends the credit.
 
     `on_submit` commits the row, closes the transaction, and only then tries
@@ -101,6 +103,8 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
         self._message_id = message_id
         self.note_input: discord.ui.TextInput[SupportModal] = discord.ui.TextInput(
             label="What do you need help with?",
+            # Discord caps a label at 45 characters; Slack says this in its label.
+            placeholder="Someone from the team will reply.",
             style=discord.TextStyle.paragraph,
             required=True,
             max_length=4000,
@@ -317,7 +321,8 @@ class SupportEscalateButton(
     def __init__(self, *, guild_id: str, channel_id: str, message_id: str) -> None:
         button: discord.ui.Button[discord.ui.View] = discord.ui.Button(
             style=discord.ButtonStyle.primary,
-            label="Ask a human",
+            label=ASK_THE_TEAM,
+            emoji=ESCALATE,
             custom_id=build_custom_id(
                 guild_id=guild_id, channel_id=channel_id, message_id=message_id
             ),

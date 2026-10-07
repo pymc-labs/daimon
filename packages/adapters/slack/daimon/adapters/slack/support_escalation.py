@@ -87,6 +87,8 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_latest_thread_session
 from daimon.core.support_escalation import (
     ALREADY_REQUESTED,
+    ASK_THE_TEAM,
+    ESCALATE,
     OUT_OF_CREDITS,
     RECORDED_UNDELIVERED,
     UNAVAILABLE,
@@ -121,9 +123,6 @@ SUPPORT_CALLBACK_ID: Final = "support_escalation"
 
 _NOTE_BLOCK_ID: Final = "support_note_block"
 _NOTE_INPUT_ID: Final = "support_note_input"
-
-#: The person-facing name of the button, the form and its notices.
-ASK_THE_TEAM: Final = "Ask the team"
 
 NOT_ALLOWED: Final = "Asking the team isn't available to you here."
 POLICY_UNREADABLE: Final = (
@@ -167,7 +166,7 @@ def build_ask_human_button() -> dict[str, Any]:
         "action_id": ASK_HUMAN_ACTION_ID,
         "text": {
             "type": "plain_text",
-            "text": "\N{HAPPY PERSON RAISING ONE HAND} Ask the team",
+            "text": f"{ESCALATE} {ASK_THE_TEAM}",
             "emoji": True,
         },
     }

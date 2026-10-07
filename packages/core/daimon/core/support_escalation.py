@@ -126,6 +126,9 @@ def is_enabled(*, channel_id: str | None, allowance: int) -> bool:
 # Person-facing copy, shared so Discord and Slack say the same thing. Each
 # adapter renders its own markup around it; none of these carry markup.
 
+#: The button, the form and its notices, on every platform.
+ASK_THE_TEAM: Final[str] = "Ask the team"
+
 OUT_OF_CREDITS: Final[str] = (
     "You've used all your support requests. Contact us if you'd like more added to your account."
 )
