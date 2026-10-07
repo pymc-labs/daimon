@@ -134,6 +134,14 @@ def test_modal_offers_the_reason_vocabulary_and_both_inputs_are_optional() -> No
     assert offered == list(FEEDBACK_REASONS)
 
 
+def test_modal_text_input_stays_within_slack_input_limit() -> None:
+    """Slack refuses the whole view (`invalid_arguments`) above 3,000; production
+    logged exactly that on every 👎 while this was 4,000."""
+    view = _modal()
+    (text,) = [b["element"] for b in view["blocks"] if b["element"]["type"] == "plain_text_input"]
+    assert 1 <= text["max_length"] <= 3000
+
+
 # ---------------------------------------------------------------------------
 # evaluate_feedback_text_submission
 # ---------------------------------------------------------------------------
