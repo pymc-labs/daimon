@@ -174,6 +174,14 @@ that identity in Slack's message header. The built-in Daimon agent uses the
 app header. Slack is expected to keep the header when the status card is edited into an
 answer; each new turn post is recorded under the turn's agent and card intent.
 
+Discord starts a turn on a direct bot mention or a reply to a message recorded
+for an agent in the same tenant and channel. The usual admission path follows
+either trigger. Agent turn posts use one application-owned webhook per text or
+forum channel, including its threads; built-in Daimon posts use the bot. If the
+webhook is unavailable, the first answer chunk carries a bold agent name.
+The bot and MCP Discord tools resolve the same channel webhook to edit or
+delete an agent's recorded posts.
+
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
 `thread_participation_scopes`. In a followed thread it joins a quiet-timer
 batch; once the thread goes quiet the shared gates in

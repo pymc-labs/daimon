@@ -17,8 +17,10 @@ re-ping the requester each time the state moves.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import suppress
 
 import structlog
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.posted_controls.view import build_card_view
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.posted_controls import CardState, RefusalReason, card_for_request
@@ -67,7 +69,23 @@ async def edit_posted_card(
         int(row.posted_message_id)
     )
     try:
-        await message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+        fetched: discord.Message | None = None
+        if isinstance(message, discord.PartialMessage):  # pyright: ignore[reportUnnecessaryIsInstance]
+            with suppress(discord.HTTPException):
+                fetched = await message.fetch()
+        if isinstance(fetched, discord.Message) and fetched.webhook_id is not None:
+            transport = DiscordPostTransport(
+                client,
+                fetched.channel,
+                name=fetched.author.name,
+                avatar_url=None,
+                builtin=False,
+            )
+            await transport.edit(
+                fetched, view=view, allowed_mentions=discord.AllowedMentions.none()
+            )
+        else:
+            await message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException as err:
         _log.warning(
             "posted_card.edit_failed", err_type=type(err).__name__, state=state, kind=row.kind

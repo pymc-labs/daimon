@@ -19,11 +19,10 @@ level, the same shape `credential_button.py` and `feedback_button.py` use.
 Pipeline, cheapest and most certain gates first: (1) bot not connected yet
 -- bail; (2) `vote_for_reaction`, one pure call covering the bot-self-
 reaction, direct-message, custom-emoji, and emoji-match gates with zero
-I/O; (3) `is_bot_authored`, tri-state -- `True`/`False` resolve
-immediately, `None` means the gateway omitted the undocumented, possibly-
-absent `message_author_id` field and this module falls back to one bounded
-message fetch, memoized per message id (see `_AUTHOR_CACHE_MAX_ENTRIES`),
-logging its use since that field could stop arriving without notice, where
+I/O; (3) `is_bot_authored` accepts the bot id immediately; an absent author
+id or a webhook author falls back to one bounded message fetch, memoized per
+message id (see `_AUTHOR_CACHE_MAX_ENTRIES`),
+logging its use since the gateway field could stop arriving without notice, where
 a failure means the author is unverifiable and records NOTHING -- never
 "assume ours"; (4) derive the tenant id (pure)
 and open one transaction to read the tenant, resolve a best-effort
@@ -39,6 +38,7 @@ from typing import cast
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.feedback_button import FeedbackButton
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.support_escalation import SupportEscalateButton
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.message_feedback import (
@@ -118,9 +118,7 @@ class FeedbackReactionCog(commands.Cog):
             verdict = is_bot_authored(
                 message_author_id=payload.message_author_id, bot_user_id=bot_user_id
             )
-            if verdict is False:
-                return
-            if verdict is None and not await self._is_bot_message_via_fetch(
+            if verdict is not True and not await self._is_bot_message_via_fetch(
                 payload, bot_user_id=bot_user_id
             ):
                 return
@@ -139,9 +137,7 @@ class FeedbackReactionCog(commands.Cog):
         verdict = is_bot_authored(
             message_author_id=payload.message_author_id, bot_user_id=bot_user_id
         )
-        if verdict is False:
-            return
-        if verdict is None and not await self._is_bot_message_via_fetch(
+        if verdict is not True and not await self._is_bot_message_via_fetch(
             payload, bot_user_id=bot_user_id
         ):
             return
@@ -240,7 +236,15 @@ class FeedbackReactionCog(commands.Cog):
         except discord.HTTPException:
             log.info("feedback.author_unverifiable", message_id=str(payload.message_id))
             return False
-        is_bot_message = message.author.id == bot_user_id
+        if message.author.id == bot_user_id:
+            is_bot_message = True
+        elif isinstance(message.webhook_id, int):
+            transport = DiscordPostTransport(
+                self._bot, channel, name=message.author.name, avatar_url=None, builtin=False
+            )
+            is_bot_message = await transport.owns_message(message)
+        else:
+            is_bot_message = False
         self._memoize_author(payload.message_id, is_bot_message)
         return is_bot_message
 

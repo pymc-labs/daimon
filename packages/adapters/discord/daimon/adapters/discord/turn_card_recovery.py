@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 
 import structlog
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.stores.domain import TurnCardIntentRow
 from daimon.core.stores.turn_card_intents import (
     create_turn_card_intent,
@@ -234,6 +235,7 @@ async def reconcile_turn_card_intent(
     *,
     intent: TurnCardIntentRow,
     thread: discord.Thread,
+    client: discord.Client | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     monotonic: Callable[[], float] = time.monotonic,
@@ -275,6 +277,7 @@ async def reconcile_turn_card_intent(
             async def edit(message_ids: set[int] = message_ids) -> bool:
                 return await _reconcile_matching_messages(
                     thread,
+                    client=client,
                     intent_id=intent.id,
                     message_ids=message_ids,
                     known_message_id=intent.message_id,
@@ -302,6 +305,7 @@ async def reconcile_turn_card_intent(
             # duplicate coverage.
             if not await _reconcile_matching_messages(
                 thread,
+                client=client,
                 intent_id=intent.id,
                 message_ids=set(),
                 known_message_id=intent.message_id,
@@ -340,6 +344,7 @@ async def reconcile_turn_card_intent(
 async def _reconcile_matching_messages(
     thread: discord.Thread,
     *,
+    client: discord.Client | None = None,
     intent_id: UUID,
     message_ids: set[int],
     known_message_id: str | None,
@@ -365,27 +370,37 @@ async def _reconcile_matching_messages(
                     error=str(err),
                 )
                 return False
-            if not await _mark_card_interrupted(message, intent_id=intent_id):
+            if not await _mark_card_interrupted(message, intent_id=intent_id, client=client):
                 return False
             break
     return True
 
 
-async def _mark_card_interrupted(message: discord.Message, *, intent_id: UUID) -> bool:
+async def _mark_card_interrupted(
+    message: discord.Message, *, intent_id: UUID, client: discord.Client | None = None
+) -> bool:
     """Return true for a terminal card or a successfully edited live card."""
     if intent_id not in turn_card_ids_from_message(message):
         return True
     try:
-        await message.edit(
-            embed=discord.Embed(
-                color=0xE74C3C,
-                description=(
-                    "❌ This turn was interrupted by a restart and cannot be resumed. "
-                    "Nothing was lost on your side — mention me again to retry."
-                ),
+        embed = discord.Embed(
+            color=0xE74C3C,
+            description=(
+                "❌ This turn was interrupted by a restart and cannot be resumed. "
+                "Nothing was lost on your side — mention me again to retry."
             ),
-            view=None,
         )
+        if client is not None and message.webhook_id is not None:
+            transport = DiscordPostTransport(
+                client,
+                message.channel,
+                name=message.author.name,
+                avatar_url=None,
+                builtin=False,
+            )
+            await transport.edit(message, embed=embed, view=None)
+        else:
+            await message.edit(embed=embed, view=None)
         return True
     except (discord.HTTPException, discord.ClientException) as err:
         log.warning(

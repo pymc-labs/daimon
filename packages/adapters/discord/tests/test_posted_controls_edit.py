@@ -55,6 +55,9 @@ def _row(**overrides: Any) -> CredentialRequestRow:
 def _client() -> MagicMock:
     client = MagicMock(spec=discord.Client)
     client.get_partial_messageable.return_value.get_partial_message.return_value.edit = AsyncMock()
+    client.get_partial_messageable.return_value.get_partial_message.return_value.fetch = AsyncMock(
+        return_value=None
+    )
     return client
 
 

@@ -104,6 +104,53 @@ def _make_channel_message(
     return message
 
 
+async def test_reply_to_recorded_agent_post_starts_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.defaults.provisioning import provision_tenant
+    from daimon.core.stores.agent_posts import record_post
+
+    guild_id = "801000098"
+    result = await provision_tenant(
+        db_session_factory,
+        platform="discord",
+        workspace_id=guild_id,
+        signup_credit=Decimal("5.00"),
+    )
+    async with db_session_factory() as session, session.begin():
+        await record_post(
+            session,
+            tenant_id=result.tenant_id,
+            platform="discord",
+            channel_id="789",
+            message_id="123",
+            agent_id=uuid.uuid4(),
+        )
+    bot = make_bot(_make_runtime(db_session_factory))
+    bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue,reportMethodAssign]
+    message = _make_channel_message(guild_id=int(guild_id))
+    message.mentions = []
+    message.webhook_id = None
+    message.reference = discord.MessageReference(
+        message_id=123, channel_id=789, guild_id=int(guild_id)
+    )
+    await bot.on_message(message)
+    bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+
+
+async def test_reply_to_unrecorded_post_does_not_start_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bot = make_bot(_make_runtime(db_session_factory))
+    bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue,reportMethodAssign]
+    message = _make_channel_message(guild_id=801000097)
+    message.mentions = []
+    message.webhook_id = None
+    message.reference = discord.MessageReference(message_id=123, channel_id=789, guild_id=801000097)
+    await bot.on_message(message)
+    bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+
+
 class TestInflightCapRejection:
     """4th turn for a saturated tenant rejected (SCALE-01)."""
 

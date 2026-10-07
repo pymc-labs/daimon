@@ -20,6 +20,7 @@ import discord
 import pytest
 from daimon.adapters.discord import feedback_reactions
 from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.message_feedback import CUSTOM_ID_PATTERN
 from daimon.core.stores.domain import RecordVoteResult
 from daimon.core.stores.identity import find_platform_principal
@@ -31,6 +32,31 @@ _BOT_USER_ID = 999999999999999999
 _REACTOR_ID = 100000000000000001
 _OTHER_REACTOR_ID = 100000000000000002
 _GUILD_ID = 555555555555555555
+
+
+async def test_application_webhook_post_counts_as_bot_authored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    message = MagicMock(spec=discord.Message)
+    message.author.id = 900
+    message.author.name = "Research"
+    message.webhook_id = 900
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
+    owns = AsyncMock(return_value=True)
+    monkeypatch.setattr(DiscordPostTransport, "owns_message", owns)
+    cog = FeedbackReactionCog(bot)
+    payload = _build_payload(
+        message_id=123,
+        channel_id=456,
+        user_id=_REACTOR_ID,
+        guild_id=_GUILD_ID,
+        emoji_name="👍",
+        message_author_id=900,
+    )
+    assert await cog._is_bot_message_via_fetch(payload, bot_user_id=_BOT_USER_ID)  # pyright: ignore[reportPrivateUsage]
+    owns.assert_awaited_once()
 
 
 def _build_payload(

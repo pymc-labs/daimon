@@ -11,7 +11,7 @@ import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._file_handles import staged_uploads
-from daimon.adapters.mcp.tools._tidy import PostRecord, record_agent_posts
+from daimon.adapters.mcp.tools._tidy import PostRecord, executing_agent_id, record_agent_posts
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -25,11 +25,14 @@ from daimon.adapters.mcp.tools.discord._models import (
     MessageRow,
     _to_message_row,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.discord._post_transport import send_agent_message
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.agent_identity import resolve_agent_identity
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -148,7 +151,26 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
         parent_id = str(channel.parent_id) if isinstance(channel, discord.Thread) else None
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support sending messages")
-        sent = await channel.send(content=content, files=files)
+        actor_id = executing_agent_id(auth)
+        actor = (
+            await find_agent_by_derived_uuid(
+                runtime.client, tenant_id=auth.tenant_id, agent_id=actor_id
+            )
+            if actor_id is not None
+            else None
+        )
+        if actor is None:
+            sent = await channel.send(content=content, files=files)
+        else:
+            async with runtime.session_factory.begin() as identity_session:
+                identity = await resolve_agent_identity(
+                    identity_session,
+                    tenant_id=auth.tenant_id,
+                    agent_name=actor.name,
+                    is_builtin=actor.name.casefold() == "daimon",
+                    public_base_url=runtime.settings.mcp.app_root_url,
+                )
+            sent = await send_agent_message(c, channel, identity, content=content, files=files)
         await record_agent_posts(
             runtime,
             auth,
@@ -158,7 +180,7 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                     channel_id=str(channel.id),
                     message_id=str(sent.id),
                     parent_channel_id=parent_id,
-                    content=content,
+                    content=sent.content,
                 )
             ],
         )
