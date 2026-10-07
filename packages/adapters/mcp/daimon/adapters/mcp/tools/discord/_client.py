@@ -14,6 +14,8 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from fastmcp.exceptions import ToolError
 
+_application_ids: dict[int, int] = {}
+
 
 @asynccontextmanager
 async def rest_client(token: str) -> AsyncIterator[discord.Client]:
@@ -23,6 +25,16 @@ async def rest_client(token: str) -> AsyncIterator[discord.Client]:
     # Client.login would set this; REST-only mode must do it by hand so tools
     # can tell daimon's own threads apart (rename_thread's ownership check).
     client._connection.user = discord.ClientUser(state=client._connection, data=me)  # pyright: ignore[reportPrivateUsage]
+    bot_id = client._connection.user.id  # pyright: ignore[reportPrivateUsage]
+    application_id = _application_ids.get(bot_id)
+    if application_id is None:
+        try:
+            application_id = int((await client.http.application_info())["id"])
+        except discord.HTTPException:
+            application_id = None
+        if application_id is not None:
+            _application_ids[bot_id] = application_id
+    client._connection.application_id = application_id  # pyright: ignore[reportPrivateUsage]
     try:
         yield client
     finally:

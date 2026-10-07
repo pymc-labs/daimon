@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import io
+import time
 import uuid
 from urllib.parse import urlparse
 
 import aiohttp
 import discord
+import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._file_handles import staged_uploads
@@ -39,6 +41,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 # Discord uses MiB, not MB, for the per-attachment cap.
 _DISCORD_ATTACHMENT_MAX_BYTES: int = 25 * 1024 * 1024
 _MAX_ATTACHMENTS_PER_MESSAGE: int = 10
+_actor_names: dict[tuple[uuid.UUID, uuid.UUID], tuple[str, float]] = {}
+_ACTOR_NAME_TTL_SECONDS = 600
+_log = structlog.get_logger()
 
 # SSRF guard: attachment fetches are restricted to Discord's CDN hosts. A bare
 # https scheme check is insufficient — an attacker-supplied https URL can
@@ -152,25 +157,40 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support sending messages")
         actor_id = executing_agent_id(auth)
-        actor = (
-            await find_agent_by_derived_uuid(
-                runtime.client, tenant_id=auth.tenant_id, agent_id=actor_id
-            )
-            if actor_id is not None
-            else None
-        )
-        if actor is None:
+        identity = None
+        if actor_id is not None:
+            try:
+                key = (auth.tenant_id, actor_id)
+                cached = _actor_names.get(key)
+                if cached is not None and cached[1] > time.monotonic():
+                    actor_name = cached[0]
+                else:
+                    actor = await find_agent_by_derived_uuid(
+                        runtime.client, tenant_id=auth.tenant_id, agent_id=actor_id
+                    )
+                    actor_name = actor.name if actor is not None else None
+                    if actor_name is not None:
+                        _actor_names[key] = (actor_name, time.monotonic() + _ACTOR_NAME_TTL_SECONDS)
+                if actor_name is not None:
+                    async with runtime.session_factory.begin() as identity_session:
+                        identity = await resolve_agent_identity(
+                            identity_session,
+                            tenant_id=auth.tenant_id,
+                            agent_name=actor_name,
+                            is_builtin=actor_name.casefold() == "daimon",
+                            public_base_url=runtime.settings.mcp.app_root_url,
+                        )
+            except Exception as exc:
+                _log.warning(
+                    "mcp.discord.identity_resolution_failed", error_type=type(exc).__name__
+                )
+        extra_messages: list[discord.Message] = []
+        if identity is None:
             sent = await channel.send(content=content, files=files)
         else:
-            async with runtime.session_factory.begin() as identity_session:
-                identity = await resolve_agent_identity(
-                    identity_session,
-                    tenant_id=auth.tenant_id,
-                    agent_name=actor.name,
-                    is_builtin=actor.name.casefold() == "daimon",
-                    public_base_url=runtime.settings.mcp.app_root_url,
-                )
-            sent = await send_agent_message(c, channel, identity, content=content, files=files)
+            sent = await send_agent_message(
+                c, channel, identity, content=content, files=files, extra_messages=extra_messages
+            )
         await record_agent_posts(
             runtime,
             auth,
@@ -178,10 +198,11 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
             posts=[
                 PostRecord(
                     channel_id=str(channel.id),
-                    message_id=str(sent.id),
+                    message_id=str(post.id),
                     parent_channel_id=parent_id,
-                    content=sent.content,
+                    content=post.content,
                 )
+                for post in [sent, *extra_messages]
             ],
         )
         return _to_message_row(sent)

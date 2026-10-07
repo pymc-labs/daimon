@@ -377,6 +377,8 @@ class DiscordTurnLifecycle:
             if index in self._persisted_sealed_indices:
                 continue
             self._persisted_sealed_indices.add(index)
+            if self._fallback_active is not None and self._fallback_active():
+                text = fallback_name_prefix(self._agent_name, text)
             for chunk in split_for_discord_safe(text):
                 await self._send_message(
                     content=chunk, allowed_mentions=discord.AllowedMentions.none()

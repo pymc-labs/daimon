@@ -38,7 +38,7 @@ from typing import cast
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.feedback_button import FeedbackButton
-from daimon.adapters.discord.post_transport import DiscordPostTransport
+from daimon.adapters.discord.post_transport import DiscordPostTransport, known_webhook_ids
 from daimon.adapters.discord.support_escalation import SupportEscalateButton
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.message_feedback import (
@@ -118,6 +118,12 @@ class FeedbackReactionCog(commands.Cog):
             verdict = is_bot_authored(
                 message_author_id=payload.message_author_id, bot_user_id=bot_user_id
             )
+            if (
+                verdict is not True
+                and payload.message_author_id is not None
+                and payload.message_author_id not in known_webhook_ids()
+            ):
+                return
             if verdict is not True and not await self._is_bot_message_via_fetch(
                 payload, bot_user_id=bot_user_id
             ):
@@ -137,6 +143,12 @@ class FeedbackReactionCog(commands.Cog):
         verdict = is_bot_authored(
             message_author_id=payload.message_author_id, bot_user_id=bot_user_id
         )
+        if (
+            verdict is not True
+            and payload.message_author_id is not None
+            and payload.message_author_id not in known_webhook_ids()
+        ):
+            return
         if verdict is not True and not await self._is_bot_message_via_fetch(
             payload, bot_user_id=bot_user_id
         ):
@@ -239,6 +251,8 @@ class FeedbackReactionCog(commands.Cog):
         if message.author.id == bot_user_id:
             is_bot_message = True
         elif isinstance(message.webhook_id, int):
+            if self._bot.application_id is None or message.application_id is None:
+                return False
             transport = DiscordPostTransport(
                 self._bot, channel, name=message.author.name, avatar_url=None, builtin=False
             )

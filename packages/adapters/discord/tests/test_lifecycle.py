@@ -606,6 +606,15 @@ def _sealed_state(answer: str, *, trailing: str = "") -> TurnState:
 
 
 class TestSealedResponsePersistence:
+    async def test_early_answer_labels_only_first_chunk_on_bot_fallback(self) -> None:
+        lc, sends, _ = _make_lifecycle()
+        lc._fallback_active = lambda: True  # pyright: ignore[reportPrivateUsage]
+        await lc.on_render(_sealed_state("x" * 2100))
+        chunks = [sent["content"] for sent in sends if "content" in sent]
+        assert len(chunks) > 1
+        assert chunks[0].startswith("**test-agent** ")
+        assert all(not chunk.startswith("**test-agent** ") for chunk in chunks[1:])
+
     async def test_on_render_posts_sealed_answer_once(self) -> None:
         """A >=500-char text block sealed by a tool use posts as a permanent
         message on the next render tick — and only once across ticks."""

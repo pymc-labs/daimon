@@ -43,9 +43,11 @@ class ThreadParticipant:
         billing_config: BillingConfig | None,
         markup: Decimal,
         deployment_default: DeploymentDefault,
+        application_id: int | None = None,
     ) -> None:
         self._settings = settings
         self._bot_user_id = bot_user_id
+        self._application_id = application_id
         self._gates = ParticipationGates(
             platform=PLATFORM,
             settings=settings,
@@ -123,7 +125,12 @@ class ThreadParticipant:
             ClassifierMessage(
                 author_name=m.author.display_name,
                 content=m.content,
-                is_bot=m.author.id == self._bot_user_id,
+                is_bot=m.author.id == self._bot_user_id
+                or (
+                    isinstance(m.webhook_id, int)
+                    and self._application_id is not None
+                    and m.application_id == self._application_id
+                ),
             )
             for m in window
         ]

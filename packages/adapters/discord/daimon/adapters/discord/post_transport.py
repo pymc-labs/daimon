@@ -1,24 +1,54 @@
-"""Agent-authored Discord posts through an application-owned channel webhook."""
+"""Agent-authored Discord posts through application-owned channel webhooks."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from typing import Any, cast
 
+import structlog
 from daimon.core.agent_post_identity import (
     DISCORD_AGENT_WEBHOOK_NAME,
     discord_username,
+    fallback_name_prefix,
     is_our_discord_webhook,
 )
 
 import discord
 
+_POOL_SIZE = 3
+_UNAVAILABLE_SECONDS = 600
 _locks: dict[int, asyncio.Lock] = {}
-_webhooks: dict[int, discord.Webhook] = {}
+_webhooks: dict[int, dict[int, discord.Webhook]] = {}
+_unavailable_until: dict[int, float] = {}
+_log = structlog.get_logger()
+
+
+class _WebhookRateLimitCounter(logging.Filter):
+    count = 0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING and "is rate limited" in record.getMessage():
+            self.count += 1
+            _log.warning("discord.webhook.rate_limited", count=self.count)
+        return True
+
+
+_rate_limit_counter = _WebhookRateLimitCounter()
+logging.getLogger("discord.webhook.async_").addFilter(_rate_limit_counter)
 
 
 def _snowflake(value: object) -> int | None:
     return int(value) if isinstance(value, (int, str)) else None
+
+
+def _cooldown(exc: discord.HTTPException) -> bool:
+    return exc.code == 30007 or exc.status == 403
+
+
+def known_webhook_ids() -> frozenset[int]:
+    return frozenset(hook_id for pool in _webhooks.values() for hook_id in pool)
 
 
 class DiscordPostTransport:
@@ -48,71 +78,117 @@ class DiscordPostTransport:
             return parent, thread
         return None
 
-    async def _webhook(self, *, create: bool = True) -> discord.Webhook | None:
-        if self.builtin:
+    def _ours(self, message: discord.Message) -> bool:
+        application_id = self.client.application_id
+        return (
+            isinstance(message.webhook_id, int)
+            and application_id is not None
+            and message.application_id == application_id
+        )
+
+    async def _webhook(
+        self, *, create: bool = True, webhook_id: int | None = None
+    ) -> discord.Webhook | None:
+        if self.builtin and create:
             return None
         destination = self._destination()
         if destination is None:
             return None
         parent, thread = destination
-        if thread is not None and thread.locked:
+        if create and thread is not None and thread.locked:
             return None
-        member = parent.guild.me
-        if member is None or not parent.permissions_for(member).manage_webhooks:  # pyright: ignore[reportUnnecessaryComparison]
-            return None
-        if self.client.user is None:
+        application_id = self.client.application_id
+        if application_id is None:
             return None
         lock = _locks.setdefault(parent.id, asyncio.Lock())
         async with lock:
-            cached = _webhooks.get(parent.id)
-            if cached is not None:
-                return cached
+            pool = _webhooks.setdefault(parent.id, {})
+            target_index = thread.id % _POOL_SIZE if thread is not None else 0
+            if webhook_id is not None and webhook_id in pool:
+                return pool[webhook_id]
+            if create and len(pool) > target_index:
+                return self._pick(pool)
+            if create and pool and _unavailable_until.get(parent.id, 0) > time.monotonic():
+                return self._pick(pool)
+            if create and _unavailable_until.get(parent.id, 0) > time.monotonic():
+                return None
+            if create:
+                member = parent.guild.me
+                if member is None or not parent.permissions_for(member).manage_webhooks:  # pyright: ignore[reportUnnecessaryComparison]
+                    _unavailable_until[parent.id] = time.monotonic() + _UNAVAILABLE_SECONDS
+                    return self._pick(pool)
+            if webhook_id is None and not create and pool:
+                return self._pick(pool)
             try:
                 raw_hooks = await self.client.http.channel_webhooks(parent.id)
-                hook = next(
-                    (
-                        discord.Webhook.from_state(data=raw, state=self.client._connection)  # pyright: ignore[reportPrivateUsage]
-                        for raw in raw_hooks
-                        if is_our_discord_webhook(
-                            application_id=_snowflake(raw.get("application_id")),
-                            channel_id=_snowflake(raw.get("channel_id")),
-                            our_application_id=self.client.user.id,
-                            target_channel_id=parent.id,
+                for raw in raw_hooks:
+                    if is_our_discord_webhook(
+                        application_id=_snowflake(raw.get("application_id")),
+                        channel_id=_snowflake(raw.get("channel_id")),
+                        our_application_id=application_id,
+                        target_channel_id=parent.id,
+                    ) and raw.get("token"):
+                        hook = discord.Webhook.from_state(  # pyright: ignore[reportPrivateUsage]
+                            data=raw,
+                            state=self.client._connection,  # pyright: ignore[reportPrivateUsage]
                         )
-                        and raw.get("token")
-                    ),
-                    None,
-                )
-                if hook is None and create:
-                    hook = await parent.create_webhook(name=DISCORD_AGENT_WEBHOOK_NAME)
-                if hook is not None and hook.token is not None:
-                    _webhooks[parent.id] = hook
-                    return hook
-                return None
-            except (discord.HTTPException, discord.Forbidden):
-                return None
+                        pool[hook.id] = hook
+                if webhook_id is not None:
+                    return pool.get(webhook_id)
+                while create and len(pool) <= target_index and len(pool) < _POOL_SIZE:
+                    try:
+                        hook = await parent.create_webhook(name=DISCORD_AGENT_WEBHOOK_NAME)
+                    except discord.HTTPException as exc:
+                        if _cooldown(exc):
+                            _unavailable_until[parent.id] = time.monotonic() + _UNAVAILABLE_SECONDS
+                        return self._pick(pool)
+                    except Exception as exc:
+                        _log.warning(
+                            "discord.webhook_creation_failed", error_type=type(exc).__name__
+                        )
+                        return self._pick(pool)
+                    if hook.token is not None:
+                        pool[hook.id] = hook
+                    else:
+                        return self._pick(pool)
+                return self._pick(pool)
+            except discord.HTTPException as exc:
+                if _cooldown(exc):
+                    _unavailable_until[parent.id] = time.monotonic() + _UNAVAILABLE_SECONDS
+                return pool.get(webhook_id) if webhook_id is not None else self._pick(pool)
+            except Exception as exc:
+                _log.warning("discord.webhook_lookup_failed", error_type=type(exc).__name__)
+                return pool.get(webhook_id) if webhook_id is not None else self._pick(pool)
+
+    def _pick(self, pool: dict[int, discord.Webhook]) -> discord.Webhook | None:
+        if not pool:
+            return None
+        hooks = [pool[key] for key in sorted(pool)[:_POOL_SIZE]]
+        if isinstance(self.channel, discord.Thread):
+            target_index = self.channel.id % _POOL_SIZE
+            return hooks[target_index] if target_index < len(hooks) else hooks[0]
+        return hooks[0]
 
     async def owns_message(self, message: discord.Message) -> bool:
-        hook = await self._webhook(create=False)
-        webhook_id = getattr(message, "webhook_id", None)
-        return hook is not None and isinstance(webhook_id, int) and webhook_id == hook.id
+        return self._ours(message)
 
     async def send(self, *args: Any, **kwargs: Any) -> discord.Message:  # noqa: ANN401
+        kwargs = dict(kwargs)
+        prefix_if_fallback = bool(kwargs.pop("_prefix_if_fallback", False))
+        if kwargs.get("view") is None:
+            kwargs.pop("view", None)
+        webhook_rejected = False
         hook = await self._webhook()
         if hook is not None:
             destination = self._destination()
             assert destination is not None
             _, thread = destination
-            send_kwargs: dict[str, Any] = dict(kwargs)
+            send_kwargs = dict(kwargs)
             if thread is not None:
                 send_kwargs["thread"] = thread
             try:
                 sent = await hook.send(  # pyright: ignore[reportCallIssue]
-                    *args,
-                    **send_kwargs,
-                    username=self.name,
-                    avatar_url=self.avatar_url,
-                    wait=True,
+                    *args, **send_kwargs, username=self.name, avatar_url=self.avatar_url, wait=True
                 )
                 assert sent is not None
                 return cast(discord.Message, sent)
@@ -128,12 +204,25 @@ class DiscordPostTransport:
                     )
                     assert sent is not None
                     return cast(discord.Message, sent)
-                if not isinstance(exc, discord.NotFound):
-                    raise
-                if exc.code != 10015:  # Unknown Webhook
-                    raise
-                _webhooks.pop(destination[0].id, None)
+                if exc.status == 429:
+                    raise  # discord.py normally retries these itself
+                if exc.code == 10015:
+                    _webhooks.get(destination[0].id, {}).pop(hook.id, None)
+                webhook_rejected = exc.code != 10015
         self.fallback_used = not self.builtin
+        if (
+            (webhook_rejected or prefix_if_fallback)
+            and not self.builtin
+            and isinstance(kwargs.get("content"), str)
+        ):
+            kwargs["content"] = fallback_name_prefix(self.name, kwargs["content"])
+        elif (
+            (webhook_rejected or prefix_if_fallback)
+            and not self.builtin
+            and args
+            and isinstance(args[0], str)
+        ):
+            args = (fallback_name_prefix(self.name, args[0]), *args[1:])
         try:
             return await self.channel.send(*args, **kwargs)
         except discord.HTTPException as exc:
@@ -143,33 +232,31 @@ class DiscordPostTransport:
             return await self.channel.send(*args, **kwargs)
 
     async def edit(self, message: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
-        hook = await self._webhook()
-        webhook_id = getattr(message, "webhook_id", None)
-        if hook is not None and isinstance(webhook_id, int) and webhook_id == hook.id:
+        if self._ours(message):
+            hook = await self._webhook(create=False, webhook_id=message.webhook_id)
+            if hook is None:
+                raise RuntimeError("own webhook token unavailable")
             destination = self._destination()
             assert destination is not None
             _, thread = destination
             try:
-                edit_kwargs: dict[str, Any] = dict(kwargs)
+                edit_kwargs = dict(kwargs)
                 if thread is not None:
                     edit_kwargs["thread"] = thread
                 return cast(discord.Message, await hook.edit_message(message.id, **edit_kwargs))  # pyright: ignore[reportCallIssue]
             except discord.NotFound as exc:
-                if exc.code != 10015:  # Unknown Webhook
+                if exc.code != 10015:
                     raise
-                _webhooks.pop(destination[0].id, None)
-                # A deleted webhook cannot edit its old messages. Surface the
-                # update as a new post instead of losing the turn's answer.
-                return await self.send(**_replacement_send_kwargs(kwargs))
-        if isinstance(webhook_id, int):
-            return await self.send(**_replacement_send_kwargs(kwargs))
+                _webhooks.get(destination[0].id, {}).pop(hook.id, None)
+                return await self.send(_prefix_if_fallback=True, **_replacement_send_kwargs(kwargs))
         await message.edit(**kwargs)
         return None
 
     async def delete(self, message: discord.Message) -> None:
-        hook = await self._webhook()
-        webhook_id = getattr(message, "webhook_id", None)
-        if hook is not None and isinstance(webhook_id, int) and webhook_id == hook.id:
+        if self._ours(message):
+            hook = await self._webhook(create=False, webhook_id=message.webhook_id)
+            if hook is None:
+                raise RuntimeError("own webhook token unavailable")
             destination = self._destination()
             assert destination is not None
             _, thread = destination
@@ -177,8 +264,8 @@ class DiscordPostTransport:
                 await hook.delete_message(message.id, thread=thread)
             else:
                 await hook.delete_message(message.id)
-        else:
-            await message.delete()
+            return
+        await message.delete()
 
 
 def _replacement_send_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:

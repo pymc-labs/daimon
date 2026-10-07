@@ -42,6 +42,7 @@ async def test_application_webhook_post_counts_as_bot_authored(
     message.author.id = 900
     message.author.name = "Research"
     message.webhook_id = 900
+    message.application_id = _BOT_USER_ID
     channel.fetch_message = AsyncMock(return_value=message)
     bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
     owns = AsyncMock(return_value=True)
@@ -57,6 +58,44 @@ async def test_application_webhook_post_counts_as_bot_authored(
     )
     assert await cog._is_bot_message_via_fetch(payload, bot_user_id=_BOT_USER_ID)  # pyright: ignore[reportPrivateUsage]
     owns.assert_awaited_once()
+
+
+async def test_known_human_author_never_fetches_message() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.fetch_message = AsyncMock()
+    bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
+    cog = FeedbackReactionCog(bot)
+    payload = _build_payload(
+        message_id=123,
+        channel_id=456,
+        user_id=_REACTOR_ID,
+        guild_id=_GUILD_ID,
+        emoji_name="👍",
+        message_author_id=1234,
+    )
+    await cog._record_vote_from_reaction(payload)  # pyright: ignore[reportPrivateUsage]
+    channel.fetch_message.assert_not_awaited()
+
+
+async def test_unresolved_webhook_application_is_not_memoized_false() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    message = MagicMock(spec=discord.Message)
+    message.author.id = 900
+    message.webhook_id = 900
+    message.application_id = None
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
+    cog = FeedbackReactionCog(bot)
+    payload = _build_payload(
+        message_id=123,
+        channel_id=456,
+        user_id=_REACTOR_ID,
+        guild_id=_GUILD_ID,
+        emoji_name="👍",
+        message_author_id=None,
+    )
+    assert not await cog._is_bot_message_via_fetch(payload, bot_user_id=_BOT_USER_ID)  # pyright: ignore[reportPrivateUsage]
+    assert 123 not in cog._author_is_bot  # pyright: ignore[reportPrivateUsage]
 
 
 def _build_payload(
@@ -105,6 +144,7 @@ def _fake_bot(
     get_user/fetch_user are read."""
     return SimpleNamespace(
         user=SimpleNamespace(id=_BOT_USER_ID),
+        application_id=_BOT_USER_ID,
         runtime=SimpleNamespace(sessionmaker=sessionmaker),
         get_channel=get_channel or MagicMock(return_value=None),
         fetch_channel=fetch_channel or AsyncMock(),

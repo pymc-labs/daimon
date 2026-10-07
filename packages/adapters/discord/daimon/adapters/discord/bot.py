@@ -52,7 +52,7 @@ from daimon.adapters.discord.vision import (
     download_as_image_blocks,
     is_vision_image_attachment,
 )
-from daimon.core.agent_identity import resolve_agent_identity
+from daimon.core.agent_identity import AgentIdentity, resolve_agent_identity
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import DirectMessagePolicy, Settings
@@ -1046,7 +1046,11 @@ class DaimonBot(commands.Bot):
                 )
                 if isinstance(channel, discord.abc.Messageable):
                     message = await channel.fetch_message(int(row.active_turn_message_id))
-                    await message.edit(
+                    transport = DiscordPostTransport(
+                        self, channel, name="Daimon", avatar_url=None, builtin=False
+                    )
+                    await transport.edit(
+                        message,
                         embed=discord.Embed(
                             color=theme.COLOR_RED,
                             description=(
@@ -1316,6 +1320,7 @@ class DaimonBot(commands.Bot):
                 sessionmaker=self.runtime.sessionmaker,
                 anthropic=self.runtime.anthropic,
                 bot_user_id=bot_user_id,
+                application_id=self.application_id,
                 bot_display_name=bot_display_name,
                 billing_config=self.runtime.billing_config,
                 markup=self.runtime.settings.billing.markup,
@@ -1520,12 +1525,26 @@ class DaimonBot(commands.Bot):
         bot_mentioned = self.user is not None and any(
             user.id == self.user.id for user in message.mentions
         )
+        if self.draining:
+            return
         is_webhook_post = isinstance(message.webhook_id, int)
         reply_to_recorded_post = False
+        reference = message.reference
+        resolved = reference.resolved if isinstance(reference, discord.MessageReference) else None
+        resolved_is_ours = isinstance(resolved, discord.Message) and (
+            (self.user is not None and resolved.author.id == self.user.id)
+            or (
+                isinstance(resolved.webhook_id, int)
+                and self.application_id is not None
+                and resolved.application_id == self.application_id
+            )
+        )
         if (
-            isinstance(message.reference, discord.MessageReference)
-            and message.reference.type is discord.MessageReferenceType.reply
-            and message.reference.message_id is not None
+            not bot_mentioned
+            and isinstance(reference, discord.MessageReference)
+            and reference.type is discord.MessageReferenceType.reply
+            and reference.message_id is not None
+            and resolved_is_ours
             and message.guild is not None
             and not message.author.bot
             and not is_webhook_post
@@ -1533,17 +1552,18 @@ class DaimonBot(commands.Bot):
             reply_tenant = derive_tenant_uuid(
                 platform="discord", workspace_id=str(message.guild.id)
             )
-            async with self.runtime.sessionmaker() as session:
-                reply_to_recorded_post = (
-                    await get_post(
+            try:
+                async with self.runtime.sessionmaker() as session:
+                    post = await get_post(
                         session,
                         tenant_id=reply_tenant,
                         platform="discord",
                         channel_id=str(message.channel.id),
-                        message_id=str(message.reference.message_id),
+                        message_id=str(reference.message_id),
                     )
-                    is not None
-                )
+                reply_to_recorded_post = post is not None and post.source != "auto_thread"
+            except Exception as exc:
+                log.warning("reply_gate.lookup_failed", error_type=type(exc).__name__)
         if not should_process_message(
             author_is_bot=message.author.bot,
             author_id=str(message.author.id),
@@ -1570,8 +1590,6 @@ class DaimonBot(commands.Bot):
             ):
                 await self._maybe_participate(message)
             return
-        if self.draining:
-            return  # stop admitting new mentions during drain
         assert message.guild is not None
         guild = message.guild
         guild_id = str(guild.id)
@@ -2153,14 +2171,18 @@ class DaimonBot(commands.Bot):
         )
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
         agent = admission.agent
-        async with self.runtime.sessionmaker.begin() as identity_session:
-            identity = await resolve_agent_identity(
-                identity_session,
-                tenant_id=tenant_id,
-                agent_name=agent.name,
-                is_builtin=agent.name.casefold() == "daimon",
-                public_base_url=self.runtime.settings.mcp.app_root_url,
-            )
+        try:
+            async with self.runtime.sessionmaker.begin() as identity_session:
+                identity = await resolve_agent_identity(
+                    identity_session,
+                    tenant_id=tenant_id,
+                    agent_name=agent.name,
+                    is_builtin=agent.name.casefold() == "daimon",
+                    public_base_url=self.runtime.settings.mcp.app_root_url,
+                )
+        except Exception as exc:
+            log.warning("discord.identity_resolution_failed", error_type=type(exc).__name__)
+            identity = AgentIdentity(name=agent.name, avatar_url=None, builtin=True)
 
         # kwargs are forwarded verbatim to discord.py's overloaded send()/edit().
         recorder = TurnPostRecorder(
@@ -2723,14 +2745,18 @@ class DaimonBot(commands.Bot):
         # --- Wire lifecycle with send/edit callables ---
         # kwargs are forwarded verbatim to discord.py's overloaded send()/edit().
 
-        async with self.runtime.sessionmaker.begin() as identity_session:
-            identity = await resolve_agent_identity(
-                identity_session,
-                tenant_id=tenant_id,
-                agent_name=agent.name,
-                is_builtin=agent.name.casefold() == "daimon",
-                public_base_url=self.runtime.settings.mcp.app_root_url,
-            )
+        try:
+            async with self.runtime.sessionmaker.begin() as identity_session:
+                identity = await resolve_agent_identity(
+                    identity_session,
+                    tenant_id=tenant_id,
+                    agent_name=agent.name,
+                    is_builtin=agent.name.casefold() == "daimon",
+                    public_base_url=self.runtime.settings.mcp.app_root_url,
+                )
+        except Exception as exc:
+            log.warning("discord.identity_resolution_failed", error_type=type(exc).__name__)
+            identity = AgentIdentity(name=agent.name, avatar_url=None, builtin=True)
 
         transport = DiscordPostTransport(
             self,

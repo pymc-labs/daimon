@@ -181,6 +181,8 @@ class _FakeDiscord:
         method, path = route.method, route.path
         tail = route.url.rsplit("/", 1)[-1]
         self.calls.append((method, route.url))
+        if path == "/oauth2/applications/@me":
+            return {"id": _BOT}
         if path == "/guilds/{guild_id}":
             return {
                 "id": _GUILD,
@@ -273,21 +275,18 @@ class _FakeDiscord:
         return any(m == method and url.endswith(url_tail) for m, url in self.calls)
 
 
-async def test_owned_webhook_message_passes_tidy_author_check(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_owned_webhook_message_passes_tidy_author_check() -> None:
     from daimon.adapters.mcp.tools.discord import _tidy
 
     client = MagicMock(spec=discord.Client)
+    client.application_id = 10
     channel = MagicMock(spec=discord.TextChannel)
     channel.id = 20
     message = MagicMock(spec=discord.Message)
     message.author.id = 900
     message.webhook_id = 900
+    message.application_id = 10
     channel.fetch_message = AsyncMock(return_value=message)
-    hook = MagicMock(spec=discord.Webhook)
-    hook.id = 900
-    monkeypatch.setattr(_tidy, "own_webhook", AsyncMock(return_value=hook))
     target = _tidy._Target(  # pyright: ignore[reportPrivateUsage]
         channel=channel, parent_id=None, bot_user_id=10, requester_is_admin=False
     )
@@ -408,13 +407,26 @@ async def _post(world: _World, auth: AuthIdentity, *, channel_id: str = _CHANNEL
 
 
 async def test_deleted_webhook_edit_records_replacement(
-    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: _FakeDiscord
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: _FakeDiscord,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from daimon.adapters.mcp.tools.discord import _post_transport
+
     world = await _world(committing_sessionmaker)
     auth, origin = await world.turn()
     old_id = await _post(world, auth)
     fake.messages[old_id]["webhook_id"] = "900"
+    fake.messages[old_id]["application_id"] = _BOT
     fake.messages[old_id]["author"] = _user("900", bot=True)
+    hook = MagicMock(spec=discord.Webhook)
+    hook.id = 900
+    hook.edit_message = AsyncMock(
+        side_effect=discord.NotFound(
+            MagicMock(status=404), {"code": 10015, "message": "Unknown Webhook"}
+        )
+    )
+    monkeypatch.setattr(_post_transport, "own_webhook", AsyncMock(side_effect=[hook, None]))
     result = await _edit_message_impl(
         world.runtime,
         auth,

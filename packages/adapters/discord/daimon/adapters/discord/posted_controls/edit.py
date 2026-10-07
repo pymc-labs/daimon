@@ -74,9 +74,14 @@ async def edit_posted_card(
             with suppress(discord.HTTPException):
                 fetched = await message.fetch()
         if isinstance(fetched, discord.Message) and fetched.webhook_id is not None:
+            channel = client.get_channel(int(row.origin_thread_id)) or await client.fetch_channel(
+                int(row.origin_thread_id)
+            )
+            if not isinstance(channel, discord.abc.Messageable):
+                return
             transport = DiscordPostTransport(
                 client,
-                fetched.channel,
+                channel,
                 name=fetched.author.name,
                 avatar_url=None,
                 builtin=False,

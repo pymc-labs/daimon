@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.discord.post_transport import DiscordPostTransport
-from daimon.core.agent_identity import resolve_agent_identity
+from daimon.core.agent_identity import AgentIdentity, resolve_agent_identity
 from daimon.core.continuity.continuation import ContinuationDecision
 from daimon.core.continuity.dispatch import dispatch_pending_continuations as dispatch_core
 from daimon.core.stores.domain import TaskContinuationRow
@@ -68,14 +68,20 @@ async def dispatch_pending_continuations(
             if client is None:
                 await thread.send(text)
             else:
-                async with sessionmaker.begin() as session:
-                    identity = await resolve_agent_identity(
-                        session,
-                        tenant_id=tenant_id,
-                        agent_name=row.target_name,
-                        is_builtin=row.target_name.casefold() == "daimon",
-                        public_base_url=public_base_url,
+                try:
+                    async with sessionmaker.begin() as session:
+                        identity = await resolve_agent_identity(
+                            session,
+                            tenant_id=tenant_id,
+                            agent_name=row.target_name,
+                            is_builtin=row.target_name.casefold() == "daimon",
+                            public_base_url=public_base_url,
+                        )
+                except Exception as exc:
+                    log.warning(
+                        "continuation.identity_resolution_failed", error_type=type(exc).__name__
                     )
+                    identity = AgentIdentity(name=row.target_name, avatar_url=None, builtin=True)
                 transport = DiscordPostTransport(
                     client,
                     thread,

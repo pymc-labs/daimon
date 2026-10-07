@@ -51,7 +51,14 @@ def _msg(*, author_id: int, content: str, message_id: int) -> Any:
     author = SimpleNamespace(
         id=author_id, display_name=f"user-{author_id}", bot=author_id == BOT_ID
     )
-    return SimpleNamespace(id=message_id, author=author, content=content, reactions=[])
+    return SimpleNamespace(
+        id=message_id,
+        author=author,
+        content=content,
+        reactions=[],
+        webhook_id=None,
+        application_id=None,
+    )
 
 
 def _thread(history: list[Any]) -> Any:
@@ -113,6 +120,18 @@ def _responder(
         markup=Decimal("1.0"),
         deployment_default=DeploymentDefault(agent_name="daimon"),
     )
+
+
+async def test_recent_window_marks_our_webhook_post_as_bot(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    responder = _responder(db_session_factory, mode="on")
+    responder._application_id = 500  # pyright: ignore[reportPrivateUsage]
+    message = _msg(author_id=300, content="agent answer", message_id=1)
+    message.webhook_id = 300
+    message.application_id = 500
+    recent = await responder._recent_window(_thread([message]), exclude_ids=set())  # pyright: ignore[reportPrivateUsage]
+    assert recent == [ClassifierMessage("user-300", "agent answer", is_bot=True)]
 
 
 async def _funded_tenant(session: AsyncSession) -> Any:
