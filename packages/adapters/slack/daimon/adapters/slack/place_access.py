@@ -29,7 +29,13 @@ from daimon.core.stores.identity import find_platform_principal
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-__all__ = ["PlaceAccess", "check_place_access", "may_start_turn_at", "stored_clicker"]
+__all__ = [
+    "PlaceAccess",
+    "check_place_access",
+    "may_start_turn_at",
+    "resolve_clicker",
+    "stored_clicker",
+]
 
 
 async def stored_clicker(
@@ -73,6 +79,22 @@ class PlaceAccess:
     decision: Literal["allowed", "refused", "unreadable"]
     account_id: uuid.UUID | None
     policy: TenantAccessPolicy | None
+
+
+async def resolve_clicker(
+    runtime: SlackRuntime, client: AsyncWebClient, *, tenant_id: uuid.UUID, user_id: str
+) -> tuple[Subject, uuid.UUID | None]:
+    """The clicker as authorization sees them, and their account id.
+
+    For a caller that decides access inside its own write transaction: the
+    group lookup is network I/O and has to happen before that opens.
+    """
+    async with runtime.sessionmaker() as session:
+        stored, account_id = await stored_clicker(session, tenant_id=tenant_id, user_id=user_id)
+    subject = await confirm_stored_subject(
+        stored, user_group_members(runtime, client, tenant_id=tenant_id)
+    )
+    return subject, account_id
 
 
 async def check_place_access(

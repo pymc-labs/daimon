@@ -23,6 +23,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.slack import support_escalation as slack_support
 from daimon.adapters.slack.support_escalation import (
     ASK_HUMAN_ACTION_ID,
+    CHECK_FAILED,
     FORM_DID_NOT_OPEN,
     NOT_ALLOWED,
     SEALED_NOTE_HINT,
@@ -51,7 +52,9 @@ from daimon.core.support_escalation import (
     received_text,
 )
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import build_slack_runtime
@@ -701,3 +704,80 @@ async def test_a_top_level_answer_in_a_dm_offers_the_form_for_that_answer(
         "message_ts": "1.5",
         "thread_ts": "1.5",
     }
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OperationalError("SELECT 1", {}, Exception("connection reset")),
+        ConnectionRefusedError(111, "Connection refused"),
+        TimeoutError(),
+    ],
+    ids=["sqlalchemy", "raw-connection-refused", "timeout"],
+)
+async def test_a_database_failure_during_the_checks_replaces_the_checking_notice(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    error: BaseException,
+) -> None:
+    _tenant, key = await _seed(db_session)
+    runtime = _runtime(key, db_session_factory, _support())
+
+    async def failing(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    with patch.object(slack_support, "check_place_access", new=failing):
+        await handle_ask_human_click(runtime, _click())
+
+    assert _notice(fake_slack_web_client) == CHECK_FAILED
+    assert await _rows(db_session_factory) == []
+
+
+@pytest.mark.parametrize("method", ["chat_getPermalink", "chat_postMessage"])
+async def test_a_transport_timeout_while_delivering_keeps_the_row_and_says_so(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    permalink: Any,
+    method: str,
+) -> None:
+    """An ambiguous send is recorded undelivered and the person is told; never retried."""
+    _tenant, key = await _seed(db_session)
+    runtime = _runtime(key, db_session_factory, _support())
+    real = getattr(AsyncWebClient, method)
+
+    async def timing_out(self: AsyncWebClient, **kwargs: Any) -> Any:
+        if method == "chat_postMessage" and kwargs.get("channel") != _ESC_CHANNEL:
+            return await real(self, **kwargs)
+        raise TimeoutError
+
+    with patch.object(AsyncWebClient, method, new=timing_out):
+        await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
+
+    rows = await _rows(db_session_factory)
+    assert len(rows) == 1
+    if method == "chat_postMessage":
+        assert rows[0]["delivered_at"] is None
+        assert _ephemeral_texts(permalink) == [RECORDED_UNDELIVERED]
+    else:
+        assert rows[0]["delivered_at"] is not None, "a missing permalink still posts the ids"
+        (body,) = _posts(permalink)
+        assert f"message {_ANSWER_TS} in channel {_CHANNEL}" in body["text"]
+
+
+async def test_a_failure_stamping_a_delivered_request_still_says_it_was_received(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    permalink: Any,
+) -> None:
+    _tenant, key = await _seed(db_session)
+    runtime = _runtime(key, db_session_factory, _support())
+
+    async def failing(*args: Any, **kwargs: Any) -> Any:
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    with patch.object(slack_support, "mark_delivered", new=failing):
+        await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
+
+    assert len(_posts(permalink)) == 1, "it landed"
+    assert _ephemeral_texts(permalink) == [received_text(remaining=19)]
