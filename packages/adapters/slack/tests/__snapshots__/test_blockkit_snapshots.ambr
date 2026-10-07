@@ -134,7 +134,7 @@
     dict({
       'elements': list([
         dict({
-          'text': 'Atlas · 42s · 1.5k in / 320 out',
+          'text': '42s · 1.5k in / 320 out',
           'type': 'mrkdwn',
         }),
       ]),
@@ -147,7 +147,7 @@
     dict({
       'elements': list([
         dict({
-          'text': 'Atlas · 42s · 1.5k in / 320 out · $0.04',
+          'text': '42s · 1.5k in / 320 out · $0.04',
           'type': 'mrkdwn',
         }),
       ]),
@@ -160,7 +160,7 @@
     dict({
       'elements': list([
         dict({
-          'text': '❌ rate limited · Atlas · 12s · 100 in / 50 out',
+          'text': '❌ rate limited · 12s · 100 in / 50 out',
           'type': 'mrkdwn',
         }),
       ]),

@@ -210,7 +210,7 @@ class TestToBlocks:
         context_blocks = _find_blocks_by_type(blocks, "context")
         assert context_blocks, "DONE state must produce a context block"
         summary_text = context_blocks[-1]["elements"][0]["text"]
-        assert "Atlas" in summary_text, "footer must contain agent_name"
+        assert "Atlas" not in summary_text, "the Slack header already names the agent"
         assert "12s" in summary_text, "footer must contain elapsed time"
         assert "$0.04" in summary_text, "footer must contain cost_str when set"
 

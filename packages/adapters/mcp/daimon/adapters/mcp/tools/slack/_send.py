@@ -172,7 +172,8 @@ async def _post_message(
     if thread_ts is not None:
         post_kwargs["thread_ts"] = thread_ts
     try:
-        custom = identity_kwargs if client.token not in _NO_CUSTOMIZE_SCOPE else None
+        token = getattr(client, "token", None)
+        custom = identity_kwargs if token not in _NO_CUSTOMIZE_SCOPE else None
         try:
             resp = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
                 **(post_kwargs | (custom or {}))
@@ -185,8 +186,8 @@ async def _post_message(
                 or "chat:write.customize" not in {scope.strip() for scope in needed.split(",")}
             ):
                 raise
-            if client.token:
-                _NO_CUSTOMIZE_SCOPE.add(client.token)
+            if token:
+                _NO_CUSTOMIZE_SCOPE.add(token)
             resp = await client.chat_postMessage(**post_kwargs)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
     except SlackApiError as err:
         code = _slack_error_code(err)

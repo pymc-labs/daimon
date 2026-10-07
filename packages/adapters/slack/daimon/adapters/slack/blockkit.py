@@ -22,7 +22,7 @@ Status surface shape (non-terminal):
   actions  — Cancel button (action_id="cancel_turn"; style="danger"; no value)
 
 Terminal collapse (DONE/ERROR):
-  context  — {agent_name} · {elapsed}s · {in} in / {out} out [· {cost}]
+  context  — {elapsed}s · {in} in / {out} out [· {cost}]
              For ERROR: ❌ {reason} prepended
 
 No color field anywhere — blocks only, no attachments.
@@ -128,7 +128,7 @@ def to_blocks(
         - actions  : Cancel button  (action_id="cancel_turn", style="danger")
 
     Terminal (DONE / ERROR):
-        - context  : {agent_name} · {elapsed}s · {in} in / {out} out [· {cost}]
+        - context  : {elapsed}s · {in} in / {out} out [· {cost}]
                      ERROR prepends ❌ {reason}, under a section with the
                      termination notice when one was rendered
         No actions block (cancel button removed on terminal).
