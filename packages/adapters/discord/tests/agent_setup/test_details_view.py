@@ -201,6 +201,56 @@ def _find_button(view: discord.ui.LayoutView, label: str) -> discord.ui.Button[A
     raise AssertionError(f"No button labeled {label!r}")
 
 
+def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID) -> None:
+    details = _details()
+    state = _state(details, account_id=account_id, is_admin=True)
+    state.avatar_urls[details.name] = "https://mcp.example.com/avatars/token/abcdef123456.png"
+    container = build_details_container(
+        state, details, expanded_detail=None, is_admin=True, attribution=None
+    )
+    assert any(isinstance(item, discord.ui.Thumbnail) for item in _walk(container))
+    assert "Avatars are public" in _container_text(container)
+    assert {item.label for item in _walk(container) if isinstance(item, discord.ui.Button)} >= {
+        "Change avatar",
+        "Reset avatar",
+    }
+
+    member = build_details_container(
+        state, details, expanded_detail=None, is_admin=False, attribution=None
+    )
+    assert not any(
+        isinstance(item, discord.ui.Button) and item.label in {"Change avatar", "Reset avatar"}
+        for item in _walk(member)
+    )
+    built_in = build_details_container(
+        state, details, expanded_detail=None, is_admin=True, attribution=None, is_builtin=True
+    )
+    assert "Avatars are public" not in _container_text(built_in)
+
+
+async def test_reset_avatar_button_updates_detail_image(
+    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.adapters.discord.agent_setup import details_view as details_module
+    from daimon.core.stores.agent_avatars import AvatarRow
+
+    details = _details()
+    state = _state(details, account_id=account_id)
+    runtime = _make_runtime(settings=_mcp_settings())
+    view = DetailsView(state, runtime=runtime, allowed_user_id=42)
+    restored = AvatarRow(token="new-token", sha256="abcdef1234567890", png=b"", source="default")
+    reset = AsyncMock(return_value=("Restored", restored))
+    monkeypatch.setattr(details_module, "reset_agent_avatar", reset)
+    view.swap_to = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+    interaction = _admin_interaction()
+
+    await _find_button(view, "Reset avatar").callback(interaction)
+
+    reset.assert_awaited_once()
+    assert state.avatar_urls[details.name].endswith("/avatars/new-token/abcdef123456.png")  # type: ignore[union-attr]
+    view.swap_to.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType]
+
+
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------

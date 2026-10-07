@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delegated `Files.Read.All`. Asked to turn files on, or for a file where they
   are off, the agent calls the new `enable_channel_files` tool and the bot
   posts the card after its answer, instead of offering an artifact or notebook.
+- Discord server admins can change an agent's avatar with an attachment on `/agent-setup` or reset it from the agent detail panel. The panel shows the current public avatar and warns that caches may keep old images.
 - Slack workspace admins can change or reset an agent's avatar in `/agent-setup`; uploads are cropped and saved as metadata-free PNGs. Teams answers from non-built-in agents start with the agent's bold name on the first chunk.
 - Slack turn messages now carry the answering agent's name and avatar. Built-in Daimon retains the app identity. Existing installs without `chat:write.customize` fall back to the bot header until reinstalled. Turn posts are recorded for agent ownership checks.
 - Discord agent replies can show each agent's name and avatar through a pool of channel webhooks. Replies to recorded bot or application-owned webhook posts can start a turn without mentioning the bot. Servers without Manage Webhooks permission retain bot posts with a name on the first answer chunk.

@@ -16,6 +16,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 
+from daimon.adapters.discord.agent_setup.avatar import avatar_public_url
 from daimon.adapters.discord.agent_setup.scope_default import (
     list_guild_propagations,
     resolve_account_display,
@@ -29,6 +30,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.roster import RosterAgent, load_roster
 from daimon.core.rule_views import RuleViewer, load_rule_viewer
+from daimon.core.stores.agent_avatars import get_or_create_avatar
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_agent_bindings import get_binding
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -200,7 +202,7 @@ async def load_details_for(
     that was true when the panel opened is not the same as a claim that is true.
     """
     async with runtime.sessionmaker() as session:
-        return await load_agent_details(
+        details = await load_agent_details(
             session,
             runtime.anthropic,
             tenant_id=_tenant_id(state),
@@ -214,6 +216,14 @@ async def load_details_for(
             is_admin=state.is_admin,
             channel_label=_channel_label(state),
         )
+        state.avatar_urls[agent.name] = None
+        if not agent.is_built_in:
+            avatar = await get_or_create_avatar(
+                session, tenant_id=_tenant_id(state), agent_name=agent.name
+            )
+            state.avatar_urls[agent.name] = avatar_public_url(runtime, avatar)
+            await session.commit()
+        return details
 
 
 async def load_answering_map_for(runtime: DiscordRuntime, *, state: PanelState) -> AnsweringMap:

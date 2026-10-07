@@ -119,6 +119,8 @@ class PanelState:
     routing_page: int = 0
     expanded_detail: DetailListName | None = None
     details: AgentDetails | None = None
+    # Public URLs for agents whose Details have been loaded in this panel.
+    avatar_urls: dict[str, str | None] = dataclasses.field(default_factory=dict[str, str | None])
     answering_map: AnsweringMap | None = None
     thread_context: ThreadContext | None = None
     # The thread the panel was opened in, when it was opened in one. `channel_id`
