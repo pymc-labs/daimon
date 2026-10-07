@@ -9,15 +9,28 @@ from __future__ import annotations
 import copy
 import io
 import json
+import re
+import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
 from daimon.adapters.teams.app import _NO_CONTEXT
 from daimon.adapters.teams.identity import TeamsInbound, parse_inbound
+from daimon.adapters.teams.site_grant import GrantTarget, verify_state
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.thread_sessions import get_latest_thread_session
+from daimon.core.teams_sharepoint import ENABLE_FILES_TOOL
+from daimon.core.turn.state import ToolUseBlock
+from daimon.testing import (
+    build_fake_anthropic,
+    combine_handlers,
+    list_response,
+    make_agent_env_echo_handler,
+)
+from daimon.testing.ma import NotHandled
 from microsoft_teams.api import MessageActivity
 from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -38,6 +51,7 @@ pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned
 
 DATA = Path(__file__).parent / "data/activities"
 ROOT, REPLY = "1700000000001", "1700000000003"
+CHANNEL = "19:channel-1@thread.tacv2"
 CHANNEL_PATH = f"/v1.0/teams/{TEAM_GROUP_ID}/channels/19:channel-1@thread.tacv2/messages"
 HOSTED = (
     f"https://graph.microsoft.com{CHANNEL_PATH}/{ROOT}/replies/{REPLY}"
@@ -209,7 +223,10 @@ async def test_a_channel_reply_replays_the_thread_inlines_the_image_and_explains
     )
 
     message = turn["user_message"]
-    assert 'files="unavailable"/>' in message, "the agent is told channel files do not work"
+    assert 'files="unavailable" files_hint=' in message, "the agent is told files do not work"
+    assert "until the deployment's operator grants" in message, (
+        "with no public URL there is no card to offer, so the hint names the operator"
+    )
     assert '<thread_history source="teams" trust="untrusted">' in message
     assert "Q3 release plan" in message and "the numbers are in the sheet" in message
     assert "describe these attachments</message>" not in message, "the trigger is not history"
@@ -265,6 +282,69 @@ async def test_an_admin_whose_channel_files_are_refused_gets_the_enable_files_si
     [offer] = offers
     assert "login.microsoftonline.com" in offer and "Sites.FullControl.All" in offer
     assert "redirect_uri=https%3A%2F%2Fteams.example%2Foauth%2Fteams%2Ffiles%2Fcallback" in offer
+    assert _signed_target(offer) == GrantTarget(TEAM_GROUP_ID, CHANNEL), "for this channel"
+
+
+async def test_the_agents_enable_files_call_posts_the_card_for_this_channel(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """Asked for files, the agent calls `enable_channel_files` (here through the search proxy).
+
+    The card follows the answer though nothing was refused: files already work here.
+    """
+    teams = teams_settings(admins=(AAD_OBJECT_ID,), public_url="https://teams.example")
+    anthropic = build_fake_anthropic(combine_handlers(_no_outputs, make_agent_env_echo_handler()))
+    graph = _graph([], site=GRANTED_SITE)
+    runtime = build_teams_runtime(
+        db_session_factory, anthropic=anthropic, teams=teams, http_client=graph
+    )
+    asked = ToolUseBlock(
+        kind="tool_use",
+        id="t1",
+        type="agent.mcp_tool_use",
+        name="call_tool",
+        input={"name": ENABLE_FILES_TOOL, "arguments": {}},
+        mcp_server_name="daimon-mcp",
+        status="complete",
+    )
+    with patched_turns(tools=(asked,)) as turns:
+        async with running_service(runtime, teams_api_fake) as service:
+            await post_activity(service, _load("channel_attachments_reply"))
+            await service.turns.drain(timeout=30)
+
+    [offer] = [text for text in _cards(teams_api_fake) if "Enable files" in text]
+    assert _signed_target(offer) == GrantTarget(TEAM_GROUP_ID, CHANNEL), "for this channel"
+    assert "files_hint" not in turns[0]["user_message"], "files work here: no hint"
+
+
+async def test_where_files_are_refused_the_hint_tells_the_agent_to_call_for_the_card(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """With a public URL the card can be posted, so the hint names the tool, before any format."""
+    teams = teams_settings(public_url="https://teams.example")
+    runtime = build_teams_runtime(db_session_factory, teams=teams, http_client=_graph([]))
+    with patched_turns() as turns:
+        async with running_service(runtime, teams_api_fake) as service:
+            await post_activity(service, _load("channel_attachments_reply"))
+            await service.turns.drain(timeout=30)
+
+    message = turns[0]["user_message"]
+    assert f"call {ENABLE_FILES_TOOL} first" in message, "the agent knows to post the card"
+    assert "Do not swap in an artifact, report or notebook" in message, "not a fallback first"
+
+
+def _no_outputs(request: httpx.Request) -> httpx.Response:
+    """A tool call sends the output sweep looking for session files: there are none."""
+    if request.method == "GET" and request.url.path == "/v1/files":
+        return list_response([])
+    raise NotHandled
+
+
+def _signed_target(card: str) -> GrantTarget | None:
+    url = re.search(r'"(https://login\.microsoftonline\.com/[^"]+)"', card)
+    assert url is not None, "the card links the sign-in"
+    [state] = parse_qs(urlparse(url.group(1)).query)["state"]
+    return verify_state(state, secret="test-secret", now=time.time())
 
 
 def _cards(fake: TeamsApiFake) -> list[str]:
