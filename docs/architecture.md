@@ -1491,8 +1491,11 @@ it at once (Discord refuses edits in an archived thread): once every check,
 including the locked policy re-check, has passed, it sets
 `turn_origins.archive_requested_at` on that turn's origin. The Discord adapter
 reads it when the run ends and archives the thread after the turn's last edit
-and reaction, and after any session-output files are posted. A turn that
-raises leaves the thread open. `daimon audit prune` also removes those
+and reaction, and after any session-output files are posted. If a newer turn
+holds the thread by then (in flight, queued or a deferred continuation) the
+thread stays open; otherwise the adapter holds the thread in `_processing` for
+the archive call and hands any mention that queued meanwhile back to
+`on_message`. A turn that raises leaves the thread open. `daimon audit prune` also removes those
 records past the retention, and account erasure clears `content_hmac`.
 The policy remains synchronous and does no I/O outside an MCP audit scope; the
 separate hub OAuth applications (`/discord/mcp` and `/slack/mcp`, which use

@@ -514,7 +514,10 @@ class TestNewThreadCreation:
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    @pytest.mark.parametrize(("asked", "with_files"), [(True, True), (True, False), (False, True)])
+    @pytest.mark.parametrize(
+        ("asked", "with_files", "newer_turn"),
+        [(True, True, False), (True, False, False), (False, True, False), (True, True, True)],
+    )
     async def test_an_archive_asked_during_the_turn_happens_after_its_last_post(
         self,
         mock_resolve: AsyncMock,
@@ -524,6 +527,7 @@ class TestNewThreadCreation:
         mock_find_agent: AsyncMock,
         asked: bool,
         with_files: bool,
+        newer_turn: bool,
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
@@ -574,6 +578,9 @@ class TestNewThreadCreation:
         async def deliver(*_args: object, **_kwargs: object) -> None:
             await asyncio.sleep(0)
             order.append("file_posted")
+            if newer_turn:
+                # The sweep takes seconds; a queued mention's turn has the thread now.
+                bot._processing.add(9999)  # pyright: ignore[reportPrivateUsage]
 
         mock_run_turn.side_effect = finish_turn
         with patch("daimon.adapters.discord.bot.deliver_session_outputs", side_effect=deliver):
@@ -581,7 +588,9 @@ class TestNewThreadCreation:
             await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
 
         archived = "thread_edit:{'archived': True}"
-        if asked:
+        if newer_turn:
+            assert archived not in order, "archiving under a newer turn would break its card"
+        elif asked:
             assert order[-1] == archived, f"the archive comes after every post, got {order}"
             assert order.count(archived) == 1 and "card_edit" in order
             if with_files:

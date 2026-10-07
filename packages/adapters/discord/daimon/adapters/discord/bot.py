@@ -579,7 +579,8 @@ class DaimonBot(commands.Bot):
         """Archive the turn's thread once nothing more will be posted for the turn.
 
         Runs after the turn's last edit and reaction. A session-output sweep may
-        still post files (a post reopens a thread), so the archive waits for it.
+        still post files (a post reopens a thread), so the archive waits for it,
+        and by then a newer turn may own the thread: `_archive_when_idle`.
         """
         sweep = self._output_sweeps.get(outcome.ma_session_id)
         if sweep is None:
@@ -589,9 +590,34 @@ class DaimonBot(commands.Bot):
         async def after_sweep() -> None:
             with contextlib.suppress(Exception):
                 await sweep
-            await archive_thread_quietly(thread)
+            await self._archive_when_idle(thread)
 
         self._spawn(after_sweep())
+
+    async def _archive_when_idle(self, thread: discord.Thread) -> None:
+        """Archive unless a newer turn has the thread; hold the thread meanwhile.
+
+        A newer turn in flight or queued wins: archiving under it would fail its
+        card edits, the bug the deferral exists to avoid, and the agent can be
+        asked again. The check and the claim have no await between them, so a
+        mention arriving during the archive queues; it is handed back to
+        `on_message` afterwards, which gates and counts it like any mention.
+        """
+        if (
+            thread.id in self._processing
+            or self._pending.get(thread.id)
+            or thread.id in self._deferred_dispatch
+        ):
+            log.info("turn.thread_archive_skipped_busy", thread_id=thread.id)
+            return
+        self._processing.add(thread.id)
+        try:
+            await archive_thread_quietly(thread)
+        finally:
+            # Resumes a continuation deferred behind the claim, like any release.
+            self._release_thread(thread.id)
+            for queued in self._pending.pop(thread.id, []):
+                self._spawn(self.on_message(queued))
 
     def _schedule_output_sweep(
         self, outcome: RunOutcome, *, thread: discord.Thread, tenant_id: uuid.UUID
