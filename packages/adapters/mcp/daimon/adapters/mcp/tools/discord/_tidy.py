@@ -19,10 +19,12 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._tidy import (
     Check,
+    PostRecord,
     TidyContext,
     TidyResult,
     conversation_refusal,
     policy_recheck,
+    record_agent_posts,
     refuse,
     require_conversation_rights,
     require_not_escalation_channel,
@@ -37,7 +39,13 @@ from daimon.adapters.mcp.tools.discord._client import (
     _require_guild_id,  # pyright: ignore[reportPrivateUsage]
     _resolve_channel,  # pyright: ignore[reportPrivateUsage]
     _resolve_member,  # pyright: ignore[reportPrivateUsage]
+    ensure_application_id,
     rest_client,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.discord._post_transport import (
+    delete_own_message,
+    edit_own_message,
+    own_webhooks,
 )
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
@@ -45,7 +53,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.channel_tidy import TidyOperation, TidyTarget
-from daimon.core.stores.agent_posts import AgentPostRow, get_post, list_posts_in
+from daimon.core.stores.agent_posts import AgentPostRow, get_post, list_posts_in, mark_deleted
 from daimon.core.stores.turn_origins import request_thread_archive
 from fastmcp.exceptions import ToolError
 
@@ -112,6 +120,7 @@ async def _resolve_target(
 
 
 async def _fetch_own_bot_message(
+    _client: discord.Client,
     runtime: McpRuntime,
     ctx: TidyContext,
     target: _Target,
@@ -126,7 +135,19 @@ async def _fetch_own_bot_message(
         message = await target.channel.fetch_message(int(message_id))
     except discord.NotFound as e:
         raise ToolError("message not found") from e
-    if message.author.id != target.bot_user_id or message.webhook_id is not None:
+    if message.webhook_id is not None:
+        await ensure_application_id(_client)
+    # require_own_post has already checked the durable agent ledger. A deleted
+    # webhook may no longer appear in the channel list, but its recorded post
+    # is still the calling agent's.
+    if not (
+        (message.webhook_id is None and message.author.id == target.bot_user_id)
+        or (
+            message.webhook_id is not None
+            and _client.application_id is not None
+            and message.application_id == _client.application_id
+        )
+    ):
         raise await refuse(
             runtime,
             ctx,
@@ -226,17 +247,31 @@ async def _edit_message_impl(  # pyright: ignore[reportUnusedFunction]
             runtime, ctx, target, post, tool_name=tool, operation=operation
         )
         message = await _fetch_own_bot_message(
-            runtime, ctx, target, tool_name=tool, operation=operation, message_id=message_id
+            c, runtime, ctx, target, tool_name=tool, operation=operation, message_id=message_id
         )
+        replacement: discord.Message | None = None
+        extra_messages: list[discord.Message] = []
 
         async def act() -> None:
+            nonlocal replacement
             if post.source == "turn":
                 # A status card is an embed with buttons, and an answer may
                 # carry rendered table images: replacing only the text would
                 # leave the stale card or tables showing under it.
-                await message.edit(content=content, embeds=[], attachments=[], view=None)
+                replacement = await edit_own_message(
+                    c,
+                    target.channel,
+                    message,
+                    extra_messages=extra_messages,
+                    content=content,
+                    embeds=[],
+                    attachments=[],
+                    view=None,
+                )
             else:
-                await message.edit(content=content)
+                replacement = await edit_own_message(
+                    c, target.channel, message, extra_messages=extra_messages, content=content
+                )
 
         await run_action(
             runtime,
@@ -254,6 +289,24 @@ async def _edit_message_impl(  # pyright: ignore[reportUnusedFunction]
             post=post,
             content=content,
         )
+        if replacement is not None:
+            await record_agent_posts(
+                runtime,
+                auth,
+                platform=_PLATFORM,
+                posts=[
+                    PostRecord(
+                        channel_id=resolved_channel_id,
+                        message_id=str(sent.id),
+                        parent_channel_id=target.parent_id,
+                        content=sent.content,
+                    )
+                    for sent in [replacement, *extra_messages]
+                ],
+            )
+            async with runtime.session_factory.begin() as session:
+                await mark_deleted(session, post_ids=[post.id], now=datetime.now(UTC))
+            message_id = str(replacement.id)
     return TidyResult(
         platform=_PLATFORM, channel_id=resolved_channel_id, message_id=message_id, action="edited"
     )
@@ -289,11 +342,11 @@ async def _delete_message_impl(  # pyright: ignore[reportUnusedFunction]
             runtime, ctx, target, post, tool_name=tool, operation=operation
         )
         message = await _fetch_own_bot_message(
-            runtime, ctx, target, tool_name=tool, operation=operation, message_id=message_id
+            c, runtime, ctx, target, tool_name=tool, operation=operation, message_id=message_id
         )
 
         async def act() -> None:
-            await message.delete()
+            await delete_own_message(c, target.channel, message)
 
         await run_action(
             runtime,
@@ -462,12 +515,26 @@ async def _delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
                 message_ids=[str(m.id) for m in messages],
             )
         owned = {p.message_id: p for p in own if p.agent_id == ctx.actor.agent_id}
+        hooks = await own_webhooks(c, target.channel)
+        own_hook_ids = frozenset(hooks)
         opener = (
             thread_post.requester_platform_user_id if thread_post.source == "auto_thread" else None
         )
         for message in messages:
             post = owned.get(str(message.id))
-            if post is None or message.author.id != target.bot_user_id or message.webhook_id:
+            if post is None:
+                continue
+            if not (
+                (message.webhook_id is None and message.author.id == target.bot_user_id)
+                or (
+                    message.webhook_id in own_hook_ids
+                    or (
+                        message.webhook_id is not None
+                        and c.application_id is not None
+                        and message.application_id == c.application_id
+                    )
+                )
+            ):
                 continue
             # A running turn's card (this turn's own included) and replies to
             # someone the caller may not speak for are left in place.
@@ -487,7 +554,9 @@ async def _delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
                     operation="thread.delete",
                     target=TidyTarget(str(thread.id), str(message.id), post.content_hmac),
                     checks=[_recheck(runtime, ctx, auth, target)],
-                    act=message.delete,
+                    act=lambda message=message: delete_own_message(
+                        c, target.channel, message, known_webhooks=hooks
+                    ),
                     describe_error=_describe("delete"),
                     post=post,
                 )

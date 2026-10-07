@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.adapters.discord.post_transport import DiscordPostTransport
+from daimon.core.agent_identity import AgentIdentity, resolve_agent_identity
 from daimon.core.continuity.continuation import ContinuationDecision
 from daimon.core.continuity.dispatch import dispatch_pending_continuations as dispatch_core
 from daimon.core.stores.domain import TaskContinuationRow
@@ -43,6 +45,8 @@ async def dispatch_pending_continuations(
     thread: discord.Thread,
     run_follow_up: RunFollowUp,
     may_post: MayPost,
+    client: discord.Client | None = None,
+    public_base_url: str | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
     """Dispatch under the caller's existing thread guard."""
@@ -61,7 +65,31 @@ async def dispatch_pending_continuations(
 
     async def post(row: TaskContinuationRow, text: str, reason: str) -> None:
         if await may_post():
-            await thread.send(text)
+            if client is None:
+                await thread.send(text)
+            else:
+                try:
+                    async with sessionmaker.begin() as session:
+                        identity = await resolve_agent_identity(
+                            session,
+                            tenant_id=tenant_id,
+                            agent_name=row.target_name,
+                            is_builtin=row.target_name.casefold() == "daimon",
+                            public_base_url=public_base_url,
+                        )
+                except Exception as exc:
+                    log.warning(
+                        "continuation.identity_resolution_failed", error_type=type(exc).__name__
+                    )
+                    identity = AgentIdentity(name=row.target_name, avatar_url=None, builtin=True)
+                transport = DiscordPostTransport(
+                    client,
+                    thread,
+                    name=identity.name,
+                    avatar_url=identity.avatar_url,
+                    builtin=identity.builtin,
+                )
+                await transport.send(text)
         else:
             log.info("continuation.notice_withheld", thread_id=row.thread_id, reason=reason)
 

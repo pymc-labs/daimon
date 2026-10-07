@@ -53,8 +53,18 @@ Leave it unset to disable operator alerts.
 4. Under **OAuth2 → URL Generator**, select the `bot` and
    `applications.commands` scopes, then under **Bot Permissions** select at
    least `Send Messages`, `Send Messages in Threads`,
-   `Create Public Threads`, `Manage Threads` and `Read Message History`.
+   `Create Public Threads`, `Manage Threads`, `Read Message History` and
+   `Embed Links`. Select `View Channels` and `Manage Webhooks` too. With
+   exactly these eight permissions, the invite permissions integer is
+   `326954470400`.
 5. Open the generated URL and invite the bot to a test server you control.
+
+For a server where the bot is already installed, open **Server Settings → Roles**,
+select the bot's role, enable **Manage Webhooks**, and save. Check each channel
+where agents answer: **Edit Channel → Permissions** must also allow the bot role
+to manage webhooks. Discord's channel overrides can deny a permission granted
+at server level. Without it, agent replies still post through the bot with a
+bold agent name on the first answer chunk.
 
 Setup and routines commands require Discord's `Manage Server` permission.
 

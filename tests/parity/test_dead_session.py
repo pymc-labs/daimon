@@ -22,6 +22,7 @@ from decimal import Decimal
 from typing import Literal
 
 import pytest
+from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.continuity.messages import render_unexpected_loss
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -135,7 +136,10 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session(
     assert len(carrying) == 1, (
         f"expected exactly one unexpected-loss notice (history variant), got: {posted}"
     )
-    assert carrying[0].startswith(expected_notice + "\n\n"), (
+    expected_start = expected_notice + "\n\n"
+    if platform == "discord":
+        expected_start = fallback_name_prefix("test-agent", expected_start)
+    assert carrying[0].startswith(expected_start), (
         f"the loss notice must be the first paragraph of the answer, got: {carrying[0]!r}"
     )
     assert carrying[0] != expected_notice, (
