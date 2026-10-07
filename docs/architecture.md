@@ -1082,9 +1082,8 @@ A thread can move to another agent without a new thread. Two triggers:
   Teams.
 - When a channel's agent changes, a thread whose session belongs to the old
   agent can't run a turn, and its next mention gets a notice instead. On
-  Discord and Slack the notice has a Hand over button that moves the thread to
-  the channel's agent for whoever clicks it. Teams has no button; the notice
-  there says to start a new conversation.
+  Discord, Slack and Teams the notice has a Hand over button that moves the
+  thread to the channel's agent for whoever clicks it.
 
 Asking the agent is the default because it is how every other thread change
 works (keys, repo, fresh start). The button exists because no agent can answer
