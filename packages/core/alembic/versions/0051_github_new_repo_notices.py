@@ -6,8 +6,8 @@ downgrade: destructive
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0050_github_new_repo_notices"
-down_revision: str | None = "0049_github_connect"
+revision: str = "0051_github_new_repo_notices"
+down_revision: str | None = "0050_turn_post_ownership"
 branch_labels: str | None = None
 depends_on: str | None = None
 
