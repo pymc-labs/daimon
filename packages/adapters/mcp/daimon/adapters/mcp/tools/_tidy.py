@@ -141,7 +141,7 @@ class TidyResult(BaseModel):
     platform: str
     channel_id: str
     message_id: str
-    action: Literal["edited", "deleted", "archived"]
+    action: Literal["edited", "deleted", "archived", "archive_scheduled"]
     messages_deleted: int = 0
 
 

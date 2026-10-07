@@ -118,8 +118,10 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Its messages stay readable and a new post reopens it. Use it for a
         finished or abandoned thread of yours that others wrote in. A thread
         opened from someone's mention can be archived only when that person
-        or a server admin asks. Pass origin_context_id. Discord-only: Slack
-        threads cannot be archived.
+        or a server admin asks. The thread you are answering in is archived
+        when your turn ends (action "archive_scheduled"), so say it will be
+        archived rather than that it is. Pass origin_context_id. Discord-only:
+        Slack threads cannot be archived.
         """
         auth = await _auth(ctx)
         if auth.platform != "discord":

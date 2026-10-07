@@ -308,3 +308,30 @@ async def test_a_turn_post_must_name_its_turn(
             requester_platform_user_id="42",
             source="turn",
         )
+
+
+async def test_an_allowed_archive_of_a_thread_is_found_only_since_its_turn(
+    db_session: AsyncSession,
+) -> None:
+    from daimon.core.stores.security_audit import thread_archive_requested
+
+    tenant = await make_tenant(db_session)
+    actor = _actor(tenant.id, uuid.uuid4(), "origin:a")
+    now = datetime.now(UTC)
+    await record_tidy_actions(
+        db_session,
+        actor=actor,
+        tool_name="archive_thread",
+        operation="thread.archive",
+        targets=[TidyTarget(channel_id="222", message_id="444")],
+        now=now,
+    )
+
+    async def found(thread_id: str, since: datetime) -> bool:
+        return await thread_archive_requested(
+            db_session, tenant_id=tenant.id, thread_id=thread_id, since=since
+        )
+
+    assert await found("444", now - timedelta(seconds=1)), "an archive asked during the turn"
+    assert not await found("444", now + timedelta(seconds=1)), "not one from before the turn"
+    assert not await found("555", now - timedelta(seconds=1)), "not another thread's"

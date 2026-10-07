@@ -369,7 +369,14 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
     origin_context_id: str | None,
 ) -> TidyResult:
     """Archive a thread this agent opened. Its messages stay readable; anyone
-    posting in it reopens it."""
+    posting in it reopens it.
+
+    The thread this turn is running in is archived when the turn ends, not
+    now: Discord refuses edits in an archived thread, so the turn could not
+    finish its own status card. The call is checked, counted and audited as
+    usual; the Discord adapter archives on seeing the `allowed` row
+    (`thread_archive_requested`).
+    """
     ctx = await resolve_tidy_context(
         runtime, auth, platform=_PLATFORM, origin_context_id=origin_context_id
     )
@@ -381,8 +388,11 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
             c, runtime, ctx, auth, thread_id=thread_id, tool_name=tool, operation=operation
         )
 
+        scheduled = ctx.origin is not None and ctx.origin.channel_id == str(thread.id)
+
         async def act() -> None:
-            await thread.edit(archived=True)
+            if not scheduled:
+                await thread.edit(archived=True)
 
         await run_action(
             runtime,
@@ -399,7 +409,7 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
         platform=_PLATFORM,
         channel_id=target.parent_id or "",
         message_id=str(thread.id),
-        action="archived",
+        action="archive_scheduled" if scheduled else "archived",
     )
 
 

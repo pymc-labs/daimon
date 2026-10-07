@@ -7,6 +7,7 @@ import contextlib
 import types
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -507,6 +508,83 @@ class TestNewThreadCreation:
                 assert not await turn_card_intent_is_active(session, id=row.turn_card_intent_id), (
                     "and that turn is over once the mention is handled"
                 )
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    @pytest.mark.parametrize("asked", [True, False])
+    async def test_an_archive_asked_during_the_turn_happens_after_its_last_edit(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        asked: bool,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """archive_thread on the turn's own thread is carried out once the turn is done."""
+        from daimon.core.channel_tidy import TidyActor, TidyTarget, record_tidy_actions
+        from daimon.core.turn.state import TextBlock, TurnState
+
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_create_session.return_value = ma_session(id="sess-archive")
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message(channel_id=789, author_id=111)
+        order: list[str] = []
+        card = types.SimpleNamespace(
+            id=1000, edit=AsyncMock(side_effect=lambda **_: order.append("card_edit"))
+        )
+        mock_thread = MagicMock(spec=discord.Thread)
+        mock_thread.id = 9999
+        mock_thread.parent_id = 789
+        mock_thread.archived = False
+        mock_thread.send = AsyncMock(return_value=card)
+        mock_thread.edit = AsyncMock(side_effect=lambda **kw: order.append(f"thread_edit:{kw}"))
+        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
+
+        async def finish_turn(*, lifecycle, **kwargs):
+            if asked:
+                # What archive_thread writes when called from inside this thread.
+                async with db_session_factory.begin() as session:
+                    await record_tidy_actions(
+                        session,
+                        actor=TidyActor(
+                            tenant_id=tenant.id,
+                            agent_id=uuid.uuid4(),
+                            account_id=None,
+                            platform="discord",
+                            platform_user_id="111",
+                            turn_ref="origin:x",
+                        ),
+                        tool_name="archive_thread",
+                        operation="thread.archive",
+                        targets=[TidyTarget(channel_id="789", message_id="9999")],
+                        now=datetime.now(UTC),
+                    )
+            state = TurnState(content=[TextBlock(kind="text", text="Archiving this thread.")])
+            await lifecycle.on_terminal_success(state)
+            return state
+
+        mock_run_turn.side_effect = finish_turn
+        await bot.on_message(message)
+
+        if asked:
+            assert order[-1] == "thread_edit:{'archived': True}", (
+                f"the thread is archived after the card's final edit, got {order}"
+            )
+            assert "card_edit" in order[:-1], "the card was finished first"
+        else:
+            assert not any(o.startswith("thread_edit") for o in order), (
+                "no archive without a request"
+            )
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)

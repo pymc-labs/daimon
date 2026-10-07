@@ -8,7 +8,7 @@ import functools
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, Final, Literal
 
@@ -43,7 +43,7 @@ from daimon.adapters.discord.turn_card_recovery import (
     reconcile_turn_card_intent,
     retire_terminal_turn_card,
 )
-from daimon.adapters.discord.turn_posts import TurnPostRecorder
+from daimon.adapters.discord.turn_posts import TurnPostRecorder, archive_if_requested
 from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.vision import (
     build_image_url_prefix,
@@ -139,6 +139,9 @@ import discord
 from discord.ext import commands
 
 log = structlog.get_logger()
+# The tidy tools stamp an archive request with the MCP host's clock; allow for
+# a few seconds of drift when looking for one made during this turn.
+_ARCHIVE_CLOCK_SKEW = timedelta(seconds=5)
 
 
 def log_anthropic_overload(
@@ -2055,6 +2058,7 @@ class DaimonBot(commands.Bot):
             admitted_name=admission.agent.name,
             asking_ma_agent_id=asking_ma_agent_id,
         )
+        turn_started_at = datetime.now(UTC)
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
         agent = admission.agent
 
@@ -2305,6 +2309,14 @@ class DaimonBot(commands.Bot):
             if final_lifecycle.was_answered and final_lifecycle.final_message_id is not None:
                 await seed_feedback_reactions(thread, message_id=final_lifecycle.final_message_id)
         self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)
+        # After the turn's last edit and reaction: an archive the agent asked
+        # for in this thread during the turn happens now (`archive_if_requested`).
+        await archive_if_requested(
+            self.runtime.sessionmaker,
+            thread,
+            tenant_id=tenant_id,
+            since=turn_started_at - _ARCHIVE_CLOCK_SKEW,
+        )
 
     async def on_raw_thread_update(self, payload: discord.RawThreadUpdateEvent) -> None:
         metadata = payload.data["thread_metadata"]
@@ -2534,6 +2546,7 @@ class DaimonBot(commands.Bot):
         # has passed, and covers session bind/create (bind_session) plus the
         # driver pump (run_prepared_turn) as ONE shared budget -- admit()
         # itself is deliberately outside it.
+        turn_started_at = datetime.now(UTC)
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
 
         agent = admission.agent
@@ -3166,3 +3179,11 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id, thread=thread, guild_id=guild_id
             )
         self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)
+        # After the turn's last edit and reaction: an archive the agent asked
+        # for in this thread during the turn happens now (`archive_if_requested`).
+        await archive_if_requested(
+            self.runtime.sessionmaker,
+            thread,
+            tenant_id=tenant_id,
+            since=turn_started_at - _ARCHIVE_CLOCK_SKEW,
+        )

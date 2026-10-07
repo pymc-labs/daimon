@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Archiving the thread an agent is answering in no longer breaks its reply.** `archive_thread` on the turn's own thread archived it at once, so Discord refused the turn's final card edit: the card stayed on "Thinking", an error was posted, and that post reopened the thread. The archive now happens right after the turn's last edit, and the tool says it is scheduled.
 - **Slack `/help` lists `/memory` and `/dm`.** Both commands worked but were missing from `/help`, so its list didn't match the commands Slack offers.
 - **Slack `read_thread` stays within 200 messages and its cursor reads older replies.** Slack adds a thread's root to every page, so a read at the 200-message limit returned 201. The continuation hint also said "newer" while Slack returned the thread's older replies. The root now counts toward the limit, so a page holds at most 200 messages; a limit below 2 still reads the root and one reply. The hint and tool description say the cursor reads older replies.
 - **A top-level Slack mention sees what was just said in the channel.** A fresh mention replayed only its own new thread, so a question about a message posted moments earlier went unanswered. Its first turn now gets up to 24 messages before it, as on Discord, read under `read_channel`'s rules. Mentions inside a thread replay that thread as before.

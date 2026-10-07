@@ -209,7 +209,8 @@ async def test_the_opener_archives_the_thread_opened_from_their_mention(
 ) -> None:
     world = await _world(committing_sessionmaker)
     await _auto_thread(world, opener=_CALLER)
-    auth, origin = await world.turn(thread=_THREAD)
+    # Asked from a turn in the parent channel, not inside the thread.
+    auth, origin = await world.turn()
 
     result = await _archive_thread_impl(
         world.runtime, auth, thread_id=_THREAD, origin_context_id=origin
@@ -218,13 +219,33 @@ async def test_the_opener_archives_the_thread_opened_from_their_mention(
     assert fake.thread_archived, "discord archived the thread"
 
 
+async def test_archiving_the_thread_the_turn_runs_in_waits_for_the_turn_to_end(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    """Discord refuses edits in an archived thread, so the turn's card could not finish."""
+    world = await _world(committing_sessionmaker)
+    await _auto_thread(world, opener=_CALLER)
+    auth, origin = await world.turn(thread=_THREAD)
+
+    result = await _archive_thread_impl(
+        world.runtime, auth, thread_id=_THREAD, origin_context_id=origin
+    )
+
+    assert result.action == "archive_scheduled", "the caller learns it happens at turn end"
+    assert not fake.thread_archived, "the thread stays open while the turn finishes"
+    rows = [r for r in await world.audit() if r.target_message_id == _THREAD]
+    assert [(r.operation, r.outcome) for r in rows] == [("thread.archive", "allowed")], (
+        "the allowed row is the request the Discord adapter carries out"
+    )
+
+
 async def test_an_admin_archives_an_auto_opened_thread_someone_else_opened(
     committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
     world = await _world(committing_sessionmaker)
     fake.everyone_perms = _ALL_PERMS | _ADMINISTRATOR
     await _auto_thread(world, opener=_SOMEONE_ELSE)
-    auth, origin = await world.turn(thread=_THREAD)
+    auth, origin = await world.turn()
 
     await _archive_thread_impl(world.runtime, auth, thread_id=_THREAD, origin_context_id=origin)
     assert fake.thread_archived, "a server admin may archive it"
