@@ -133,6 +133,23 @@ async def test_answer_replaces_the_card_with_feedback_and_no_usage_footer() -> N
     assert lifecycle.card_closed and lifecycle.final_message_id == "m-1"
 
 
+async def test_agent_name_prefix_is_only_on_first_answer_chunk() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender, agent_name_prefix="Ada")
+    await lifecycle.on_terminal_success(_answer("One.\n\n" + "Long answer. " * 600))
+    answers = [activity.text or "" for activity in sender.activities[1:]]
+    assert len(answers) > 1
+    assert answers[0].startswith("**Ada**\n\n")
+    assert all("**Ada**" not in chunk for chunk in answers[1:])
+
+
+async def test_builtin_answer_has_no_name_prefix() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("Done."))
+    assert sender.activities[-1].text == "Done."
+
+
 async def test_a_spend_limit_alerts_the_operators(monkeypatch: pytest.MonkeyPatch) -> None:
     alerts: list[str] = []
     monkeypatch.setattr(

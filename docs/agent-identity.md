@@ -1,6 +1,7 @@
 # Agent identity on every message
 
-Status: design, 2026-10-07, revised after review the same day. Owner: the
+Status: delivery in progress; Slack identity merged, Slack avatar panel and Teams
+prefix in PR 3. Owner: the
 agent-identity effort.
 
 ## Problem

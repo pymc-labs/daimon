@@ -18,14 +18,14 @@ Handler contract:
     in the boundary catch, which renders into the open view rather than
     failing silently.
 
-The panel is read-only. Its three screens — Agents, one agent's Details, and
+The panel's three main screens — Agents, one agent's Details, and
 Who answers where — are dispatched by ``PANEL_ACTION_IDS`` and read their
 state from the typed ``PanelMetadata`` the views carry, never from the click.
 Navigation pushes; paging and the Details expansions update the view they were
 clicked on, so the stack never grows past the two depths the design uses.
 
-Only four clicks leave the read path, and none of them edits an existing
-agent:
+The avatar controls are admin-only writes from Details. Other clicks leave
+the read path for these existing workflows:
   - New agent pushes the creation form, whose submission is handled in
     submit.py. Creating an unscoped agent has no tenant-wide blast radius, so
     it is open to every member.
@@ -41,9 +41,8 @@ agent:
   - This channel's environment, on Who answers where, saves the pick through
     channel_environment.py. Workspace admins and this channel's admins,
     re-checked live on the pick.
-  - The setup-conversation button opens a thread with Daimon. Every change to
-    an existing agent, and every routing change, happens in that conversation,
-    where the chat tool owns the authorization.
+  - The setup-conversation button opens a thread with Daimon for other agent
+    and routing changes, where the chat tool owns the authorization.
 
 A click whose view carries no panel metadata belongs to a surface this
 deployment no longer serves; it is logged at debug and dropped rather than
@@ -126,6 +125,7 @@ from daimon.core.panel_operator_tokens import list_panel_operator_tokens
 from daimon.core.roster import Roster, paginate
 from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.agent_avatars import get_or_create_avatar
 from daimon.core.stores.channel_admins import get_channel_admins, list_channel_admins
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -279,6 +279,8 @@ _RULE_ACTIONS = frozenset(
 PANEL_ACTION_IDS: frozenset[str] = frozenset(
     {
         panel_views.ACTION_DETAILS,
+        panel_views.ACTION_AVATAR_CHANGE,
+        panel_views.ACTION_AVATAR_RESET,
         panel_views.ACTION_ROUTING,
         panel_views.ACTION_PAGE_NEXT,
         panel_views.ACTION_PAGE_PREV,
@@ -538,6 +540,15 @@ async def load_details_view(
             tenant_id=tenant_id,
             account_ids=[details.created_by_account_id] if details.created_by_account_id else [],
         )
+        avatar_url: str | None = None
+        if not details.daimon_managed and details.name != runtime.deployment_default.agent_name:
+            avatar = await get_or_create_avatar(
+                session, tenant_id=tenant_id, agent_name=details.name
+            )
+            base = runtime.settings.mcp.app_root_url
+            if base:
+                avatar_url = f"{base.rstrip('/')}/avatars/{avatar.token}/{avatar.sha256[:12]}.png"
+            await session.commit()
     view = build_details_view(
         details,
         meta=meta.with_view("details", agent_name=agent_name),
@@ -547,6 +558,10 @@ async def load_details_view(
         attribution=attributions.get(details.created_by_account_id)
         if details.created_by_account_id
         else None,
+        avatar_url=avatar_url,
+        avatar_editable=(
+            not details.daimon_managed and details.name != runtime.deployment_default.agent_name
+        ),
     )
     return view
 
@@ -632,6 +647,38 @@ async def _dispatch_panel_action(
     view_hash: str = str(view_info.get("hash") or "")
     trigger_id: str = str(payload.get("trigger_id") or "")
     is_admin = await resolve_is_admin(client, user_id=user_id)
+
+    if action_id == panel_views.ACTION_AVATAR_CHANGE:
+        from daimon.adapters.slack.agent_setup.avatar import may_edit_avatar
+
+        if not meta.agent_name or not await may_edit_avatar(
+            runtime, client, tenant_id=tenant_id, user_id=user_id, agent_name=meta.agent_name
+        ):
+            await record_panel_write(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                op="agent_avatar_change",
+                outcome="denied",
+                reason="needs_admin_or_agent_gone",
+            )
+            return
+        await client.views_push(  # pyright: ignore[reportUnknownMemberType]
+            trigger_id=trigger_id,
+            view=panel_views.build_avatar_upload_form(
+                meta=meta.with_view(
+                    "avatar_upload", agent_name=meta.agent_name, root_view_id=view_id
+                )
+            ),
+        )
+        return
+
+    if action_id == panel_views.ACTION_AVATAR_RESET:
+        from daimon.adapters.slack.agent_setup.avatar import reset_agent_avatar
+
+        await reset_agent_avatar(runtime, client, meta=meta, user_id=user_id, view_id=view_id)
+        return
 
     if action_id == panel_views.ACTION_DETAILS:
         agent_name = str(action.get("value") or "")

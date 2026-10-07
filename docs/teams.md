@@ -7,6 +7,9 @@ Slack. This page covers how it behaves and where it differs. To set it up
 (Entra, Azure Bot, the app package and the Teams admin center), follow
 [Microsoft Teams in the self-hosting guide](self-hosting.md#microsoft-teams-optional).
 
+Teams uses one bot identity for every agent. Answers from an agent other than
+the built-in one start with its bold name on the first message chunk.
+
 ### Ingress is HTTP, not a dial-out
 
 Discord (gateway) and Slack (Socket Mode) dial out; Teams does not. The

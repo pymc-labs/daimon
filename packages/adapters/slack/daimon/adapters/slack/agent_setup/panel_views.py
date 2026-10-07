@@ -1,4 +1,4 @@
-"""Pure Block Kit builders for the read-only setup panel.
+"""Pure Block Kit builders for the setup panel.
 
 Three screens — Agents, one agent's Details, and Who answers where — plus the
 New agent form and the placeholder shown while a creation is in flight. Every
@@ -10,8 +10,8 @@ how a Slack modal says them. It reads no settings, resolves no credential and
 re-derives no precedence: an unrouted agent is unrouted because
 `AgentDetails.answers_in` is empty, and the sentence about it is the one
 `daimon.core.routing_facts` wrote. Admin and member see identical blocks; the
-role changes only whose voice the routing request is in, and whether Who
-answers where lists the channel admins with a form to edit them.
+role changes which admin controls are offered, including avatar changes and
+the channel admins form.
 
 Pure — no I/O, no clock, no slack_sdk.
 """
@@ -66,6 +66,11 @@ __all__ = [
     "ACTION_CHANNEL_SKILLS",
     "ACTION_CODING_TOOLS",
     "ACTION_DETAILS",
+    "ACTION_AVATAR_CHANGE",
+    "ACTION_AVATAR_RESET",
+    "CALLBACK_AVATAR_UPLOAD",
+    "AVATAR_FILE_INPUT_ID",
+    "build_avatar_upload_form",
     "ACTION_ENVIRONMENT",
     "ACTION_EXPAND_KEYS",
     "ACTION_EXPAND_SKILLS",
@@ -111,6 +116,10 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 ACTION_DETAILS: Final = "agent_setup__details"
+ACTION_AVATAR_CHANGE: Final = "agent_setup__avatar_change"
+ACTION_AVATAR_RESET: Final = "agent_setup__avatar_reset"
+CALLBACK_AVATAR_UPLOAD: Final = "agent_setup__avatar_upload"
+AVATAR_FILE_INPUT_ID: Final = "agent_setup__avatar_file"
 """Open one agent's Details. The button's `value` is the agent name."""
 
 ACTION_ROUTING: Final = "agent_setup__routing"
@@ -459,15 +468,16 @@ def build_details_view(
     coding_tools_available: bool,
     channel_id: str,
     attribution: str | None,
+    avatar_url: str | None = None,
+    avatar_editable: bool | None = None,
 ) -> dict[str, Any]:
     """One agent's whole readable state, in the order the roster promised.
 
-    `is_admin` reaches this view only through `details.unrouted_note`, which
-    the core already phrased in the reader's voice; nothing here is shown or
-    hidden by role. Key values are not a parameter and cannot be: the model
-    carries names and attribution only.
+    `is_admin` controls the avatar buttons. The core phrases
+    `details.unrouted_note` in the reader's voice. Key values are not a
+    parameter: the model carries names and attribution only.
     """
-    del is_admin, attribution
+    del attribution
     title = fit_title(details.name)
     blocks: list[dict[str, Any]] = []
     if title != details.name:
@@ -485,6 +495,28 @@ def build_details_view(
         }
     )
     blocks.append(_section(f"*Model:* {escape_mrkdwn(details.model_display_name)}"))
+    avatar_accessory = (
+        {"type": "image", "image_url": avatar_url, "alt_text": f"{details.name}'s avatar"}
+        if avatar_url
+        else None
+    )
+    blocks.append(_section("*Avatar*", accessory=avatar_accessory))
+    if is_admin and (not details.daimon_managed if avatar_editable is None else avatar_editable):
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    _button(action_id=ACTION_AVATAR_CHANGE, label="Change", value=details.name),
+                    _button(action_id=ACTION_AVATAR_RESET, label="Reset", value=details.name),
+                ],
+            }
+        )
+    blocks.append(
+        _context(
+            "Avatars are public: anyone who sees a message can open its image. "
+            "Platform caches can keep it after a change."
+        )
+    )
     blocks.extend(_repo_blocks(details))
     blocks.extend(_detail_list_blocks(details, meta=meta))
     actions = [_button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name)]
@@ -510,6 +542,38 @@ def build_details_view(
             )
         ),
         callback_id=CALLBACK_DETAILS,
+    )
+
+
+def build_avatar_upload_form(*, meta: PanelMetadata) -> dict[str, Any]:
+    """A single image upload for the agent in the details view."""
+    return finish_modal(
+        title="Change avatar",
+        blocks=[
+            _section(
+                "Upload a PNG, JPG, GIF, or WebP image (up to 2 MB). "
+                "It will be cropped to a square."
+            ),
+            {
+                "type": "input",
+                "block_id": AVATAR_FILE_INPUT_ID,
+                "label": {"type": "plain_text", "text": "Image"},
+                "element": {
+                    "type": "file_input",
+                    "action_id": AVATAR_FILE_INPUT_ID,
+                    "filetypes": ["png", "jpg", "jpeg", "gif", "webp"],
+                    "max_files": 1,
+                },
+            },
+            _context(
+                "Avatars are public: anyone who sees a message can open the image. "
+                "Platform caches can keep it after a change."
+            ),
+        ],
+        private_metadata=encode_panel_metadata(meta),
+        callback_id=CALLBACK_AVATAR_UPLOAD,
+        close="Cancel",
+        submit="Change",
     )
 
 

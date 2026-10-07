@@ -34,6 +34,11 @@ from daimon.adapters.slack.agent_setup.add_skill import (
     evaluate_add_skill_submission,
     run_add_skill_submission,
 )
+from daimon.adapters.slack.agent_setup.avatar import (
+    AvatarSubmission,
+    evaluate_avatar_submission,
+    run_avatar_submission,
+)
 from daimon.adapters.slack.agent_setup.channel_admins import (
     ChannelAdminsSubmission,
     evaluate_channel_admins_submission,
@@ -51,6 +56,7 @@ from daimon.adapters.slack.agent_setup.operator_tokens import (
 )
 from daimon.adapters.slack.agent_setup.panel_views import (
     CALLBACK_ADD_SKILL,
+    CALLBACK_AVATAR_UPLOAD,
     CALLBACK_CHANNEL_ADMINS,
     CALLBACK_CHANNEL_SKILLS,
     CALLBACK_OPERATOR_MINT,
@@ -929,6 +935,28 @@ class SlackApp:
                             )
 
                     self._spawn(_run_add_skill())
+            elif cb_id == CALLBACK_AVATAR_UPLOAD:
+                _av = evaluate_avatar_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id, payload=_av.response_payload)
+                )
+                if _av.proceed:
+                    _av_team: dict[str, Any] = payload.get("team") or {}
+                    _av_user: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_avatar(
+                        *,
+                        _t: str = str(_av_team.get("id") or ""),
+                        _u: str = str(_av_user.get("id") or ""),
+                        _s: AvatarSubmission = _av,
+                    ) -> None:
+                        wc = await resolve_web_client(self.runtime, team_id=_t)
+                        if wc is not None:
+                            await run_avatar_submission(
+                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
+                            )
+
+                    self._spawn(_run_avatar())
             elif cb_id == "feedback_text":
                 # Pure evaluate (no I/O) — must run before the single ack.
                 _fb_decision = evaluate_feedback_text_submission(payload)
@@ -2481,6 +2509,7 @@ class SlackApp:
                     # this turn's answer rather than left standing beside a
                     # second, successful card.
                     adopt_status_ts=lifecycle.status_ts,
+                    header_customized=lifecycle.header_customized,
                     intent_id=card_intent.id,
                     identity=turn_identity,
                     ma_agent_id=str(agent.id),
@@ -2996,6 +3025,7 @@ class SlackApp:
                 register_pending=self._register_cancel,
                 deregister_pending=self._deregister_cancel,
                 adopt_status_ts=follow_lifecycle.status_ts,
+                header_customized=follow_lifecycle.header_customized,
                 intent_id=card_intent.id,
                 identity=follow_identity,
                 ma_agent_id=str(follow_admission.agent.id),

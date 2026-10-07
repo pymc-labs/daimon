@@ -45,6 +45,7 @@ PanelViewName = Literal[
     "new_agent",
     "creating",
     "add_skill",
+    "avatar_upload",
 ]
 """Which of the panel's screens a view is showing."""
 
@@ -62,6 +63,7 @@ _PANEL_VIEW_NAMES: Final[frozenset[str]] = frozenset(
         "new_agent",
         "creating",
         "add_skill",
+        "avatar_upload",
     }
 )
 _PANEL_EXPANSIONS: Final[tuple[PanelExpansion, ...]] = ("keys", "skills", "connections")

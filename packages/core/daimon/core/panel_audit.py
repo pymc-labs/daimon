@@ -37,6 +37,8 @@ PanelOp = Literal[
     "operator_token_mint",
     "operator_token_revoke",
     "handoff",
+    "agent_avatar_change",
+    "agent_avatar_reset",
 ]
 
 PanelOutcome = Literal["allowed", "denied", "error"]

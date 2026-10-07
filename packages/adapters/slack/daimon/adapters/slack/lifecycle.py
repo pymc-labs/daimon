@@ -175,6 +175,7 @@ class SlackTurnLifecycle:
         render_tables: bool = False,
         clock: Callable[[], float] = time.monotonic,
         adopt_status_ts: str | None = None,
+        header_customized: bool = False,
         intent_id: UUID | None = None,
         request_id: Callable[[], str] = bound_request_id,
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
@@ -217,6 +218,7 @@ class SlackTurnLifecycle:
         self._state: State = State(
             phase=TurnPhase.THINKING,
             agent_name=agent_name,
+            header_customized=header_customized,
             started_at=self._clock(),
         )
         # Seeded only by dead-session recovery, which hands over the card the
@@ -272,6 +274,11 @@ class SlackTurnLifecycle:
         started_at) as soon as the card exists; nothing else should need it.
         """
         return self._status_ts
+
+    @property
+    def header_customized(self) -> bool:
+        """Whether the adopted status card carries an agent header."""
+        return self._state.header_customized
 
     async def record_post(self, ts: str) -> None:
         if (
