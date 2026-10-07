@@ -71,6 +71,7 @@ __all__ = [
     "CALLBACK_AVATAR_UPLOAD",
     "AVATAR_FILE_INPUT_ID",
     "build_avatar_upload_form",
+    "build_avatar_status_view",
     "ACTION_ENVIRONMENT",
     "ACTION_EXPAND_KEYS",
     "ACTION_EXPAND_SKILLS",
@@ -495,28 +496,43 @@ def build_details_view(
         }
     )
     blocks.append(_section(f"*Model:* {escape_mrkdwn(details.model_display_name)}"))
+    show_avatar = not details.daimon_managed if avatar_editable is None else avatar_editable
     avatar_accessory = (
         {"type": "image", "image_url": avatar_url, "alt_text": f"{details.name}'s avatar"}
-        if avatar_url
+        if show_avatar and avatar_url
         else None
     )
-    blocks.append(_section("*Avatar*", accessory=avatar_accessory))
-    if is_admin and (not details.daimon_managed if avatar_editable is None else avatar_editable):
+    if show_avatar:
+        blocks.append(_section("*Avatar*", accessory=avatar_accessory))
+    if is_admin and show_avatar:
+        reset_button = _button(action_id=ACTION_AVATAR_RESET, label="Reset", value=details.name)
+        reset_button["confirm"] = {
+            "title": {"type": "plain_text", "text": "Reset avatar?"},
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    "Restore the generated avatar? The old image may remain in platform caches."
+                ),
+            },
+            "confirm": {"type": "plain_text", "text": "Reset"},
+            "deny": {"type": "plain_text", "text": "Cancel"},
+        }
         blocks.append(
             {
                 "type": "actions",
                 "elements": [
                     _button(action_id=ACTION_AVATAR_CHANGE, label="Change", value=details.name),
-                    _button(action_id=ACTION_AVATAR_RESET, label="Reset", value=details.name),
+                    reset_button,
                 ],
             }
         )
-    blocks.append(
-        _context(
-            "Avatars are public: anyone who sees a message can open its image. "
-            "Platform caches can keep it after a change."
+    if show_avatar:
+        blocks.append(
+            _context(
+                "Avatars are public: anyone who sees a message can open its image. "
+                "Platform caches can keep it after a change."
+            )
         )
-    )
     blocks.extend(_repo_blocks(details))
     blocks.extend(_detail_list_blocks(details, meta=meta))
     actions = [_button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name)]
@@ -575,6 +591,21 @@ def build_avatar_upload_form(*, meta: PanelMetadata) -> dict[str, Any]:
         close="Cancel",
         submit="Change",
     )
+
+
+def build_avatar_status_view(
+    *, meta: PanelMetadata, message: str, external_id: str | None = None
+) -> dict[str, Any]:
+    """Show upload progress or a result in the submitted modal itself."""
+    view = finish_modal(
+        title="Avatar",
+        blocks=[_section(message)],
+        private_metadata=encode_panel_metadata(meta),
+        callback_id=CALLBACK_AVATAR_UPLOAD,
+    )
+    if external_id is not None:
+        view["external_id"] = external_id
+    return view
 
 
 def _answers_text(details: AgentDetails) -> str:

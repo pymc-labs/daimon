@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import struct
+from unittest.mock import patch
 
 import pytest
 from daimon.core.agent_avatar_image import MAX_UPLOAD_BYTES, normalize_avatar_image
@@ -34,6 +36,28 @@ def test_exif_orientation_removed() -> None:
     with Image.open(io.BytesIO(normalized)) as result:
         assert result.size == (256, 256)
         assert "exif" not in result.info
+
+
+def test_two_frame_mpo_uses_first_jpeg() -> None:
+    first = Image.new("RGB", (300, 300), "red")
+    second = Image.new("RGB", (300, 300), "blue")
+    output = io.BytesIO()
+    first.save(output, format="MPO", save_all=True, append_images=[second])
+    with Image.open(io.BytesIO(output.getvalue())) as source:
+        assert source.format == "MPO" and source.n_frames == 2
+    normalized = normalize_avatar_image(output.getvalue())
+    with Image.open(io.BytesIO(normalized)) as result:
+        assert result.getpixel((128, 128))[0] > 200
+        assert result.getpixel((128, 128))[2] < 50
+
+
+@pytest.mark.parametrize("error", [SyntaxError("broken PNG file"), struct.error("bad EXIF")])
+def test_decoder_errors_are_value_errors(error: Exception) -> None:
+    with (
+        patch("daimon.core.agent_avatar_image.ImageOps.exif_transpose", side_effect=error),
+        pytest.raises(ValueError, match="could not be read"),
+    ):
+        normalize_avatar_image(_bytes(Image.new("RGB", (32, 32)), "PNG"))
 
 
 @pytest.mark.parametrize("body", [b"not an image", b"x" * (MAX_UPLOAD_BYTES + 1)])

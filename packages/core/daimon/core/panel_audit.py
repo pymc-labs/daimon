@@ -53,6 +53,7 @@ async def record_panel_write(
     op: PanelOp,
     outcome: PanelOutcome,
     reason: str,
+    agent_name: str | None = None,
     token_kind: str | None = None,
     token_jti: uuid.UUID | None = None,
 ) -> None:
@@ -71,6 +72,7 @@ async def record_panel_write(
                 tenant_id=tenant_id,
                 account_id=principal.account_id if principal is not None else None,
                 agent_id=None,
+                agent_name=agent_name,
                 platform=platform,
                 platform_user_id=platform_user_id if principal is not None else None,
                 tool_name=f"panel:{op}",

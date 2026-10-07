@@ -2686,6 +2686,7 @@ class SecurityAuditEvent(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    agent_name: Mapped[str | None] = mapped_column(Text)
     platform: Mapped[str | None] = mapped_column(Text)
     platform_user_id: Mapped[str | None] = mapped_column(Text)
     tool_name: Mapped[str] = mapped_column(Text, nullable=False)

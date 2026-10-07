@@ -649,11 +649,7 @@ async def _dispatch_panel_action(
     is_admin = await resolve_is_admin(client, user_id=user_id)
 
     if action_id == panel_views.ACTION_AVATAR_CHANGE:
-        from daimon.adapters.slack.agent_setup.avatar import may_edit_avatar
-
-        if not meta.agent_name or not await may_edit_avatar(
-            runtime, client, tenant_id=tenant_id, user_id=user_id, agent_name=meta.agent_name
-        ):
+        if not meta.agent_name or not is_admin:
             await record_panel_write(
                 runtime.sessionmaker,
                 tenant_id=tenant_id,
@@ -662,6 +658,7 @@ async def _dispatch_panel_action(
                 op="agent_avatar_change",
                 outcome="denied",
                 reason="needs_admin_or_agent_gone",
+                agent_name=meta.agent_name,
             )
             return
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]
@@ -677,7 +674,9 @@ async def _dispatch_panel_action(
     if action_id == panel_views.ACTION_AVATAR_RESET:
         from daimon.adapters.slack.agent_setup.avatar import reset_agent_avatar
 
-        await reset_agent_avatar(runtime, client, meta=meta, user_id=user_id, view_id=view_id)
+        await reset_agent_avatar(
+            runtime, client, meta=meta, team_id=team_id, user_id=user_id, view_id=view_id
+        )
         return
 
     if action_id == panel_views.ACTION_DETAILS:

@@ -995,10 +995,14 @@ async def test_avatar_buttons_dispatch_to_upload_and_reset(
     fake_slack_web_client: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from daimon.adapters.slack.agent_setup import actions as actions_module
+
     _tenant_id, fernet_key = await _seed_team(db_session)
     await db_session.commit()
     runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
-    monkeypatch.setattr(avatar_module, "may_edit_avatar", AsyncMock(return_value=True))
+    agent_lookup = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions_module, "resolve_is_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(avatar_module, "may_edit_avatar", agent_lookup)
     reset = AsyncMock()
     monkeypatch.setattr(avatar_module, "reset_agent_avatar", reset)
     meta = _meta(view="details", agent_name=_OTHER_AGENT)
@@ -1011,6 +1015,7 @@ async def test_avatar_buttons_dispatch_to_upload_and_reset(
     upload_meta = decode_panel_metadata(pushed["view"]["private_metadata"])
     assert upload_meta is not None
     assert (upload_meta.agent_name, upload_meta.root_view_id) == (_OTHER_AGENT, "V_DETAILS")
+    agent_lookup.assert_not_awaited()
 
     await handle_agent_setup_action(
         runtime, _action_payload(ACTION_AVATAR_RESET, meta=meta, view_id="V_DETAILS")

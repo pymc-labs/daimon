@@ -482,6 +482,13 @@ def test_details_avatar_row_and_admin_controls() -> None:
     assert ACTION_AVATAR_CHANGE in json.dumps(admin)
     assert ACTION_AVATAR_RESET in json.dumps(admin)
     assert "Avatars are public" in _joined(admin)
+    reset_button = next(
+        element
+        for block in admin["blocks"]
+        for element in block.get("elements", [])
+        if element.get("action_id") == ACTION_AVATAR_RESET
+    )
+    assert reset_button["confirm"]["confirm"]["text"] == "Reset"
     member = build_details_view(
         _details(name="research-bot"),
         meta=_meta(),
@@ -493,6 +500,31 @@ def test_details_avatar_row_and_admin_controls() -> None:
     )
     assert ACTION_AVATAR_CHANGE not in json.dumps(member)
     assert ACTION_AVATAR_RESET not in json.dumps(member)
+    without_public_url = build_details_view(
+        _details(name="research-bot"),
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+        avatar_url=None,
+    )
+    assert not any(
+        block.get("accessory", {}).get("type") == "image" for block in without_public_url["blocks"]
+    )
+    built_in = build_details_view(
+        _details(name="research-bot"),
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+        avatar_url=avatar_url,
+        avatar_editable=False,
+    )
+    assert "*Avatar*" not in _joined(built_in)
+    assert "Avatars are public" not in _joined(built_in)
+    assert ACTION_AVATAR_CHANGE not in json.dumps(built_in)
 
 
 def test_details_view_when_short_name_does_not_repeat_it_in_the_body() -> None:
