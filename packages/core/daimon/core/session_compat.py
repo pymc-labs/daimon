@@ -215,11 +215,15 @@ def decide_session_compatibility(
             must_replace = True
 
     if recorded.github_mode == "app" and recorded.repo_urls:
-        reasons.append("repo_token_age")
-        if capabilities.repo_token_rotatable:
-            ops.append(RotateAppTokens(resource_ids=recorded.repo_resource_ids))
-        else:
-            must_replace = True
+        issued_at = recorded.repo_token_issued_at
+        # Installation tokens are recorded with a conservative 55-minute life.
+        # Refresh at 40 minutes, leaving 15 minutes for vault propagation.
+        if issued_at is None or now.timestamp() - issued_at >= 2400:
+            reasons.append("repo_token_age")
+            if capabilities.repo_token_rotatable:
+                ops.append(RotateAppTokens(resource_ids=recorded.repo_resource_ids))
+            else:
+                must_replace = True
 
     repo_resource_id = recorded.repo_resource_id if recorded.github_mode == "legacy" else None
     token_issued_at = recorded.repo_token_issued_at

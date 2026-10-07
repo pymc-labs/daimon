@@ -174,7 +174,10 @@ async def _replace_env_file(
     async with sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
     if snapshot.github_mode == "app":
-        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
+        rows = sorted(
+            (row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")),
+            key=lambda row: row.key,
+        )
 
     file_id = await upload_env_file(anthropic, sessionmaker, rows=rows) if rows else None
     cleared = snapshot.model_copy(
@@ -378,12 +381,7 @@ async def apply_update_ops(
                 )
                 applied.append("repo_token_age")
             case RemirrorVaultCredentials():
-                if (
-                    snapshot.github_mode == "legacy"
-                    and fernet is not None
-                    and mcp.public_url is not None
-                    and mcp.jwt_secret is not None
-                ):
+                if fernet is not None and mcp.public_url is not None and mcp.jwt_secret is not None:
                     await sync_agent_mcp_credentials(
                         anthropic,
                         sessionmaker=sessionmaker,
@@ -394,6 +392,7 @@ async def apply_update_ops(
                         jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
                         public_url=str(mcp.public_url),
                         now=now,
+                        exclude_github_copilot=snapshot.github_mode == "app",
                     )
 
     return AppliedOps(snapshot=snapshot, applied=tuple(applied))

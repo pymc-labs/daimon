@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -21,6 +23,7 @@ from daimon.core._models import (
     Tenant,
     TenantGitHubRepo,
 )
+from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.github_requester_access import (
     PermissionCache,
@@ -729,6 +732,7 @@ async def test_issued_tokens_stale_after_bump_unlink_and_relink(db_session: Asyn
         first,
         second,
     }
+
     db_session.add(
         GitHubUserLink(
             github_user_id=777,
@@ -752,3 +756,88 @@ async def test_issued_tokens_stale_after_bump_unlink_and_relink(db_session: Asyn
         first,
         second,
     }
+
+
+@pytest.mark.asyncio
+async def test_headless_app_session_is_closed_only_after_runner_finishes(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="headless-test"))
+    await db_session.flush()
+    token = await github_issued_tokens.create_pending(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        session_id="headless-session",
+        installation_id=909,
+        repo_ids=[101],
+        permissions={"contents": "read"},
+        grant_versions={"grant:101": 1, "authorization:101": 1},
+        expires_at=datetime.now(UTC) + timedelta(minutes=55),
+    )
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    await github_issued_tokens.store_token(
+        db_session, token_id=token.token_id, token="headless-token", fernet=fernet
+    )
+    await github_issued_tokens.mark_delivered(db_session, token_id=token.token_id)
+    started = datetime.now(UTC)
+    await github_issued_tokens.mark_session_tokens_superseded(
+        db_session, session_id="headless-session", except_ids=frozenset(), now=started
+    )
+    assert (
+        await github_issued_tokens.select_due_superseded_tokens(
+            db_session, now=started + timedelta(seconds=119)
+        )
+        == []
+    )
+    assert [
+        row.token_id
+        for row in await github_issued_tokens.select_due_superseded_tokens(
+            db_session, now=started + timedelta(seconds=120)
+        )
+    ] == [token.token_id]
+    await github_issued_tokens.register_headless_app_session(
+        db_session, session_id="headless-session", vault_id="session-vault"
+    )
+    await db_session.flush()
+
+    now = datetime.now(UTC) + timedelta(minutes=2)
+    assert await github_issued_tokens.list_closed_app_sessions(db_session, now=now) == []
+
+    assert (
+        await github_issued_tokens.finish_headless_app_session(
+            db_session, session_id="headless-session"
+        )
+        == "session-vault"
+    )
+    closed = await github_issued_tokens.list_closed_app_sessions(db_session, now=now)
+    assert [(row.session_id, row.vault_id) for row in closed] == [
+        ("headless-session", "session-vault")
+    ]
+    await github_issued_tokens.mark_headless_app_session_closed(
+        db_session, session_id="headless-session"
+    )
+    assert await github_issued_tokens.list_closed_app_sessions(db_session, now=now) == []
+
+
+@pytest.mark.asyncio
+async def test_headless_app_cleanup_archives_vault_without_grants(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await github_issued_tokens.register_headless_app_session(
+        db_session, session_id="headless-zero-grants", vault_id="session-vault"
+    )
+    await db_session.commit()
+    archive = AsyncMock()
+    anthropic = SimpleNamespace(beta=SimpleNamespace(vaults=SimpleNamespace(archive=archive)))
+    await close_headless_app_session(
+        anthropic, db_session_factory, session_id="headless-zero-grants", fernet=None
+    )
+    archive.assert_awaited_once_with("session-vault")
+    async with db_session_factory() as session:
+        assert (
+            await github_issued_tokens.list_closed_app_sessions(session, now=datetime.now(UTC))
+            == []
+        )

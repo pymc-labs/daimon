@@ -18,6 +18,7 @@ from anthropic.types.beta import (
 from cryptography.fernet import Fernet, MultiFernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from daimon.core._models import AgentGitHubMode
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_requests import mint_request_token
@@ -1384,6 +1385,100 @@ async def test_create_session_skips_copilot_when_no_pat(
     app_mint.assert_not_awaited()
     assert len(cred_bodies) == 0, "no Copilot credential POST when there is no PAT"
     assert len(session_bodies) == 1
+
+
+async def test_create_session_app_mode_with_zero_grants_has_no_github_access(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    agent_uuid = uuid.uuid4()
+    db_session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_uuid, mode="app"))
+    await db_session.commit()
+    vault = AsyncMock(return_value="vlt_session")
+    credentials = AsyncMock()
+    monkeypatch.setattr("daimon.core.sessions.create_session_vault", vault)
+    monkeypatch.setattr("daimon.core.sessions.add_app_credentials", credentials)
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST" and request.url.path == "/v1/sessions"
+        body = json_body(request)
+        bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_zero_grants",
+                agent_id=body["agent"],
+                environment_id=body["environment_id"],
+            ),
+        )
+
+    await create_session(
+        build_fake_anthropic_http(handler),
+        agent=_make_agent(anthropic_id="ag_zero_grants"),
+        environment=_make_env(anthropic_id="env_zero_grants"),
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+    )
+    assert bodies[0]["vault_ids"] == ["vlt_session"]
+    assert not any(r["type"] == "github_repository" for r in bodies[0].get("resources", []))
+    assert credentials.await_args.kwargs["access"].tokens == ()
+    assert credentials.await_args.kwargs["access"].working_token is None
+
+
+async def test_app_session_attaches_caller_and_session_vaults(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    agent_uuid, account_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_uuid, mode="app"))
+    await db_session.commit()
+    monkeypatch.setattr(
+        "daimon.core.sessions.create_session_vault", AsyncMock(return_value="vlt_session")
+    )
+    monkeypatch.setattr(
+        "daimon.core.sessions.ensure_agent_mcp_vault", AsyncMock(return_value="vlt_caller")
+    )
+    add_app = AsyncMock()
+    mirror = AsyncMock()
+    monkeypatch.setattr("daimon.core.sessions.add_app_credentials", add_app)
+    monkeypatch.setattr("daimon.core.sessions.mirror_credentials_into_vault", mirror)
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST" and request.url.path == "/v1/sessions"
+        body = json_body(request)
+        bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_two_vaults",
+                agent_id=body["agent"],
+                environment_id=body["environment_id"],
+            ),
+        )
+
+    await create_session(
+        build_fake_anthropic_http(handler),
+        agent=_make_agent(anthropic_id="ag_two_vaults"),
+        environment=_make_env(anthropic_id="env_two_vaults"),
+        mcp_settings=McpSettings(
+            jwt_secret=SecretStr("x" * 32), public_url=HttpUrl("https://mcp.example.com/mcp")
+        ),
+        account_id=account_id,
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+    )
+    assert bodies[0]["vault_ids"] == ["vlt_caller", "vlt_session"]
+    assert mirror.await_args.kwargs["vault_id"] == "vlt_caller"
+    assert add_app.await_args.kwargs["vault_id"] == "vlt_session"
 
 
 async def test_create_session_never_mirrors_fallback_pat_into_copilot_vault(

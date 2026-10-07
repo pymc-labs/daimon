@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -41,9 +42,12 @@ from daimon.core.stores.github_issued_tokens import (
     GitHubTokenRowClosedError,
     create_pending,
     decrypt_issued_token,
+    finish_headless_app_session,
     list_session_tokens,
     mark_delivered,
+    mark_headless_app_session_closed,
     mark_revoked,
+    mark_session_tokens_superseded,
     select_stale_tokens,
     set_session_id,
     store_token,
@@ -52,6 +56,8 @@ from daimon.core.stores.github_links import get_account_link, get_user
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.turn_origin import current_origin_id
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -84,11 +90,33 @@ async def effective_repo_urls(
     config: GithubAppSettings,
     fernet: MultiFernet | None,
 ) -> tuple[str, ...]:
+    urls, _ = await effective_repo_state(
+        sessionmaker,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        account_id=account_id,
+        is_external=is_external,
+        config=config,
+        fernet=fernet,
+    )
+    return urls
+
+
+async def effective_repo_state(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+    is_external: bool,
+    config: GithubAppSettings,
+    fernet: MultiFernet | None,
+) -> tuple[tuple[str, ...], dict[int, dict[str, str]]]:
     if is_external:
-        return ()
+        return (), {}
     async with sessionmaker() as session:
         if not await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id):
-            return ()
+            return (), {}
     if fernet is None:
         raise ValueError("GitHub App mode requires encryption")
     async with httpx.AsyncClient() as client:
@@ -102,7 +130,10 @@ async def effective_repo_urls(
             fernet=fernet,
             cache=REQUESTER_CACHE,
         )
-    return tuple(sorted(f"https://github.com/{repo.repo_full_name}" for _, repo, _ in rows))
+    return (
+        tuple(sorted(f"https://github.com/{repo.repo_full_name}" for _, repo, _ in rows)),
+        {repo.repo_id: dict(PERMISSION_PROFILES[profile]) for _, repo, profile in rows},
+    )
 
 
 async def create_session_vault(
@@ -115,20 +146,24 @@ async def create_session_vault(
     jwt_secret: bytes | None,
 ) -> str:
     vault = await anthropic.beta.vaults.create(display_name=f"github-session:{uuid.uuid4()}")
-    if public_url is not None and jwt_secret is not None and account_id is not None:
-        await anthropic.beta.vaults.credentials.create(
-            vault_id=vault.id,
-            auth={
-                "type": "static_bearer",
-                "mcp_server_url": public_url,
-                "token": mint_jwt(
-                    account_id=account_id,
-                    chat_agent_id=agent_id,
-                    secret=jwt_secret,
-                    now=datetime.now(UTC),
-                ),
-            },
-        )
+    try:
+        if public_url is not None and jwt_secret is not None and account_id is not None:
+            await anthropic.beta.vaults.credentials.create(
+                vault_id=vault.id,
+                auth={
+                    "type": "static_bearer",
+                    "mcp_server_url": public_url,
+                    "token": mint_jwt(
+                        account_id=account_id,
+                        chat_agent_id=agent_id,
+                        secret=jwt_secret,
+                        now=datetime.now(UTC),
+                    ),
+                },
+            )
+    except BaseException:
+        await anthropic.beta.vaults.archive(vault.id)
+        raise
     return vault.id
 
 
@@ -326,9 +361,12 @@ async def prepare_app_access(
                 raise ValueError("GitHub access changed during token mint")
     except Exception:
         for issued in tokens:
-            await revoke_token(client, issued.token)
-            async with sessionmaker.begin() as session:
-                await mark_revoked(session, token_id=issued.token_id)
+            try:
+                await revoke_token(client, issued.token)
+                async with sessionmaker.begin() as session:
+                    await mark_revoked(session, token_id=issued.token_id)
+            except Exception:
+                _log.exception("Failed to revoke partially minted GitHub token %s", issued.token_id)
         raise
     by_repo = {repo_id: item.token for item in tokens for repo_id in item.repo_ids}
     resources: list[Resource] = []
@@ -339,7 +377,7 @@ async def prepare_app_access(
                 "type": "github_repository",
                 "url": f"https://github.com/{repo.repo_full_name}",
                 "authorization_token": by_repo[repo.repo_id],
-                "mount_path": grant.mount_path or f"/workspace/{owner}-{name}",
+                "mount_path": grant.mount_path or f"/workspace/{owner}/{name}",
             }
         )
     working = next((by_repo[grant.repo_id] for grant, _, _ in rows if grant.is_working_repo), None)
@@ -352,25 +390,28 @@ async def revoke_app_access(
     access: AppSessionAccess,
 ) -> None:
     for issued in access.tokens:
-        await revoke_token(client, issued.token)
-        async with sessionmaker.begin() as session:
-            row = await mark_revoked(session, token_id=issued.token_id)
-            await append_github_token_event(
-                session,
-                tenant_id=row.tenant_id,
-                agent_id=row.agent_id,
-                account_id=row.requester_account_id,
-                kind="github_token_revoke",
-                outcome="allowed",
-                reason="session creation failed",
-                token_id=row.token_id,
-                session_id=row.session_id,
-                installation_id=row.installation_id,
-                repo_ids=row.repo_ids,
-                permissions=row.permissions,
-                expires_at=row.expires_at,
-                grant_versions=row.grant_versions,
-            )
+        try:
+            await revoke_token(client, issued.token)
+            async with sessionmaker.begin() as session:
+                row = await mark_revoked(session, token_id=issued.token_id)
+                await append_github_token_event(
+                    session,
+                    tenant_id=row.tenant_id,
+                    agent_id=row.agent_id,
+                    account_id=row.requester_account_id,
+                    kind="github_token_revoke",
+                    outcome="allowed",
+                    reason="session creation failed",
+                    token_id=row.token_id,
+                    session_id=row.session_id,
+                    installation_id=row.installation_id,
+                    repo_ids=row.repo_ids,
+                    permissions=row.permissions,
+                    expires_at=row.expires_at,
+                    grant_versions=row.grant_versions,
+                )
+        except Exception:
+            _log.exception("Failed to revoke GitHub token for failed session %s", issued.token_id)
 
 
 async def add_app_credentials(
@@ -500,6 +541,30 @@ async def revoke_session_tokens(
             )
 
 
+async def close_headless_app_session(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    session_id: str,
+    fernet: MultiFernet | None,
+) -> None:
+    """Finish a routine's App session; an interrupted cleanup is retried by the sweeper."""
+    async with sessionmaker.begin() as session:
+        vault_id = await finish_headless_app_session(session, session_id=session_id)
+    if vault_id is None:
+        return
+    async with httpx.AsyncClient() as client:
+        if fernet is None:
+            async with sessionmaker() as session:
+                if await list_session_tokens(session, session_id=session_id):
+                    raise ValueError("App session revocation requires encryption")
+        else:
+            await revoke_session_tokens(sessionmaker, client, session_id=session_id, fernet=fernet)
+    await anthropic.beta.vaults.archive(vault_id)
+    async with sessionmaker.begin() as session:
+        await mark_headless_app_session_closed(session, session_id=session_id)
+
+
 async def rotate_live_app_tokens(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -552,13 +617,13 @@ async def rotate_live_app_tokens(
                 provisional_session_id=provisional,
                 session_id=session_id,
             )
-            await revoke_session_tokens(
-                sessionmaker,
-                client,
-                session_id=session_id,
-                fernet=fernet,
-                except_ids=frozenset(token.token_id for token in access.tokens),
-            )
+            async with sessionmaker.begin() as session:
+                await mark_session_tokens_superseded(
+                    session,
+                    session_id=session_id,
+                    except_ids=frozenset(token.token_id for token in access.tokens),
+                    now=datetime.now(UTC),
+                )
         except Exception:
             await anthropic.beta.sessions.archive(session_id)
             await revoke_app_access(sessionmaker, client, access)

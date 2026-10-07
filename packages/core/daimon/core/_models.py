@@ -2579,6 +2579,19 @@ class GitHubIssuedToken(Base):
     status: Mapped[str] = mapped_column(Text, server_default="pending")
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoke_attempts: Mapped[int] = mapped_column(Integer, server_default="0")
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoke_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GitHubAppHeadlessSession(Base):
+    __tablename__ = "github_app_headless_sessions"
+
+    session_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    vault_id: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SecurityAuditEvent(Base):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import getpass
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 import httpx
 import typer
@@ -12,8 +12,13 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.cli.errors import run_cli
 from daimon.core.config import load_settings
 from daimon.core.db import build_engine, build_session_factory
-from daimon.core.github_app_session import revoke_session_tokens
+from daimon.core.github_app_session import (
+    effective_repo_urls,
+    revoke_session_tokens,
+    rotate_live_app_tokens,
+)
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import (
@@ -35,6 +40,19 @@ from rich.console import Console
 github_app = typer.Typer(help="GitHub App connection commands.")
 grants_app = typer.Typer(help="Stage and activate agent GitHub grants.")
 github_app.add_typer(grants_app, name="grants")
+
+
+def _grant_session_action(
+    action: str, snapshot: SessionSnapshot | None, desired_urls: tuple[str, ...]
+) -> Literal["rotate", "close"]:
+    if (
+        action in ("stage", "remove")
+        and snapshot is not None
+        and snapshot.github_mode == "app"
+        and desired_urls == snapshot.repo_urls
+    ):
+        return "rotate"
+    return "close"
 
 
 def _run_grant_command(
@@ -143,12 +161,49 @@ def _run_grant_command(
                         httpx.AsyncClient() as github,
                     ):
                         archived_ids: set[str] = set()
+                        rotated_ids: set[str] = set()
                         for mapped in live:
+                            snapshot = mapped.effective_config
+                            if mapped.ma_session_id in rotated_ids:
+                                continue
+                            if (
+                                action in ("stage", "remove")
+                                and snapshot is not None
+                                and snapshot.github_mode == "app"
+                                and snapshot.vault_id is not None
+                            ):
+                                if fernet is None:
+                                    raise ValueError("App session refresh requires encryption")
+                                urls = await effective_repo_urls(
+                                    sessionmaker,
+                                    tenant_id=tenant,
+                                    agent_id=agent,
+                                    account_id=mapped.account_id,
+                                    is_external=False,
+                                    config=settings.github_app,
+                                    fernet=fernet,
+                                )
+                                if _grant_session_action(action, snapshot, urls) == "rotate":
+                                    await rotate_live_app_tokens(
+                                        anthropic,
+                                        sessionmaker,
+                                        session_id=mapped.ma_session_id,
+                                        tenant_id=tenant,
+                                        agent_id=agent,
+                                        account_id=mapped.account_id,
+                                        is_external=False,
+                                        vault_id=snapshot.vault_id,
+                                        resource_ids=snapshot.repo_resource_ids,
+                                        config=settings.github_app,
+                                        fernet=fernet,
+                                    )
+                                    rotated_ids.add(mapped.ma_session_id)
+                                    continue
                             if mapped.ma_session_id not in archived_ids:
                                 await anthropic.beta.sessions.archive(mapped.ma_session_id)
-                                if mapped.effective_config is not None:
-                                    vault_id = mapped.effective_config.vault_id
-                                    if mapped.effective_config.github_mode == "app":
+                                if snapshot is not None:
+                                    vault_id = snapshot.vault_id
+                                    if snapshot.github_mode == "app":
                                         if fernet is None:
                                             raise ValueError(
                                                 "App session revocation requires encryption"

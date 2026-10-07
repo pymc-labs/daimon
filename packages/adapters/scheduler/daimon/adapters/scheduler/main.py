@@ -54,7 +54,7 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.github_app_session import (
-    effective_repo_urls,
+    effective_repo_state,
     revoke_session_tokens,
     revoke_token,
     rotate_live_app_tokens,
@@ -105,9 +105,13 @@ from daimon.core.stores.github_issued_tokens import (
     decrypt_issued_token,
     list_closed_app_sessions,
     list_live_app_sessions,
+    list_session_tokens,
+    mark_headless_app_session_closed,
     mark_revoked,
     record_revoke_attempt,
+    select_abandoned_pending_tokens,
     select_deactivated_tokens,
+    select_due_superseded_tokens,
     select_stale_tokens,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -613,6 +617,8 @@ async def _sweep_github_app_tokens(
     async with sm() as session:
         stale = await select_stale_tokens(session)
         stale.extend(await select_deactivated_tokens(session))
+        stale.extend(await select_due_superseded_tokens(session))
+        stale.extend(await select_abandoned_pending_tokens(session))
     stale = list({row.token_id: row for row in stale}.values())
     async with httpx.AsyncClient() as github:
         for row in stale:
@@ -667,13 +673,11 @@ async def _refresh_github_app_sessions(
             continue
         due_for_expiry = item.expires_at <= now + timedelta(minutes=15)
         last_check = _last_app_access_checks.get(item.mapping.ma_session_id)
-        due_for_access = item.has_linked_requester and (
-            last_check is None or last_check <= now - timedelta(minutes=5)
-        )
+        due_for_access = last_check is None or last_check <= now - timedelta(minutes=5)
         if not due_for_expiry and not due_for_access:
             continue
         try:
-            desired_urls = await effective_repo_urls(
+            desired_urls, desired_permissions = await effective_repo_state(
                 sm,
                 tenant_id=item.mapping.tenant_id,
                 agent_id=item.agent_id,
@@ -691,6 +695,16 @@ async def _refresh_github_app_sessions(
                         sm, github, session_id=item.mapping.ma_session_id, fernet=fernet
                     )
                 await anthropic_client.beta.vaults.archive(snapshot.vault_id)
+                continue
+            level = {"none": 0, "read": 1, "write": 2}
+            narrowed = any(
+                level.get(desired_permissions.get(repo_id, {}).get(key, "none"), 0)
+                < level.get(value, 0)
+                for repo_id, current in item.permissions_by_repo.items()
+                for key, value in current.items()
+            )
+            if not due_for_expiry and not narrowed:
+                _last_app_access_checks[item.mapping.ma_session_id] = now
                 continue
             await rotate_live_app_tokens(
                 anthropic_client,
@@ -719,16 +733,23 @@ async def _close_github_app_sessions(
     *,
     fernet: MultiFernet | None,
 ) -> None:
-    if fernet is None:
-        return
     async with sm() as session:
         closed = await list_closed_app_sessions(session, now=datetime.now(UTC))
     async with httpx.AsyncClient() as github:
         for item in closed:
             try:
-                await revoke_session_tokens(sm, github, session_id=item.session_id, fernet=fernet)
+                if fernet is None:
+                    async with sm() as session:
+                        if await list_session_tokens(session, session_id=item.session_id):
+                            continue
+                else:
+                    await revoke_session_tokens(
+                        sm, github, session_id=item.session_id, fernet=fernet
+                    )
                 if item.vault_id is not None:
                     await anthropic_client.beta.vaults.archive(item.vault_id)
+                    async with sm.begin() as session:
+                        await mark_headless_app_session_closed(session, session_id=item.session_id)
             except Exception:
                 log.exception(
                     "scheduler.github_app_session_close.failed",

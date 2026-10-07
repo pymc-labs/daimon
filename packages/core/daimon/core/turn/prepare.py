@@ -178,7 +178,10 @@ async def _env_bytes_sha256(
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
         mode = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid)
     if mode == "app":
-        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
+        rows = sorted(
+            (row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")),
+            key=lambda row: row.key,
+        )
     if not rows:
         return None
     return hash_env_bytes(assemble_env_bytes(rows))
@@ -321,7 +324,11 @@ async def create_ma_session(
         # `resolve_clone_token` minted the repo credential inside the
         # `create_session` call above, so "now" is when it was issued.
         repo_token_issued_at=int(time.time()) if has_repo else None,
-        vault_id=next(iter(ma_session.vault_ids), None),
+        vault_id=(
+            ma_session.vault_ids[-1]
+            if github_mode == "app" and ma_session.vault_ids
+            else next(iter(ma_session.vault_ids), None)
+        ),
         github_mode=github_mode,
     )
     return CreatedSession(

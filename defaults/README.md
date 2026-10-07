@@ -17,4 +17,3 @@ Layout:
   etc. are packaged into the zip.
 
 Operator workflow: edit YAML → `daimon defaults apply`.
-The default environment installs `gh` for repository work in GitHub App sessions.

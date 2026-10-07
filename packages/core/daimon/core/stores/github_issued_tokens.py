@@ -7,11 +7,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from cryptography.fernet import MultiFernet
-from daimon.core._models import GitHubIssuedToken, ThreadSession
+from daimon.core._models import GitHubAppHeadlessSession, GitHubIssuedToken, ThreadSession
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.stores.domain import ThreadSessionRow
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select, text, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -33,6 +33,9 @@ class IssuedToken(BaseModel):
     status: Literal["pending", "stored", "delivered", "revoked"]
     revoked_at: datetime | None
     revoke_attempts: int
+    superseded_at: datetime | None
+    revoke_after: datetime | None
+    created_at: datetime
 
 
 class GitHubTokenRowClosedError(ValueError):
@@ -45,6 +48,7 @@ class LiveAppSession(BaseModel):
     agent_id: uuid.UUID
     expires_at: datetime
     has_linked_requester: bool
+    permissions_by_repo: dict[int, dict[str, str]]
 
 
 class ClosedAppSession(BaseModel):
@@ -180,6 +184,7 @@ async def select_stale_tokens(
               ON user_link.github_user_id = account_link.github_user_id
             WHERE token.status IN ('stored', 'delivered')
               AND token.expires_at > :now
+              AND (token.revoke_after IS NULL OR token.revoke_after <= :now)
               AND (
                 installation.installation_id IS NULL
                 OR installation.suspended_at IS NOT NULL
@@ -243,6 +248,71 @@ async def list_session_tokens(session: AsyncSession, *, session_id: str) -> list
     return [IssuedToken.model_validate(row) for row in rows]
 
 
+async def mark_session_tokens_superseded(
+    session: AsyncSession, *, session_id: str, except_ids: frozenset[uuid.UUID], now: datetime
+) -> None:
+    """Keep old credentials valid while a vault update propagates."""
+    await session.execute(
+        update(GitHubIssuedToken)
+        .where(
+            GitHubIssuedToken.session_id == session_id,
+            GitHubIssuedToken.status == "delivered",
+            GitHubIssuedToken.superseded_at.is_(None),
+            GitHubIssuedToken.token_id.not_in(except_ids),
+        )
+        .values(superseded_at=now, revoke_after=now + timedelta(seconds=120))
+    )
+
+
+async def select_due_superseded_tokens(
+    session: AsyncSession, *, now: datetime | None = None
+) -> list[IssuedToken]:
+    rows = await session.scalars(
+        select(GitHubIssuedToken).where(
+            GitHubIssuedToken.status == "delivered",
+            GitHubIssuedToken.revoke_after <= (now or datetime.now(UTC)),
+        )
+    )
+    return [IssuedToken.model_validate(row) for row in rows]
+
+
+async def select_abandoned_pending_tokens(
+    session: AsyncSession, *, now: datetime | None = None
+) -> list[IssuedToken]:
+    rows = await session.scalars(
+        select(GitHubIssuedToken).where(
+            GitHubIssuedToken.status == "stored",
+            GitHubIssuedToken.session_id.startswith("pending:"),
+            GitHubIssuedToken.created_at <= (now or datetime.now(UTC)) - timedelta(minutes=2),
+        )
+    )
+    return [IssuedToken.model_validate(row) for row in rows]
+
+
+async def register_headless_app_session(
+    session: AsyncSession, *, session_id: str, vault_id: str
+) -> None:
+    session.add(GitHubAppHeadlessSession(session_id=session_id, vault_id=vault_id))
+    await session.flush()
+
+
+async def finish_headless_app_session(session: AsyncSession, *, session_id: str) -> str | None:
+    row = await session.get(GitHubAppHeadlessSession, session_id, with_for_update=True)
+    if row is None:
+        return None
+    if row.finished_at is None:
+        row.finished_at = datetime.now(UTC)
+    await session.flush()
+    return row.vault_id
+
+
+async def mark_headless_app_session_closed(session: AsyncSession, *, session_id: str) -> None:
+    row = await session.get(GitHubAppHeadlessSession, session_id, with_for_update=True)
+    if row is not None and row.closed_at is None:
+        row.closed_at = datetime.now(UTC)
+        await session.flush()
+
+
 async def select_deactivated_tokens(session: AsyncSession) -> list[IssuedToken]:
     rows = await session.scalars(
         select(GitHubIssuedToken).from_statement(
@@ -265,6 +335,7 @@ async def list_live_app_sessions(session: AsyncSession) -> list[LiveAppSession]:
         .where(
             ThreadSession.status == "live",
             GitHubIssuedToken.status == "delivered",
+            GitHubIssuedToken.superseded_at.is_(None),
         )
     )
     grouped: dict[str, LiveAppSession] = {}
@@ -279,6 +350,7 @@ async def list_live_app_sessions(session: AsyncSession) -> list[LiveAppSession]:
                 agent_id=token.agent_id,
                 expires_at=token.expires_at,
                 has_linked_requester=token.link_generation is not None,
+                permissions_by_repo={repo_id: token.permissions for repo_id in token.repo_ids},
             )
         else:
             grouped[mapping.ma_session_id] = current.model_copy(
@@ -286,6 +358,10 @@ async def list_live_app_sessions(session: AsyncSession) -> list[LiveAppSession]:
                     "expires_at": min(current.expires_at, token.expires_at),
                     "has_linked_requester": current.has_linked_requester
                     or token.link_generation is not None,
+                    "permissions_by_repo": {
+                        **current.permissions_by_repo,
+                        **{repo_id: token.permissions for repo_id in token.repo_ids},
+                    },
                 }
             )
     return list(grouped.values())
@@ -304,7 +380,21 @@ async def list_closed_app_sessions(
         .distinct()
     )
     result: list[ClosedAppSession] = []
+    headless_rows = await session.scalars(
+        select(GitHubAppHeadlessSession).where(
+            or_(
+                GitHubAppHeadlessSession.finished_at.is_not(None),
+                GitHubAppHeadlessSession.created_at <= now - timedelta(minutes=46),
+            ),
+            GitHubAppHeadlessSession.closed_at.is_(None),
+        )
+    )
+    for row in headless_rows:
+        result.append(ClosedAppSession(session_id=row.session_id, vault_id=row.vault_id))
     for session_id in ids:
+        headless = await session.get(GitHubAppHeadlessSession, session_id)
+        if headless is not None:
+            continue
         mapping = await session.scalar(
             select(ThreadSession)
             .where(ThreadSession.ma_session_id == session_id)

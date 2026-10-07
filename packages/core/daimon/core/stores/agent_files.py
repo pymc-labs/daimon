@@ -306,7 +306,7 @@ async def list_agent_files(
             AgentFile.tenant_id == tenant_id,
             AgentFile.agent_id == agent_id,
         )
-        .order_by(AgentFile.key.collate("C"))
+        .order_by(AgentFile.key)
     )
     rows = result.scalars().all()
     cipher = _cipher(session) if rows else None
