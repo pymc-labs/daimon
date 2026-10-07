@@ -138,6 +138,8 @@ def to_blocks(
         elapsed = int(now - state.started_at) if now is not None else 0
         tokens = f"{_fmt_tokens(state.usage_in)} in / {_fmt_tokens(state.usage_out)} out"
         parts: list[str] = [f"{elapsed}s", tokens]
+        if state.agent_name and not state.header_customized:
+            parts.insert(0, state.agent_name)
         if state.cost_str is not None:
             parts.append(state.cost_str)
         if state.balance_str is not None:

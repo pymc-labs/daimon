@@ -293,6 +293,9 @@ class SlackTurnLifecycle:
                 thread_ts=self._thread_ts,
             )
 
+    def _set_header_customized(self, customized: bool) -> None:
+        self._state = dataclasses.replace(self._state, header_customized=customized)
+
     async def post_notice(self, text: str, *, blocks: list[dict[str, Any]] | None = None) -> str:
         """Post a turn notice with the same header and ownership as its answer."""
         kwargs: dict[str, Any] = {
@@ -359,6 +362,7 @@ class SlackTurnLifecycle:
                 resp = await post_as_agent(
                     self._client,
                     self._identity,
+                    on_customized=self._set_header_customized,
                     channel=self._channel,
                     thread_ts=self._thread_ts,
                     blocks=blocks,
@@ -370,13 +374,13 @@ class SlackTurnLifecycle:
                     self._pending_registered = False
                 raise
             self._status_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
-            await self.record_post(self._status_ts)
             self._register(self._status_ts, self._cancel, self._author_id)
             # The card is now routable by its message ts. Remove the temporary
             # key promptly so later clicks follow any recovery rebind of that ts.
             if self._pending_registered and self._deregister_pending is not None:
                 self._deregister_pending(self._cancel_key)
                 self._pending_registered = False
+            await self.record_post(self._status_ts)
             self._last_flush = now
         elif now - self._last_flush >= _DEBOUNCE_S:
             # Debounce elapsed — update the status message in place.
@@ -424,14 +428,15 @@ class SlackTurnLifecycle:
             resp = await post_as_agent(
                 self._client,
                 self._identity,
+                on_customized=self._set_header_customized,
                 channel=self._channel,
                 thread_ts=self._thread_ts,
                 blocks=blocks,
                 text=text,
             )
             self._status_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
-            await self.record_post(self._status_ts)
             self._register(self._status_ts, self._cancel, self._author_id)
+            await self.record_post(self._status_ts)
         else:
             await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel,

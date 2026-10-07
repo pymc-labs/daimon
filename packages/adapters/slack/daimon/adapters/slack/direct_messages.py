@@ -15,8 +15,9 @@ from daimon.adapters.slack.channel_admin_groups import user_group_ids
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime, admission_refusal_message
-from daimon.core.agent_identity import AgentIdentity, resolve_agent_identity
+from daimon.core.agent_identity import AgentIdentity, is_builtin_agent, resolve_agent_identity
 from daimon.core.config import Settings
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.direct_messages import (
     is_sealed_slack_message,
     reply_to_dm,
@@ -250,14 +251,24 @@ async def handle_direct_message(
 
         async def on_agent(name: str) -> None:
             nonlocal identity
-            async with runtime.sessionmaker.begin() as session:
-                identity = await resolve_agent_identity(
-                    session,
-                    tenant_id=conversation.tenant_id,
-                    agent_name=name,
-                    is_builtin=name.casefold() == "daimon",
-                    public_base_url=runtime.settings.mcp.app_root_url,
+            try:
+                agent = await find_agent_by_daimon_tag(
+                    runtime.anthropic, tenant_id=conversation.tenant_id, name=name
                 )
+                async with runtime.sessionmaker.begin() as session:
+                    identity = await resolve_agent_identity(
+                        session,
+                        tenant_id=conversation.tenant_id,
+                        agent_name=name,
+                        is_builtin=is_builtin_agent(
+                            name=name,
+                            metadata=agent.metadata if agent is not None else None,
+                            default_agent_name=runtime.deployment_default.agent_name,
+                        ),
+                        public_base_url=runtime.settings.mcp.app_root_url,
+                    )
+            except (anthropic.APIError, SQLAlchemyError) as exc:
+                log.warning("slack.dm.identity_lookup_failed", error_type=type(exc).__name__)
 
         answer = await reply_to_dm(
             runtime.turn_deps,

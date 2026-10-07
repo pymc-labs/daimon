@@ -273,7 +273,7 @@ and can expose private content to another caller on the same account. Do not rol
 those reader guards back while private sessions remain: disabling routing does
 not erase existing transcripts. Drain active turns before changing versions.
 
-# Agent names and avatars
+### Agent names and avatars
 
 Each non-built-in agent posts turn messages with its own Slack message name and
 avatar. The built-in Daimon agent keeps the app's name and icon. Files uploaded
@@ -288,3 +288,5 @@ scope. Repeat for each staging workspace. Verify an agent's answer has its own
 name and avatar before repeating these steps for the **production** app and
 its workspaces. An installation without the scope keeps posting with the app
 header until it is reinstalled.
+Restart the Slack and MCP services after reinstalling to clear any remembered
+missing-scope result immediately; otherwise the result expires within 15 minutes.

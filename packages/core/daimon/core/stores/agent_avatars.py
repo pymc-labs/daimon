@@ -1,4 +1,7 @@
-"""Tenant-scoped avatar storage and deterministic default artwork."""
+"""Tenant-scoped avatar storage and deterministic default artwork.
+
+Agent names are immutable; archive cleanup deletes the associated avatar.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +15,7 @@ from datetime import UTC, datetime
 
 from daimon.core._models import AgentAvatar
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,7 +37,14 @@ def normalize_agent_name(name: str) -> str:
 
 def generate_default_png(name: str) -> bytes:
     words = name.replace("-", " ").replace("_", " ").split()
-    initials = "".join(word[0].upper() for word in words[:2]) or "?"
+    glyphs = [word[0].upper() for word in words[:2]]
+    initials = (
+        "".join(
+            glyph if len(glyph) == 1 and glyph.isascii() and glyph.isalnum() else "?"
+            for glyph in glyphs
+        )
+        or "?"
+    )
     colour = _PALETTE[
         int.from_bytes(hashlib.sha256(normalize_agent_name(name).encode()).digest()[:4], "big")
         % len(_PALETTE)
@@ -42,7 +52,11 @@ def generate_default_png(name: str) -> bytes:
     image = Image.new("RGB", (256, 256), colour)
     draw = ImageDraw.Draw(image)
     font = ImageFont.load_default(size=100)
-    box = draw.textbbox((0, 0), initials, font=font)
+    try:
+        box = draw.textbbox((0, 0), initials, font=font)
+    except UnicodeError:
+        initials = "?"
+        box = draw.textbbox((0, 0), initials, font=font)
     draw.text(
         ((256 - (box[2] - box[0])) / 2 - box[0], (256 - (box[3] - box[1])) / 2 - box[1]),
         initials,
@@ -163,15 +177,3 @@ async def delete_avatar(session: AsyncSession, *, tenant_id: uuid.UUID, agent_na
             AgentAvatar.agent_name == normalize_agent_name(agent_name),
         )
     )
-
-
-async def rename_avatar(
-    session: AsyncSession, *, tenant_id: uuid.UUID, old_name: str, new_name: str
-) -> None:
-    old_key, new_key = normalize_agent_name(old_name), normalize_agent_name(new_name)
-    if old_key != new_key:
-        await session.execute(
-            update(AgentAvatar)
-            .where(AgentAvatar.tenant_id == tenant_id, AgentAvatar.agent_name == old_key)
-            .values(agent_name=new_key)
-        )

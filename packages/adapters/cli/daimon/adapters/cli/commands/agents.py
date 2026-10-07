@@ -42,7 +42,6 @@ from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.errors import SpecError, StoreError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.specs import load_agent_spec, merge_default_agent_toolset
-from daimon.core.stores.agent_avatars import delete_avatar
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_write import clear_agent_references
@@ -430,7 +429,7 @@ async def agents_archive(
     # rather than degrade silently.
     async with rt.sessionmaker.begin() as session:
         await clear_agent_references(session, tenant_id=tenant_id, agent_name=name)
-        await delete_avatar(session, tenant_id=tenant_id, agent_name=name)
+
     console.print(f"[green]✓ archived agent {name!r}[/green]")
 
 

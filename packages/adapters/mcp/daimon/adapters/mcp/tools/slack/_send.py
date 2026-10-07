@@ -25,7 +25,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, cast
 
+import anthropic
 import httpx
+import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.slack_file_proxy import fetch_slack_file
@@ -48,13 +50,21 @@ from daimon.adapters.mcp.tools.slack._visibility import (
     check_channel_access,
     map_slack_api_error,
 )
-from daimon.core.agent_identity import resolve_agent_identity
+from daimon.core.agent_identity import is_builtin_agent, resolve_agent_identity
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.output_delivery import MAX_BYTES_PER_FILE
+from daimon.core.slack_customize_scope import (
+    _NO_CUSTOMIZE_SCOPE as _NO_CUSTOMIZE_SCOPE,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.core.slack_customize_scope import (
+    missing_customize_scope,
+    remember_missing_customize_scope,
+)
 from daimon.core.slack_file_token import SlackFileRef
 from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy.exc import SQLAlchemyError
 
 # Slack's {"type": "markdown"} block cap is 12,000 CHARACTERS (not bytes);
 # over it, chat.postMessage answers msg_too_long. Kept local to this module —
@@ -92,7 +102,7 @@ _MISSING_FILES_SCOPE_MSG = (
 _UPLOAD_FAILED_SUFFIX = " — the message text was already posted, do not send it again"
 _MAX_FILES = 10
 _THREAD_NOT_FOUND_MSG = "that thread does not exist — check the thread_ts and try again"
-_NO_CUSTOMIZE_SCOPE: set[str] = set()
+log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,23 +182,7 @@ async def _post_message(
     if thread_ts is not None:
         post_kwargs["thread_ts"] = thread_ts
     try:
-        token = getattr(client, "token", None)
-        custom = identity_kwargs if token not in _NO_CUSTOMIZE_SCOPE else None
-        try:
-            resp = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
-                **(post_kwargs | (custom or {}))
-            )
-        except SlackApiError as err:
-            needed = str(err.response.get("needed", ""))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-            if (
-                not custom
-                or _slack_error_code(err) != "missing_scope"
-                or "chat:write.customize" not in {scope.strip() for scope in needed.split(",")}
-            ):
-                raise
-            if token:
-                _NO_CUSTOMIZE_SCOPE.add(token)
-            resp = await client.chat_postMessage(**post_kwargs)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
+        resp = await _post_with_identity(client, identity_kwargs, **post_kwargs)
     except SlackApiError as err:
         code = _slack_error_code(err)
         if code == "not_in_channel":
@@ -199,26 +193,58 @@ async def _post_message(
         if mapped is None:
             raise
         raise mapped from err
-    return cast(dict[str, Any], resp.data)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # slack_sdk response is dict-like
+    return cast(dict[str, Any], resp.data)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+
+
+async def _post_with_identity(
+    client: AsyncWebClient,
+    identity_kwargs: dict[str, str] | None,
+    **post_kwargs: Any,  # noqa: ANN401
+) -> Any:  # noqa: ANN401
+    """Apply an agent header, retrying only a missing customize scope."""
+    token = getattr(client, "token", None) if identity_kwargs else None
+    custom = identity_kwargs if not missing_customize_scope(token) else None
+    try:
+        return await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
+            **(post_kwargs | (custom or {}))
+        )
+    except SlackApiError as err:
+        needed = str(err.response.get("needed", ""))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        if (
+            not custom
+            or _slack_error_code(err) != "missing_scope"
+            or "chat:write.customize" not in {scope.strip() for scope in needed.split(",")}
+        ):
+            raise
+        remember_missing_customize_scope(token)
+        return await client.chat_postMessage(**post_kwargs)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
 
 
 async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dict[str, str] | None:
     agent_id = auth.chat_agent_id or auth.agent_id
     if agent_id is None:
         return None
-    agent = await find_agent_by_derived_uuid(
-        runtime.client, tenant_id=auth.tenant_id, agent_id=agent_id
-    )
-    if agent is None:
-        return None
-    async with runtime.session_factory.begin() as session:
-        identity = await resolve_agent_identity(
-            session,
-            tenant_id=auth.tenant_id,
-            agent_name=agent.name,
-            is_builtin=agent.name.casefold() == "daimon",
-            public_base_url=runtime.settings.mcp.app_root_url,
+    try:
+        agent = await find_agent_by_derived_uuid(
+            runtime.client, tenant_id=auth.tenant_id, agent_id=agent_id
         )
+        if agent is None:
+            return None
+        async with runtime.session_factory.begin() as session:
+            identity = await resolve_agent_identity(
+                session,
+                tenant_id=auth.tenant_id,
+                agent_name=agent.name,
+                is_builtin=is_builtin_agent(
+                    name=agent.name,
+                    metadata=agent.metadata,
+                    default_agent_name=runtime.deployment_default.agent_name,
+                ),
+                public_base_url=runtime.settings.mcp.app_root_url,
+            )
+    except (anthropic.APIError, SQLAlchemyError) as exc:
+        log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
+        return None
     if identity.builtin:
         return None
     result = {"username": identity.name}

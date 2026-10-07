@@ -10,9 +10,9 @@ from daimon.core.stores.agent_avatars import (
     get_avatar_by_token,
     get_or_create_avatar,
     normalize_agent_name,
-    rename_avatar,
     reset_avatar,
 )
+from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.testing.factories import make_tenant
 from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +27,14 @@ def test_default_avatar_is_stable_png() -> None:
     with Image.open(BytesIO(png)) as image:
         assert image.format == "PNG"
         assert image.size == (256, 256)
+
+
+def test_default_avatar_handles_non_ascii_and_expanding_uppercase() -> None:
+    from io import BytesIO
+
+    for name in ("ßeta", "𐐨 agent", "💬 agent"):
+        with Image.open(BytesIO(generate_default_png(name))) as image:
+            assert image.size == (256, 256)
 
 
 @pytest.mark.asyncio
@@ -59,15 +67,22 @@ async def test_avatar_lifecycle_and_resolver(db_session: AsyncSession) -> None:
     reset = await reset_avatar(db_session, tenant_id=tenant.id, agent_name="Ada")
     assert reset.token != row.token
     assert await get_avatar_by_token(db_session, token=row.token) is None
-    await rename_avatar(db_session, tenant_id=tenant.id, old_name="Ada", new_name="Grace")
     assert (
-        await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="Grace")
+        await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="Ada")
     ).token == reset.token
-    await delete_avatar(db_session, tenant_id=tenant.id, agent_name="Grace")
+    await delete_avatar(db_session, tenant_id=tenant.id, agent_name="Ada")
     assert await get_avatar_by_token(db_session, token=reset.token) is None
     assert (
-        await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="Grace")
+        await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="Ada")
     ).token != reset.token
+
+
+@pytest.mark.asyncio
+async def test_archive_cleanup_deletes_avatar(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session)
+    row = await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="Ada")
+    await clear_agent_references(db_session, tenant_id=tenant.id, agent_name="Ada")
+    assert await get_avatar_by_token(db_session, token=row.token) is None
 
 
 @pytest.mark.asyncio

@@ -174,7 +174,7 @@ from daimon.adapters.slack.vision import (
     is_vision_image,
 )
 from daimon.core.access_policy import DM_SCOPE_PREFIX
-from daimon.core.agent_identity import resolve_agent_identity
+from daimon.core.agent_identity import AgentIdentity, is_builtin_agent, resolve_agent_identity
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -1973,14 +1973,22 @@ class SlackApp:
         agent = admission.agent
         _lc_agent_name: str = agent.name
         _lc_model_id: str = agent.model.id
-        async with self.runtime.sessionmaker.begin() as identity_session:
-            turn_identity = await resolve_agent_identity(
-                identity_session,
-                tenant_id=tenant_id,
-                agent_name=agent.name,
-                is_builtin=agent.name.casefold() == "daimon",
-                public_base_url=self.runtime.settings.mcp.app_root_url,
-            )
+        turn_identity: AgentIdentity | None = None
+        try:
+            async with self.runtime.sessionmaker.begin() as identity_session:
+                turn_identity = await resolve_agent_identity(
+                    identity_session,
+                    tenant_id=tenant_id,
+                    agent_name=agent.name,
+                    is_builtin=is_builtin_agent(
+                        name=agent.name,
+                        metadata=agent.metadata,
+                        default_agent_name=self.runtime.deployment_default.agent_name,
+                    ),
+                    public_base_url=self.runtime.settings.mcp.app_root_url,
+                )
+        except (anthropic.APIError, SQLAlchemyError) as exc:
+            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
 
         # Commit the intent before Slack can accept the initial card. If the
         # response is lost or this task is cancelled during the request, a
@@ -2863,14 +2871,22 @@ class SlackApp:
             )
             await intent_session.commit()
         follow_cancel = asyncio.Event()
-        async with self.runtime.sessionmaker.begin() as identity_session:
-            follow_identity = await resolve_agent_identity(
-                identity_session,
-                tenant_id=tenant_id,
-                agent_name=follow_admission.agent.name,
-                is_builtin=follow_admission.agent.name.casefold() == "daimon",
-                public_base_url=self.runtime.settings.mcp.app_root_url,
-            )
+        follow_identity: AgentIdentity | None = None
+        try:
+            async with self.runtime.sessionmaker.begin() as identity_session:
+                follow_identity = await resolve_agent_identity(
+                    identity_session,
+                    tenant_id=tenant_id,
+                    agent_name=follow_admission.agent.name,
+                    is_builtin=is_builtin_agent(
+                        name=follow_admission.agent.name,
+                        metadata=follow_admission.agent.metadata,
+                        default_agent_name=self.runtime.deployment_default.agent_name,
+                    ),
+                    public_base_url=self.runtime.settings.mcp.app_root_url,
+                )
+        except (anthropic.APIError, SQLAlchemyError) as exc:
+            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,

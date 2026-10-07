@@ -10,6 +10,7 @@ pattern. No DB required.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Literal
 
 from daimon.adapters.slack.blockkit import (
@@ -210,7 +211,9 @@ class TestToBlocks:
         context_blocks = _find_blocks_by_type(blocks, "context")
         assert context_blocks, "DONE state must produce a context block"
         summary_text = context_blocks[-1]["elements"][0]["text"]
-        assert "Atlas" not in summary_text, "the Slack header already names the agent"
+        assert "Atlas" in summary_text, "the bot-header fallback must name the agent"
+        customized = to_blocks(replace(state, header_customized=True), now=12.0)
+        assert "Atlas" not in customized[-1]["elements"][0]["text"]
         assert "12s" in summary_text, "footer must contain elapsed time"
         assert "$0.04" in summary_text, "footer must contain cost_str when set"
 

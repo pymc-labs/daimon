@@ -75,7 +75,7 @@
           dict({
             'elements': list([
               dict({
-                'text': '❌ Something went wrong · 12s · 500 in / 80 out · $0.003',
+                'text': '❌ Something went wrong · Atlas · 12s · 500 in / 80 out · $0.003',
                 'type': 'mrkdwn',
               }),
             ]),
@@ -171,7 +171,7 @@
           dict({
             'elements': list([
               dict({
-                'text': '16s · 1.5k in / 320 out · $0.008',
+                'text': 'Atlas · 16s · 1.5k in / 320 out · $0.008',
                 'type': 'mrkdwn',
               }),
             ]),

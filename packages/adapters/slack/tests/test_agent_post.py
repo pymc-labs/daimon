@@ -8,6 +8,7 @@ import pytest
 import yarl
 from daimon.adapters.slack.agent_post import _NO_CUSTOMIZE_SCOPE, post_as_agent
 from daimon.core.agent_identity import AgentIdentity
+from daimon.core.slack_customize_scope import missing_customize_scope
 from slack_sdk.errors import SlackApiError
 
 from .conftest import CHAT_OK_PAYLOAD
@@ -62,3 +63,17 @@ async def test_other_missing_scope_is_not_retried(fake_slack_web_client: Any) ->
             fake.client, AgentIdentity("Ada", None, False), channel="C_TEST", text="x"
         )
     assert len(fake.mock.requests[("POST", _POST_URL)]) == 1
+
+
+def test_missing_scope_cache_expires_and_can_be_cleared(monkeypatch: pytest.MonkeyPatch) -> None:
+    from daimon.core import slack_customize_scope as cache
+
+    cache._NO_CUSTOMIZE_SCOPE.clear()  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(cache.time, "monotonic", lambda: 100.0)
+    cache.remember_missing_customize_scope("xoxb-test")
+    assert missing_customize_scope("xoxb-test")
+    monkeypatch.setattr(cache.time, "monotonic", lambda: 1000.0)
+    assert not missing_customize_scope("xoxb-test")
+    cache.remember_missing_customize_scope("xoxb-test")
+    cache.clear_missing_customize_scope("xoxb-test")
+    assert not missing_customize_scope("xoxb-test")

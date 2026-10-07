@@ -171,7 +171,7 @@ without an error reply.
 After admission, Slack resolves the answering agent's message name and avatar
 once for the turn. The status card and each answer or continuation post carry
 that identity in Slack's message header. The built-in Daimon agent uses the
-app header. Slack keeps the header when the status card is edited into an
+app header. Slack is expected to keep the header when the status card is edited into an
 answer; each new turn post is recorded under the turn's agent and card intent.
 
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
@@ -1485,7 +1485,7 @@ record the status card, answer chunks and in-thread notices of mention and
 continuation turns (`source='turn'`, with the turn's card intent and the
 requesting user). Discord records the thread it opens from a mention
 (`source='auto_thread'`, with the user who mentioned it). Turn error notices,
-setup-wizard turns and session-output files are not recorded. Each post belongs
+setup-wizard turns, Slack DM answers (which have no card intent), and session-output files are not recorded. Each post belongs
 to the turn agent's derived id. A turn post may be tidied
 only once its card intent is retired, and only for the user who started that
 turn, the user who opened the auto-thread it is in with the same agent, or a server
