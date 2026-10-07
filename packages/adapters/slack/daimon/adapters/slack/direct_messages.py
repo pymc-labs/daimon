@@ -10,10 +10,12 @@ import aiohttp
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
+from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.adapters.slack.channel_admin_groups import user_group_ids
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime, admission_refusal_message
+from daimon.core.agent_identity import AgentIdentity, resolve_agent_identity
 from daimon.core.config import Settings
 from daimon.core.direct_messages import (
     is_sealed_slack_message,
@@ -244,6 +246,19 @@ async def handle_direct_message(
         content = str(event.get("text") or "")
         if not content.strip():
             return
+        identity: AgentIdentity | None = None
+
+        async def on_agent(name: str) -> None:
+            nonlocal identity
+            async with runtime.sessionmaker.begin() as session:
+                identity = await resolve_agent_identity(
+                    session,
+                    tenant_id=conversation.tenant_id,
+                    agent_name=name,
+                    is_builtin=name.casefold() == "daimon",
+                    public_base_url=runtime.settings.mcp.app_root_url,
+                )
+
         answer = await reply_to_dm(
             runtime.turn_deps,
             platform="slack",
@@ -253,10 +268,13 @@ async def handle_direct_message(
             expected_scope_id=conversation.scope_id,
             text=content,
             role=role,
+            on_agent=on_agent,
         )
         if answer is not None:
             for offset in range(0, len(answer), 3500):
-                await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                await post_as_agent(
+                    client,
+                    identity,
                     channel=channel_id,
                     text=answer[offset : offset + 3500],
                     parse="none",

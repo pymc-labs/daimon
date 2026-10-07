@@ -30,6 +30,7 @@ from daimon.core.github_credentials import (
     upsert_credential_encrypted,
 )
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores.agent_avatars import delete_avatar
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 from daimon.core.stores.scoped_config_write import clear_agent_references
 
@@ -106,6 +107,7 @@ async def delete_agent(runtime: SlackRuntime, *, tenant_id: uuid.UUID, name: str
     # rather than degrade silently.
     async with runtime.sessionmaker.begin() as session:
         await clear_agent_references(session, tenant_id=tenant_id, agent_name=name)
+        await delete_avatar(session, tenant_id=tenant_id, agent_name=name)
 
 
 async def load_agent_inline_pat(runtime: SlackRuntime, *, agent_id: uuid.UUID) -> str | None:

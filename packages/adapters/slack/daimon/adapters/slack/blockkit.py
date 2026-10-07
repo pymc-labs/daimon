@@ -137,7 +137,7 @@ def to_blocks(
         # Terminal collapse: one summary context block only.
         elapsed = int(now - state.started_at) if now is not None else 0
         tokens = f"{_fmt_tokens(state.usage_in)} in / {_fmt_tokens(state.usage_out)} out"
-        parts: list[str] = [state.agent_name, f"{elapsed}s", tokens]
+        parts: list[str] = [f"{elapsed}s", tokens]
         if state.cost_str is not None:
             parts.append(state.cost_str)
         if state.balance_str is not None:

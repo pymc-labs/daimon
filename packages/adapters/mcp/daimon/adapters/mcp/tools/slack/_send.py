@@ -48,6 +48,8 @@ from daimon.adapters.mcp.tools.slack._visibility import (
     check_channel_access,
     map_slack_api_error,
 )
+from daimon.core.agent_identity import resolve_agent_identity
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.output_delivery import MAX_BYTES_PER_FILE
 from daimon.core.slack_file_token import SlackFileRef
 from fastmcp.exceptions import ToolError
@@ -90,6 +92,7 @@ _MISSING_FILES_SCOPE_MSG = (
 _UPLOAD_FAILED_SUFFIX = " — the message text was already posted, do not send it again"
 _MAX_FILES = 10
 _THREAD_NOT_FOUND_MSG = "that thread does not exist — check the thread_ts and try again"
+_NO_CUSTOMIZE_SCOPE: set[str] = set()
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +157,12 @@ async def _validate_thread_target(
 
 
 async def _post_message(
-    client: AsyncWebClient, *, channel_id: str, content: str, thread_ts: str | None
+    client: AsyncWebClient,
+    *,
+    channel_id: str,
+    content: str,
+    thread_ts: str | None,
+    identity_kwargs: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     post_kwargs: dict[str, Any] = {
         "channel": channel_id,
@@ -164,7 +172,22 @@ async def _post_message(
     if thread_ts is not None:
         post_kwargs["thread_ts"] = thread_ts
     try:
-        resp = await client.chat_postMessage(**post_kwargs)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]  # slack_sdk **kwargs: Unknown
+        custom = identity_kwargs if client.token not in _NO_CUSTOMIZE_SCOPE else None
+        try:
+            resp = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
+                **(post_kwargs | (custom or {}))
+            )
+        except SlackApiError as err:
+            needed = str(err.response.get("needed", ""))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            if (
+                not custom
+                or _slack_error_code(err) != "missing_scope"
+                or "chat:write.customize" not in {scope.strip() for scope in needed.split(",")}
+            ):
+                raise
+            if client.token:
+                _NO_CUSTOMIZE_SCOPE.add(client.token)
+            resp = await client.chat_postMessage(**post_kwargs)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
     except SlackApiError as err:
         code = _slack_error_code(err)
         if code == "not_in_channel":
@@ -176,6 +199,31 @@ async def _post_message(
             raise
         raise mapped from err
     return cast(dict[str, Any], resp.data)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # slack_sdk response is dict-like
+
+
+async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dict[str, str] | None:
+    agent_id = auth.chat_agent_id or auth.agent_id
+    if agent_id is None:
+        return None
+    agent = await find_agent_by_derived_uuid(
+        runtime.client, tenant_id=auth.tenant_id, agent_id=agent_id
+    )
+    if agent is None:
+        return None
+    async with runtime.session_factory.begin() as session:
+        identity = await resolve_agent_identity(
+            session,
+            tenant_id=auth.tenant_id,
+            agent_name=agent.name,
+            is_builtin=agent.name.casefold() == "daimon",
+            public_base_url=runtime.settings.mcp.app_root_url,
+        )
+    if identity.builtin:
+        return None
+    result = {"username": identity.name}
+    if identity.avatar_url is not None:
+        result["icon_url"] = identity.avatar_url
+    return result
 
 
 def _resolve_attachment_ref(runtime: McpRuntime, *, url: str, team_id: str) -> SlackFileRef:
@@ -336,7 +384,11 @@ async def _slack_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
         uploads = fetched + uploads
 
     resp = await _post_message(
-        client, channel_id=target_channel_id, content=content, thread_ts=thread_ts
+        client,
+        channel_id=target_channel_id,
+        content=content,
+        thread_ts=thread_ts,
+        identity_kwargs=await _agent_identity_kwargs(runtime, auth),
     )
     await record_agent_posts(
         runtime,
@@ -409,7 +461,11 @@ async def _slack_create_thread_impl(  # pyright: ignore[reportUnusedFunction]  #
     await require_channel_writable(runtime, auth, channel_id=target_channel_id)
 
     resp = await _post_message(
-        client, channel_id=target_channel_id, content=content, thread_ts=None
+        client,
+        channel_id=target_channel_id,
+        content=content,
+        thread_ts=None,
+        identity_kwargs=await _agent_identity_kwargs(runtime, auth),
     )
     await record_agent_posts(
         runtime,

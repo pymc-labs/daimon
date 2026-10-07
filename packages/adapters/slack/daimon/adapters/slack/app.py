@@ -174,6 +174,7 @@ from daimon.adapters.slack.vision import (
     is_vision_image,
 )
 from daimon.core.access_policy import DM_SCOPE_PREFIX
+from daimon.core.agent_identity import resolve_agent_identity
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -1972,6 +1973,14 @@ class SlackApp:
         agent = admission.agent
         _lc_agent_name: str = agent.name
         _lc_model_id: str = agent.model.id
+        async with self.runtime.sessionmaker.begin() as identity_session:
+            turn_identity = await resolve_agent_identity(
+                identity_session,
+                tenant_id=tenant_id,
+                agent_name=agent.name,
+                is_builtin=agent.name.casefold() == "daimon",
+                public_base_url=self.runtime.settings.mcp.app_root_url,
+            )
 
         # Commit the intent before Slack can accept the initial card. If the
         # response is lost or this task is cancelled during the request, a
@@ -2014,6 +2023,8 @@ class SlackApp:
             register_pending=self._register_cancel,
             deregister_pending=self._deregister_cancel,
             intent_id=card_intent.id,
+            identity=turn_identity,
+            ma_agent_id=str(agent.id),
         )
         lifecycle_holder: list[SlackTurnLifecycle] = [lifecycle]
 
@@ -2133,11 +2144,7 @@ class SlackApp:
                     )
                     intent_terminal = True
                 else:
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                        channel=channel,
-                        thread_ts=thread_id,
-                        text=explanation,
-                    )
+                    await lifecycle.post_notice(explanation)
                 return
             except SessionBusyError:
                 # Nothing failed and nothing is misconfigured: the previous
@@ -2157,11 +2164,7 @@ class SlackApp:
                     )
                     intent_terminal = True
                 else:
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                        channel=channel,
-                        thread_ts=thread_id,
-                        text=busy_text,
-                    )
+                    await lifecycle.post_notice(busy_text)
                 return
             except SessionAgentMismatch as error:
                 # The recorded (previous) responder's display name is a
@@ -2196,12 +2199,7 @@ class SlackApp:
                     )
                     intent_terminal = True
                 else:
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                        channel=channel,
-                        thread_ts=thread_id,
-                        text=explanation,
-                        blocks=hand_over,
-                    )
+                    await lifecycle.post_notice(explanation, blocks=hand_over)
                 return
             ma_session_id = prepared.ma_session_id
             watermark = prepared.watermark
@@ -2398,10 +2396,8 @@ class SlackApp:
                 # Only claim the images were "linked" when the proxy is configured —
                 # that's the branch that actually minted fetchable URLs into the prefix.
                 if images_skipped:
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                        channel=channel,
-                        thread_ts=thread_id,
-                        text=(
+                    await lifecycle.post_notice(
+                        (
                             "Some images couldn't be inlined — I've linked them for the agent to "
                             "fetch instead: "
                             + ", ".join(f"`{f['name']}` ({r})" for f, r in images_skipped)
@@ -2478,6 +2474,8 @@ class SlackApp:
                     # second, successful card.
                     adopt_status_ts=lifecycle.status_ts,
                     intent_id=card_intent.id,
+                    identity=turn_identity,
+                    ma_agent_id=str(agent.id),
                 )
                 # The replacement summary belongs to the turn, not to the
                 # lifecycle object that happens to render it -- a recovery
@@ -2554,7 +2552,11 @@ class SlackApp:
                         render_interval_s=2.0,
                         deadline=turn_deadline_at,
                         confirm_write=self._confirmations.hook(
-                            web_client, channel=channel, thread_ts=thread_id
+                            web_client,
+                            channel=channel,
+                            thread_ts=thread_id,
+                            identity=turn_identity,
+                            record_post=lifecycle.record_post,
                         ),
                     )
                     intent_terminal = lifecycle_holder[0].final_ts is not None
@@ -2589,16 +2591,12 @@ class SlackApp:
                 # back to a message when there is no answer to sit above (a
                 # tool-only or failed turn) or it will not fit.
                 if not await final_lifecycle.prepend_revealed_answer(loss_notice):
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                        channel=channel, thread_ts=thread_id, text=loss_notice
-                    )
+                    await final_lifecycle.post_notice(loss_notice)
             if replacement_summary is not None and not final_lifecycle.answer_prefix_applied:
                 # The turn produced no answer to carry the summary (tool-only,
                 # cancelled, or failed). The person still has to be told what
                 # the replacement carried across, so it goes out on its own.
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel, thread_ts=thread_id, text=replacement_summary
-                )
+                await final_lifecycle.post_notice(replacement_summary)
 
             # --- Watermark --- Preserves Slack's original gate exactly (unconditional
             # on final_ts, no state.error branch) -- Discord's inline sequence had an
@@ -2626,10 +2624,8 @@ class SlackApp:
             # the change is saved and will apply at their NEXT message here,
             # not this one -- the answer they just got used the old config.
             if prepared.continuity.pending:
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=render_current_work_must_finish(admission.agent.name, handoff=False),
+                await final_lifecycle.post_notice(
+                    render_current_work_must_finish(admission.agent.name, handoff=False)
                 )
 
             # This turn's own marker is cleared BEFORE anything is dispatched.
@@ -2867,6 +2863,14 @@ class SlackApp:
             )
             await intent_session.commit()
         follow_cancel = asyncio.Event()
+        async with self.runtime.sessionmaker.begin() as identity_session:
+            follow_identity = await resolve_agent_identity(
+                identity_session,
+                tenant_id=tenant_id,
+                agent_name=follow_admission.agent.name,
+                is_builtin=follow_admission.agent.name.casefold() == "daimon",
+                public_base_url=self.runtime.settings.mcp.app_root_url,
+            )
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
@@ -2888,6 +2892,8 @@ class SlackApp:
             register_pending=self._register_cancel,
             deregister_pending=self._deregister_cancel,
             intent_id=card_intent.id,
+            identity=follow_identity,
+            ma_agent_id=str(follow_admission.agent.id),
         )
         lifecycle_holder: list[SlackTurnLifecycle] = [follow_lifecycle]
         await follow_lifecycle.post_initial()
@@ -2974,6 +2980,9 @@ class SlackApp:
                 register_pending=self._register_cancel,
                 deregister_pending=self._deregister_cancel,
                 adopt_status_ts=follow_lifecycle.status_ts,
+                intent_id=card_intent.id,
+                identity=follow_identity,
+                ma_agent_id=str(follow_admission.agent.id),
             )
             lifecycle_holder[0] = new_lifecycle
             if follow_lifecycle.status_ts is not None:
@@ -3033,7 +3042,11 @@ class SlackApp:
                     render_interval_s=2.0,
                     deadline=follow_deadline,
                     confirm_write=self._confirmations.hook(
-                        web_client, channel=channel, thread_ts=thread_id
+                        web_client,
+                        channel=channel,
+                        thread_ts=thread_id,
+                        identity=follow_identity,
+                        record_post=follow_lifecycle.record_post,
                     ),
                 )
         finally:

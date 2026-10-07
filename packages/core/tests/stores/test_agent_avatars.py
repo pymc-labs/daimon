@@ -1,0 +1,84 @@
+"""Avatar generation, URL resolution and tenant-scoped persistence."""
+
+from __future__ import annotations
+
+import pytest
+from daimon.core.agent_identity import resolve_agent_identity
+from daimon.core.stores.agent_avatars import (
+    delete_avatar,
+    generate_default_png,
+    get_avatar_by_token,
+    get_or_create_avatar,
+    normalize_agent_name,
+    rename_avatar,
+    reset_avatar,
+)
+from daimon.testing.factories import make_tenant
+from PIL import Image
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+def test_default_avatar_is_stable_png() -> None:
+    from io import BytesIO
+
+    png = generate_default_png("Ada Lovelace")
+    assert png == generate_default_png("Ada Lovelace")
+    assert len(png) <= 256 * 1024
+    with Image.open(BytesIO(png)) as image:
+        assert image.format == "PNG"
+        assert image.size == (256, 256)
+
+
+@pytest.mark.asyncio
+async def test_avatar_lifecycle_and_resolver(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session)
+    built_in = await resolve_agent_identity(
+        db_session,
+        tenant_id=tenant.id,
+        agent_name="Daimon",
+        is_builtin=True,
+        public_base_url="https://example.test",
+    )
+    assert built_in.builtin and built_in.avatar_url is None
+
+    identity = await resolve_agent_identity(
+        db_session,
+        tenant_id=tenant.id,
+        agent_name="ＡＤＡ",
+        is_builtin=False,
+        public_base_url="https://example.test/",
+    )
+    assert identity.name == "ＡＤＡ"
+    row = await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="ada")
+    assert normalize_agent_name("ＡＤＡ") == "ada"
+    assert identity.avatar_url == f"https://example.test/avatars/{row.token}/{row.sha256[:12]}.png"
+    assert (
+        await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="Ada")
+    ).token == row.token
+
+    reset = await reset_avatar(db_session, tenant_id=tenant.id, agent_name="Ada")
+    assert reset.token != row.token
+    assert await get_avatar_by_token(db_session, token=row.token) is None
+    await rename_avatar(db_session, tenant_id=tenant.id, old_name="Ada", new_name="Grace")
+    assert (
+        await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="Grace")
+    ).token == reset.token
+    await delete_avatar(db_session, tenant_id=tenant.id, agent_name="Grace")
+    assert await get_avatar_by_token(db_session, token=reset.token) is None
+    assert (
+        await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="Grace")
+    ).token != reset.token
+
+
+@pytest.mark.asyncio
+async def test_avatar_url_absent_without_public_base(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session)
+    identity = await resolve_agent_identity(
+        db_session,
+        tenant_id=tenant.id,
+        agent_name="Helper",
+        is_builtin=False,
+        public_base_url=None,
+    )
+    assert identity.avatar_url is None
+    assert await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="Helper")

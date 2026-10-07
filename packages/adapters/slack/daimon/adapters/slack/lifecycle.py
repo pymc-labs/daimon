@@ -50,6 +50,7 @@ from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
+from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.adapters.slack.blockkit import (
     NOTICE_MAX_CHARS,
     EmbedEvent,
@@ -72,8 +73,10 @@ from daimon.adapters.slack.mrkdwn import (
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.support_escalation import build_ask_human_button
 from daimon.adapters.slack.tables import render_slack_tables
+from daimon.core.agent_identity import AgentIdentity
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
+from daimon.core.channel_tidy import record_turn_post
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
@@ -179,6 +182,8 @@ class SlackTurnLifecycle:
         budget_channel_id: str | None = None,
         alert_webhook_url: SecretStr | None = None,
         ask_human: bool = False,
+        identity: AgentIdentity | None = None,
+        ma_agent_id: str | None = None,
     ) -> None:
         self._trigger_ts = trigger_ts
         # Whether the final answer offers Ask a human beside the vote buttons
@@ -191,6 +196,9 @@ class SlackTurnLifecycle:
         self._request_id = request_id
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
+        self._identity = identity
+        self._ma_agent_id = ma_agent_id
+        self._intent_id = intent_id
         self._budget_channel_id = budget_channel_id
         self._alert_webhook_url = alert_webhook_url
         self._channel = channel
@@ -265,6 +273,40 @@ class SlackTurnLifecycle:
         """
         return self._status_ts
 
+    async def record_post(self, ts: str) -> None:
+        if (
+            self._sessionmaker is not None
+            and self._tenant_id is not None
+            and self._ma_agent_id is not None
+            and self._intent_id is not None
+        ):
+            await record_turn_post(
+                self._sessionmaker,
+                tenant_id=self._tenant_id,
+                platform="slack",
+                ma_agent_id=self._ma_agent_id,
+                channel_id=self._channel,
+                message_id=ts,
+                requester_platform_user_id=self._author_id,
+                source="turn",
+                turn_card_intent_id=self._intent_id,
+                thread_ts=self._thread_ts,
+            )
+
+    async def post_notice(self, text: str, *, blocks: list[dict[str, Any]] | None = None) -> str:
+        """Post a turn notice with the same header and ownership as its answer."""
+        kwargs: dict[str, Any] = {
+            "channel": self._channel,
+            "thread_ts": self._thread_ts,
+            "text": text,
+        }
+        if blocks is not None:
+            kwargs["blocks"] = blocks
+        resp = await post_as_agent(self._client, self._identity, **kwargs)
+        ts = cast(str, resp["ts"])
+        await self.record_post(ts)
+        return ts
+
     async def post_initial(self) -> None:
         """Post the initial status card immediately, before session setup.
 
@@ -314,7 +356,9 @@ class SlackTurnLifecycle:
                 self._register_pending(self._cancel_key, self._cancel, self._author_id)
                 self._pending_registered = True
             try:
-                resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                resp = await post_as_agent(
+                    self._client,
+                    self._identity,
                     channel=self._channel,
                     thread_ts=self._thread_ts,
                     blocks=blocks,
@@ -326,6 +370,7 @@ class SlackTurnLifecycle:
                     self._pending_registered = False
                 raise
             self._status_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
+            await self.record_post(self._status_ts)
             self._register(self._status_ts, self._cancel, self._author_id)
             # The card is now routable by its message ts. Remove the temporary
             # key promptly so later clicks follow any recovery rebind of that ts.
@@ -376,13 +421,16 @@ class SlackTurnLifecycle:
         prior SSE flush.
         """
         if self._status_ts is None:
-            resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+            resp = await post_as_agent(
+                self._client,
+                self._identity,
                 channel=self._channel,
                 thread_ts=self._thread_ts,
                 blocks=blocks,
                 text=text,
             )
             self._status_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
+            await self.record_post(self._status_ts)
             self._register(self._status_ts, self._cancel, self._author_id)
         else:
             await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
@@ -527,12 +575,15 @@ class SlackTurnLifecycle:
                     # turn, so a dropped server is named on its own line.
                     tool_only_notice = render_degraded_notice(state.mcp_failures)
                     if tool_only_notice is not None:
-                        await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                        resp = await post_as_agent(
+                            self._client,
+                            self._identity,
                             channel=self._channel,
                             thread_ts=self._thread_ts,
                             blocks=[{"type": "markdown", "text": tool_only_notice}],
                             text=tool_only_notice,
                         )
+                        await self.record_post(cast(str, resp["ts"]))
                 else:
                     await self._flush_cancelled()
                 self.final_ts = self._status_ts
@@ -596,7 +647,9 @@ class SlackTurnLifecycle:
                         await self._post_or_update(blocks, _notification_text(notification_chunk))
                         current_ts = self._status_ts
                     else:
-                        resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                        resp = await post_as_agent(
+                            self._client,
+                            self._identity,
                             channel=self._channel,
                             thread_ts=self._thread_ts,
                             blocks=blocks,
@@ -604,6 +657,7 @@ class SlackTurnLifecycle:
                             link_names=False if notify_on_completion else None,
                         )
                         current_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
+                        await self.record_post(current_ts)
                     if index == 0:
                         self._answer_ts = current_ts
                         self._revealed_first_chunk = notification_chunk

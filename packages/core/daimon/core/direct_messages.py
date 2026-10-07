@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -263,6 +263,7 @@ async def reply_to_dm(
     text: str,
     role: Role,
     platform_role_ids: Sequence[str] | None = None,
+    on_agent: Callable[[str], Awaitable[None]] | None = None,
 ) -> str | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
 
@@ -307,6 +308,8 @@ async def reply_to_dm(
         )
         if admission.account_id != conversation.account_id:
             raise DaimonError("Your account changed. Run /dm again in the workspace channel.")
+        if on_agent is not None:
+            await on_agent(admission.agent.name)
         execution_id = uuid.uuid4() if platform == "slack" else None
         admission = replace(
             admission,

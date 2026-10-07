@@ -83,6 +83,7 @@ from daimon.core.specs import (
     SkillRepo,
     merge_default_agent_toolset,
 )
+from daimon.core.stores.agent_avatars import delete_avatar
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.scoped_config_write import clear_agent_references
@@ -955,6 +956,7 @@ async def _archive_agent_impl(
     # to an archived agent. A failure here surfaces to the tool caller.
     async with runtime.session_factory() as session, session.begin():
         await clear_agent_references(session, tenant_id=auth.tenant_id, agent_name=name)
+        await delete_avatar(session, tenant_id=auth.tenant_id, agent_name=name)
 
 
 def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
