@@ -10,9 +10,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from daimon.adapters.slack.agent_setup import github_new_repo as notice_module
 from daimon.adapters.slack.agent_setup import github_repos_actions as actions_module
+from daimon.adapters.slack.agent_setup.github_add_repos import build_view as build_add_view
 from daimon.adapters.slack.agent_setup.github_repos import build_confirm_view, build_view
 from daimon.adapters.slack.agent_setup.panel_views import build_github_home_view
-from daimon.adapters.slack.agent_setup.state import PanelMetadata
+from daimon.adapters.slack.agent_setup.state import (
+    PanelMetadata,
+    decode_panel_metadata,
+    encode_panel_metadata,
+)
 from daimon.core.github_panel import GrantsPanel, RepoChoice
 from daimon.core.stores.github_new_repo_notices import NewRepoNotice
 
@@ -80,6 +85,53 @@ def test_slack_github_home_and_confirmations() -> None:
     confirmed = build_confirm_view(meta, panel, choice="update_key")
     assert "Update and restart chats" in str(confirmed["blocks"])
     assert "Unsaved work" in str(confirmed["blocks"])
+
+
+def test_slack_add_repos_keeps_selection_through_review() -> None:
+    panel = GrantsPanel(
+        mode="legacy",
+        working_repo="example/work",
+        has_pat=True,
+        repos=(
+            RepoChoice(1, "example/work", "write", None, None, False, True),
+            RepoChoice(2, "example/readme", "read", None, None, False, False),
+        ),
+    )
+    meta = PanelMetadata(team_id="T", channel_id="C", view="github_add", agent_name="helper")
+    pick = build_add_view(meta, panel)
+    selector = next(
+        item
+        for block in pick["blocks"]
+        if block["type"] == "actions"
+        for item in block["elements"]
+        if item["type"] == "multi_static_select"
+    )
+    assert [option["value"] for option in selector["initial_options"]] == ["1"]
+    reviewed = PanelMetadata(
+        team_id="T",
+        channel_id="C",
+        view="github_add",
+        agent_name="helper",
+        selected_repo_ids=(1, 2),
+        github_step="review",
+    )
+    saved = decode_panel_metadata(encode_panel_metadata(reviewed))
+    assert saved == reviewed
+    review = build_add_view(saved, panel)
+    assert "example/readme — read only" in str(review["blocks"])
+    assert "Update and restart chats" in str(
+        build_add_view(
+            PanelMetadata(
+                team_id="T",
+                channel_id="C",
+                view="github_add",
+                agent_name="helper",
+                selected_repo_ids=(1,),
+                github_step="confirm_key",
+            ),
+            panel,
+        )["blocks"]
+    )
 
 
 @pytest.mark.asyncio

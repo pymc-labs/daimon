@@ -143,6 +143,11 @@ class GitHubReposView(PanelViewBase):
                 paging.add_item(following)
                 container.add_item(paging)
         actions: discord.ui.ActionRow[GitHubReposView] = discord.ui.ActionRow()
+        add_repos: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+            label="Add repos", style=discord.ButtonStyle.primary
+        )
+        add_repos.callback = self._on_add_repos  # type: ignore[method-assign]
+        actions.add_item(add_repos)
         if panel.mode == "legacy":
             if panel.has_pat:
                 switch: discord.ui.Button[GitHubReposView] = discord.ui.Button(
@@ -150,11 +155,12 @@ class GitHubReposView(PanelViewBase):
                 )
                 switch.callback = self._on_switch  # type: ignore[method-assign]
                 actions.add_item(switch)
-            activate: discord.ui.Button[GitHubReposView] = discord.ui.Button(
-                label="Add repos", style=discord.ButtonStyle.primary
-            )
-            activate.callback = self._on_activate  # type: ignore[method-assign]
-            actions.add_item(activate)
+            if panel.has_pending:
+                activate: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                    label="Save changes", style=discord.ButtonStyle.primary
+                )
+                activate.callback = self._on_activate  # type: ignore[method-assign]
+                actions.add_item(activate)
         else:
             if panel.has_pending:
                 activate: discord.ui.Button[GitHubReposView] = discord.ui.Button(
@@ -394,24 +400,46 @@ class GitHubReposView(PanelViewBase):
             None,
         )
         if working is None:
-            await interaction.followup.send("Connect the working repo first.", ephemeral=True)
+            await interaction.followup.send(
+                f"{self.panel.working_repo or 'The working repo'} isn't connected yet. "
+                "Connect it first.",
+                ephemeral=True,
+            )
             return
         if working.max_access != "write":
             await interaction.followup.send("The working repo needs write access.", ephemeral=True)
             return
-        tenant_id, agent_id = self._ids()
-        async with self.runtime.sessionmaker.begin() as session:
-            await stage_panel_grant(
-                session,
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-                repo_id=working.repo_id,
-                baseline_access="write",
-                ceiling_access="write",
-                account_id=self.state.account_id,
-                is_working_repo=True,
+        from daimon.adapters.discord.agent_setup.github_add_repos import GitHubAddReposView
+
+        await self.swap_to(
+            interaction,
+            GitHubAddReposView(
+                self.state,
+                runtime=self.runtime,
+                allowed_user_id=self.allowed_user_id,
+                agent=self.agent,
+                panel=self.panel,
+            ),
+        )
+
+    async def _on_add_repos(self, interaction: discord.Interaction) -> None:
+        if not await self.allowed(interaction):
+            await interaction.followup.send(
+                "You cannot change this agent's GitHub repos.", ephemeral=True
             )
-        await self._refresh_panel(interaction)
+            return
+        from daimon.adapters.discord.agent_setup.github_add_repos import GitHubAddReposView
+
+        await self.swap_to(
+            interaction,
+            GitHubAddReposView(
+                self.state,
+                runtime=self.runtime,
+                allowed_user_id=self.allowed_user_id,
+                agent=self.agent,
+                panel=self.panel,
+            ),
+        )
 
     async def _on_activate(self, interaction: discord.Interaction) -> None:
         if self.panel.mode == "legacy" and self.panel.has_pat:

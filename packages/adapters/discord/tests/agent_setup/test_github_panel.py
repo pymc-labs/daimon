@@ -11,6 +11,7 @@ import discord
 import pytest
 from daimon.adapters.discord.agent_setup import github_new_repo as notice_module
 from daimon.adapters.discord.agent_setup import github_repos as repos_module
+from daimon.adapters.discord.agent_setup.github_add_repos import GitHubAddReposView
 from daimon.adapters.discord.agent_setup.github_home import GitHubHomeView, GitHubLinkView
 from daimon.adapters.discord.agent_setup.github_repos import GitHubReposView
 from daimon.adapters.discord.agent_setup.state import PanelState
@@ -97,6 +98,48 @@ def test_discord_github_home_and_destructive_confirmations() -> None:
         for item in confirm.walk_children()
         if isinstance(item, discord.ui.TextDisplay)
     )
+
+
+def test_discord_add_repos_defaults_working_repo_and_reviews_abilities() -> None:
+    agent = RosterAgent(name="helper", ma_agent_id="ag_helper", model_id="model", is_built_in=False)
+    state = PanelState(
+        roster=[],
+        selected=None,
+        account_id=uuid.uuid4(),
+        guild_id=123,
+        channel_id=456,
+        selected_agent=agent,
+        is_admin=True,
+    )
+    panel = GrantsPanel(
+        mode="legacy",
+        working_repo="example/work",
+        has_pat=True,
+        repos=(
+            RepoChoice(1, "example/work", "write", None, None, False, True),
+            RepoChoice(2, "example/readme", "read", None, None, False, False),
+        ),
+    )
+    pick = GitHubAddReposView(
+        state, runtime=MagicMock(), allowed_user_id=7, agent=agent, panel=panel
+    )
+    selector = next(item for item in pick.walk_children() if isinstance(item, discord.ui.Select))
+    assert [option.value for option in selector.options if option.default] == ["1"]
+    review = GitHubAddReposView(
+        state,
+        runtime=MagicMock(),
+        allowed_user_id=7,
+        agent=agent,
+        panel=panel,
+        selected_ids=frozenset({1, 2}),
+        step="review",
+    )
+    review_text = "\n".join(
+        item.content for item in review.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    )
+    assert "example/work — read and open issues and pull requests" in review_text
+    assert "example/readme — read only" in review_text
+    assert "Used by: everyone who can use helper" in review_text
 
 
 @pytest.mark.asyncio

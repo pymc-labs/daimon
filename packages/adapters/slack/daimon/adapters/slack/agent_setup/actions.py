@@ -67,6 +67,7 @@ from daimon.adapters.slack.agent_policy import (
     refuse_unless_allowed_for_agent_name,
     refuse_unless_pin_allows,
 )
+from daimon.adapters.slack.agent_setup import github_add_repos as github_add_repos_view
 from daimon.adapters.slack.agent_setup import github_repos as github_repos_view
 from daimon.adapters.slack.agent_setup import panel_views
 from daimon.adapters.slack.agent_setup.channel_environment import (
@@ -327,6 +328,8 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         github_repos_view.ACTION_CONFIRM_TURN_OFF,
         github_repos_view.ACTION_CONFIRM_UPDATE_KEY,
         github_repos_view.ACTION_CANCEL_CONFIRM,
+        github_repos_view.ACTION_ADD_OPEN,
+        *github_add_repos_view.ACTIONS,
         panel_views.ACTION_CODING_TOOLS,
         panel_views.ACTION_ADD_SKILL,
         panel_views.ACTION_REVOKE_TOKEN,

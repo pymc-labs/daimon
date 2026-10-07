@@ -23,6 +23,7 @@ ACTION_CONFIRM_REMOVE: Final = "agent_setup__github_confirm_remove"
 ACTION_CONFIRM_TURN_OFF: Final = "agent_setup__github_confirm_turn_off"
 ACTION_CONFIRM_UPDATE_KEY: Final = "agent_setup__github_confirm_update_key"
 ACTION_CANCEL_CONFIRM: Final = "agent_setup__github_cancel_confirm"
+ACTION_ADD_OPEN: Final = "agent_setup__github_add_open"
 
 
 def _button(action: str, label: str, value: str | None = None) -> dict[str, Any]:
@@ -138,9 +139,11 @@ def build_view(meta: PanelMetadata, panel: GrantsPanel) -> dict[str, Any]:
         controls: list[dict[str, Any]] = []
         if panel.has_pat:
             controls.append(_button(ACTION_SWITCH, "Update GitHub connection"))
-        controls.append(_button(ACTION_ACTIVATE, "Add repos"))
+        controls.append(_button(ACTION_ADD_OPEN, "Add repos"))
+        if panel.has_pending:
+            controls.append(_button(ACTION_ACTIVATE, "Save changes"))
     else:
-        controls = []
+        controls = [_button(ACTION_ADD_OPEN, "Add repos")]
         if panel.has_pending:
             controls.append(_button(ACTION_ACTIVATE, "Save changes"))
         controls.append(_button(ACTION_DEACTIVATE, "Turn off GitHub"))
