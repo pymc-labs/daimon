@@ -10,7 +10,8 @@ The numbers are Slack's, from the modal-view reference
 (https://docs.slack.dev/reference/views/modal-views) and the modals guide
 (https://docs.slack.dev/surfaces/modals): 100 blocks per view, 24 characters
 for each of `title` / `close` / `submit`, 3,000 for `private_metadata`, 3,000
-for a section's text, and at most 3 views in one modal's stack.
+for a section's text, 3,000 for a plain-text input's `max_length`, and at
+most 3 views in one modal's stack.
 
 Pure — no I/O, no slack_sdk import.
 """
@@ -22,6 +23,7 @@ from typing import Any, Final
 
 __all__ = [
     "MAX_BLOCKS_PER_VIEW",
+    "MAX_PLAIN_TEXT_INPUT_CHARS",
     "MAX_PRIVATE_METADATA_CHARS",
     "MAX_SECTION_TEXT_CHARS",
     "MAX_TITLE_CHARS",
@@ -42,6 +44,10 @@ MAX_PRIVATE_METADATA_CHARS: Final = 3000
 #: Characters in a section block's `text`. Renderers clip to this themselves —
 #: a section that grows with an agent's key list is content, not a bug.
 MAX_SECTION_TEXT_CHARS: Final = 3000
+
+#: Largest `max_length` a `plain_text_input` may declare. A bigger value fails
+#: the whole `views.open` with `invalid_arguments`, so the form never opens.
+MAX_PLAIN_TEXT_INPUT_CHARS: Final = 3000
 
 _ELLIPSIS: Final = "…"
 
