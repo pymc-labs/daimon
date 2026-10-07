@@ -3,7 +3,8 @@ config:
   type: cloud
   packages:
     type: packages
-    apt: []
+    apt:
+      - gh
     # `typst` ships the compiler as a prebuilt wheel, so this costs seconds at
     # environment build rather than a Rust rebuild per session (`cargo install
     # typst-cli` would). The artifact-style skill bundles the PyMC report class
