@@ -481,11 +481,13 @@
     }),
     'archive_thread': dict({
       'description': '''
-        Archive a Discord thread you opened with create_thread.
+        Archive a Discord thread you opened, with create_thread or from a mention.
         
         Its messages stay readable and a new post reopens it. Use it for a
-        finished or abandoned thread of yours that others wrote in. Pass
-        origin_context_id. Discord-only: Slack threads cannot be archived.
+        finished or abandoned thread of yours that others wrote in. A thread
+        opened from someone's mention can be archived only when that person
+        or a server admin asks. Pass origin_context_id. Discord-only: Slack
+        threads cannot be archived.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2130,11 +2132,12 @@
     }),
     'delete_message': dict({
       'description': '''
-        Delete one message you posted with send_message or create_thread.
+        Delete one message you posted, or on Discord one of your replies or status cards.
         
-        Use it for your own stale or failed posts, one message per call.
-        The same rules as edit_message: only your own posts, pass
-        origin_context_id, the same limits and the same refused channels.
+        Use it for your own stale, empty or failed posts, one message per
+        call. The same rules as edit_message: only your own posts and
+        replies, pass origin_context_id, the same limits and the same refused
+        channels.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2247,8 +2250,12 @@
     }),
     'delete_thread': dict({
       'description': '''
-        Remove your own messages from a thread you opened with create_thread.
+        Remove your own messages from a thread you opened.
         
+        Discord: a thread from create_thread or from a mention (the latter
+        only when the person who mentioned you or a server admin asks); your
+        posts, replies and status cards go, except the running turn's and
+        replies to someone the person asking cannot speak for.
         Discord keeps the thread and everyone else's messages. Slack refuses
         a thread with other people's replies. Reads at most 50 messages.
         Each deletion is checked, audited and counted against the 10 per turn
@@ -2374,11 +2381,15 @@
     }),
     'edit_message': dict({
       'description': '''
-        Replace the text of a message you posted with send_message or create_thread.
+        Replace the text of a message you posted.
         
         Use it to correct or update your own post instead of posting again.
-        Only your own posts: a person's message, another agent's, another
-        bot's, or your normal chat replies are refused. channel_id is where
+        Your own posts are those you sent with send_message or create_thread
+        and, on Discord, your chat replies and status cards (a status card's
+        embed is replaced by the new text). A person's message, another
+        agent's or another bot's is refused. A reply or card is refused while
+        its turn is still running, and unless the person asking started that
+        turn, opened the thread, or is a server admin. channel_id is where
         the message is (Discord: the thread id for a message in a thread;
         Slack: the channel id, and message_id is the message ts). Pass this
         turn's origin_context_id. Limited to 10 edits or deletes per turn and

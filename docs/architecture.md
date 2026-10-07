@@ -1474,7 +1474,19 @@ only individually recorded own messages and keeps the thread, including human
 replies arriving mid-call. Slack also checks, audits and counts each deletion,
 and stops with partial progress on refusal. An agent may tidy only posts in
 `agent_posted_messages` under its own agent id, which `send_message` and
-`create_thread` write at send time. `daimon audit prune` also removes those
+`create_thread` write at send time (`source='tool'`). On Discord the adapter
+also records the status card, answer chunks and in-thread notices of mention and
+continuation turns (not turn error notices, setup-wizard turns or session-output
+files)
+(`source='turn'`, with the turn's card intent and the requesting user) and the
+thread it opens from a mention (`source='auto_thread'`, with the user who
+mentioned it), under the turn agent's derived id. A turn post may be tidied
+only once its card intent is retired, and only for the user who started that
+turn, the user who opened the auto-thread it is in with the same agent, or a server
+admin; a turn row must name its turn (a CHECK enforces it) and erasure clears
+the requester id;
+archiving or clearing an auto-opened thread takes its opener or a server
+admin. `daimon audit prune` also removes those
 records past the retention, and account erasure clears `content_hmac`.
 The policy remains synchronous and does no I/O outside an MCP audit scope; the
 separate hub OAuth applications (`/discord/mcp` and `/slack/mcp`, which use

@@ -118,6 +118,16 @@ async def retire_turn_card_intent(
     return cast(CursorResult[object], result).rowcount == 1
 
 
+async def turn_card_intent_is_active(session: AsyncSession, *, id: uuid.UUID) -> bool:
+    """Whether the turn behind this intent is still running.
+
+    An intent is retired when its turn reaches a terminal state, and retired
+    rows are pruned later, so a missing row means a finished turn.
+    """
+    status = await session.scalar(select(TurnCardIntent.status).where(TurnCardIntent.id == id))
+    return status in ("prepared", "posted")
+
+
 async def list_recoverable_turn_card_intents(
     session: AsyncSession,
     *,

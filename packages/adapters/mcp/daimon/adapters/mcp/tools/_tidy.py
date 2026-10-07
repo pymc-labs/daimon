@@ -5,12 +5,20 @@ Ownership: a message is the calling agent's own only when
 `agent_posted_messages` says this agent posted it. `send_message` and
 `create_thread` write that row at send time (`record_agent_posts`), keyed by
 the executing agent (`chat_agent_id` for a chat turn, `agent_id` for an
-agent key). Anything else in a channel — a person's message, another
-agent's post, another bot's, daimon's own turn replies, status cards,
-credential cards and support-escalation posts — has no such row for this
-agent and is refused. The platform side is checked too: on Discord the
+agent key). On Discord the adapter also writes one for each status card,
+answer and notice a turn posts (`source='turn'`) and for the thread it opens
+from a mention (`source='auto_thread'`), keyed by the turn's agent. Anything
+else in a channel — a person's message, another agent's post, another
+bot's, credential cards and support-escalation posts — has no such row for
+this agent and is refused. The platform side is checked too: on Discord the
 message must be authored by daimon's bot user; Slack lets a bot token edit
 and delete only its own messages.
+
+A turn's posts belong to a conversation, so two more rules apply to them
+(`conversation_refusal`): the turn must be over (its status card intent is
+retired), and the person asking must be the one who started that turn, the
+one whose mention opened the thread, or a server admin. Archiving or
+deleting an auto-opened thread takes the person who opened it or an admin.
 
 Every action is decided at call time with a fresh policy: the caller's own
 platform permission to post there, `require_channel_writable`
@@ -72,6 +80,7 @@ from daimon.core.stores.agent_posts import (
     record_post,
     set_post_hash,
 )
+from daimon.core.stores.turn_card_intents import turn_card_intent_is_active
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, SecretStr
 
@@ -86,8 +95,16 @@ _ESCALATION_MSG = (
     "daimon does not edit or delete them. Tell the caller. Do not retry."
 )
 _NOT_POSTED_MSG = (
-    "this message was not posted by you through send_message or create_thread, so you "
-    "cannot edit or delete it. You can only tidy your own posts. Do not retry."
+    "this message was not posted by you, so you cannot edit or delete it. You can only "
+    "tidy your own posts, replies and status cards. Do not retry."
+)
+_TURN_RUNNING_MSG = (
+    "this message belongs to a turn that is still running, so it cannot be changed yet. "
+    "Do not retry in this turn."
+)
+_NOT_CONVERSATION_OWNER_MSG = (
+    "only the person who started this conversation, or a server admin, can have it "
+    "tidied. Tell the caller. Do not retry."
 )
 _OTHER_AGENT_MSG = (
     "another agent posted this message, so you cannot edit or delete it. Do not retry."
@@ -108,7 +125,14 @@ _LIMIT_MSG = {
     ),
 }
 
-RefusalReason = Literal["not_posted_by_agent", "other_agent", "not_bot_author", "not_own_thread"]
+RefusalReason = Literal[
+    "not_posted_by_agent",
+    "other_agent",
+    "not_bot_author",
+    "not_own_thread",
+    "turn_in_progress",
+    "not_conversation_owner",
+]
 
 
 class TidyResult(BaseModel):
@@ -247,6 +271,8 @@ async def refuse(
         "not_own_thread": _NOT_POSTED_MSG,
         "other_agent": _OTHER_AGENT_MSG,
         "not_bot_author": _NOT_BOT_MSG,
+        "turn_in_progress": _TURN_RUNNING_MSG,
+        "not_conversation_owner": _NOT_CONVERSATION_OWNER_MSG,
     }[reason]
     return ToolError(message)
 
@@ -290,6 +316,70 @@ async def require_own_post(
             target=target,
         )
     return post
+
+
+async def conversation_refusal(
+    runtime: McpRuntime,
+    ctx: TidyContext,
+    post: AgentPostRow,
+    *,
+    requester_is_admin: bool,
+    thread_opener_id: str | None = None,
+) -> RefusalReason | None:
+    """Why a turn or auto-thread post may not be tidied for this caller, or None.
+
+    Tool posts (`source='tool'`) pass: #383's rules cover them. A turn post
+    is refused while its turn is still running, so the lifecycle never edits
+    a message tidy removed. Then the person asking (the caller's platform
+    user) must be the one who started that turn or opened that thread, the
+    one whose mention opened the thread the message is in
+    (``thread_opener_id``), or a server admin.
+    """
+    if post.source == "tool":
+        return None
+    if post.source == "turn":
+        # A turn row without its turn cannot prove the turn is over: refuse.
+        if post.turn_card_intent_id is None:
+            return "turn_in_progress"
+        async with runtime.session_factory() as session:
+            running = await turn_card_intent_is_active(session, id=post.turn_card_intent_id)
+        if running:
+            return "turn_in_progress"
+    if requester_is_admin:
+        return None
+    requester = ctx.actor.platform_user_id
+    if requester is not None and requester in (post.requester_platform_user_id, thread_opener_id):
+        return None
+    return "not_conversation_owner"
+
+
+async def require_conversation_rights(
+    runtime: McpRuntime,
+    ctx: TidyContext,
+    post: AgentPostRow,
+    *,
+    tool_name: str,
+    operation: TidyOperation,
+    requester_is_admin: bool,
+    thread_opener_id: str | None = None,
+) -> None:
+    """`conversation_refusal`, written as a `denied` audit row and raised."""
+    reason = await conversation_refusal(
+        runtime,
+        ctx,
+        post,
+        requester_is_admin=requester_is_admin,
+        thread_opener_id=thread_opener_id,
+    )
+    if reason is not None:
+        raise await refuse(
+            runtime,
+            ctx,
+            tool_name=tool_name,
+            operation=operation,
+            reason=reason,
+            target=TidyTarget(channel_id=post.channel_id, message_id=post.message_id),
+        )
 
 
 async def begin_action(

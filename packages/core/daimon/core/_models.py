@@ -2612,11 +2612,14 @@ class SecurityAuditEvent(Base):
 
 
 class AgentPostedMessage(Base):
-    """A message or thread an agent posted through the channel tools.
+    """A message or thread an agent posted.
 
-    Written at send time by `send_message` and `create_thread`; the channel
-    tidy tools edit or delete only what this table says the calling agent
-    posted. Holds ids and a keyed HMAC of the text, never the text itself.
+    Written at send time by `send_message` and `create_thread` (`source='tool'`),
+    and by the Discord adapter for a turn's status cards, answers and notices
+    (`source='turn'`) and the thread it opens from a mention
+    (`source='auto_thread'`). The channel tidy tools edit or delete only what
+    this table says the calling agent posted. Holds ids and a keyed HMAC of
+    the text, never the text itself.
     `channel_id` is where the message lives (a Discord thread id for a
     message in a thread); a Discord thread is its own row with
     `kind='thread'`, the parent channel as `channel_id` and the thread id as
@@ -2633,6 +2636,13 @@ class AgentPostedMessage(Base):
             name="uq_agent_posted_messages_target",
         ),
         CheckConstraint("kind IN ('message', 'thread')", name="ck_agent_posted_messages_kind"),
+        CheckConstraint(
+            "source IN ('tool', 'turn', 'auto_thread')", name="ck_agent_posted_messages_source"
+        ),
+        CheckConstraint(
+            "source <> 'turn' OR turn_card_intent_id IS NOT NULL",
+            name="ck_agent_posted_messages_turn_intent",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -2649,6 +2659,12 @@ class AgentPostedMessage(Base):
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     content_hmac: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'tool'"))
+    # The person whose message started the turn (`turn`) or whose mention
+    # opened the thread (`auto_thread`). NULL for tool posts.
+    requester_platform_user_id: Mapped[str | None] = mapped_column(Text)
+    # The turn that posted a `turn` row; no FK, intents are pruned once retired.
+    turn_card_intent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     posted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

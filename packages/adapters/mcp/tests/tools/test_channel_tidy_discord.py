@@ -109,6 +109,8 @@ class _FakeDiscord:
     next_id: int = 1_400_000_000_000_000_000
     thread_archived: bool = False
     thread_deleted: bool = False
+    # The caller's permissions, through the @everyone role.
+    everyone_perms: int = _ALL_PERMS
     # Test hooks: run when a message is fetched; raise on a message delete or edit.
     on_fetch: Callable[[], Awaitable[None]] | None = None
     fail_with: BaseException | None = None
@@ -204,7 +206,7 @@ class _FakeDiscord:
                 {
                     "id": _GUILD,
                     "name": "@everyone",
-                    "permissions": str(_ALL_PERMS),
+                    "permissions": str(self.everyone_perms),
                     "position": 0,
                     "color": 0,
                     "hoist": False,
@@ -256,6 +258,7 @@ class _FakeDiscord:
                 raise self.fail_with
             if method == "PATCH":
                 message["content"] = kwargs["json"]["content"]
+                message["embeds"] = kwargs["json"].get("embeds", message["embeds"])
                 return message
             if method == "DELETE":
                 del self.messages[tail]
