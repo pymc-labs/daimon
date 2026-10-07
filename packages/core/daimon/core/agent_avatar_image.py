@@ -26,6 +26,8 @@ def normalize_avatar_image(data: bytes) -> bytes:
             if image.format in {"JPEG", "MPO"}:
                 image.seek(0)
                 image.draft("RGB", (512, 512))
+            if image.mode not in {"RGB", "RGBA", "L", "LA", "P"}:
+                image = image.convert("RGBA")
             image.thumbnail((512, 512), Image.Resampling.LANCZOS)
             oriented = ImageOps.exif_transpose(image)
             rgba = oriented.convert("RGBA")

@@ -16,7 +16,6 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
-    op.add_column("security_audit_events", sa.Column("agent_name", sa.Text(), nullable=True))
     op.create_table(
         "agent_avatars",
         sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -39,4 +38,3 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("agent_avatars")
-    op.drop_column("security_audit_events", "agent_name")
