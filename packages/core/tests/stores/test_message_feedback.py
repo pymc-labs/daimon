@@ -448,3 +448,80 @@ async def test_count_for_account_matches_subsequent_delete(
     )
 
     assert count_before == deleted == 2
+
+
+async def _down_vote(session: AsyncSession, *, message_id: str) -> uuid.UUID:
+    tenant = await make_tenant(session)
+    voted = await store.record_vote(
+        session,
+        tenant_id=tenant.id,
+        platform="slack",
+        message_id=message_id,
+        channel_id="C1",
+        platform_user_id="voter-1",
+        account_id=None,
+        ma_session_id=None,
+        vote="down",
+    )
+    return voted.row.id
+
+
+async def test_attach_feedback_details_stores_text_and_reasons(db_session: AsyncSession) -> None:
+    row_id = await _down_vote(db_session, message_id="msg-d1")
+
+    updated = await store.attach_feedback_details(
+        db_session,
+        feedback_id=row_id,
+        platform_user_id="voter-1",
+        feedback_text="wrong totals",
+        feedback_reasons=["inaccurate", "incomplete"],
+    )
+
+    assert updated is not None
+    assert updated.feedback_text == "wrong totals"
+    assert updated.feedback_reasons == ["inaccurate", "incomplete"]
+
+
+async def test_attach_feedback_details_replaces_both_and_stores_no_reasons_as_null(
+    db_session: AsyncSession,
+) -> None:
+    row_id = await _down_vote(db_session, message_id="msg-d2")
+    await store.attach_feedback_details(
+        db_session,
+        feedback_id=row_id,
+        platform_user_id="voter-1",
+        feedback_text="first",
+        feedback_reasons=["too_slow"],
+    )
+
+    updated = await store.attach_feedback_details(
+        db_session,
+        feedback_id=row_id,
+        platform_user_id="voter-1",
+        feedback_text=None,
+        feedback_reasons=[],
+    )
+
+    assert updated is not None
+    assert updated.feedback_text is None
+    assert updated.feedback_reasons is None
+
+
+async def test_attach_feedback_details_for_another_user_writes_nothing(
+    db_session: AsyncSession,
+) -> None:
+    row_id = await _down_vote(db_session, message_id="msg-d3")
+
+    result = await store.attach_feedback_details(
+        db_session,
+        feedback_id=row_id,
+        platform_user_id="someone-else",
+        feedback_text="hijack",
+        feedback_reasons=["other"],
+    )
+
+    assert result is None
+    orm = (
+        await db_session.execute(select(MessageFeedback).where(MessageFeedback.id == row_id))
+    ).scalar_one()
+    assert orm.feedback_text is None and orm.feedback_reasons is None

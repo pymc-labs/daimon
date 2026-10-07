@@ -174,13 +174,38 @@ a backtick a link or bare URL could take), the text is escaped as prose and its
 for notifications, escapes code as well.
 
 
+### Feedback on answers
+
+Every final answer carries 👍 and 👎 buttons on its last message. A turn that only
+ran tools (a file written, a chart posted) carries them on its finished status card.
+👍 records the vote and thanks the person with a message only they see.
+
+👎 records the vote and opens a **What went wrong?** form. The form offers optional
+reasons (wrong or inaccurate, didn't do what I asked, incomplete or cut off, too slow,
+something else) and optional free text, and needs at least one. Every 👎 click opens
+it, so a person can come back and add details. If Slack doesn't open the form, they
+get a private **Tell us what went wrong** button that opens it. Sending the form
+records a down-vote on that answer with the reasons and text. Each person has one
+row per answer, so a double click or a second form replaces the first rather than
+adding another.
+
+Who may vote: anyone who could start a turn there (the invoker allowlist and the
+channel's rules), checked when the vote is recorded and again on send. Anyone else is
+told they can't, and nothing is recorded. External Slack Connect members are refused.
+The text is stored only on the feedback row. Logs carry the row id and the reason
+codes. Deleting your data with `/privacy` removes the row.
+
+Emoji reactions (a :-1: on the message) are not read: that would need the
+`reactions:read` scope and a reinstall of every workspace.
+
 ### Ask a human
 
 Set `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` to show an **Ask a human** button
-next to the 👍/👎 buttons on every final answer. It opens a short form; sending it
+next to the 👍/👎 buttons on every final answer (and on a tool-only turn's status card). It opens a short form; sending it
 spends one of the person's support requests (`DAIMON_SUPPORT__CREDITS_PER_USER`,
 default 20, counted per person per workspace and shared with Discord's ledger) and
-posts the request to that channel. Opening the form spends nothing, and asking twice
+posts the request to that channel. The click shows a "Checking…" form at once and
+then the note form, or the reason there is none. Opening the form spends nothing, and asking twice
 on the same answer (a double click, two open forms, a Slack retry) records and posts
 once.
 

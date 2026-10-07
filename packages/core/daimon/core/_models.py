@@ -1840,6 +1840,9 @@ class MessageFeedback(Base):
     ma_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     vote: Mapped[str] = mapped_column(Text, nullable=False)
     feedback_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Reason codes picked in the "What went wrong?" form
+    # (`daimon.core.message_feedback.FEEDBACK_REASONS`); NULL when none were.
+    feedback_reasons: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -880,6 +880,7 @@ class MessageFeedbackRow(BaseModel):
     ma_session_id: str | None
     vote: str
     feedback_text: str | None
+    feedback_reasons: list[str] | None
     created_at: datetime
     updated_at: datetime
 

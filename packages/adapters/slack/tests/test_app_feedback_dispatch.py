@@ -18,7 +18,11 @@ from unittest.mock import MagicMock, patch
 import httpx
 from anthropic import AsyncAnthropic
 from daimon.adapters.slack.app import SlackApp
-from daimon.adapters.slack.feedback import FEEDBACK_TEXT_CALLBACK_ID, FEEDBACK_VOTE_UP
+from daimon.adapters.slack.feedback import (
+    FEEDBACK_DETAILS_ACTION_ID,
+    FEEDBACK_TEXT_CALLBACK_ID,
+    FEEDBACK_VOTE_UP,
+)
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.support_escalation import ASK_HUMAN_ACTION_ID, SUPPORT_CALLBACK_ID
 from pydantic import SecretStr
@@ -123,13 +127,37 @@ async def test_feedback_vote_block_action_acks_then_spawns_handler() -> None:
     assert spawned == [FEEDBACK_VOTE_UP], "handle_feedback_vote must be spawned for the vote"
 
 
+async def test_feedback_details_button_acks_then_spawns_its_handler() -> None:
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+    spawned: list[str] = []
+    request = _vote_request()
+    request.payload["actions"] = [{"action_id": FEEDBACK_DETAILS_ACTION_ID, "value": "{}"}]
+
+    async def _fake_details(runtime: Any, payload: Any) -> None:
+        spawned.append(str(payload["actions"][0]["action_id"]))
+
+    async def _fake_vote(runtime: Any, payload: Any) -> None:
+        spawned.append("vote")
+
+    with (
+        patch("daimon.adapters.slack.app.handle_feedback_details_click", new=_fake_details),
+        patch("daimon.adapters.slack.app.handle_feedback_vote", new=_fake_vote),
+    ):
+        await app.on_request(fake_client, request)  # type: ignore[arg-type]
+        await _drain(app)
+
+    assert fake_client.call_log[0] == "send_socket_mode_response"
+    assert spawned == [FEEDBACK_DETAILS_ACTION_ID], "the details button is not a vote"
+
+
 async def test_feedback_text_submission_valid_acks_empty_and_spawns_run() -> None:
     fake_client = _FakeSocketClient()
     app = _make_app()
     ran: list[str] = []
 
     async def _fake_run(runtime: Any, **kwargs: Any) -> None:
-        ran.append(str(kwargs["text"]))
+        ran.append(str(kwargs["decision"].text))
 
     with patch("daimon.adapters.slack.app.run_feedback_text_submission", new=_fake_run):
         await app.on_request(fake_client, _text_submission_request("it was wrong"))  # type: ignore[arg-type]
@@ -147,7 +175,7 @@ async def test_feedback_text_submission_whitespace_acks_errors_and_spawns_nothin
     ran: list[str] = []
 
     async def _fake_run(runtime: Any, **kwargs: Any) -> None:
-        ran.append(str(kwargs["text"]))
+        ran.append(str(kwargs["decision"].text))
 
     with patch("daimon.adapters.slack.app.run_feedback_text_submission", new=_fake_run):
         await app.on_request(fake_client, _text_submission_request("   "))  # type: ignore[arg-type]
