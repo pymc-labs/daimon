@@ -174,10 +174,7 @@ async def _replace_env_file(
     async with sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
     if snapshot.github_mode == "app":
-        rows = sorted(
-            (row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")),
-            key=lambda row: row.key,
-        )
+        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
 
     file_id = await upload_env_file(anthropic, sessionmaker, rows=rows) if rows else None
     cleared = snapshot.model_copy(

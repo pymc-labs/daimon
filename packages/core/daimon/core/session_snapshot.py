@@ -82,8 +82,6 @@ _IDENTITY_FIELDS = (
     "system_sha256",
     "skills_sha256",
     "environment_id",
-    "github_mode",
-    "repo_urls",
     "repo_url",
     "repo_branch",
     "memory_store_id",
@@ -176,7 +174,10 @@ def hash_env_bytes(content: bytes) -> str:
 
 
 def fingerprint_identity(snapshot: SessionSnapshot) -> str:
-    return _fingerprint(snapshot, _IDENTITY_FIELDS)
+    fields = _IDENTITY_FIELDS
+    if snapshot.github_mode == "app":
+        fields = (*fields, "github_mode", "repo_urls")
+    return _fingerprint(snapshot, fields)
 
 
 def fingerprint_mutable(snapshot: SessionSnapshot) -> str:

@@ -72,7 +72,7 @@ from daimon.core.session_seal import origin_stamp
 from daimon.core.session_snapshot import session_mcp_servers, session_skills, session_tools
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.github_access import get_agent_mode
-from daimon.core.stores.github_issued_tokens import register_headless_app_session
+from daimon.core.stores.github_issued_tokens import register_app_session_vault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -611,7 +611,17 @@ async def create_session(
                 resources=resources if resources else omit,
             )
             if app_access is not None:
-                assert session_factory is not None
+                assert (
+                    session_factory is not None and tenant_id is not None and vault_id is not None
+                )
+                async with session_factory.begin() as session:
+                    await register_app_session_vault(
+                        session,
+                        session_id=created.id,
+                        tenant_id=tenant_id,
+                        vault_id=vault_id,
+                        is_headless=requester_is_headless,
+                    )
                 async with httpx.AsyncClient() as app_client:
                     await finish_app_delivery(
                         session_factory,
@@ -620,12 +630,6 @@ async def create_session(
                         provisional_session_id=provisional_session_id,
                         session_id=created.id,
                     )
-                if requester_is_headless:
-                    assert vault_id is not None and tenant_id is not None
-                    async with session_factory.begin() as session:
-                        await register_headless_app_session(
-                            session, session_id=created.id, tenant_id=tenant_id, vault_id=vault_id
-                        )
             return created
         except BaseException:
             if created is not None and app_mode:

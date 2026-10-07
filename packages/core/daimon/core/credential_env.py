@@ -117,10 +117,7 @@ async def upload_env_and_mount(
     async with session_factory() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_id)
     if exclude_github:
-        rows = sorted(
-            (row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")),
-            key=lambda row: row.key,
-        )
+        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
     if not rows:
         return None
 

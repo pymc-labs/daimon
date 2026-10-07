@@ -671,6 +671,8 @@ async def _refresh_github_app_sessions(
         snapshot = item.mapping.effective_config
         if snapshot is None or snapshot.vault_id is None:
             continue
+        if item.mapping.active_turn_message_id is not None:
+            continue
         due_for_expiry = item.expires_at <= now + timedelta(minutes=15)
         last_check = _last_app_access_checks.get(item.mapping.ma_session_id)
         due_for_access = last_check is None or last_check <= now - timedelta(minutes=5)
@@ -754,8 +756,8 @@ async def _close_github_app_sessions(
                     )
                 if item.vault_id is not None:
                     await anthropic_client.beta.vaults.archive(item.vault_id)
-                    async with sm.begin() as session:
-                        await mark_headless_app_session_closed(session, session_id=item.session_id)
+                async with sm.begin() as session:
+                    await mark_headless_app_session_closed(session, session_id=item.session_id)
             except Exception:
                 log.exception(
                     "scheduler.github_app_session_close.failed",

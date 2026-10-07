@@ -7,11 +7,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from cryptography.fernet import MultiFernet
-from daimon.core._models import GitHubAppHeadlessSession, GitHubIssuedToken, ThreadSession
+from daimon.core._models import GitHubAppSessionVault, GitHubIssuedToken, ThreadSession
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.stores.domain import ThreadSessionRow
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import or_, select, text, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -292,14 +292,32 @@ async def select_abandoned_pending_tokens(
 async def register_headless_app_session(
     session: AsyncSession, *, session_id: str, tenant_id: uuid.UUID, vault_id: str
 ) -> None:
+    await register_app_session_vault(
+        session, session_id=session_id, tenant_id=tenant_id, vault_id=vault_id, is_headless=True
+    )
+
+
+async def register_app_session_vault(
+    session: AsyncSession,
+    *,
+    session_id: str,
+    tenant_id: uuid.UUID,
+    vault_id: str,
+    is_headless: bool = False,
+) -> None:
     session.add(
-        GitHubAppHeadlessSession(session_id=session_id, tenant_id=tenant_id, vault_id=vault_id)
+        GitHubAppSessionVault(
+            session_id=session_id,
+            tenant_id=tenant_id,
+            vault_id=vault_id,
+            is_headless=is_headless,
+        )
     )
     await session.flush()
 
 
 async def finish_headless_app_session(session: AsyncSession, *, session_id: str) -> str | None:
-    row = await session.get(GitHubAppHeadlessSession, session_id, with_for_update=True)
+    row = await session.get(GitHubAppSessionVault, session_id, with_for_update=True)
     if row is None:
         return None
     if row.finished_at is None:
@@ -309,7 +327,7 @@ async def finish_headless_app_session(session: AsyncSession, *, session_id: str)
 
 
 async def mark_headless_app_session_closed(session: AsyncSession, *, session_id: str) -> None:
-    row = await session.get(GitHubAppHeadlessSession, session_id, with_for_update=True)
+    row = await session.get(GitHubAppSessionVault, session_id, with_for_update=True)
     if row is not None and row.closed_at is None:
         row.closed_at = datetime.now(UTC)
         await session.flush()
@@ -372,45 +390,25 @@ async def list_live_app_sessions(session: AsyncSession) -> list[LiveAppSession]:
 async def list_closed_app_sessions(
     session: AsyncSession, *, now: datetime
 ) -> list[ClosedAppSession]:
-    """Delivered tokens whose MA mapping ended, after a one-minute create grace."""
-    ids = await session.scalars(
-        select(GitHubIssuedToken.session_id)
-        .where(
-            GitHubIssuedToken.status == "delivered",
-            GitHubIssuedToken.expires_at <= now + timedelta(minutes=54),
-        )
-        .distinct()
-    )
+    """App vaults whose headless run or mapped session ended."""
     result: list[ClosedAppSession] = []
-    headless_rows = await session.scalars(
-        select(GitHubAppHeadlessSession).where(
-            or_(
-                GitHubAppHeadlessSession.finished_at.is_not(None),
-                GitHubAppHeadlessSession.created_at <= now - timedelta(minutes=46),
-            ),
-            GitHubAppHeadlessSession.closed_at.is_(None),
-        )
+    vaults = await session.scalars(
+        select(GitHubAppSessionVault).where(GitHubAppSessionVault.closed_at.is_(None))
     )
-    for row in headless_rows:
-        result.append(ClosedAppSession(session_id=row.session_id, vault_id=row.vault_id))
-    for session_id in ids:
-        headless = await session.get(GitHubAppHeadlessSession, session_id)
-        if headless is not None:
+    for row in vaults:
+        if row.is_headless:
+            if row.finished_at is not None or row.created_at <= now - timedelta(minutes=46):
+                result.append(ClosedAppSession(session_id=row.session_id, vault_id=row.vault_id))
             continue
         mapping = await session.scalar(
             select(ThreadSession)
-            .where(ThreadSession.ma_session_id == session_id)
+            .where(ThreadSession.ma_session_id == row.session_id)
             .order_by(ThreadSession.created_at.desc())
             .limit(1)
         )
         if mapping is not None and mapping.status == "live":
             continue
-        mapped = ThreadSessionRow.model_validate(mapping) if mapping is not None else None
-        vault_id = mapped.effective_config.vault_id if mapped and mapped.effective_config else None
-        result.append(
-            ClosedAppSession(
-                session_id=session_id,
-                vault_id=vault_id,
-            )
-        )
+        if mapping is None and row.created_at > now - timedelta(minutes=1):
+            continue
+        result.append(ClosedAppSession(session_id=row.session_id, vault_id=row.vault_id))
     return result

@@ -184,8 +184,9 @@ Agents remain in legacy GitHub mode until a server admin stages grants with
 `daimon github grants stage --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id> --baseline read --ceiling read`
 and runs `daimon github grants activate --tenant <workspace-uuid> --agent <agent-uuid>`.
 Use `grants list`, `remove`, and `deactivate` with the same tenant and agent options.
-While app mode is active, `grants stage` updates a grant immediately and closes
-the agent's live sessions so the next turn uses the new access.
+While app mode is active, `grants stage` updates access immediately. Existing
+sessions rotate tokens in place when the repository set is unchanged; a changed
+repository set closes the sessions so the next turn mounts the new checkouts.
 
 ## Microsoft Teams (optional)
 

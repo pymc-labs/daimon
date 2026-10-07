@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from cryptography.fernet import Fernet
+from daimon.core import github_app_session
 from daimon.core._models import (
     Account,
     AccountGitHubLink,
@@ -22,8 +23,10 @@ from daimon.core._models import (
     PlatformPrincipal,
     Tenant,
     TenantGitHubRepo,
+    ThreadSession,
 )
-from daimon.core.github_app_session import close_headless_app_session
+from daimon.core.config import GithubAppSettings
+from daimon.core.github_app_session import AppSessionAccess, close_headless_app_session
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.github_requester_access import (
     PermissionCache,
@@ -416,6 +419,74 @@ async def test_bad_refresh_token_does_not_break_a_rotated_link(
     assert refreshes == 1
     async with sessionmaker() as session:
         row = await github_links.get_user(session, github_user_id=681)
+    assert row is not None and row.status == "active"
+    assert row.token_generation == 2 and row.link_generation == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_refresh_does_not_break_a_rotated_link(
+    db_engine: AsyncEngine,
+    db_nullpool_engine: AsyncEngine,
+    db_clean: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
+    probe_sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    async with sessionmaker.begin() as session:
+        session.add(
+            GitHubUserLink(
+                github_user_id=682,
+                login="alex",
+                encrypted_access_token=encrypt_token(fernet, "old"),
+                encrypted_refresh_token=encrypt_token(fernet, "refresh-old"),
+                access_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+                refresh_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+            )
+        )
+
+    original_bump = github_links.bump_link_generation
+    raced = False
+
+    async def bump_with_race(session: AsyncSession, **kwargs: object):
+        nonlocal raced
+        if not raced:
+            raced = True
+            async with probe_sessionmaker.begin() as probe:
+                assert await github_links.rotate_user_tokens(
+                    probe,
+                    github_user_id=682,
+                    expected_generation=1,
+                    encrypted_access_token=encrypt_token(fernet, "new"),
+                    encrypted_refresh_token=encrypt_token(fernet, "refresh-new"),
+                    access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    refresh_expires_at=datetime.now(UTC) + timedelta(days=1),
+                )
+        return await original_bump(session, **kwargs)
+
+    monkeypatch.setattr("daimon.core.github_requester_access.bump_link_generation", bump_with_race)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer new"
+        return httpx.Response(
+            200, json={"repositories": [{"id": 101, "permissions": {"pull": True}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        permissions = await linked_permissions(
+            sessionmaker,
+            client,
+            user_id=682,
+            installation_id=88,
+            fernet=fernet,
+            client_id="client",
+            client_secret="secret",
+            cache=PermissionCache(),
+        )
+    assert permissions == {101: "read"}
+    assert raced
+    async with sessionmaker() as session:
+        row = await github_links.get_user(session, github_user_id=682)
     assert row is not None and row.status == "active"
     assert row.token_generation == 2 and row.link_generation == 1
 
@@ -847,3 +918,83 @@ async def test_headless_app_cleanup_archives_vault_without_grants(
             await github_issued_tokens.list_closed_app_sessions(session, now=datetime.now(UTC))
             == []
         )
+
+
+@pytest.mark.asyncio
+async def test_mapped_app_vault_closes_without_issued_tokens(db_session: AsyncSession) -> None:
+    tenant_id = uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="mapped-zero"))
+    await db_session.flush()
+    await github_issued_tokens.register_app_session_vault(
+        db_session,
+        session_id="mapped-zero-grants",
+        tenant_id=tenant_id,
+        vault_id="mapped-vault",
+    )
+    mapping = ThreadSession(
+        tenant_id=tenant_id,
+        platform="discord",
+        thread_id="mapped-zero-thread",
+        ma_session_id="mapped-zero-grants",
+        status="live",
+    )
+    db_session.add(mapping)
+    await db_session.flush()
+    assert (
+        await github_issued_tokens.list_closed_app_sessions(db_session, now=datetime.now(UTC)) == []
+    )
+    mapping.status = "dead"
+    await db_session.flush()
+    closed = await github_issued_tokens.list_closed_app_sessions(db_session, now=datetime.now(UTC))
+    assert [(row.session_id, row.vault_id) for row in closed] == [
+        ("mapped-zero-grants", "mapped-vault")
+    ]
+    await github_issued_tokens.mark_headless_app_session_closed(
+        db_session, session_id="mapped-zero-grants"
+    )
+    assert (
+        await github_issued_tokens.list_closed_app_sessions(db_session, now=datetime.now(UTC)) == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_app_rotation_keeps_old_session_when_first_resource_update_fails(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    access = AppSessionAccess(
+        resources=(
+            {
+                "type": "github_repository",
+                "url": "https://github.com/owner/repo",
+                "authorization_token": "new-token",
+            },
+        ),
+        tokens=(),
+        working_token=None,
+    )
+    monkeypatch.setattr(github_app_session, "prepare_app_access", AsyncMock(return_value=access))
+    revoke = AsyncMock()
+    monkeypatch.setattr(github_app_session, "revoke_app_access", revoke)
+    update = AsyncMock(side_effect=RuntimeError("resource update failed"))
+    archive = AsyncMock()
+    anthropic = SimpleNamespace(
+        beta=SimpleNamespace(
+            sessions=SimpleNamespace(resources=SimpleNamespace(update=update), archive=archive)
+        )
+    )
+    with pytest.raises(RuntimeError, match="resource update failed"):
+        await github_app_session.rotate_live_app_tokens(
+            anthropic,
+            db_session_factory,
+            session_id="existing-session",
+            tenant_id=uuid.uuid4(),
+            agent_id=uuid.uuid4(),
+            account_id=None,
+            is_external=True,
+            vault_id="existing-vault",
+            resource_ids={"https://github.com/owner/repo": "resource-1"},
+            config=GithubAppSettings(),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        )
+    archive.assert_not_awaited()
+    revoke.assert_awaited_once()

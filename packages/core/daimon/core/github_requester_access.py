@@ -222,12 +222,14 @@ async def _linked_permissions_once(
                     row.refresh_expires_at is not None
                     and row.refresh_expires_at <= datetime.now(UTC)
                 ):
-                    await bump_link_generation(
+                    broken = await bump_link_generation(
                         session,
                         github_user_id=user_id,
                         broken=True,
                         expected_token_generation=row.token_generation,
                     )
+                    if broken is None:
+                        raise _RefreshRace
                     cache.drop_user(user_id)
                     return {}
                 response = await client.post(

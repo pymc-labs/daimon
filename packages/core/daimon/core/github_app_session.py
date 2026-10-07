@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -415,7 +416,11 @@ async def revoke_app_access(
 
 
 async def add_app_credentials(
-    anthropic: AsyncAnthropic, *, vault_id: str, access: AppSessionAccess
+    anthropic: AsyncAnthropic,
+    *,
+    vault_id: str,
+    access: AppSessionAccess,
+    on_mutation: Callable[[], None] | None = None,
 ) -> None:
     desired = {issued.credential_name: issued.token for issued in access.tokens}
     if access.working_token is not None:
@@ -447,13 +452,19 @@ async def add_app_credentials(
                     "injection_location": {"header": True, "body": False},
                 },
             )
+        if on_mutation is not None:
+            on_mutation()
     for name, credential_id in existing.items():
         if name not in desired:
             await anthropic.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
+            if on_mutation is not None:
+                on_mutation()
     if access.working_token is not None:
         await add_github_copilot_credential(
             anthropic, vault_id=vault_id, token=access.working_token
         )
+        if on_mutation is not None:
+            on_mutation()
     else:
         async for cred in anthropic.beta.vaults.credentials.list(vault_id=vault_id):
             if (
@@ -461,6 +472,8 @@ async def add_app_credentials(
                 and cred.auth.mcp_server_url == GITHUB_COPILOT_MCP_URL
             ):
                 await anthropic.beta.vaults.credentials.delete(cred.id, vault_id=vault_id)
+                if on_mutation is not None:
+                    on_mutation()
 
 
 async def finish_app_delivery(
@@ -581,6 +594,12 @@ async def rotate_live_app_tokens(
 ) -> None:
     """Refresh mounted clone resources and the session vault together."""
     provisional = f"pending:{uuid.uuid4()}"
+    swapped = False
+
+    def mark_swapped() -> None:
+        nonlocal swapped
+        swapped = True
+
     async with httpx.AsyncClient() as client:
         access = await prepare_app_access(
             sessionmaker,
@@ -609,7 +628,10 @@ async def rotate_live_app_tokens(
                     session_id=session_id,
                     authorization_token=resource["authorization_token"],
                 )
-            await add_app_credentials(anthropic, vault_id=vault_id, access=access)
+                swapped = True
+            await add_app_credentials(
+                anthropic, vault_id=vault_id, access=access, on_mutation=mark_swapped
+            )
             await finish_app_delivery(
                 sessionmaker,
                 client,
@@ -625,6 +647,9 @@ async def rotate_live_app_tokens(
                     now=datetime.now(UTC),
                 )
         except Exception:
-            await anthropic.beta.sessions.archive(session_id)
-            await revoke_app_access(sessionmaker, client, access)
+            try:
+                if swapped:
+                    await anthropic.beta.sessions.archive(session_id)
+            finally:
+                await revoke_app_access(sessionmaker, client, access)
             raise

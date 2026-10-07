@@ -178,10 +178,7 @@ async def _env_bytes_sha256(
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
         mode = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid)
     if mode == "app":
-        rows = sorted(
-            (row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")),
-            key=lambda row: row.key,
-        )
+        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
     if not rows:
         return None
     return hash_env_bytes(assemble_env_bytes(rows))

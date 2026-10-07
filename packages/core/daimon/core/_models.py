@@ -2584,14 +2584,15 @@ class GitHubIssuedToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class GitHubAppHeadlessSession(Base):
-    __tablename__ = "github_app_headless_sessions"
+class GitHubAppSessionVault(Base):
+    __tablename__ = "github_app_session_vaults"
 
     session_id: Mapped[str] = mapped_column(Text, primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
     )
     vault_id: Mapped[str] = mapped_column(Text)
+    is_headless: Mapped[bool] = mapped_column(Boolean, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
