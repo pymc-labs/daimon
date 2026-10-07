@@ -285,14 +285,26 @@ async def test_an_admin_whose_channel_files_are_refused_gets_the_enable_files_si
     assert _signed_target(offer) == GrantTarget(TEAM_GROUP_ID, CHANNEL), "for this channel"
 
 
+@pytest.mark.parametrize(
+    ("admin", "is_error", "posted"),
+    [(True, False, True), (False, False, False), (True, True, False)],
+    ids=["admin", "not-an-admin", "refused-call"],
+)
 async def test_the_agents_enable_files_call_posts_the_card_for_this_channel(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    admin: bool,
+    is_error: bool,
+    posted: bool,
 ) -> None:
     """Asked for files, the agent calls `enable_channel_files` (here through the search proxy).
 
     The card follows the answer though nothing was refused: files already work here.
+    Only for an admin, and only after a call that succeeded.
     """
-    teams = teams_settings(admins=(AAD_OBJECT_ID,), public_url="https://teams.example")
+    teams = teams_settings(
+        admins=(AAD_OBJECT_ID,) if admin else (), public_url="https://teams.example"
+    )
     anthropic = build_fake_anthropic(combine_handlers(_no_outputs, make_agent_env_echo_handler()))
     graph = _graph([], site=GRANTED_SITE)
     runtime = build_teams_runtime(
@@ -305,15 +317,18 @@ async def test_the_agents_enable_files_call_posts_the_card_for_this_channel(
         name="call_tool",
         input={"name": ENABLE_FILES_TOOL, "arguments": {}},
         mcp_server_name="daimon-mcp",
-        status="complete",
+        status="failed" if is_error else "complete",
+        is_error=is_error,
     )
     with patched_turns(tools=(asked,)) as turns:
         async with running_service(runtime, teams_api_fake) as service:
             await post_activity(service, _load("channel_attachments_reply"))
             await service.turns.drain(timeout=30)
 
-    [offer] = [text for text in _cards(teams_api_fake) if "Enable files" in text]
-    assert _signed_target(offer) == GrantTarget(TEAM_GROUP_ID, CHANNEL), "for this channel"
+    offers = [text for text in _cards(teams_api_fake) if "Enable files" in text]
+    assert len(offers) == posted
+    if posted:
+        assert _signed_target(offers[0]) == GrantTarget(TEAM_GROUP_ID, CHANNEL), "this channel"
     assert "files_hint" not in turns[0]["user_message"], "files work here: no hint"
 
 

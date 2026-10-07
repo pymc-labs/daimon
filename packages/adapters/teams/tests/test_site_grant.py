@@ -173,6 +173,8 @@ async def test_grant_turns_a_forbidden_permission_post_into_an_admin_hint() -> N
         "https://evil.example/sites/x/Shared%20Documents/General",
         "https://example.sharepoint.com/personal/u/Documents",
         "https://example.sharepoint.com/sites/../Shared%20Documents",
+        "https://example.sharepoint.com/sites",
+        "https://example.sharepoint.com/sites//Shared%20Documents",
     ],
 )
 async def test_grant_refuses_a_folder_off_a_sharepoint_site_before_any_grant(
@@ -183,6 +185,26 @@ async def test_grant_refuses_a_folder_off_a_sharepoint_site_before_any_grant(
     with pytest.raises(SiteGrantFailed):
         await _grant(_graph(requests, folder_url=folder_url))
     assert [r.method for r in requests] == ["POST", "GET"], "token and folder only, no grant"
+
+
+@pytest.mark.parametrize(
+    ("folder_url", "site_path"),
+    [
+        ("https://example.sharepoint.com/teams/Sales/Shared%20Documents/General", "teams/Sales"),
+        (
+            "https://example.sharepoint.com/sites/Sales%20Q3-Private/Shared%20Documents",
+            "sites/Sales%20Q3-Private",
+        ),
+    ],
+)
+async def test_grant_looks_up_the_site_by_its_managed_path_and_encoded_name(
+    folder_url: str, site_path: str
+) -> None:
+    """Either managed path, and a name with a space, reach Graph as the folder's URL had them."""
+    requests: list[httpx.Request] = []
+    await _grant(_graph(requests, folder_url=folder_url))
+    site = requests[2]
+    assert site.url.raw_path.decode() == f"/v1.0/sites/example.sharepoint.com:/{site_path}"
 
 
 async def _callback(query: str, granted: list[tuple[GrantTarget, GrantedSite]]) -> httpx.Response:

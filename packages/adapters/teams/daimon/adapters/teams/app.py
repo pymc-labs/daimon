@@ -1163,8 +1163,8 @@ class TeamsApp:
         """An admin gets the sign-in that grants this channel's files.
 
         Offered when the agent asked for it (`ENABLE_FILES_TOOL`), or when the
-        admin's shared file was refused. A card, not a status line: never
-        unprompted, and unasked again only once the last offer's sign-in has expired.
+        admin's shared file was refused. A card, not a status line: unasked, never
+        on an unprompted message, and again only once the last offer's sign-in has expired.
         """
         teams, files = self._teams, self._channel_files
         now = time.monotonic()
@@ -1173,7 +1173,7 @@ class TeamsApp:
             files is None
             or inbound.kind != "channel"
             or teams.public_url is None
-            or inbound.unprompted
+            or (inbound.unprompted and not asked)
             or self._role(inbound) is not Role.ADMIN
             or (not asked and now - last < STATE_TTL_S)
         ):
