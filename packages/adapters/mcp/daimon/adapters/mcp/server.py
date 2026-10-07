@@ -19,7 +19,7 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.adapters.mcp.artifacts import build_artifact_store
-from daimon.adapters.mcp.auth.group_members import GroupLookups
+from daimon.adapters.mcp.auth.group_members import DiscordMembers, GroupLookups
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
@@ -248,8 +248,16 @@ def create_mcp_app(
         if effective_settings.teams is not None
         else None
     )
+    discord = effective_settings.discord
     group_lookups = GroupLookups(
-        sessionmaker=effective_sessionmaker, fernet=fernet, teams_client=teams_client
+        sessionmaker=effective_sessionmaker,
+        fernet=fernet,
+        teams_client=teams_client,
+        discord=DiscordMembers(
+            discord.bot_token.get_secret_value(), httpx.AsyncClient(timeout=10.0)
+        )
+        if discord is not None
+        else None,
     )
 
     effective_auth = auth

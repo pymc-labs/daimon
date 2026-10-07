@@ -14,7 +14,9 @@ nothing. Either way the ids a chat turn matched are kept
 an MCP call. Slack lets any member edit a user group by default, so outside a
 turn a stored Slack group, and likewise a Teams team, counts only while a live
 lookup still admits the person (`confirm_stored_group_ids`); with no lookup it
-counts for nothing. Recorded in tests/parity/test_channel_admin_groups.py.
+counts for nothing. A stored Discord role is re-checked the same way where a
+lookup runs, by reading the member's current roles; with none it stands.
+Recorded in tests/parity/test_channel_admin_groups.py.
 """
 
 from __future__ import annotations
@@ -57,7 +59,7 @@ _USER_ID = {"discord": r"[0-9]{15,21}", "slack": r"[UW][A-Z0-9]+", "teams": _UUI
 _ROLE_ID = {"discord": r"[0-9]{15,21}", "slack": r"S[A-Z0-9]+", "teams": _UUID}
 
 GROUP_MEMBERS_TTL_S: Final = 60.0
-"""How long a Slack user group's or a Teams team's looked-up members are trusted."""
+"""How long a looked-up group's members, or a Discord member's roles, are trusted."""
 
 GROUP_LOOKUP_FAILURE_TTL_S: Final = 15.0
 """How long a failed group lookup is remembered before the platform is asked again."""
@@ -166,7 +168,12 @@ class GroupLookupFailed(DaimonError):
 
 
 GroupMembers = Callable[[str], Awaitable[frozenset[str]]]
-"""A group id to the user ids it admits; raises `GroupLookupFailed`."""
+"""A group id to the user ids it admits; raises `GroupLookupFailed`.
+
+On Discord it goes the other way, a user id to the role ids they hold now
+(none once they left): Discord lists a role's members only to a bot with a
+privileged intent.
+"""
 
 GroupMembersFor = Callable[[str, str], GroupMembers | None]
 """A platform and workspace id to that workspace's group lookup, or None without one."""
@@ -265,6 +272,19 @@ async def member_group_ids(
     return frozenset(matched)
 
 
+async def _held_roles(
+    user_id: str, role_ids: Collection[str], member_roles: GroupMembers
+) -> frozenset[str]:
+    """The Discord roles among `role_ids` the member holds now. A failed lookup grants nothing."""
+    if not role_ids:
+        return frozenset()
+    try:
+        return frozenset(role_ids) & await member_roles(user_id)
+    except GroupLookupFailed as exc:
+        _log.warning("channel_admins.role_lookup_failed", reason=str(exc))
+        return frozenset()
+
+
 def grant_group_ids(grants: Iterable[ChannelAdminsRow]) -> frozenset[str]:
     """Every group id some grant names."""
     return frozenset(group_id for grant in grants for group_id in grant.role_ids)
@@ -280,13 +300,15 @@ async def confirm_stored_group_ids(
 ) -> frozenset[str]:
     """The stored group ids that still admit the person, for a caller outside a chat turn.
 
-    Discord sends roles with every event and guards them with Manage Roles, so
-    its stored roles stand. A Slack user group or Teams team is looked up again
-    (`members`, cached), so someone who left it, or added themselves where
-    members may edit groups, counts as they are now. Only the groups some
-    grant still names (`named`) are looked up; the rest grant nothing anyway.
-    No lookup grants nothing.
+    A Slack user group or Teams team is looked up again (`members`, cached),
+    so someone who left it, or added themselves where members may edit
+    groups, counts as they are now. Only the groups some grant still names
+    (`named`) are looked up; the rest grant nothing anyway. No lookup grants
+    nothing. A Discord role, guarded by Manage Roles, counts while the
+    member's current roles (`members`) hold it, and stands with no lookup.
     """
+    if platform == "discord" and members is not None and platform_user_id is not None:
+        return await _held_roles(platform_user_id, [g for g in stored_ids if g in named], members)
     if platform not in LOOKED_UP_GROUP_PLATFORMS:
         return frozenset(stored_ids)
     if members is None or platform_user_id is None:
@@ -471,8 +493,9 @@ async def channel_admin_user_ids(
 
     The grant's users, plus members whose stored roles or groups match a
     granted one, as of their last chat turn; a Slack group or Teams team match
-    must still hold by `members` now. Sorted, at most `limit`, counted after
-    that re-check: capped before it, members who left could fill the cap.
+    must still hold by `members` now, and a Discord role match too when given.
+    Sorted, at most `limit`, counted after that re-check: capped before it,
+    members who left could fill the cap.
     Reads in sessions of their own, closed before the lookup, so a slow
     platform never holds a pooled connection.
     """
@@ -488,12 +511,15 @@ async def channel_admin_user_ids(
         # the cap applies in SQL and a large group costs no scan of every
         # account that once held it.
         among = {*grant.user_ids, *await live_group_member_ids(grant.role_ids, members)}
+    # Discord can't list a role's members, so each stored match is re-checked
+    # on its own; twice the cap is read so members who left don't fill it.
+    recheck = members if platform == "discord" and grant.role_ids else None
     async with sessionmaker() as session:
         found = await list_platform_user_ids(
             session,
             tenant_id=tenant_id,
             platform=platform,
-            limit=limit,
+            limit=limit * 2 if recheck else limit,
             user_ids=grant.user_ids,
             role_ids=grant.role_ids,
             among=among,
@@ -503,6 +529,12 @@ async def channel_admin_user_ids(
         externals = await list_external_platform_user_ids(
             session, tenant_id=tenant_id, platform=platform, user_ids=grant.user_ids
         )
+    if recheck is not None:
+        found = [
+            uid
+            for uid in found
+            if uid in grant.user_ids or await _held_roles(uid, grant.role_ids, recheck)
+        ]
     # A granted user who never spoke to the bot has no account yet.
     return sorted({*found, *grant.user_ids} - externals)[:limit]
 

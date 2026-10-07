@@ -10,6 +10,7 @@ renders no code blocks, a message does.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from daimon.core.turn.notices import TerminationNotice, fit_notice
@@ -131,14 +132,17 @@ def termination_text(notice: TerminationNotice) -> str:
     return fit_notice(["\n\n".join(lines)], tail=tail, limit=TEAMS_LIMIT)
 
 
-def notice_card(text: str) -> MessageActivityInput:
-    """A terminal card with no buttons: bailouts, failures, restarts.
+def notice_card(text: str, *, actions: Sequence[ExecuteAction] = ()) -> MessageActivityInput:
+    """A terminal card: bailouts, failures, restarts; `actions` are its buttons, if any.
 
     Clipped as Slack clips its notices; the fallback repeats it, so it gets less.
     """
     body = fit_notice([text], tail=None, limit=TEAMS_LIMIT)
     fallback = fit_notice([text], tail=None, limit=_FALLBACK_MAX_CHARS)
-    return _card([TextBlock(text=body, wrap=True)], fallback=fallback)
+    elements: list[CardElement] = [TextBlock(text=body, wrap=True)]
+    if actions:
+        elements.append(ActionSet(actions=list(actions)))
+    return _card(elements, fallback=fallback)
 
 
 ANSWERED_BELOW = "✅ Done. The answer is below."

@@ -34,7 +34,7 @@ async def support_recipient_tiers(
     """The DM tiers to try in order (channel admins, then server admins); () for no grant.
 
     The requester is left out of both: asking for a human must reach someone else.
-    `members` re-checks a channel admin matched by a stored Slack group or Teams team,
+    `members` re-checks a channel admin matched by a stored group or Discord role,
     with no DB session open.
     """
     channel_admins = await channel_admin_user_ids(
