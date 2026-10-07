@@ -234,13 +234,15 @@ async def record_turn_post(
     source: PostSource,
     turn_card_intent_id: uuid.UUID | None = None,
     parent_channel_id: str | None = None,
+    thread_ts: str | None = None,
 ) -> None:
     """Record a message (`turn`) or thread (`auto_thread`) an adapter posted for a turn.
 
     The agent is the turn's own (`derive_agent_uuid`, the `chat_agent_id` its
     MCP token carries), so only that agent can tidy it. An `auto_thread` row
     is `kind='thread'` with the parent channel as `channel_id` and the thread
-    id as `message_id`. The post has already gone out, so a failure, or a write
+    id as `message_id`. A Slack turn post carries its root in `thread_ts`.
+    The post has already gone out, so a failure, or a write
     slower than `RECORD_TIMEOUT_S` (it sits between a send and the turn using
     its message), is logged and swallowed; the cost is that this one post
     cannot be tidied.
@@ -258,6 +260,7 @@ async def record_turn_post(
                 agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
                 kind="thread" if source == "auto_thread" else "message",
                 parent_channel_id=parent_channel_id,
+                thread_ts=thread_ts,
                 source=source,
                 requester_platform_user_id=requester_platform_user_id,
                 turn_card_intent_id=turn_card_intent_id,

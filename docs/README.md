@@ -26,6 +26,8 @@ pieces fit together.
   skills, `daimon defaults apply` and `verify`, the seeded-skill fingerprint.
 - [slack.md](slack.md) — the Slack adapter's trust model: file delivery and
   per-user access.
+- [agent-identity.md](agent-identity.md) — per-message agent names, avatars,
+  platform limits and reply-routing design.
 - [teams.md](teams.md) — the Teams adapter: where it answers, admins,
   channel history and files, agent tools, restarts and current limits.
 - [plugin.md](plugin.md) — the Claude Code plugin: what the hub login mounts
