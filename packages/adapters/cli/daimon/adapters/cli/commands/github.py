@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getpass
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 import httpx
@@ -34,7 +35,11 @@ from daimon.core.stores.github_connect import (
     cli_account_id,
     mint_invitation,
 )
-from daimon.core.stores.thread_sessions import list_live_sessions_for_agent, mark_dead
+from daimon.core.stores.thread_sessions import (
+    list_live_sessions_for_agent,
+    mark_dead,
+    record_app_token_refresh,
+)
 from rich.console import Console
 
 github_app = typer.Typer(help="GitHub App connection commands.")
@@ -197,6 +202,12 @@ def _run_grant_command(
                                         config=settings.github_app,
                                         fernet=fernet,
                                     )
+                                    async with sessionmaker.begin() as session:
+                                        await record_app_token_refresh(
+                                            session,
+                                            ma_session_id=mapped.ma_session_id,
+                                            issued_at=int(datetime.now(UTC).timestamp()),
+                                        )
                                     rotated_ids.add(mapped.ma_session_id)
                                     continue
                             if mapped.ma_session_id not in archived_ids:

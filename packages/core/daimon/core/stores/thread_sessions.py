@@ -498,6 +498,23 @@ async def record_snapshot(
     await session.flush()
 
 
+async def record_app_token_refresh(
+    session: AsyncSession, *, ma_session_id: str, issued_at: int
+) -> None:
+    """Carry a scheduler or CLI token swap into every live mapping of the MA session."""
+    rows = await session.scalars(
+        select(ThreadSession).where(
+            ThreadSession.ma_session_id == ma_session_id,
+            ThreadSession.status == "live",
+        )
+    )
+    for row in rows:
+        config = row.effective_config
+        if config is not None and config.get("github_mode") == "app":
+            row.effective_config = {**config, "repo_token_issued_at": issued_at}
+    await session.flush()
+
+
 async def set_pending_unsaved_work(
     session: AsyncSession,
     *,

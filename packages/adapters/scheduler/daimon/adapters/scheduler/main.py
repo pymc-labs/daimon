@@ -119,7 +119,7 @@ from daimon.core.stores.routines import record_result, update_routine_agent_id
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.stores.thread_sessions import mark_dead
+from daimon.core.stores.thread_sessions import mark_dead, record_app_token_refresh
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.outcomes import current_outcome, drain_outcomes
 from daimon.core.turn.state import TurnState
@@ -719,6 +719,12 @@ async def _refresh_github_app_sessions(
                 config=settings.github_app,
                 fernet=fernet,
             )
+            async with sm.begin() as session:
+                await record_app_token_refresh(
+                    session,
+                    ma_session_id=item.mapping.ma_session_id,
+                    issued_at=int(now.timestamp()),
+                )
             _last_app_access_checks[item.mapping.ma_session_id] = now
         except Exception:
             log.exception(
