@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
 DISCORD_AGENT_WEBHOOK_NAME = "Daimon agents"
 
@@ -28,3 +29,11 @@ def is_our_discord_webhook(
     target_channel_id: int,
 ) -> bool:
     return application_id == our_application_id and channel_id == target_channel_id
+
+
+def select_discord_webhook_id(ids: Iterable[int], thread_id: int | None) -> int | None:
+    """Choose one app webhook consistently across Discord and MCP adapters."""
+    ordered = sorted(ids)
+    if not ordered:
+        return None
+    return ordered[(thread_id or 0) % len(ordered)]

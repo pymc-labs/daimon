@@ -40,6 +40,7 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.feedback_button import FeedbackButton
 from daimon.adapters.discord.post_transport import DiscordPostTransport, known_webhook_ids
 from daimon.adapters.discord.support_escalation import SupportEscalateButton
+from daimon.core.agent_post_identity import is_our_discord_webhook
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.message_feedback import (
     Vote,
@@ -47,6 +48,7 @@ from daimon.core.message_feedback import (
     should_trigger_feedback_dm,
     vote_for_reaction,
 )
+from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.message_feedback import record_vote
 from daimon.core.stores.support_escalation import count_escalations_for_user
@@ -60,6 +62,7 @@ from daimon.core.support_escalation import (
     offer_text,
     remaining_credits,
 )
+from sqlalchemy.exc import SQLAlchemyError
 
 import discord
 from discord.ext import commands
@@ -91,6 +94,7 @@ class FeedbackReactionCog(commands.Cog):
         # actually resolved an author. Per-process and deliberately not
         # persisted: it is a REST-amplification bound, not a source of truth.
         self._author_is_bot: dict[int, bool] = {}
+        self._channel_webhook_ids: dict[int, frozenset[int]] = {}
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
@@ -118,11 +122,7 @@ class FeedbackReactionCog(commands.Cog):
             verdict = is_bot_authored(
                 message_author_id=payload.message_author_id, bot_user_id=bot_user_id
             )
-            if (
-                verdict is not True
-                and payload.message_author_id is not None
-                and payload.message_author_id not in known_webhook_ids()
-            ):
+            if verdict is not True and not await self._possible_own_author(payload):
                 return
             if verdict is not True and not await self._is_bot_message_via_fetch(
                 payload, bot_user_id=bot_user_id
@@ -143,11 +143,7 @@ class FeedbackReactionCog(commands.Cog):
         verdict = is_bot_authored(
             message_author_id=payload.message_author_id, bot_user_id=bot_user_id
         )
-        if (
-            verdict is not True
-            and payload.message_author_id is not None
-            and payload.message_author_id not in known_webhook_ids()
-        ):
+        if verdict is not True and not await self._possible_own_author(payload):
             return
         if verdict is not True and not await self._is_bot_message_via_fetch(
             payload, bot_user_id=bot_user_id
@@ -211,6 +207,49 @@ class FeedbackReactionCog(commands.Cog):
         if should_trigger_feedback_dm(previous_vote=previous_vote, new_vote=candidate_vote):
             await self._send_feedback_prompt(payload, feedback_id=result.row.id)
 
+    async def _possible_own_author(self, payload: discord.RawReactionActionEvent) -> bool:
+        author_id = payload.message_author_id
+        if author_id is None or author_id in known_webhook_ids():
+            return True
+        channel = self._bot.get_channel(payload.channel_id)
+        if channel is None:
+            try:
+                channel = await self._bot.fetch_channel(payload.channel_id)
+            except discord.HTTPException:
+                return False
+        parent = channel.parent if isinstance(channel, discord.Thread) else channel
+        if not isinstance(parent, (discord.TextChannel, discord.ForumChannel)):
+            return False
+        cached = self._channel_webhook_ids.get(parent.id, frozenset())
+        if author_id in cached:
+            return True
+        application_id = self._bot.application_id
+        if application_id is None:
+            return True
+        http = getattr(self._bot, "http", None)
+        if http is None:
+            return False
+        try:
+            hooks = await http.channel_webhooks(parent.id)
+        except discord.HTTPException:
+            # Ownership can still be verified from the fetched message's
+            # application_id when listing is temporarily unavailable.
+            return True
+        ids = frozenset(
+            int(raw["id"])
+            for raw in hooks
+            if is_our_discord_webhook(
+                application_id=int(raw["application_id"])
+                if raw.get("application_id") is not None
+                else None,
+                channel_id=int(raw["channel_id"]) if raw.get("channel_id") is not None else None,
+                our_application_id=application_id,
+                target_channel_id=parent.id,
+            )
+        )
+        self._channel_webhook_ids[parent.id] = ids
+        return author_id in ids
+
     async def _is_bot_message_via_fetch(
         self, payload: discord.RawReactionActionEvent, *, bot_user_id: int
     ) -> bool:
@@ -251,16 +290,44 @@ class FeedbackReactionCog(commands.Cog):
         if message.author.id == bot_user_id:
             is_bot_message = True
         elif isinstance(message.webhook_id, int):
-            if self._bot.application_id is None or message.application_id is None:
-                return False
             transport = DiscordPostTransport(
                 self._bot, channel, name=message.author.name, avatar_url=None, builtin=False
             )
-            is_bot_message = await transport.owns_message(message)
+            destination = transport._destination()  # pyright: ignore[reportPrivateUsage]
+            loaded_ids = (
+                self._channel_webhook_ids.get(destination[0].id, frozenset[int]())
+                if destination is not None
+                else frozenset[int]()
+            )
+            is_bot_message = message.webhook_id in loaded_ids or await transport.owns_message(
+                message
+            )
+            if not is_bot_message and message.application_id is None:
+                is_bot_message = await self._is_recorded_agent_post(payload)
+                if not is_bot_message:
+                    return False
         else:
             is_bot_message = False
         self._memoize_author(payload.message_id, is_bot_message)
         return is_bot_message
+
+    async def _is_recorded_agent_post(self, payload: discord.RawReactionActionEvent) -> bool:
+        if payload.guild_id is None:
+            return False
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
+        try:
+            async with self._bot.runtime.sessionmaker() as session:
+                post = await get_post(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    channel_id=str(payload.channel_id),
+                    message_id=str(payload.message_id),
+                )
+        except SQLAlchemyError:
+            log.warning("feedback.author_ledger_unavailable", message_id=str(payload.message_id))
+            return False
+        return post is not None and post.source != "auto_thread"
 
     def _memoize_author(self, message_id: int, is_bot_message: bool) -> None:
         """Record one resolved verdict, dropping the oldest entry past the cap."""

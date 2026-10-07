@@ -32,7 +32,7 @@ from daimon.adapters.discord.gating import is_participation_candidate, should_pr
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
-from daimon.adapters.discord.post_transport import DiscordPostTransport
+from daimon.adapters.discord.post_transport import DiscordPostTransport, known_webhook_ids
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
@@ -1049,18 +1049,18 @@ class DaimonBot(commands.Bot):
                     transport = DiscordPostTransport(
                         self, channel, name="Daimon", avatar_url=None, builtin=False
                     )
-                    await transport.edit(
-                        message,
-                        embed=discord.Embed(
-                            color=theme.COLOR_RED,
-                            description=(
-                                "❌ This turn was interrupted by a restart and cannot be "
-                                "resumed. Nothing was lost on your side — mention me again "
-                                "to retry."
-                            ),
+                    embed = discord.Embed(
+                        color=theme.COLOR_RED,
+                        description=(
+                            "❌ This turn was interrupted by a restart and cannot be "
+                            "resumed. Nothing was lost on your side — mention me again "
+                            "to retry."
                         ),
-                        view=None,
                     )
+                    if transport._destination() is not None:  # pyright: ignore[reportPrivateUsage]
+                        await transport.edit(message, embed=embed, view=None)
+                    elif not isinstance(message.webhook_id, int):
+                        await message.edit(embed=embed, view=None)
                     log.info(
                         "turn.orphan_retired",
                         thread_id=row.thread_id,
@@ -1535,8 +1535,13 @@ class DaimonBot(commands.Bot):
             (self.user is not None and resolved.author.id == self.user.id)
             or (
                 isinstance(resolved.webhook_id, int)
-                and self.application_id is not None
-                and resolved.application_id == self.application_id
+                and (
+                    (
+                        self.application_id is not None
+                        and resolved.application_id == self.application_id
+                    )
+                    or resolved.webhook_id in known_webhook_ids()
+                )
             )
         )
         if (

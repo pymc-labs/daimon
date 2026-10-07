@@ -23,6 +23,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
@@ -246,6 +247,32 @@ async def test_sweep_clears_the_row_even_when_the_embed_is_unreachable(
     assert await list_orphaned_turns(db_session, platform="discord") == [], (
         "an unreachable embed must still clear its marker"
     )
+
+
+async def test_sweep_missing_webhook_token_does_not_block_turns(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _make_orphan(db_session)
+    bot = _make_bot(db_session_factory)
+    message = MagicMock(spec=discord.Message)
+    message.webhook_id = 42
+    message.application_id = 10
+    thread = MagicMock(spec=discord.Thread)
+    thread.parent = MagicMock(spec=discord.TextChannel)
+    thread.parent.id = 123
+    thread.fetch_message = AsyncMock(return_value=message)
+    thread.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
+    bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setattr(DiscordPostTransport, "_ours", lambda *_: True)
+    monkeypatch.setattr(DiscordPostTransport, "_webhook", AsyncMock(return_value=None))
+
+    await bot._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]
+    await bot._wait_for_orphan_recovery()  # pyright: ignore[reportPrivateUsage]
+
+    thread.send.assert_awaited_once()
+    assert await list_orphaned_turns(db_session, platform="discord") == []
 
 
 async def test_sweep_runs_once_per_process_not_once_per_reconnect(

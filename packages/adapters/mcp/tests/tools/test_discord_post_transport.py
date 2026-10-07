@@ -1,5 +1,6 @@
 """REST-only Discord agent post transport."""
 
+import io
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -119,7 +120,7 @@ async def test_webhook_edit_and_delete_use_webhook_route(
     hook.delete_message = AsyncMock()
     monkeypatch.setattr(_post_transport, "own_webhook", AsyncMock(return_value=hook))
     await _post_transport.edit_own_message(client, channel, message, content="updated")
-    await _post_transport.delete_own_message(client, channel, message)
+    await _post_transport.delete_own_message(client, channel, message, known_webhooks={30: hook})
     hook.edit_message.assert_awaited_once_with(40, content="updated")
     hook.delete_message.assert_awaited_once_with(40)
     message.edit.assert_not_awaited()
@@ -150,3 +151,76 @@ async def test_deleted_webhook_edit_posts_update_as_new_message(
     result = await _post_transport.edit_own_message(client, channel, message, content="updated")
     assert result is new_message
     assert send.call_args.kwargs["content"] == "updated"
+
+
+async def test_missing_webhook_token_posts_update_as_new_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock(spec=discord.Client)
+    client.application_id = 10
+    channel = MagicMock(spec=discord.TextChannel)
+    message = MagicMock(spec=discord.Message)
+    message.webhook_id = 30
+    message.application_id = 10
+    message.author.name = "Research"
+    new_message = MagicMock(spec=discord.Message)
+    monkeypatch.setattr(_post_transport, "own_webhook", AsyncMock(return_value=None))
+    send = AsyncMock(return_value=new_message)
+    monkeypatch.setattr(_post_transport, "send_agent_message", send)
+    result = await _post_transport.edit_own_message(client, channel, message, content="updated")
+    assert result is new_message
+    assert send.call_args.kwargs["content"] == "updated"
+
+
+async def test_mcp_thread_uses_same_sorted_webhook_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock(spec=discord.Client)
+    client.application_id = 10
+    client.http = MagicMock()
+    client._connection = MagicMock()  # pyright: ignore[reportPrivateUsage]
+    client.http.channel_webhooks = AsyncMock(
+        return_value=[
+            {"id": str(i), "application_id": "10", "channel_id": "20", "token": "test"}
+            for i in (32, 30, 31)
+        ]
+    )
+    parent = MagicMock(spec=discord.TextChannel)
+    parent.id = 20
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = 22
+    thread.parent = parent
+    hooks = {i: MagicMock(spec=discord.Webhook) for i in (30, 31, 32)}
+    for i, hook in hooks.items():
+        hook.id = i
+        hook.token = "test"
+    monkeypatch.setattr(
+        discord.Webhook,
+        "from_state",
+        MagicMock(side_effect=lambda *, data, state: hooks[int(data["id"])]),
+    )
+    assert await _post_transport.own_webhook(client, thread, create=False) is hooks[31]
+
+
+async def test_mcp_failed_webhook_upload_rebuilds_file_for_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock(spec=discord.Client)
+    channel = MagicMock(spec=discord.TextChannel)
+    hook = MagicMock(spec=discord.Webhook)
+
+    async def fail_upload(**kwargs: object) -> None:
+        files = kwargs["files"]
+        assert isinstance(files, list)
+        files[0].fp.read()
+        raise discord.HTTPException(MagicMock(status=400), {"code": 50035, "message": "bad"})
+
+    hook.send = AsyncMock(side_effect=fail_upload)
+    monkeypatch.setattr(_post_transport, "own_webhook", AsyncMock(return_value=hook))
+    channel.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
+    file = discord.File(io.BytesIO(b"payload"), filename="a.txt")
+    await _post_transport.send_agent_message(
+        client, channel, AgentIdentity("Research", None, False), content="answer", files=[file]
+    )
+    sent_files = channel.send.call_args.kwargs["files"]
+    assert sent_files[0].fp.read() == b"payload"

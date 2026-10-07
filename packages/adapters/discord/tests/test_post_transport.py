@@ -1,6 +1,7 @@
 """Discord agent post transport selection and routing."""
 
 import asyncio
+import io
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,6 +11,7 @@ from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.post_transport import (
     DiscordPostTransport,
     _rate_limit_counter,
+    _send_unavailable_until,
     _unavailable_until,
     _webhooks,
 )
@@ -19,6 +21,7 @@ from daimon.adapters.discord.post_transport import (
 def clear_webhook_cache() -> None:
     _webhooks.clear()
     _unavailable_until.clear()
+    _send_unavailable_until.clear()
 
 
 def test_webhook_429s_are_counted_from_discord_library_logger() -> None:
@@ -258,3 +261,101 @@ async def test_deleted_webhook_edit_posts_replacement() -> None:
     replacement = await transport.edit(message, content="updated", attachments=[])
     assert replacement is hook.send.return_value
     assert hook.send.call_args.kwargs["content"] == "updated"
+
+
+async def test_missing_webhook_token_posts_edit_as_replacement() -> None:
+    client, channel, hook = _world()
+    message = MagicMock(spec=discord.Message)
+    message.id = 40
+    message.webhook_id = hook.id
+    message.application_id = client.application_id
+    message.author.name = "Research"
+    channel.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    channel.permissions_for.return_value.manage_webhooks = False
+    client.http.channel_webhooks = AsyncMock(return_value=[])
+    replacement = await transport.edit(message, content="updated")
+    assert replacement is channel.send.return_value
+    channel.send.assert_awaited_once_with(content="**Research** updated")
+    hook.edit_message.assert_not_awaited()
+
+
+async def test_loaded_webhook_id_proves_ownership_without_application_id() -> None:
+    client, channel, hook = _world()
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    await transport._webhook()  # pyright: ignore[reportPrivateUsage]
+    message = MagicMock(spec=discord.Message)
+    message.webhook_id = hook.id
+    message.application_id = None
+    assert await transport.owns_message(message)
+
+
+async def test_failed_webhook_upload_rebuilds_file_for_bot_fallback() -> None:
+    client, channel, hook = _world()
+    original = discord.File(io.BytesIO(b"payload"), filename="a.txt")
+
+    async def fail_upload(**kwargs: object) -> None:
+        files = kwargs["files"]
+        assert isinstance(files, list)
+        files[0].fp.read()
+        raise discord.HTTPException(MagicMock(status=400), {"code": 50035, "message": "bad"})
+
+    hook.send = AsyncMock(side_effect=fail_upload)
+    channel.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    await transport.send(content="answer", files=[original])
+    files = channel.send.call_args.kwargs["files"]
+    assert files[0].fp.read() == b"payload"
+    await transport.send(content="overflow")
+    assert channel.send.call_args.kwargs["content"] == "overflow"
+    assert hook.send.await_count == 1
+
+
+async def test_archived_thread_webhook_retry_rebuilds_file() -> None:
+    client, parent, hook = _world()
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = 21
+    thread.parent = parent
+    thread.locked = False
+    thread.edit = AsyncMock()
+    sent = MagicMock(spec=discord.Message)
+    received: list[bytes] = []
+
+    async def send(**kwargs: object) -> discord.Message:
+        files = kwargs["files"]
+        assert isinstance(files, list)
+        received.append(files[0].fp.read())
+        if len(received) == 1:
+            raise discord.HTTPException(
+                MagicMock(status=400), {"code": 50083, "message": "thread archived"}
+            )
+        return sent
+
+    hook.send = AsyncMock(side_effect=send)
+    transport = DiscordPostTransport(
+        client, thread, name="Research", avatar_url=None, builtin=False
+    )
+    result = await transport.send(
+        content="answer", files=[discord.File(io.BytesIO(b"payload"), filename="a.txt")]
+    )
+    assert result is sent
+    assert received == [b"payload", b"payload"]
+    thread.edit.assert_awaited_once_with(archived=False)
+
+
+async def test_lifecycle_prefix_is_not_duplicated_after_webhook_rejection() -> None:
+    client, channel, hook = _world()
+    hook.send = AsyncMock(
+        side_effect=discord.HTTPException(MagicMock(status=400), {"code": 50035, "message": "bad"})
+    )
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    await transport.send(content="**Research** first")
+    assert channel.send.call_args.kwargs["content"] == "**Research** first"

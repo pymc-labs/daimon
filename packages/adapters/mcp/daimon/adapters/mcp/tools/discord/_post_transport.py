@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 from typing import Any, cast
 
 import discord
@@ -13,9 +14,56 @@ from daimon.core.agent_post_identity import (
     discord_username,
     fallback_name_prefix,
     is_our_discord_webhook,
+    select_discord_webhook_id,
 )
 
 _locks: dict[int, asyncio.Lock] = {}
+
+
+def _fresh_files(files: list[discord.File]) -> list[discord.File]:
+    rebuilt: list[discord.File] = []
+    for file in files:
+        file.reset()
+        data = file.fp.read()
+        file.reset()
+        rebuilt.append(
+            discord.File(
+                io.BytesIO(data),
+                filename=file.filename,
+                spoiler=file.spoiler,
+                description=file.description,
+            )
+        )
+    return rebuilt
+
+
+async def own_webhooks(
+    client: discord.Client, channel: discord.abc.GuildChannel | discord.Thread
+) -> dict[int, discord.Webhook]:
+    parent = channel.parent if isinstance(channel, discord.Thread) else channel
+    if not isinstance(parent, (discord.TextChannel, discord.ForumChannel)):
+        return {}
+    application_id = await ensure_application_id(client)
+    if application_id is None:
+        return {}
+    try:
+        raw_hooks = await client.http.channel_webhooks(parent.id)
+    except discord.HTTPException:
+        return {}
+    return {
+        hook.id: hook
+        for raw in raw_hooks
+        if is_our_discord_webhook(
+            application_id=_snowflake(raw.get("application_id")),
+            channel_id=_snowflake(raw.get("channel_id")),
+            our_application_id=application_id,
+            target_channel_id=parent.id,
+        )
+        if raw.get("token")
+        for hook in [
+            discord.Webhook.from_state(data=raw, state=client._connection)  # pyright: ignore[reportPrivateUsage]
+        ]
+    }
 
 
 def _snowflake(value: object) -> int | None:
@@ -67,7 +115,11 @@ async def own_webhook(
                 else None
             )
             if hook is None and webhook_id is None and hooks:
-                hook = hooks[0]
+                chosen = select_discord_webhook_id(
+                    (item.id for item in hooks),
+                    channel.id if isinstance(channel, discord.Thread) else None,
+                )
+                hook = next(item for item in hooks if item.id == chosen)
             if hook is None and create:
                 hook = await parent.create_webhook(name=DISCORD_AGENT_WEBHOOK_NAME)
             return hook if hook is not None and hook.token is not None else None
@@ -78,26 +130,7 @@ async def own_webhook(
 async def own_webhook_ids(
     client: discord.Client, channel: discord.abc.GuildChannel | discord.Thread
 ) -> frozenset[int]:
-    parent = channel.parent if isinstance(channel, discord.Thread) else channel
-    if not isinstance(parent, (discord.TextChannel, discord.ForumChannel)):
-        return frozenset()
-    application_id = await ensure_application_id(client)
-    if application_id is None:
-        return frozenset()
-    try:
-        raw_hooks = await client.http.channel_webhooks(parent.id)
-    except discord.HTTPException:
-        return frozenset()
-    return frozenset(
-        int(raw["id"])
-        for raw in raw_hooks
-        if is_our_discord_webhook(
-            application_id=_snowflake(raw.get("application_id")),
-            channel_id=_snowflake(raw.get("channel_id")),
-            our_application_id=application_id,
-            target_channel_id=parent.id,
-        )
-    )
+    return frozenset(await own_webhooks(client, channel))
 
 
 async def send_agent_message(
@@ -109,6 +142,7 @@ async def send_agent_message(
     files: list[discord.File] | None = None,
     extra_messages: list[discord.Message] | None = None,
 ) -> discord.Message:
+    fallback_files = _fresh_files(files or [])
     hook = None if identity.builtin else await own_webhook(client, channel, create=True)
     if hook is not None:
         kwargs: dict[str, Any] = {}
@@ -132,7 +166,7 @@ async def send_agent_message(
         raise TypeError("channel does not support messages")
     fallback_content = content if identity.builtin else fallback_name_prefix(identity.name, content)
     chunks = [fallback_content[i : i + 2000] for i in range(0, len(fallback_content), 2000)] or [""]
-    sent = await channel.send(content=chunks[0], files=files or [])
+    sent = await channel.send(content=chunks[0], files=fallback_files)
     for chunk in chunks[1:]:
         additional = await channel.send(content=chunk, files=[])
         if extra_messages is not None:
@@ -148,23 +182,25 @@ async def edit_own_message(
     **kwargs: Any,  # noqa: ANN401
 ) -> discord.Message | None:
     await ensure_application_id(client)
-    ours = (
-        isinstance(message.webhook_id, int)
-        and client.application_id is not None
-        and message.application_id == client.application_id
+    hook = (
+        await own_webhook(client, channel, create=False, webhook_id=message.webhook_id)
+        if isinstance(message.webhook_id, int)
+        else None
+    )
+    ours = isinstance(message.webhook_id, int) and (
+        (client.application_id is not None and message.application_id == client.application_id)
+        or hook is not None
     )
     if ours:
-        hook = await own_webhook(client, channel, create=False, webhook_id=message.webhook_id)
-        if hook is None:
-            raise RuntimeError("own webhook token unavailable")
         if isinstance(channel, discord.Thread):
             kwargs["thread"] = channel
-        try:
-            await hook.edit_message(message.id, **kwargs)  # pyright: ignore[reportCallIssue]
-            return None
-        except discord.NotFound as exc:
-            if exc.code != 10015:  # Unknown Webhook
-                raise
+        if hook is not None:
+            try:
+                await hook.edit_message(message.id, **kwargs)  # pyright: ignore[reportCallIssue]
+                return None
+            except discord.NotFound as exc:
+                if exc.code != 10015:  # Unknown Webhook
+                    raise
     if ours:
         content = kwargs.get("content")
         if not isinstance(content, str):
@@ -184,17 +220,24 @@ async def delete_own_message(
     client: discord.Client,
     channel: discord.abc.GuildChannel | discord.Thread,
     message: discord.Message,
+    *,
+    known_webhooks: dict[int, discord.Webhook] | None = None,
 ) -> None:
     await ensure_application_id(client)
-    ours = (
-        isinstance(message.webhook_id, int)
-        and client.application_id is not None
-        and message.application_id == client.application_id
+    hooks = known_webhooks
+    webhook_id = message.webhook_id
+    if hooks is None and webhook_id is not None:
+        hooks = await own_webhooks(client, channel)
+    hooks = hooks or {}
+    ours = isinstance(webhook_id, int) and (
+        (client.application_id is not None and message.application_id == client.application_id)
+        or webhook_id in hooks
     )
     if ours:
-        hook = await own_webhook(client, channel, create=False, webhook_id=message.webhook_id)
+        assert isinstance(webhook_id, int)
+        hook = hooks.get(webhook_id)
         if hook is None:
-            raise RuntimeError("own webhook token unavailable")
+            raise discord.ClientException("own webhook token unavailable")
         if isinstance(channel, discord.Thread):
             await hook.delete_message(message.id, thread=channel)
         else:

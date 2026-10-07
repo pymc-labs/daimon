@@ -42,6 +42,8 @@ async def test_recovery_edits_webhook_card_via_transport(
     message = _fetched_message(123, _TURN_ID)
     message.webhook_id = 900
     message.author.name = "Research"
+    message.channel = MagicMock(spec=discord.Thread)
+    message.channel.parent = MagicMock(spec=discord.TextChannel)
     edit = AsyncMock()
     monkeypatch.setattr(DiscordPostTransport, "edit", edit)
     client = MagicMock(spec=discord.Client)
@@ -49,6 +51,16 @@ async def test_recovery_edits_webhook_card_via_transport(
         message, intent_id=_TURN_ID, client=client
     )
     edit.assert_awaited_once()
+
+
+async def test_recovery_defers_webhook_card_without_resolved_parent() -> None:
+    message = _fetched_message(123, _TURN_ID)
+    message.webhook_id = 900
+    message.author.name = "Research"
+    client = MagicMock(spec=discord.Client)
+    assert not await turn_card_recovery._mark_card_interrupted(  # pyright: ignore[reportPrivateUsage]
+        message, intent_id=_TURN_ID, client=client
+    )
 
 
 def _fetched_message(message_id: int, *turn_ids: UUID) -> discord.Message:

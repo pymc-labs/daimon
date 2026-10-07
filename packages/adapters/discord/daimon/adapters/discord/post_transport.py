@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import time
 from typing import Any, cast
@@ -13,6 +14,7 @@ from daimon.core.agent_post_identity import (
     discord_username,
     fallback_name_prefix,
     is_our_discord_webhook,
+    select_discord_webhook_id,
 )
 
 import discord
@@ -22,6 +24,7 @@ _UNAVAILABLE_SECONDS = 600
 _locks: dict[int, asyncio.Lock] = {}
 _webhooks: dict[int, dict[int, discord.Webhook]] = {}
 _unavailable_until: dict[int, float] = {}
+_send_unavailable_until: dict[int, float] = {}
 _log = structlog.get_logger()
 
 
@@ -51,6 +54,38 @@ def known_webhook_ids() -> frozenset[int]:
     return frozenset(hook_id for pool in _webhooks.values() for hook_id in pool)
 
 
+def _snapshot_files(kwargs: dict[str, Any]) -> dict[str, list[tuple[bytes, str, bool, str | None]]]:
+    snapshots: dict[str, list[tuple[bytes, str, bool, str | None]]] = {}
+    for key in ("file", "files"):
+        value = kwargs.get(key)
+        files = [value] if isinstance(value, discord.File) else value
+        if not isinstance(files, list):
+            continue
+        saved: list[tuple[bytes, str, bool, str | None]] = []
+        for file in cast(list[object], files):
+            if not isinstance(file, discord.File):
+                continue
+            file.reset()
+            saved.append((file.fp.read(), file.filename, file.spoiler, file.description))
+            file.reset()
+        if saved:
+            snapshots[key] = saved
+    return snapshots
+
+
+def _retry_kwargs(
+    kwargs: dict[str, Any], snapshots: dict[str, list[tuple[bytes, str, bool, str | None]]]
+) -> dict[str, Any]:
+    copied = dict(kwargs)
+    for key, files in snapshots.items():
+        rebuilt = [
+            discord.File(io.BytesIO(data), filename=name, spoiler=spoiler, description=description)
+            for data, name, spoiler, description in files
+        ]
+        copied[key] = rebuilt[0] if key == "file" else rebuilt
+    return copied
+
+
 class DiscordPostTransport:
     def __init__(
         self,
@@ -67,6 +102,7 @@ class DiscordPostTransport:
         self.avatar_url = avatar_url
         self.builtin = builtin
         self.fallback_used = False
+        self._fallback_prefix_applied = False
 
     def _destination(
         self,
@@ -80,10 +116,14 @@ class DiscordPostTransport:
 
     def _ours(self, message: discord.Message) -> bool:
         application_id = self.client.application_id
-        return (
-            isinstance(getattr(message, "webhook_id", None), int)
-            and application_id is not None
-            and getattr(message, "application_id", None) == application_id
+        destination = self._destination()
+        pool = _webhooks.get(destination[0].id, {}) if destination is not None else {}
+        return isinstance(getattr(message, "webhook_id", None), int) and (
+            (
+                application_id is not None
+                and getattr(message, "application_id", None) == application_id
+            )
+            or message.webhook_id in pool
         )
 
     async def _webhook(
@@ -96,6 +136,8 @@ class DiscordPostTransport:
             return None
         parent, thread = destination
         if create and thread is not None and thread.locked:
+            return None
+        if create and _send_unavailable_until.get(parent.id, 0) > time.monotonic():
             return None
         application_id = self.client.application_id
         if application_id is None:
@@ -161,13 +203,11 @@ class DiscordPostTransport:
                 return pool.get(webhook_id) if webhook_id is not None else self._pick(pool)
 
     def _pick(self, pool: dict[int, discord.Webhook]) -> discord.Webhook | None:
-        if not pool:
-            return None
-        hooks = [pool[key] for key in sorted(pool)[:_POOL_SIZE]]
-        if isinstance(self.channel, discord.Thread):
-            target_index = self.channel.id % _POOL_SIZE
-            return hooks[target_index] if target_index < len(hooks) else hooks[0]
-        return hooks[0]
+        selected = select_discord_webhook_id(
+            sorted(pool)[:_POOL_SIZE],
+            self.channel.id if isinstance(self.channel, discord.Thread) else None,
+        )
+        return pool[selected] if selected is not None else None
 
     async def owns_message(self, message: discord.Message) -> bool:
         return self._ours(message)
@@ -178,6 +218,7 @@ class DiscordPostTransport:
         if kwargs.get("view") is None:
             kwargs.pop("view", None)
         webhook_rejected = False
+        retry_files = _snapshot_files(kwargs)
         hook = await self._webhook()
         if hook is not None:
             destination = self._destination()
@@ -195,47 +236,65 @@ class DiscordPostTransport:
             except discord.HTTPException as exc:
                 if exc.code == 50083 and thread is not None:
                     await thread.edit(archived=False)
-                    sent = await hook.send(  # pyright: ignore[reportCallIssue]
-                        *args,
-                        **send_kwargs,
-                        username=self.name,
-                        avatar_url=self.avatar_url,
-                        wait=True,
-                    )
-                    assert sent is not None
-                    return cast(discord.Message, sent)
+                    try:
+                        sent = await hook.send(  # pyright: ignore[reportCallIssue]
+                            *args,
+                            **_retry_kwargs(send_kwargs, retry_files),
+                            username=self.name,
+                            avatar_url=self.avatar_url,
+                            wait=True,
+                        )
+                        assert sent is not None
+                        return cast(discord.Message, sent)
+                    except discord.HTTPException as retry_exc:
+                        exc = retry_exc
                 if exc.status == 429:
-                    raise  # discord.py normally retries these itself
+                    raise exc  # discord.py normally retries these itself
                 if exc.code == 10015:
                     _webhooks.get(destination[0].id, {}).pop(hook.id, None)
-                webhook_rejected = exc.code != 10015
+                elif exc.status == 400:
+                    _send_unavailable_until[destination[0].id] = (
+                        time.monotonic() + _UNAVAILABLE_SECONDS
+                    )
+                webhook_rejected = True
         self.fallback_used = not self.builtin
-        if (
+        content = kwargs.get("content") if isinstance(kwargs.get("content"), str) else None
+        if content is None and args and isinstance(args[0], str):
+            content = args[0]
+        already_prefixed = isinstance(content, str) and content.startswith(
+            fallback_name_prefix(self.name, "")
+        )
+        should_prefix = (
             (webhook_rejected or prefix_if_fallback)
             and not self.builtin
-            and isinstance(kwargs.get("content"), str)
-        ):
+            and not self._fallback_prefix_applied
+            and not already_prefixed
+        )
+        if already_prefixed or should_prefix:
+            self._fallback_prefix_applied = True
+        if should_prefix and isinstance(kwargs.get("content"), str):
             kwargs["content"] = fallback_name_prefix(self.name, kwargs["content"])
-        elif (
-            (webhook_rejected or prefix_if_fallback)
-            and not self.builtin
-            and args
-            and isinstance(args[0], str)
-        ):
+        elif should_prefix and args and isinstance(args[0], str):
             args = (fallback_name_prefix(self.name, args[0]), *args[1:])
         try:
-            return await self.channel.send(*args, **kwargs)
+            return await self.channel.send(*args, **_retry_kwargs(kwargs, retry_files))
         except discord.HTTPException as exc:
             if exc.code != 50083 or not isinstance(self.channel, discord.Thread):
                 raise
             await self.channel.edit(archived=False)
-            return await self.channel.send(*args, **kwargs)
+            return await self.channel.send(*args, **_retry_kwargs(kwargs, retry_files))
 
     async def edit(self, message: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
+        if isinstance(kwargs.get("content"), str) and kwargs["content"].startswith(
+            fallback_name_prefix(self.name, "")
+        ):
+            self._fallback_prefix_applied = True
         if self._ours(message):
+            if self._destination() is None:
+                raise discord.ClientException("webhook channel unavailable")
             hook = await self._webhook(create=False, webhook_id=message.webhook_id)
             if hook is None:
-                raise RuntimeError("own webhook token unavailable")
+                return await self.send(_prefix_if_fallback=True, **_replacement_send_kwargs(kwargs))
             destination = self._destination()
             assert destination is not None
             _, thread = destination
@@ -254,9 +313,11 @@ class DiscordPostTransport:
 
     async def delete(self, message: discord.Message) -> None:
         if self._ours(message):
+            if self._destination() is None:
+                raise discord.ClientException("webhook channel unavailable")
             hook = await self._webhook(create=False, webhook_id=message.webhook_id)
             if hook is None:
-                raise RuntimeError("own webhook token unavailable")
+                raise discord.ClientException("own webhook token unavailable")
             destination = self._destination()
             assert destination is not None
             _, thread = destination

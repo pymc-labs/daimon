@@ -398,6 +398,8 @@ async def _mark_card_interrupted(
                 avatar_url=None,
                 builtin=False,
             )
+            if transport._destination() is None:  # pyright: ignore[reportPrivateUsage]
+                return False
             await transport.edit(message, embed=embed, view=None)
         else:
             await message.edit(embed=embed, view=None)

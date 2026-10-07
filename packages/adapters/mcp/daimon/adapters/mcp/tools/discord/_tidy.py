@@ -45,7 +45,7 @@ from daimon.adapters.mcp.tools.discord._client import (
 from daimon.adapters.mcp.tools.discord._post_transport import (
     delete_own_message,
     edit_own_message,
-    own_webhook_ids,
+    own_webhooks,
 )
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
@@ -515,7 +515,8 @@ async def _delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
                 message_ids=[str(m.id) for m in messages],
             )
         owned = {p.message_id: p for p in own if p.agent_id == ctx.actor.agent_id}
-        own_hook_ids = await own_webhook_ids(c, target.channel)
+        hooks = await own_webhooks(c, target.channel)
+        own_hook_ids = frozenset(hooks)
         opener = (
             thread_post.requester_platform_user_id if thread_post.source == "auto_thread" else None
         )
@@ -527,8 +528,11 @@ async def _delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
                 (message.webhook_id is None and message.author.id == target.bot_user_id)
                 or (
                     message.webhook_id in own_hook_ids
-                    and c.application_id is not None
-                    and message.application_id == c.application_id
+                    or (
+                        message.webhook_id is not None
+                        and c.application_id is not None
+                        and message.application_id == c.application_id
+                    )
                 )
             ):
                 continue
@@ -550,7 +554,9 @@ async def _delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
                     operation="thread.delete",
                     target=TidyTarget(str(thread.id), str(message.id), post.content_hmac),
                     checks=[_recheck(runtime, ctx, auth, target)],
-                    act=lambda message=message: delete_own_message(c, target.channel, message),
+                    act=lambda message=message: delete_own_message(
+                        c, target.channel, message, known_webhooks=hooks
+                    ),
                     describe_error=_describe("delete"),
                     post=post,
                 )
