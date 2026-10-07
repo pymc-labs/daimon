@@ -895,6 +895,10 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # A tenant-wide channel skill; the only accounts.id FK is the admin
             # who added it, added_by_account_id with ON DELETE SET NULL.
             "channel_skills",
+            # An avatar belongs to the tenant's agent, not the uploader. The
+            # nullable uploader reference is severed by ON DELETE SET NULL;
+            # tenant deletion cascades to the avatar itself.
+            "agent_avatars",
             # Tenant/agent-scoped, no account/principal column — "purge account X"
             # is undefined for them; deferred to a future tenant-purge path.
             "agent_files",
