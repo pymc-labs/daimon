@@ -51,6 +51,19 @@ class LiveAppSession(BaseModel):
     permissions_by_repo: dict[int, dict[str, str]]
 
 
+class LiveMcpAppSession(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    session_id: str
+    tenant_id: uuid.UUID
+    vault_id: str
+    agent_id: uuid.UUID
+    account_id: uuid.UUID | None
+    repo_urls: tuple[str, ...]
+    repo_resource_ids: dict[str, str]
+    expires_at: datetime | None
+    permissions_by_repo: dict[int, dict[str, str]]
+
+
 class ClosedAppSession(BaseModel):
     model_config = ConfigDict(frozen=True)
     session_id: str
@@ -304,13 +317,25 @@ async def register_app_session_vault(
     tenant_id: uuid.UUID,
     vault_id: str,
     is_unmapped: bool = False,
+    is_mcp: bool = False,
+    agent_id: uuid.UUID | None = None,
+    account_id: uuid.UUID | None = None,
+    repo_urls: tuple[str, ...] = (),
+    repo_resource_ids: dict[str, str] | None = None,
 ) -> None:
+    if is_mcp and (not is_unmapped or agent_id is None):
+        raise ValueError("MCP app vault requires an unmapped session and agent")
     session.add(
         GitHubAppSessionVault(
             session_id=session_id,
             tenant_id=tenant_id,
             vault_id=vault_id,
             is_unmapped=is_unmapped,
+            is_mcp=is_mcp,
+            agent_id=agent_id,
+            account_id=account_id,
+            repo_urls=list(repo_urls) if is_mcp else None,
+            repo_resource_ids=repo_resource_ids if is_mcp else None,
         )
     )
     await session.flush()
@@ -326,17 +351,29 @@ async def finish_headless_app_session(session: AsyncSession, *, session_id: str)
     return row.vault_id
 
 
-async def touch_unmapped_app_session(session: AsyncSession, *, session_id: str) -> None:
-    """Extend an MCP session's vault lifetime before its next turn starts."""
-    await session.execute(
+async def touch_unmapped_app_session(session: AsyncSession, *, session_id: str) -> bool | None:
+    """Extend an open MCP vault. False means closed or past its turn ceiling."""
+    now = datetime.now(UTC)
+    result = await session.execute(
         update(GitHubAppSessionVault)
         .where(
             GitHubAppSessionVault.session_id == session_id,
             GitHubAppSessionVault.is_unmapped.is_(True),
             GitHubAppSessionVault.closed_at.is_(None),
+            GitHubAppSessionVault.finished_at.is_(None),
+            GitHubAppSessionVault.last_started_at > now - timedelta(minutes=46),
         )
-        .values(last_started_at=datetime.now(UTC))
+        .values(last_started_at=now)
+        .returning(GitHubAppSessionVault.session_id)
     )
+    if result.scalar_one_or_none() is not None:
+        return True
+    exists = await session.scalar(
+        select(GitHubAppSessionVault.session_id).where(
+            GitHubAppSessionVault.session_id == session_id
+        )
+    )
+    return False if exists is not None else None
 
 
 async def mark_headless_app_session_closed(session: AsyncSession, *, session_id: str) -> None:
@@ -400,6 +437,71 @@ async def list_live_app_sessions(session: AsyncSession) -> list[LiveAppSession]:
     return list(grouped.values())
 
 
+async def list_live_mcp_app_sessions(
+    session: AsyncSession, *, now: datetime, session_id: str | None = None
+) -> list[LiveMcpAppSession]:
+    statement = select(GitHubAppSessionVault).where(
+        GitHubAppSessionVault.is_mcp.is_(True),
+        GitHubAppSessionVault.closed_at.is_(None),
+        GitHubAppSessionVault.finished_at.is_(None),
+        GitHubAppSessionVault.last_started_at > now - timedelta(minutes=46),
+    )
+    if session_id is not None:
+        statement = statement.where(GitHubAppSessionVault.session_id == session_id)
+    vaults = await session.scalars(statement)
+    result: list[LiveMcpAppSession] = []
+    for vault in vaults:
+        if vault.agent_id is None:
+            continue
+        tokens = await session.scalars(
+            select(GitHubIssuedToken).where(
+                GitHubIssuedToken.session_id == vault.session_id,
+                GitHubIssuedToken.status == "delivered",
+                GitHubIssuedToken.superseded_at.is_(None),
+            )
+        )
+        token_rows = list(tokens)
+        result.append(
+            LiveMcpAppSession(
+                session_id=vault.session_id,
+                tenant_id=vault.tenant_id,
+                vault_id=vault.vault_id,
+                agent_id=vault.agent_id,
+                account_id=vault.account_id,
+                repo_urls=tuple(vault.repo_urls or ()),
+                repo_resource_ids=vault.repo_resource_ids or {},
+                expires_at=min((row.expires_at for row in token_rows), default=None),
+                permissions_by_repo={
+                    repo_id: row.permissions for row in token_rows for repo_id in row.repo_ids
+                },
+            )
+        )
+    return result
+
+
+async def closed_app_session_for_id(
+    session: AsyncSession, *, session_id: str, now: datetime
+) -> ClosedAppSession | None:
+    row = await session.get(GitHubAppSessionVault, session_id)
+    if row is None or row.closed_at is not None:
+        return None
+    if row.is_unmapped:
+        if row.finished_at is None and row.last_started_at > now - timedelta(minutes=46):
+            return None
+    else:
+        mapping = await session.scalar(
+            select(ThreadSession)
+            .where(ThreadSession.ma_session_id == row.session_id)
+            .order_by(ThreadSession.created_at.desc())
+            .limit(1)
+        )
+        if mapping is not None and mapping.status == "live":
+            return None
+        if mapping is None and row.created_at > now - timedelta(minutes=1):
+            return None
+    return ClosedAppSession(session_id=row.session_id, vault_id=row.vault_id)
+
+
 async def list_closed_app_sessions(
     session: AsyncSession, *, now: datetime
 ) -> list[ClosedAppSession]:
@@ -409,19 +511,7 @@ async def list_closed_app_sessions(
         select(GitHubAppSessionVault).where(GitHubAppSessionVault.closed_at.is_(None))
     )
     for row in vaults:
-        if row.is_unmapped:
-            if row.finished_at is not None or row.last_started_at <= now - timedelta(minutes=46):
-                result.append(ClosedAppSession(session_id=row.session_id, vault_id=row.vault_id))
-            continue
-        mapping = await session.scalar(
-            select(ThreadSession)
-            .where(ThreadSession.ma_session_id == row.session_id)
-            .order_by(ThreadSession.created_at.desc())
-            .limit(1)
-        )
-        if mapping is not None and mapping.status == "live":
-            continue
-        if mapping is None and row.created_at > now - timedelta(minutes=1):
-            continue
-        result.append(ClosedAppSession(session_id=row.session_id, vault_id=row.vault_id))
+        closed = await closed_app_session_for_id(session, session_id=row.session_id, now=now)
+        if closed is not None:
+            result.append(closed)
     return result

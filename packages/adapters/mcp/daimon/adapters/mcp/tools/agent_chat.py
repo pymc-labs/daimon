@@ -667,7 +667,9 @@ async def _continue_turn_impl(
         if session.archived_at is not None:
             raise ToolError("This session is archived.")
         async with runtime.session_factory.begin() as db:
-            await touch_unmapped_app_session(db, session_id=handle)
+            touched = await touch_unmapped_app_session(db, session_id=handle)
+            if touched is False:
+                raise ToolError("This session is closed.")
         sent = await runtime.client.beta.sessions.events.send(
             handle,
             events=[

@@ -234,7 +234,8 @@ def test_github_migrations_follow_agent_avatars() -> None:
     audit = script.get_revision("0055_github_token_audit_versions")
     assert notices is not None and notices.down_revision == "0053_agent_avatars"
     assert audit is not None and audit.down_revision == "0054_github_new_repo_notices"
-    assert script.get_heads() == ["0055_github_token_audit_versions"]
+    refresh = script.get_revision("0056_github_mcp_session_refresh")
+    assert refresh is not None and refresh.down_revision == "0055_github_token_audit_versions"
 
 
 def test_main_returns_zero_for_clean_real_tree(capsys: pytest.CaptureFixture[str]) -> None:

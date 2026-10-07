@@ -1009,6 +1009,13 @@ async def test_unmapped_mcp_vault_survives_followups_until_the_turn_ceiling(
         == "mcp-vault"
     )
     assert await github_issued_tokens.list_closed_app_sessions(db_session, now=started) == closed
+    await github_issued_tokens.mark_headless_app_session_closed(
+        db_session, session_id="mcp-session"
+    )
+    assert (
+        await github_issued_tokens.touch_unmapped_app_session(db_session, session_id="mcp-session")
+        is False
+    )
 
 
 @pytest.mark.asyncio

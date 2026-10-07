@@ -2427,6 +2427,31 @@ async def test_continue_turn_returns_boundary_from_its_own_send() -> None:
     assert touch_app.await_args.kwargs == {"session_id": "ses_test001"}
 
 
+async def test_continue_turn_rejects_a_closed_app_vault_before_send() -> None:
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=_session_json(status="idle")),
+    )
+    sent: list[str] = []
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: sent.append("sent") or httpx.Response(500),
+    )
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat.touch_unmapped_app_session",
+            new=AsyncMock(return_value=False),
+        ),
+        pytest.raises(ToolError, match="session is closed"),
+    ):
+        await _continue_turn_impl(runtime, _auth(), "ses_test001", "again")
+    assert sent == []
+
+
 async def test_start_turn_raises_when_send_accepts_nothing(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

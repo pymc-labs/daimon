@@ -18,7 +18,7 @@ from anthropic.types.beta import (
 from cryptography.fernet import Fernet, MultiFernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from daimon.core._models import AgentGitHubMode
+from daimon.core._models import AgentGitHubMode, GitHubAppSessionVault
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_requests import mint_request_token
@@ -1387,10 +1387,12 @@ async def test_create_session_skips_copilot_when_no_pat(
     assert len(session_bodies) == 1
 
 
+@pytest.mark.parametrize("app_session_unmapped", [False, True])
 async def test_create_session_app_mode_with_zero_grants_has_no_github_access(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    app_session_unmapped: bool,
 ) -> None:
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
@@ -1422,7 +1424,14 @@ async def test_create_session_app_mode_with_zero_grants_has_no_github_access(
         tenant_id=tenant.id,
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
+        app_session_unmapped=app_session_unmapped,
     )
+    async with db_session_factory() as session:
+        registered = await session.get(GitHubAppSessionVault, "sess_zero_grants")
+    assert registered is not None
+    assert registered.is_unmapped is app_session_unmapped
+    assert registered.is_mcp is app_session_unmapped
+    assert registered.agent_id == (agent_uuid if app_session_unmapped else None)
     assert bodies[0]["vault_ids"] == ["vlt_session"]
     assert not any(r["type"] == "github_repository" for r in bodies[0].get("resources", []))
     assert credentials.await_args.kwargs["access"].tokens == ()
