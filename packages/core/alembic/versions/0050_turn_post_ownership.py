@@ -33,12 +33,10 @@ def upgrade() -> None:
         "agent_posted_messages",
         sa.Column("turn_card_intent_id", postgresql.UUID(as_uuid=True)),
     )
-    # NOT VALID then VALIDATE: the scan runs without blocking writes.
+    # One alembic transaction: the scan runs under the ADD COLUMN lock. The table
+    # is small (pruned with the audit retention), so this is brief.
     for name, condition in _CHECKS:
-        op.execute(
-            f"ALTER TABLE agent_posted_messages ADD CONSTRAINT {name} CHECK ({condition}) NOT VALID"
-        )
-        op.execute(f"ALTER TABLE agent_posted_messages VALIDATE CONSTRAINT {name}")
+        op.create_check_constraint(name, "agent_posted_messages", condition)
 
 
 _CHECKS = (
