@@ -6,6 +6,7 @@ import asyncio
 from typing import Any, cast
 
 import discord
+from daimon.adapters.mcp.tools.discord._client import ensure_application_id
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.agent_post_identity import (
     DISCORD_AGENT_WEBHOOK_NAME,
@@ -33,7 +34,8 @@ async def own_webhook(
         return None
     if isinstance(channel, discord.Thread) and channel.locked and create:
         return None
-    if client.application_id is None:
+    application_id = await ensure_application_id(client)
+    if application_id is None:
         return None
     if create:
         member = parent.guild.me
@@ -54,7 +56,7 @@ async def own_webhook(
                 if is_our_discord_webhook(
                     application_id=_snowflake(raw.get("application_id")),
                     channel_id=_snowflake(raw.get("channel_id")),
-                    our_application_id=client.application_id,
+                    our_application_id=application_id,
                     target_channel_id=parent.id,
                 )
                 and raw.get("token")
@@ -79,7 +81,8 @@ async def own_webhook_ids(
     parent = channel.parent if isinstance(channel, discord.Thread) else channel
     if not isinstance(parent, (discord.TextChannel, discord.ForumChannel)):
         return frozenset()
-    if client.application_id is None:
+    application_id = await ensure_application_id(client)
+    if application_id is None:
         return frozenset()
     try:
         raw_hooks = await client.http.channel_webhooks(parent.id)
@@ -91,7 +94,7 @@ async def own_webhook_ids(
         if is_our_discord_webhook(
             application_id=_snowflake(raw.get("application_id")),
             channel_id=_snowflake(raw.get("channel_id")),
-            our_application_id=client.application_id,
+            our_application_id=application_id,
             target_channel_id=parent.id,
         )
     )
@@ -144,6 +147,7 @@ async def edit_own_message(
     extra_messages: list[discord.Message] | None = None,
     **kwargs: Any,  # noqa: ANN401
 ) -> discord.Message | None:
+    await ensure_application_id(client)
     ours = (
         isinstance(message.webhook_id, int)
         and client.application_id is not None
@@ -181,6 +185,7 @@ async def delete_own_message(
     channel: discord.abc.GuildChannel | discord.Thread,
     message: discord.Message,
 ) -> None:
+    await ensure_application_id(client)
     ours = (
         isinstance(message.webhook_id, int)
         and client.application_id is not None

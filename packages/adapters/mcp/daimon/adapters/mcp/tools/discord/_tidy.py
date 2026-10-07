@@ -39,6 +39,7 @@ from daimon.adapters.mcp.tools.discord._client import (
     _require_guild_id,  # pyright: ignore[reportPrivateUsage]
     _resolve_channel,  # pyright: ignore[reportPrivateUsage]
     _resolve_member,  # pyright: ignore[reportPrivateUsage]
+    ensure_application_id,
     rest_client,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._post_transport import (
@@ -134,6 +135,8 @@ async def _fetch_own_bot_message(
         message = await target.channel.fetch_message(int(message_id))
     except discord.NotFound as e:
         raise ToolError("message not found") from e
+    if message.webhook_id is not None:
+        await ensure_application_id(_client)
     # require_own_post has already checked the durable agent ledger. A deleted
     # webhook may no longer appear in the channel list, but its recorded post
     # is still the calling agent's.

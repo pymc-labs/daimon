@@ -26,19 +26,26 @@ async def rest_client(token: str) -> AsyncIterator[discord.Client]:
     # can tell daimon's own threads apart (rename_thread's ownership check).
     client._connection.user = discord.ClientUser(state=client._connection, data=me)  # pyright: ignore[reportPrivateUsage]
     bot_id = client._connection.user.id  # pyright: ignore[reportPrivateUsage]
-    application_id = _application_ids.get(bot_id)
-    if application_id is None:
-        try:
-            application_id = int((await client.http.application_info())["id"])
-        except discord.HTTPException:
-            application_id = None
-        if application_id is not None:
-            _application_ids[bot_id] = application_id
-    client._connection.application_id = application_id  # pyright: ignore[reportPrivateUsage]
+    client._connection.application_id = _application_ids.get(bot_id)  # pyright: ignore[reportPrivateUsage]
     try:
         yield client
     finally:
         await client.http.close()
+
+
+async def ensure_application_id(client: discord.Client) -> int | None:
+    """Load the application ID only for tools that handle agent webhooks."""
+    if client.application_id is not None:
+        return client.application_id
+    if client.user is None:  # pyright: ignore[reportUnnecessaryComparison]
+        return None
+    try:
+        application_id = int((await client.http.application_info())["id"])
+    except discord.HTTPException:
+        return None
+    _application_ids[client.user.id] = application_id
+    client._connection.application_id = application_id  # pyright: ignore[reportPrivateUsage]
+    return application_id
 
 
 def _require_discord_identity(auth: AuthIdentity) -> str:  # pyright: ignore[reportUnusedFunction]  # re-exported

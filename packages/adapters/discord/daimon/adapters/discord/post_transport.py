@@ -81,9 +81,9 @@ class DiscordPostTransport:
     def _ours(self, message: discord.Message) -> bool:
         application_id = self.client.application_id
         return (
-            isinstance(message.webhook_id, int)
+            isinstance(getattr(message, "webhook_id", None), int)
             and application_id is not None
-            and message.application_id == application_id
+            and getattr(message, "application_id", None) == application_id
         )
 
     async def _webhook(
