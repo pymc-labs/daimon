@@ -27,6 +27,12 @@ def upgrade() -> None:
     op.create_table(
         "github_app_headless_sessions",
         sa.Column("session_id", sa.Text(), primary_key=True),
+        sa.Column(
+            "tenant_id",
+            sa.UUID(),
+            sa.ForeignKey("tenants.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("vault_id", sa.Text(), nullable=False),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False

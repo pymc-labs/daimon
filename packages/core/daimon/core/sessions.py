@@ -621,10 +621,10 @@ async def create_session(
                         session_id=created.id,
                     )
                 if requester_is_headless:
-                    assert vault_id is not None
+                    assert vault_id is not None and tenant_id is not None
                     async with session_factory.begin() as session:
                         await register_headless_app_session(
-                            session, session_id=created.id, vault_id=vault_id
+                            session, session_id=created.id, tenant_id=tenant_id, vault_id=vault_id
                         )
             return created
         except BaseException:

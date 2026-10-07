@@ -798,7 +798,7 @@ async def test_headless_app_session_is_closed_only_after_runner_finishes(
         )
     ] == [token.token_id]
     await github_issued_tokens.register_headless_app_session(
-        db_session, session_id="headless-session", vault_id="session-vault"
+        db_session, session_id="headless-session", tenant_id=tenant_id, vault_id="session-vault"
     )
     await db_session.flush()
 
@@ -826,8 +826,14 @@ async def test_headless_app_cleanup_archives_vault_without_grants(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    tenant_id = uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="headless-zero"))
+    await db_session.flush()
     await github_issued_tokens.register_headless_app_session(
-        db_session, session_id="headless-zero-grants", vault_id="session-vault"
+        db_session,
+        session_id="headless-zero-grants",
+        tenant_id=tenant_id,
+        vault_id="session-vault",
     )
     await db_session.commit()
     archive = AsyncMock()

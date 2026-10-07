@@ -290,9 +290,11 @@ async def select_abandoned_pending_tokens(
 
 
 async def register_headless_app_session(
-    session: AsyncSession, *, session_id: str, vault_id: str
+    session: AsyncSession, *, session_id: str, tenant_id: uuid.UUID, vault_id: str
 ) -> None:
-    session.add(GitHubAppHeadlessSession(session_id=session_id, vault_id=vault_id))
+    session.add(
+        GitHubAppHeadlessSession(session_id=session_id, tenant_id=tenant_id, vault_id=vault_id)
+    )
     await session.flush()
 
 
