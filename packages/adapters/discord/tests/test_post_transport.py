@@ -1,5 +1,6 @@
 """Discord agent post transport selection and routing."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -30,14 +31,16 @@ def _world(*, manage_webhooks: bool = True) -> tuple[MagicMock, MagicMock, Magic
 
 async def test_agent_uses_channel_webhook_with_wait_and_identity() -> None:
     client, channel, hook = _world()
+    view = MagicMock(spec=discord.ui.View)
     transport = DiscordPostTransport(
         client, channel, name="Research", avatar_url="https://x/y", builtin=False
     )
-    await transport.send(content="answer")
+    await transport.send(content="answer", view=view)
     hook.send.assert_awaited_once()
     assert hook.send.call_args.kwargs["wait"] is True
     assert hook.send.call_args.kwargs["username"] == "Research"
     assert hook.send.call_args.kwargs["avatar_url"] == "https://x/y"
+    assert hook.send.call_args.kwargs["view"] is view
     channel.send.assert_not_awaited()
 
 
@@ -66,6 +69,21 @@ async def test_thread_post_targets_parent_webhook_and_thread() -> None:
     parent.create_webhook.assert_awaited_once()
     assert hook.send.call_args.kwargs["thread"] is thread
     assert hook.send.call_args.kwargs["wait"] is True
+
+
+async def test_concurrent_turns_create_only_one_channel_webhook() -> None:
+    client, channel, hook = _world()
+
+    async def create(*, name: str) -> MagicMock:
+        await asyncio.sleep(0)
+        return hook
+
+    channel.create_webhook = AsyncMock(side_effect=create)
+    first = DiscordPostTransport(client, channel, name="Research", avatar_url=None, builtin=False)
+    second = DiscordPostTransport(client, channel, name="Writer", avatar_url=None, builtin=False)
+    await asyncio.gather(first.send(content="one"), second.send(content="two"))
+    channel.create_webhook.assert_awaited_once_with(name="Daimon agents")
+    assert hook.send.await_count == 2
 
 
 async def test_locked_thread_uses_bot_fallback() -> None:
