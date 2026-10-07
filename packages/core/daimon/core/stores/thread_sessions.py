@@ -98,6 +98,26 @@ async def list_live_thread_sessions(
     return [ThreadSessionRow.model_validate(row) for row in rows]
 
 
+async def list_live_sessions_for_agent(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, agent_id: _uuid.UUID
+) -> list[ThreadSessionRow]:
+    """Find live MA sessions for an agent during an explicit GitHub mode switch."""
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    rows = await session.scalars(
+        select(ThreadSession).where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.status == "live",
+        )
+    )
+    return [
+        ThreadSessionRow.model_validate(row)
+        for row in rows
+        if row.ma_agent_id is not None
+        and derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.ma_agent_id) == agent_id
+    ]
+
+
 async def get_thread_session_at(
     session: AsyncSession,
     *,
@@ -475,6 +495,23 @@ async def record_snapshot(
             mutable_fingerprint=mutable_fingerprint,
         )
     )
+    await session.flush()
+
+
+async def record_app_token_refresh(
+    session: AsyncSession, *, ma_session_id: str, issued_at: int
+) -> None:
+    """Carry a scheduler or CLI token swap into every live mapping of the MA session."""
+    rows = await session.scalars(
+        select(ThreadSession).where(
+            ThreadSession.ma_session_id == ma_session_id,
+            ThreadSession.status == "live",
+        )
+    )
+    for row in rows:
+        config = row.effective_config
+        if config is not None and config.get("github_mode") == "app":
+            row.effective_config = {**config, "repo_token_issued_at": issued_at}
     await session.flush()
 
 

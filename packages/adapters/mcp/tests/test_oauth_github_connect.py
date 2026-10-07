@@ -82,6 +82,7 @@ async def test_connection_happy_path_and_rechecks(
             requester_label="Alex",
         )
     repo_admin = True
+    repo_two_admin = False
     requests: list[httpx.Request] = []
 
     def github_handler(request: httpx.Request) -> httpx.Response:
@@ -125,7 +126,7 @@ async def test_connection_happy_path_and_rechecks(
                             "id": 102,
                             "owner": {"id": 55},
                             "full_name": "example/two",
-                            "permissions": {"pull": True},
+                            "permissions": {"pull": True, "admin": repo_two_admin},
                         },
                     ]
                 },
@@ -196,6 +197,8 @@ async def test_connection_happy_path_and_rechecks(
         assert malformed.headers["referrer-policy"] == "no-referrer"
         assert "example/one" in page.text and "example/two" not in page.text
         assert "Select all repos you administer" in page.text
+        assert "onclick=" not in page.text
+        assert 'id="select-all-repos"' in page.text
         assert "All repos in this org" not in page.text
         assert 'name="repo" value="101"' in page.text
         assert 'name="repo" value="101" checked' not in page.text
@@ -212,6 +215,7 @@ async def test_connection_happy_path_and_rechecks(
         async with sessionmaker() as session:
             assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
         repo_admin = True
+        repo_two_admin = True
         async with sessionmaker.begin() as session:
             await set_role(session, account_id, Role.USER)
         demoted = await browser.post("/oauth/github/confirm", data={"state": state, "repo": "101"})
@@ -227,17 +231,23 @@ async def test_connection_happy_path_and_rechecks(
             await set_external(session, account_id, False)
             await set_role(session, account_id, Role.ADMIN)
         confirmed = await browser.post(
-            "/oauth/github/confirm", data={"state": state, "repo": "101", "access_101": "write"}
+            "/oauth/github/confirm",
+            data={
+                "state": state,
+                "repo": ["101", "102"],
+                "access_101": "write",
+                "access_102": "read",
+            },
         )
-        assert confirmed.status_code == 200 and "Connected: 1 repos" in confirmed.text
+        assert confirmed.status_code == 200 and "Connected: 2 repos" in confirmed.text
         async with sessionmaker() as session:
             repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
-            assert len(repos) == 1 and repos[0].repo_id == 101
-            assert repos[0].installation_id == 77 and repos[0].max_access == "write"
+            assert {repo.repo_id: repo.max_access for repo in repos} == {101: "write", 102: "read"}
+            assert all(repo.installation_id == 77 for repo in repos)
             events = await list_events(session, tenant_id=tenant_id)
             assert len(events) == 1
             assert events[0].operation == "github_connect"
-            assert events[0].github_repo_ids == [101]
+            assert events[0].github_repo_ids == [101, 102]
         reused = await browser.post("/oauth/github/confirm", data={"state": state, "repo": "101"})
         assert reused.status_code == 400
     assert any(request.url.path == "/user/installations" for request in requests)

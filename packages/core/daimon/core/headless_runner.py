@@ -57,8 +57,9 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from cryptography.fernet import MultiFernet
-from daimon.core.config import McpSettings
+from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.context_prompt import TurnContext, context_prompt
+from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.sessions import create_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, trusted_servers_for
@@ -135,6 +136,7 @@ async def run_turn(
     github_fallback_pat: str | None = None,
     github_app_id: str | None = None,
     github_app_private_key: str | None = None,
+    agent_github_app: GithubAppSettings | None = None,
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     on_state: Callable[[TurnState], None] | None = None,
@@ -162,6 +164,7 @@ async def run_turn(
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
+            agent_github_app=agent_github_app,
             deadline=deadline,
             tool_safety=tool_safety,
             on_state=on_state,
@@ -189,6 +192,7 @@ async def run_turn(
                 github_fallback_pat=github_fallback_pat,
                 github_app_id=github_app_id,
                 github_app_private_key=github_app_private_key,
+                agent_github_app=agent_github_app,
                 deadline=deadline,
                 tool_safety=tool_safety,
                 on_state=on_state,
@@ -220,6 +224,7 @@ async def run_turn_impl(
     github_fallback_pat: str | None = None,
     github_app_id: str | None = None,
     github_app_private_key: str | None = None,
+    agent_github_app: GithubAppSettings | None = None,
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     on_state: Callable[[TurnState], None] | None = None,
@@ -321,6 +326,8 @@ async def run_turn_impl(
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
+            agent_github_app=agent_github_app,
+            requester_is_headless=True,
             billing_exempt=billing_exempt,
             memory_read_only=origin == "routine",
             tool_safety=tool_safety,
@@ -346,52 +353,61 @@ async def run_turn_impl(
         )
         raise ceiling_error() from err
 
-    if (observation := current_outcome.get()) is not None:
-        observation.session_id = session.id
-        observation.model_by_session[session.id] = session.agent.model.id
+    try:
+        if (observation := current_outcome.get()) is not None:
+            observation.session_id = session.id
+            observation.model_by_session[session.id] = session.agent.model.id
 
-    usage_record: Callable[..., Awaitable[None]] | None = None
-    if usage_record_factory is not None:
-        usage_record = usage_record_factory(session.id, session.agent.model.id)
+        usage_record: Callable[..., Awaitable[None]] | None = None
+        if usage_record_factory is not None:
+            usage_record = usage_record_factory(session.id, session.agent.model.id)
 
-    billing: BillingPosture
-    if usage_record is not None:
-        _bound_usage_record = usage_record
+        billing: BillingPosture
+        if usage_record is not None:
+            _bound_usage_record = usage_record
 
-        async def _record(*, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
-            await _bound_usage_record(event=event)
+            async def _record(*, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
+                await _bound_usage_record(event=event)
 
-        billing = Billed(record=_record)
-    else:
-        billing = BillingExempt(reason="headless-unrecorded")
+            billing = Billed(record=_record)
+        else:
+            billing = BillingExempt(reason="headless-unrecorded")
 
-    # Driver's own run_turn builds and sends the `user.message` event itself
-    # from `user_message=trigger_message` — the drain (steps 3-6 of the old
-    # bespoke loop) is fully delegated below.
-    state: TurnState = await drive_turn(
-        anthropic=anthropic,
-        session_id=session.id,
-        user_message=context_prompt(origin, system=session.agent.system) + trigger_message,
-        lifecycle=_NoOpLifecycle(),
-        cancel=asyncio.Event(),  # never set — headless has no cancel source
-        render_interval_s=2.0,  # nothing renders; do not spin the diff timer
-        billing=billing,
-        tool_confirmation=headless_tool_confirmation(
-            tool_safety,
-            trusted_servers=trusted_servers_for(
-                str(mcp_settings.public_url)
-                if mcp_settings is not None and mcp_settings.public_url is not None
-                else None
+        # Driver's own run_turn builds and sends the `user.message` event itself
+        # from `user_message=trigger_message` — the drain (steps 3-6 of the old
+        # bespoke loop) is fully delegated below.
+        state: TurnState = await drive_turn(
+            anthropic=anthropic,
+            session_id=session.id,
+            user_message=context_prompt(origin, system=session.agent.system) + trigger_message,
+            lifecycle=_NoOpLifecycle(),
+            cancel=asyncio.Event(),  # never set — headless has no cancel source
+            render_interval_s=2.0,  # nothing renders; do not spin the diff timer
+            billing=billing,
+            tool_confirmation=headless_tool_confirmation(
+                tool_safety,
+                trusted_servers=trusted_servers_for(
+                    str(mcp_settings.public_url)
+                    if mcp_settings is not None and mcp_settings.public_url is not None
+                    else None
+                ),
             ),
-        ),
-        deadline=effective_deadline,
-    )
+            deadline=effective_deadline,
+        )
 
-    if (observation := current_outcome.get()) is not None:
-        observation.finish(state=state)
-    if state.error is not None:
-        raise state.error
+        if (observation := current_outcome.get()) is not None:
+            observation.finish(state=state)
+        if state.error is not None:
+            raise state.error
 
-    if on_state is not None:
-        on_state(state)
-    return extract_final_response(state.content)[:LAST_RESULT_TAIL_MAX]
+        if on_state is not None:
+            on_state(state)
+        return extract_final_response(state.content)[:LAST_RESULT_TAIL_MAX]
+    finally:
+        if session_factory is not None:
+            try:
+                await close_headless_app_session(
+                    anthropic, session_factory, session_id=session.id, fernet=fernet
+                )
+            except Exception:
+                log.exception("headless.github_app_session_close.failed", session_id=session.id)

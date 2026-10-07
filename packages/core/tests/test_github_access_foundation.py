@@ -6,20 +6,34 @@ import base64
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from types import SimpleNamespace
+from typing import Literal, cast
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
-from daimon.core._models import AgentGitHubGrant, Tenant, TenantGitHubRepo
+from daimon.core._models import (
+    AgentGitHubGrant,
+    GitHubIssuedToken,
+    GitHubNewRepoNotice,
+    Tenant,
+    TenantGitHubRepo,
+)
 from daimon.core.config import GithubAppSettings, GithubSettings, load_settings
 from daimon.core.github_app_auth import group_repository_access, mint_installation_token
+from daimon.core.github_app_session import add_app_credentials, prepare_app_access
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.github_requester_access import PermissionCache
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.security_audit import GITHUB_TOKEN_MINT
 from daimon.core.stores import github_access, github_app_installations, github_issued_tokens
+from daimon.core.stores.github_new_repo_notices import queue_new_repos
 from daimon.core.stores.security_audit import append_github_token_event
 from pydantic import SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def test_new_app_settings_are_separate_from_legacy() -> None:
@@ -67,6 +81,314 @@ def test_group_access_uses_write_for_duplicate_repo() -> None:
         [(9, 101, "read"), (9, 101, "write"), (9, 101, "read"), (9, 102, "read")]
     )
     assert groups == [(9, "write", (101,)), (9, "read", (102,))]
+
+
+@pytest.mark.asyncio
+async def test_staged_grants_activate_atomically_and_validate_ceiling(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    await github_app_installations.upsert(
+        db_session,
+        installation_id=77,
+        account_login="example",
+        repo_full_names=["example/repo"],
+    )
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=101,
+            owner_id=1,
+            installation_id=77,
+            repo_full_name="example/repo",
+            max_access="read",
+            authorized_by_github_user_id=2,
+            status="active",
+            version=1,
+        )
+    )
+    await db_session.flush()
+    with pytest.raises(ValueError, match="exceeds repository authorization"):
+        await github_access.stage_grant(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=101,
+            baseline_access="read",
+            ceiling_access="write",
+            granted_by_account_id=None,
+        )
+    staged = await github_access.stage_grant(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        repo_id=101,
+        baseline_access="none",
+        ceiling_access="read",
+        granted_by_account_id=None,
+        is_working_repo=True,
+    )
+    assert staged.staged
+    assert (
+        await github_access.get_agent_mode(db_session, tenant_id=tenant_id, agent_id=agent_id)
+        == "legacy"
+    )
+    await github_access.activate_agent(db_session, tenant_id=tenant_id, agent_id=agent_id)
+    assert (
+        await github_access.get_agent_mode(db_session, tenant_id=tenant_id, agent_id=agent_id)
+        == "app"
+    )
+    grants = await github_access.list_agent_grants(
+        db_session, tenant_id=tenant_id, agent_id=agent_id
+    )
+    assert len(grants) == 1 and not grants[0].staged and grants[0].version == 2
+    updated = await github_access.stage_grant(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        repo_id=101,
+        baseline_access="read",
+        ceiling_access="read",
+        granted_by_account_id=None,
+        is_working_repo=True,
+    )
+    assert not updated.staged and updated.version == 3 and updated.baseline_access == "read"
+    await github_access.deactivate_agent(db_session, tenant_id=tenant_id, agent_id=agent_id)
+    assert (
+        await github_access.get_agent_mode(db_session, tenant_id=tenant_id, agent_id=agent_id)
+        == "legacy"
+    )
+
+
+@pytest.mark.asyncio
+async def test_copied_agent_identity_starts_without_source_grants(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = uuid.uuid4()
+    source_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agent_source")
+    copied_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agent_copy")
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    await github_app_installations.upsert(
+        db_session,
+        installation_id=77,
+        account_login="example",
+        repo_full_names=["example/repo"],
+    )
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=101,
+            owner_id=1,
+            installation_id=77,
+            repo_full_name="example/repo",
+            max_access="read",
+            authorized_by_github_user_id=2,
+            status="active",
+            version=1,
+        )
+    )
+    await db_session.flush()
+    await github_access.stage_grant(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=source_id,
+        repo_id=101,
+        baseline_access="read",
+        ceiling_access="read",
+        granted_by_account_id=None,
+    )
+    await github_access.activate_agent(db_session, tenant_id=tenant_id, agent_id=source_id)
+    assert (
+        await github_access.get_agent_mode(db_session, tenant_id=tenant_id, agent_id=copied_id)
+        == "legacy"
+    )
+    assert (
+        await github_access.list_agent_grants(db_session, tenant_id=tenant_id, agent_id=copied_id)
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_new_installation_repo_is_queued_for_connected_workspace_admins(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=101,
+            owner_id=1,
+            installation_id=77,
+            repo_full_name="example/old",
+            max_access="read",
+            authorized_by_github_user_id=2,
+            status="active",
+            version=1,
+        )
+    )
+    await db_session.flush()
+    now = datetime.now(UTC)
+    queued = await queue_new_repos(
+        db_session,
+        installation_id=77,
+        old_names={"example/old"},
+        new_names={"example/old", "example/new"},
+        now=now,
+    )
+    repeated = await queue_new_repos(
+        db_session,
+        installation_id=77,
+        old_names={"example/old"},
+        new_names={"example/old", "example/new"},
+        now=now,
+    )
+    notices = list(await db_session.scalars(select(GitHubNewRepoNotice)))
+    assert queued == 1 and repeated == 0
+    assert [(row.tenant_id, row.repo_full_name) for row in notices] == [(tenant_id, "example/new")]
+
+
+@pytest.mark.asyncio
+async def test_app_zero_grants_and_external_asker_mint_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    async with db_session_factory.begin() as session:
+        session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+
+    def reject_network(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected GitHub call: {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reject_network)) as client:
+        zero = await prepare_app_access(
+            db_session_factory,
+            client,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=None,
+            is_external=False,
+            provisional_session_id="pending",
+            config=GithubAppSettings(),
+            fernet=None,
+            cache=PermissionCache(),
+        )
+        external = await prepare_app_access(
+            db_session_factory,
+            client,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=uuid.uuid4(),
+            is_external=True,
+            provisional_session_id="pending",
+            config=GithubAppSettings(),
+            fernet=None,
+            cache=PermissionCache(),
+        )
+    assert zero.resources == external.resources == ()
+    assert zero.tokens == external.tokens == ()
+    assert zero.working_token is external.working_token is None
+
+    async def empty_credentials(*, vault_id: str):
+        if False:
+            yield vault_id
+
+    credentials = SimpleNamespace(list=empty_credentials, create=AsyncMock())
+    fake_anthropic = cast(
+        AsyncAnthropic,
+        SimpleNamespace(beta=SimpleNamespace(vaults=SimpleNamespace(credentials=credentials))),
+    )
+    await add_app_credentials(fake_anthropic, vault_id="vault", access=zero)
+    credentials.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mint_revocation_race_revokes_late_github_token(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    async with db_session_factory.begin() as session:
+        session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+        await session.flush()
+        await github_app_installations.upsert(
+            session,
+            installation_id=771,
+            account_login="example",
+            repo_full_names=["example/repo"],
+        )
+        session.add(
+            TenantGitHubRepo(
+                tenant_id=tenant_id,
+                repo_id=991,
+                owner_id=1,
+                installation_id=771,
+                repo_full_name="example/repo",
+                max_access="read",
+                authorized_by_github_user_id=2,
+                status="active",
+                version=1,
+            )
+        )
+        await session.flush()
+        await github_access.stage_grant(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=991,
+            baseline_access="read",
+            ceiling_access="read",
+            granted_by_account_id=None,
+        )
+        await github_access.activate_agent(session, tenant_id=tenant_id, agent_id=agent_id)
+
+    async def mint_after_revocation(*args: object, **kwargs: object) -> str:
+        async with db_session_factory.begin() as session:
+            pending = await session.scalar(
+                select(GitHubIssuedToken).where(
+                    GitHubIssuedToken.tenant_id == tenant_id,
+                    GitHubIssuedToken.agent_id == agent_id,
+                    GitHubIssuedToken.status == "pending",
+                )
+            )
+            assert pending is not None
+            await github_issued_tokens.mark_revoked(session, token_id=pending.token_id)
+        return "late-token"
+
+    monkeypatch.setattr("daimon.core.github_app_session.build_app_jwt", lambda *a, **k: "jwt")
+    monkeypatch.setattr(
+        "daimon.core.github_app_session.mint_installation_token", mint_after_revocation
+    )
+    deleted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        deleted.append(request.headers["Authorization"])
+        return httpx.Response(204)
+
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(github_issued_tokens.GitHubTokenRowClosedError):
+            await prepare_app_access(
+                db_session_factory,
+                client,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                account_id=None,
+                is_external=False,
+                provisional_session_id="pending-race",
+                config=GithubAppSettings(app_id="123", private_key=SecretStr("unused")),
+                fernet=fernet,
+                cache=PermissionCache(),
+            )
+    assert deleted == ["Bearer late-token"]
+    async with db_session_factory() as session:
+        row = await session.scalar(
+            select(GitHubIssuedToken).where(GitHubIssuedToken.session_id == "pending-race")
+        )
+        assert row is not None and row.status == "revoked" and row.encrypted_token is None
 
 
 @pytest.mark.asyncio
@@ -211,6 +533,7 @@ async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSe
     assert [
         item.token_id for item in await github_issued_tokens.select_stale_tokens(db_session)
     ] == [row.token_id]
+    origin_id = uuid.uuid4()
     event = await append_github_token_event(
         db_session,
         tenant_id=tenant_id,
@@ -225,6 +548,8 @@ async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSe
         repo_ids=[101],
         permissions={"contents": "read"},
         expires_at=row.expires_at,
+        grant_versions=row.grant_versions,
+        turn_origin_id=origin_id,
     )
     assert event is not None and event.operation == "github_token_mint"
     assert event.github_token_id == row.token_id
@@ -232,6 +557,8 @@ async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSe
     assert event.github_installation_id == 909
     assert event.github_repo_ids == [101]
     assert event.github_permissions == {"contents": "read"}
+    assert event.github_grant_versions == {"grant:101": 1, "authorization:101": 1}
+    assert event.github_turn_origin_id == origin_id
     assert event.github_expires_at == row.expires_at
 
     await github_issued_tokens.record_revoke_attempt(db_session, token_id=row.token_id)

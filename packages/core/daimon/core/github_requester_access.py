@@ -222,7 +222,14 @@ async def _linked_permissions_once(
                     row.refresh_expires_at is not None
                     and row.refresh_expires_at <= datetime.now(UTC)
                 ):
-                    await bump_link_generation(session, github_user_id=user_id, broken=True)
+                    broken = await bump_link_generation(
+                        session,
+                        github_user_id=user_id,
+                        broken=True,
+                        expected_token_generation=row.token_generation,
+                    )
+                    if broken is None:
+                        raise _RefreshRace
                     cache.drop_user(user_id)
                     return {}
                 response = await client.post(
@@ -291,6 +298,7 @@ async def _linked_permissions_once(
             if exc.response.status_code == 403 and (
                 exc.response.headers.get("x-ratelimit-remaining") == "0"
                 or "retry-after" in exc.response.headers
+                or "secondary rate limit" in exc.response.text.lower()
             ):
                 raise
             permissions = {}

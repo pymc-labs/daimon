@@ -15,6 +15,7 @@ from daimon.core.session_compat import (
     ReplaceSession,
     ReplaceToolsAndMcpServers,
     ReuseAsIs,
+    RotateAppTokens,
     RotateRepoToken,
     UpdateInPlace,
     decide_session_compatibility,
@@ -56,6 +57,64 @@ def test_decision_is_reuse_when_recorded_and_desired_are_identical() -> None:
         now=NOW,
     )
     assert decision == ReuseAsIs(), "identical snapshots must reuse the session untouched"
+
+
+def test_predeploy_legacy_snapshot_with_bound_repo_is_reused() -> None:
+    recorded = SessionSnapshot.model_validate(make_snapshot().model_dump(exclude={"repo_urls"}))
+    desired = make_snapshot(repo_urls=())
+    assert recorded.repo_url == "https://github.com/acme/data"
+    assert (
+        decide_session_compatibility(
+            recorded=recorded,
+            desired=desired,
+            capabilities=DEFAULT_MA_CAPABILITIES,
+            now=NOW,
+        )
+        == ReuseAsIs()
+    )
+
+
+def test_app_token_swap_keeps_session_but_repo_set_change_replaces_it() -> None:
+    url = "https://github.com/example/one"
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_url=None,
+        repo_branch=None,
+        repo_urls=(url,),
+        repo_resource_ids={url: "repo-resource"},
+        vault_id="session-vault",
+    )
+    desired = recorded.model_copy(update={"repo_resource_ids": {}})
+    decision = decide_session_compatibility(
+        recorded=recorded,
+        desired=desired,
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+    )
+    assert decision == UpdateInPlace(
+        ops=(
+            RotateAppTokens(resource_ids={url: "repo-resource"}),
+            RemirrorVaultCredentials(),
+        ),
+        reasons=("repo_token_age",),
+    )
+    fresh = recorded.model_copy(update={"repo_token_issued_at": int(NOW.timestamp())})
+    assert (
+        decide_session_compatibility(
+            recorded=fresh,
+            desired=desired,
+            capabilities=DEFAULT_MA_CAPABILITIES,
+            now=NOW,
+        )
+        == ReuseAsIs()
+    )
+    expanded = desired.model_copy(update={"repo_urls": (url, "https://github.com/example/two")})
+    assert decide_session_compatibility(
+        recorded=recorded,
+        desired=expanded,
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+    ) == ReplaceSession(reasons=("repo_set",))
 
 
 def test_decision_ignores_handles_and_diagnostics_when_only_those_differ() -> None:

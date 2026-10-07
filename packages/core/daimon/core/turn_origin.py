@@ -6,6 +6,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -27,6 +28,7 @@ MAX_REQUESTED_WORK_CHARS = 500
 _ALL_CHANNEL_READS = "read_channel, read_thread, get_message, list_threads, search_messages"
 # Slack has no list_threads: a thread there is a reply chain, not a listable object.
 _CHANNEL_READS = {"slack": "read_channel, read_thread, get_message, search_messages"}
+current_origin_id: ContextVar[uuid.UUID | None] = ContextVar("turn_origin_id", default=None)
 
 
 async def holds_current_channel_admin_grant(
@@ -187,9 +189,11 @@ async def turn_origin(
             is_setup=is_setup,
             is_external=is_external,
         )
+    origin_context = current_origin_id.set(origin.id)
     try:
         yield origin
     finally:
+        current_origin_id.reset(origin_context)
         async with sessionmaker.begin() as session:
             await delete_origin(session, origin_id=origin.id)
 

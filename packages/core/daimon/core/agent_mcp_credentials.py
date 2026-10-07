@@ -41,7 +41,11 @@ from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.mcp_attach import McpServerReplaceRefusedError
 from daimon.core.mcp_personal_servers import hidden_mcp_server_names
 from daimon.core.mcp_server_url import canonical_mcp_url, same_mcp_url
-from daimon.core.mcp_vault import ensure_agent_mcp_vault, hold_agent_vault_lock
+from daimon.core.mcp_vault import (
+    GITHUB_COPILOT_MCP_URL,
+    ensure_agent_mcp_vault,
+    hold_agent_vault_lock,
+)
 from daimon.core.stores import agent_mcp_credentials as cred_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from sqlalchemy import text
@@ -344,6 +348,7 @@ async def sync_agent_mcp_credentials(
     jwt_secret: bytes,
     public_url: str,
     now: dt.datetime,
+    exclude_github_copilot: bool = False,
 ) -> None:
     """Ensure this caller's vault holds the agent's external MCP credentials.
 
@@ -366,6 +371,12 @@ async def sync_agent_mcp_credentials(
         tenant_id=tenant_id,
         agent_id=agent_id,
     )
+    if exclude_github_copilot:
+        credentials = tuple(
+            credential
+            for credential in credentials
+            if credential.mcp_server_url != GITHUB_COPILOT_MCP_URL
+        )
     if not credentials:
         return
     vault_id = await ensure_agent_mcp_vault(

@@ -2307,6 +2307,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "agent_uuid",
         "session_factory",
         "fernet",
+        "app_session_unmapped",
         "github_fallback_pat",
         "github_app_id",
         "github_app_private_key",
@@ -2317,6 +2318,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "origin_seal_ids",
         "before_create",
     }, f"the non-bundle path must keep passing its full argument set; got {sorted(call_kwargs)!r}"
+    assert call_kwargs["app_session_unmapped"] is True
 
 
 @pytest.mark.parametrize("billed", [True, False], ids=["billed", "unbilled"])
@@ -2407,7 +2409,11 @@ async def test_continue_turn_returns_boundary_from_its_own_send() -> None:
     runtime = _runtime(client)
     auth = _auth()
 
-    result = await _continue_turn_impl(runtime, auth, "ses_test001", "again", now=now)
+    with patch(
+        "daimon.adapters.mcp.tools.agent_chat.touch_unmapped_app_session",
+        new=AsyncMock(),
+    ) as touch_app:
+        result = await _continue_turn_impl(runtime, auth, "ses_test001", "again", now=now)
 
     assert result == {
         "handle": "ses_test001",
@@ -2417,6 +2423,8 @@ async def test_continue_turn_returns_boundary_from_its_own_send() -> None:
     assert call_order == ["now", "send"], (
         f"the clock must be read BEFORE events.send, not after; got {call_order!r}"
     )
+    assert touch_app.await_args is not None
+    assert touch_app.await_args.kwargs == {"session_id": "ses_test001"}
 
 
 async def test_start_turn_raises_when_send_accepts_nothing(
@@ -2617,11 +2625,21 @@ async def test_archive_my_session_archives_an_owned_session_exactly_once() -> No
     runtime = _runtime(client)
     auth = _auth()
 
-    result = await _archive_my_session_impl(runtime, auth, "ses_test001")
+    with patch(
+        "daimon.adapters.mcp.tools.agent_chat.close_headless_app_session",
+        new=AsyncMock(),
+    ) as close_app:
+        result = await _archive_my_session_impl(runtime, auth, "ses_test001")
 
     assert result == {"handle": "ses_test001", "archived": "true"}
     assert archive_calls == ["ses_test001"], (
         f"expected exactly one archive call; got {archive_calls!r}"
+    )
+    close_app.assert_awaited_once_with(
+        runtime.client,
+        runtime.session_factory,
+        session_id="ses_test001",
+        fernet=runtime.fernet,
     )
 
 

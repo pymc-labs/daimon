@@ -721,6 +721,15 @@ replaced is decided in `packages/core/daimon/core/session_preparation.py`
 against the fingerprints stored on the mapping row; the outcome rides back on
 `PreparedTurn.continuity` so the adapter can say what happened.
 
+GitHub App mode uses the agent's live grants and the current asker's linked
+GitHub permissions when assembling a turn. External askers get no App token.
+Each effective installation and permission profile gets an ID-scoped token,
+recorded before minting and checked again after delivery. The session mounts
+one repository resource per effective repo and its own vault for `GH_TOKEN`
+and Copilot. A changed repository set replaces the session; unchanged mounts
+receive refreshed tokens through resource updates. Legacy sessions continue to
+use their existing binding and credential path.
+
 **Stage three, `run_prepared_turn()` —
 `packages/core/daimon/core/turn/run.py`.** Calls the driver, and on a
 dead-session 404 recovers exactly once: mark the mapping dead, create a

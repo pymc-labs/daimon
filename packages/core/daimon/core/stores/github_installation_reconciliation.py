@@ -12,6 +12,7 @@ from daimon.core._models import (
     GitHubInstallationReconciliation,
 )
 from daimon.core.stores.domain import GitHubInstallationReconciliationRow
+from daimon.core.stores.github_new_repo_notices import queue_new_repos
 from sqlalchemy import CursorResult, and_, case, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -209,6 +210,15 @@ async def finish(
     else:
         if repos is None:
             raise ValueError("a live installation requires a complete repository snapshot")
+        previous = await session.get(GitHubAppInstallation, job.installation_id)
+        if previous is not None:
+            await queue_new_repos(
+                session,
+                installation_id=job.installation_id,
+                old_names=set(previous.repo_full_names),
+                new_names=set(repos),
+                now=now,
+            )
         stmt = (
             pg_insert(GitHubAppInstallation)
             .values(

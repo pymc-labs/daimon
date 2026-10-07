@@ -33,6 +33,7 @@ from daimon.core.stores.thread_sessions import (
     list_orphaned_turns,
     mark_dead,
     mark_turn_active,
+    record_app_token_refresh,
     record_snapshot,
     set_pending_unsaved_work,
     update_mutable_fingerprint,
@@ -825,6 +826,40 @@ async def test_record_snapshot_backfills_a_row_that_had_none(
     assert refreshed is not None, "the row must still exist after a backfill"
     assert refreshed.effective_config == snapshot, "the backfilled snapshot must be readable back"
     assert refreshed.identity_fingerprint == "ident-backfill", "both fingerprints are written"
+
+
+async def test_app_token_refresh_updates_live_session_snapshots(
+    db_session: AsyncSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    snapshot = _snapshot().model_copy(update={"github_mode": "app", "repo_token_issued_at": 100})
+    live = await create_thread_session(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        thread_id="refresh-live",
+        account_id=uuid.uuid4(),
+        ma_session_id="sess_refresh",
+        effective_config=snapshot,
+    )
+    dead = await create_thread_session(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        thread_id="refresh-dead",
+        account_id=uuid.uuid4(),
+        ma_session_id="sess_refresh",
+        effective_config=snapshot,
+    )
+    await mark_dead(db_session, id=dead.id)
+    await record_app_token_refresh(db_session, ma_session_id="sess_refresh", issued_at=200)
+
+    live_row = await get_thread_session_by_id(db_session, id=live.id)
+    dead_row = await get_thread_session_by_id(db_session, id=dead.id)
+    assert live_row is not None and live_row.effective_config is not None
+    assert dead_row is not None and dead_row.effective_config is not None
+    assert live_row.effective_config.repo_token_issued_at == 200
+    assert dead_row.effective_config.repo_token_issued_at == 100
 
 
 async def test_update_mutable_fingerprint_leaves_the_identity_fingerprint_alone(
