@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 115 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 116 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -175,6 +175,14 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 | `request_mcp_token` | Discord callers, Slack callers, Teams callers | Connect an agent such as research-bot to Linear or GitHub through an MCP endpoint with a bearer token, not browser OAuth. |
 | `request_repo_binding` | Discord callers, Slack callers, Teams callers | Let an agent read a GitHub working repo or repository, public or private. |
 | `request_skill_repo_token` | Discord callers, Slack callers, Teams callers | The skills repo is private: collect a GitHub token to import its skills. |
+
+## `enable_files`
+
+`enable_channel_files`: the agent asks for the Teams Enable files card.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `enable_channel_files` | Teams callers | Post the Enable files card in this Teams channel, right after your reply. |
 
 ## `environments`
 

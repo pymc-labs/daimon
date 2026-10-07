@@ -70,6 +70,7 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
 from daimon.adapters.teams.site_grant import (
     STATE_TTL_S,
+    GrantTarget,
     authorize_url,
     redirect_uri,
     sign_state,
@@ -108,6 +109,8 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_message,
     retire_turn_card_intent,
 )
+from daimon.core.teams_graph import GraphUnavailable
+from daimon.core.teams_sharepoint import ENABLE_FILES_TOOL
 from daimon.core.teams_threads import conversation_of
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn import turn_deadline
@@ -131,7 +134,7 @@ from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import protection_state
 from daimon.core.turn.run import run_prepared_turn
-from daimon.core.turn.state import ToolUseBlock
+from daimon.core.turn.state import ToolUseBlock, daimon_tool_arguments
 from daimon.core.turn.thread_queue import (
     ThreadQueue,
     claim_dispatch,
@@ -291,7 +294,7 @@ class TeamsApp:
         # Bot Framework retries a slow delivery with the same activity id.
         # Not durable: a retry landing after a restart runs a second turn.
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
-        # Group id -> when its enable-files sign-in was offered (monotonic).
+        # Channel id -> when its enable-files sign-in was offered (monotonic).
         self._files_offered: dict[str, float] = {}
         self._recovery: asyncio.Task[None] | None = None
         self._wake_poller: asyncio.Task[None] | None = None
@@ -1089,6 +1092,7 @@ class TeamsApp:
                 keys=render_keys_element(await self._key_names(tenant_id, inbound, admission)),
                 prefix=attachments.prefix,
                 channel_files=await self._files_reachable(inbound),
+                can_enable_files=self._teams.public_url is not None,
             )
             message = render(history=history)
 
@@ -1147,27 +1151,42 @@ class TeamsApp:
         if prepared.continuity.pending:
             # The change was saved where it was made; the next turn applies it.
             log.info("teams.turn.change_pending", reasons=prepared.continuity.pending)
-        if media is not None and any(f.refused for f in media.files):
-            await self._offer_enable_files(inbound, media.group_id)
+        asked = any(
+            daimon_tool_arguments(block, ENABLE_FILES_TOOL) is not None
+            for block in outcome.state.content
+            if isinstance(block, ToolUseBlock)
+        )
+        if asked or (media is not None and any(f.refused for f in media.files)):
+            await self._offer_enable_files(inbound, asked=asked)
 
-    async def _offer_enable_files(self, inbound: TeamsInbound, group_id: str | None) -> None:
-        """An admin whose channel files were refused gets the sign-in that grants them.
+    async def _offer_enable_files(self, inbound: TeamsInbound, *, asked: bool) -> None:
+        """An admin gets the sign-in that grants this channel's files.
 
-        A card, not a status line: never unprompted, and again only once the last
-        offer's sign-in has expired.
+        Offered when the agent asked for it (`ENABLE_FILES_TOOL`), or when the
+        admin's shared file was refused. A card, not a status line: unasked, never
+        on an unprompted message, and again only once the last offer's sign-in has expired.
         """
-        teams = self._teams
+        teams, files = self._teams, self._channel_files
         now = time.monotonic()
+        last = self._files_offered.get(inbound.channel_id, -STATE_TTL_S)
         if (
-            group_id is None
+            files is None
+            or inbound.kind != "channel"
             or teams.public_url is None
-            or inbound.unprompted
+            or (inbound.unprompted and not asked)
             or self._role(inbound) is not Role.ADMIN
-            or now - self._files_offered.get(group_id, -STATE_TTL_S) < STATE_TTL_S
+            or (not asked and now - last < STATE_TTL_S)
         ):
+            if asked:
+                log.info("teams.enable_files.not_offered")
             return
-        self._files_offered[group_id] = now
-        state = sign_state(group_id, secret=teams.client_secret.get_secret_value(), now=time.time())
+        try:
+            target = GrantTarget(await files.team_group(inbound), inbound.channel_id)
+        except GraphUnavailable as err:
+            log.warning("teams.enable_files.no_group", status=err.status, reason=err.reason)
+            return
+        self._files_offered[inbound.channel_id] = now
+        state = sign_state(target, secret=teams.client_secret.get_secret_value(), now=time.time())
         url = authorize_url(
             tenant_id=teams.tenant_id,
             client_id=teams.client_id,
@@ -1179,7 +1198,7 @@ class TeamsApp:
                 inbound.conversation_id, enable_files_card(url), service_url=inbound.service_url
             )
         except TEAMS_SEND_ERRORS:
-            self._files_offered.pop(group_id, None)
+            self._files_offered.pop(inbound.channel_id, None)
             log.warning("teams.enable_files.send_failed", exc_info=True)
 
     async def _files_reachable(self, inbound: TeamsInbound) -> bool | None:

@@ -12,9 +12,10 @@ types.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Final, Literal, cast
 
 from anthropic.types.beta.sessions.beta_managed_agents_agent_tool_result_event import (
     Content as ToolResultContent,
@@ -23,6 +24,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event
     StopReason,
 )
 from daimon.core.errors import TurnError
+from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.termination import TerminationReason
 
 
@@ -59,6 +61,28 @@ class ToolUseBlock:
 
 ContentBlock = TextBlock | ToolUseBlock
 """Ordered, discriminated union of blocks inside `TurnState.content`."""
+
+#: The MCP search interface's proxy: `call_tool(name=..., arguments=...)`.
+_CALL_TOOL: Final[str] = "call_tool"
+
+
+def daimon_tool_arguments(block: ToolUseBlock, tool: str) -> Mapping[str, object] | None:
+    """The arguments of a successful call to daimon's own MCP tool `tool`, or None.
+
+    Recognises the direct call and the same call made through the MCP search
+    interface (`call_tool(name=tool, arguments={...})`), which is how a large
+    daimon catalog is reached.
+    """
+    if block.mcp_server_name != DAIMON_SERVER_NAME or block.status != "complete" or block.is_error:
+        return None
+    arguments: object = block.input
+    if block.name == _CALL_TOOL:
+        if block.input.get("name") != tool:
+            return None
+        arguments = block.input.get("arguments") or {}
+    elif block.name != tool:
+        return None
+    return cast("dict[str, object]", arguments) if isinstance(arguments, dict) else None
 
 
 @dataclass(frozen=True, slots=True)

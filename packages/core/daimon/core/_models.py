@@ -1623,6 +1623,33 @@ class TeamsInstallation(Base):
     )
 
 
+class TeamsChannelSite(Base):
+    """A Teams channel's Files folder, on a SharePoint site granted to daimon.
+
+    Written when an admin turns files on from the channel: their sign-in finds
+    the folder, which `Sites.Selected` cannot. A private or shared channel's
+    folder is on a site of its own, so this row is the only way to it.
+    """
+
+    __tablename__ = "teams_channel_sites"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "channel_id", name="pk_teams_channel_sites"),
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_teams_channel_sites_tenants"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    channel_id: Mapped[str] = mapped_column(Text)
+    group_id: Mapped[str] = mapped_column(Text, nullable=False)
+    site_id: Mapped[str] = mapped_column(Text, nullable=False)
+    drive_id: Mapped[str] = mapped_column(Text, nullable=False)
+    folder_id: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class SlackUserToken(Base):
     """Encrypted per-(workspace, user) Slack xoxp token (user-token hybrid model).
 

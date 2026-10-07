@@ -5,8 +5,9 @@ only through `/sites/...` and `/drives/...` paths; neither the Teams
 `filesFolder` call nor `/shares` lists it, so each has a site-path fallback.
 A channel's folder is `filesFolder` when Graph allows it, else the folder
 named after the channel in the team site's default library. A shared file is
-found by its URL: the site, which must be the team's own, then the library
-whose URL prefixes it, then the item, whose short-lived `downloadUrl` is
+found by its URL: the site, which must be the channel's own (the one stored
+when its files were turned on, else the team's), then the library whose URL
+prefixes it, then the item, whose short-lived `downloadUrl` is
 pre-authorised. Uploads never
 overwrite (`conflictBehavior=rename`); one over `SIMPLE_UPLOAD_MAX` goes
 through an upload session, whose URL must be on SharePoint and gets no token.
@@ -16,6 +17,7 @@ Any failure raises `GraphUnavailable`.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from typing import Final
 
 import httpx
 from daimon.core.teams_graph import (
@@ -34,6 +36,10 @@ SIMPLE_UPLOAD_MAX = 4 * 1024 * 1024
 UPLOAD_CHUNK = 16 * 320 * 1024
 UPLOAD_TIMEOUT_S = 60.0
 _CONFLICT = "@microsoft.graph.conflictBehavior"
+
+#: daimon's MCP tool by which the agent asks for the Enable files card, which the
+#: Teams adapter posts after the turn: only it holds the sign-in's callback URL.
+ENABLE_FILES_TOOL: Final = "enable_channel_files"
 
 # The channel's name, which Teams names a standard channel's folder after.
 ChannelName = Callable[[], Awaitable[str]]
@@ -127,6 +133,12 @@ class SharePoint:
             raise GraphUnavailable("folder without a drive", status=200)
         return DriveFolder(drive_id=item.parent_reference.drive_id, item_id=item.id)
 
+    async def stored_folder(self, drive_id: str, item_id: str) -> DriveFolder:
+        """A folder found when files were turned on, once Graph shows it is still reachable."""
+        item = f"{GRAPH_ROOT}/drives/{path_segment(drive_id)}/items/{path_segment(item_id)}"
+        _parse(DriveItem, await self._graph.send("GET", item))
+        return DriveFolder(drive_id=drive_id, item_id=item_id)
+
     async def upload(self, folder: DriveFolder, name: str, content: bytes) -> DriveItem:
         """Save `content` as `name` in `folder`, renamed rather than overwriting."""
         target = (
@@ -173,8 +185,13 @@ class SharePoint:
             raise GraphUnavailable("upload failed", status=response.status_code)
         raise GraphUnavailable("empty upload")
 
-    async def download_url(self, content_url: str, *, group_id: str) -> str:
-        """The pre-authorised download URL of the shared file at `content_url` in the team site."""
+    async def download_url(
+        self, content_url: str, *, group_id: str, site_id: str | None = None
+    ) -> str:
+        """The pre-authorised download URL of the shared file at `content_url`.
+
+        The file must be on the channel's site: `site_id`, else the team's.
+        """
         # Teams sends the path unencoded: a `#` or `?` there is part of the file's name.
         url = _url(content_url.replace("#", "%23").replace("?", "%3F"))
         parts = url.path.strip("/").split("/")
@@ -182,17 +199,21 @@ class SharePoint:
             raise GraphUnavailable("not a SharePoint site file")
         if {".", ".."} & set(parts):
             raise GraphUnavailable("a relative path segment")
-        # First, so a 403 means the team's own site is not granted (a grant fixes that).
-        team_site = await self._team_site(group_id)
+        # First, so a 403 means the channel's own site is not granted (a grant fixes that).
+        if site_id is None:
+            own_site = await self._team_site(group_id)
+        else:
+            await self._graph.send("GET", f"{GRAPH_ROOT}/sites/{path_segment(site_id)}")
+            own_site = site_id
         try:
             site = await self._site(url.host, "/".join(parts[:2]))
         except GraphUnavailable as err:
             if err.status != 403:
                 raise
-            raise GraphUnavailable("not the team's site", status=200) from err
-        # The app may be granted other sites: only the team's own is this channel's.
-        if site.casefold() != team_site.casefold():
-            raise GraphUnavailable("not the team's site", status=200)
+            raise GraphUnavailable("not the channel's site", status=200) from err
+        # The app may be granted other sites: only the channel's own is readable from it.
+        if site.casefold() != own_site.casefold():
+            raise GraphUnavailable("not the channel's site", status=200)
         drive, relative = await self._library(site, url.path)
         path = "/".join(path_segment(part) for part in relative.split("/"))
         data = await self._graph.send(

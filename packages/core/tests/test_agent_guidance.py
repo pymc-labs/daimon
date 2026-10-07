@@ -145,6 +145,9 @@ def test_teams_guidance_splits_one_to_one_delivery_from_channels() -> None:
     assert "Say so once in your reply" in teams, (
         "the adapter no longer posts a note per file, so the reply carries the message"
     )
+    assert "Follow the channel's `files_hint` first" in teams and "enable_channel_files" in teams, (
+        "the per-turn hint, which asks an admin's agent to post the Enable files card, comes first"
+    )
     assert "separate conversation, so the file would be made again there" in teams, (
         "a 1:1 chat does not share the channel thread's workspace"
     )
