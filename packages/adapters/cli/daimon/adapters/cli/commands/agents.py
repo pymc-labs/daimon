@@ -429,6 +429,7 @@ async def agents_archive(
     # rather than degrade silently.
     async with rt.sessionmaker.begin() as session:
         await clear_agent_references(session, tenant_id=tenant_id, agent_name=name)
+
     console.print(f"[green]✓ archived agent {name!r}[/green]")
 
 

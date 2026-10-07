@@ -12,11 +12,14 @@ card runs in this process, and a restart ends both together.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
 import structlog
+from daimon.adapters.slack.agent_post import post_as_agent
+from daimon.core.agent_identity import AgentIdentity
 from daimon.core.confirmation import (
     ConfirmationAnswer,
     ConfirmationHook,
@@ -57,19 +60,31 @@ class SlackConfirmationCards:
     def __init__(self) -> None:
         self._controls = PostedConfirmations[_PostedCard]()
 
-    def hook(self, client: AsyncWebClient, *, channel: str, thread_ts: str) -> ConfirmationHook:
+    def hook(
+        self,
+        client: AsyncWebClient,
+        *,
+        channel: str,
+        thread_ts: str,
+        identity: AgentIdentity | None = None,
+        record_post: Callable[[str], Awaitable[None]] | None = None,
+    ) -> ConfirmationHook:
         """A hook that posts each prompt's card into `channel`/`thread_ts`."""
 
         async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
             async def post(token: str) -> _PostedCard:
                 card = build_confirmation_card(prompt, state="pending", token=token)
-                response = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                response = await post_as_agent(
+                    client,
+                    identity,
                     channel=channel,
                     thread_ts=thread_ts,
                     text=confirmation_card_text(card),
                     blocks=build_confirmation_blocks(card, prompt=prompt),
                 )
                 ts = str(response.get("ts") or "")  # pyright: ignore[reportUnknownMemberType]
+                if record_post is not None and ts:
+                    await record_post(ts)
                 return _PostedCard(prompt=prompt, client=client, channel=channel, ts=ts)
 
             async def retire(posted: _PostedCard, state: ConfirmationAnswer) -> None:

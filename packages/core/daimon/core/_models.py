@@ -38,6 +38,28 @@ class Base(DeclarativeBase):
     """Declarative base for all daimon-core ORM models."""
 
 
+class AgentAvatar(Base):
+    __tablename__ = "agent_avatars"
+    __table_args__ = (
+        CheckConstraint("source IN ('default', 'upload')", name="ck_agent_avatars_source"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    token: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    png: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Tenant(Base):
     __tablename__ = "tenants"
     __table_args__ = (
@@ -2621,7 +2643,7 @@ class AgentPostedMessage(Base):
     """A message or thread an agent posted.
 
     Written at send time by `send_message` and `create_thread` (`source='tool'`),
-    and by the Discord adapter for a turn's status cards, answers and notices
+    and by chat adapters for a turn's status cards, answers and notices
     (`source='turn'`) and the thread it opens from a mention
     (`source='auto_thread'`). The channel tidy tools edit or delete only what
     this table says the calling agent posted. Holds ids and a keyed HMAC of
