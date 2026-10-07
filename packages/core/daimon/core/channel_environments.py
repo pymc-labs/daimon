@@ -490,8 +490,9 @@ def _workspace(environment_name: str | None) -> Callable[[_Picks], _Picks]:
 
 
 def _thread_of(seal: str, channels: Iterable[str]) -> str | None:
-    """The channel a Slack thread (``channel:ts``) names; a Teams thread keeps no rule."""
-    return next((c for c in channels if seal.startswith(f"{c}:")), None)
+    """The channel a Slack (``channel:ts``) or Teams (``channel;messageid=``) thread
+    names. New rules never key a Teams thread, but ones sealed before still do."""
+    return next((c for c in channels if seal.startswith((f"{c}:", f"{c};"))), None)
 
 
 async def _seal_parents(
@@ -516,7 +517,7 @@ async def _seal_parents(
 async def _sealed_thread_under(
     session: AsyncSession, policy: TenantAccessPolicy, *, tenant_id: uuid.UUID, channel_id: str
 ) -> str | None:
-    """A sealed Discord thread a session ran in under `channel_id`, if any."""
+    """A sealed thread under `channel_id`, if a Teams one names it or a session placed one."""
     seals = limited_ids(policy)
     places = await _seal_parents(session, tenant_id=tenant_id, seals=seals, channels=(channel_id,))
     return next((seal for seal in sorted(places) if channel_id in places[seal]), None)

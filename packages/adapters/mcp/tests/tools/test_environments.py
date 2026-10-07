@@ -395,11 +395,13 @@ _CLOSED_NETWORK: dict[str, object] = {
 }
 
 
+@pytest.mark.parametrize("sealed", ["c_sealed", "c_sealed;messageid=17"])
 async def test_opening_or_archiving_a_sealed_channels_environment_needs_confirming(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    committing_sessionmaker: async_sessionmaker[AsyncSession], sealed: str
 ) -> None:
     """A sealed channel's environment opened or archived onto an open fallback is the
-    same call as picking an open one there: a server admin confirms it first."""
+    same call as picking an open one there: a server admin confirms it first. A Teams
+    thread sealed before channel rules still counts under its channel."""
     async with committing_sessionmaker.begin() as session:
         tenant_id = (await make_tenant(session)).id
         await set_fields(
@@ -417,7 +419,7 @@ async def test_opening_or_archiving_a_sealed_channels_environment_needs_confirmi
         await set_access_policy(
             session,
             tenant_id=tenant_id,
-            policy=TenantAccessPolicy(sealed_channel_ids=("c_sealed",)),
+            policy=TenantAccessPolicy(sealed_channel_ids=(sealed,)),
         )
     writes: list[str] = []
 
