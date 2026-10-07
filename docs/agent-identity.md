@@ -134,6 +134,23 @@ agent's live session, an agent unavailable here), the authored candidate is
 dropped and the turn routes as it does today, with no notice. An explicit name
 still beats it.
 
+Agreed with the operator-model effort (2026-10-07):
+
+- #409's visibility filter runs first (the roster holds agents with no home or
+  whose home is this place's home), so a dropped authored candidate behaves
+  exactly like an unknown name and reveals nothing.
+- A drop is silent to the person and logged with its reason: `bound_thread`,
+  `other_session`, `unavailable` or `hidden`.
+- An admitted authored candidate that opens a new thread writes the same
+  named-thread handoff binding #409 writes (`create_named_binding_if_absent`,
+  on conflict do nothing), so unprompted follow-ups stay with that agent and
+  do not raise #388's Hand over card.
+- Only `agent_posted_messages` rows from this deployment with a resolved agent
+  id are authored: bot notices, other bots and rows whose agent was archived
+  give no candidate.
+- Everything still passes the same admission as the cascade: turn start,
+  writers, `runs_in`, home and budgets.
+
 Where nothing is derivable (a bare channel message), the cascade answers as
 today, and the answer now shows who answered.
 
