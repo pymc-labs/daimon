@@ -199,8 +199,12 @@ class SharePoint:
             raise GraphUnavailable("not a SharePoint site file")
         if {".", ".."} & set(parts):
             raise GraphUnavailable("a relative path segment")
-        # First, so a 403 means the team's own site is not granted (a grant fixes that).
-        own_site = site_id or await self._team_site(group_id)
+        # First, so a 403 means the channel's own site is not granted (a grant fixes that).
+        if site_id is None:
+            own_site = await self._team_site(group_id)
+        else:
+            await self._graph.send("GET", f"{GRAPH_ROOT}/sites/{path_segment(site_id)}")
+            own_site = site_id
         try:
             site = await self._site(url.host, "/".join(parts[:2]))
         except GraphUnavailable as err:

@@ -75,8 +75,9 @@ included), commands go to the agent as plain text, and the agent sees
 conversation's tools: reading, searching and posting in it, files into it,
 their own sessions and timers, and signing in to an MCP server the agent
 already has. Anything else, including tools added later, returns a tool
-error the agent relays. Files are saved in a shared channel once an admin
-of this organisation turned them on there (below).
+error the agent relays. Files are saved in a shared channel this
+organisation hosts once an admin turned them on there (below); one hosted by
+another organisation keeps its files on that organisation's site.
 
 A sender is placed from these signals, cheapest first: a foreign tenant on
 the activity (`channelData.tenant.id`, `from.tenantId`,
@@ -212,9 +213,9 @@ consent above) a followed thread stays mention-only.
   Files live in SharePoint: a standard channel's on the team's site, a private
   or shared channel's on a site of its own. No team-scoped permission reaches
   either, so files work only in channels whose site an admin granted (below).
-  There, a shared file from that site (never another one)
-  reaches the agent as a short-lived download link, and each file the agent
-  writes is uploaded to the channel's Files tab (never overwriting) and linked
+  There, a shared file from that site (never another one, so not the team's
+  in a private or shared channel whose own site is granted) reaches the agent
+  as a short-lived download link, and each file the agent writes is uploaded to the channel's Files tab (never overwriting) and linked
   below its answer, or in one message when the answer has no room (never
   after an unprompted answer); a failed upload is only logged.
   Elsewhere, or when Graph refuses, the agent is told the shared file's name
@@ -368,5 +369,5 @@ different agent posts a notice instead of running. A deployment with
 ### Not supported
 
 Group chats, reactions, `/dm` conversations, files in channels whose site is
-not granted. Removing the app does not
+not granted or that another organisation hosts. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.

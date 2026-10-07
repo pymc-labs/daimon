@@ -6,7 +6,7 @@ What it learns per channel is kept: a folder lookup or upload that succeeds
 marks the channel's files available; a failed lookup, or an upload refused
 (401/403), marks them unavailable for `RECHECK_S`, so a grant an admin adds
 later is picked up without a restart. Per channel, not per team: a private or
-shared channel's folder is on a site of its own, found only once stored.
+shared channel's folder is on a site of its own, used only once stored.
 The turn context shows the agent that answer.
 """
 
@@ -143,6 +143,9 @@ class ChannelFiles:
         if (folder := self._folders.get(key)) is None:
             if (stored := await self._stored_site(inbound.channel_id)) is not None:
                 folder = await self._sharepoint.stored_folder(stored.drive_id, stored.folder_id)
+            elif (inbound.channel_type or "standard").strip().lower() != "standard":
+                # Its files live in a site of its own; the team site's same-named folder is not it.
+                raise GraphUnavailable("channel site not granted", status=403)
             else:
                 name = functools.partial(self._channel_name, inbound)
                 folder = await self._sharepoint.channel_folder(

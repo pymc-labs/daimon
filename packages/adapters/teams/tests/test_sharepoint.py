@@ -459,6 +459,23 @@ async def test_a_private_channel_uses_its_stored_folder_once_graph_shows_it() ->
     ], "no filesFolder or team-site lookup, and the folder is checked once"
 
 
+@pytest.mark.parametrize("kind", ["private", "shared", "Private"])
+async def test_a_private_channel_without_a_stored_folder_never_uses_the_team_sites(
+    kind: str,
+) -> None:
+    """A same-named folder in the team site is not the channel's: no lookup, nothing uploaded."""
+    seen: list[httpx.Request] = []
+    files = ChannelFiles(
+        _sharepoint({}, seen), TeamGroups(_no_group), _no_names, stored_site=_nothing_stored
+    )
+    inbound = _channel(channel_id=PRIVATE, channel_type=kind)
+
+    assert not await files.is_available(inbound), "unavailable until turned on there"
+    with pytest.raises(GraphUnavailable):
+        await files.upload(inbound, "a.csv", b"a")
+    assert seen == [], "Graph is never asked"
+
+
 async def test_a_private_channel_is_unavailable_when_its_stored_folder_is_refused() -> None:
     """A grant removed since: the stored folder is refused, so the agent is told the truth."""
     routes = {("GET", "/v1.0/drives/b!private/items/01PRIVATE"): _denied}
@@ -474,6 +491,7 @@ async def test_resolve_in_a_private_channel_reads_only_its_own_site() -> None:
     own = SharedFile("q3.xlsx", f"{PRIVATE_LIBRARY}/q3.xlsx")
     team = SharedFile("pay.xlsx", f"{LIBRARY}/pay.xlsx")
     routes = {
+        ("GET", f"/v1.0/sites/{PRIVATE_SITE}"): _ok({"id": PRIVATE_SITE}),
         ("GET", "/v1.0/sites/example.sharepoint.com:/sites/team-Private"): _ok(
             {"id": PRIVATE_SITE}
         ),
@@ -494,6 +512,21 @@ async def test_resolve_in_a_private_channel_reads_only_its_own_site() -> None:
     assert media.files == (dataclasses.replace(own, download_url=DOWNLOAD_URL), team), (
         "the channel's own file is linked; the team site's, which its members may not share, is not"
     )
+
+
+async def test_resolve_refuses_a_shared_file_once_the_stored_site_is_revoked() -> None:
+    """A 403 on the channel's own site is a refusal, so the admin is offered the sign-in again."""
+    own = SharedFile("q3.xlsx", f"{PRIVATE_LIBRARY}/q3.xlsx")
+    files = ChannelFiles(
+        _sharepoint({("GET", f"/v1.0/sites/{PRIVATE_SITE}"): _denied}, []),
+        TeamGroups(_no_group),
+        _no_names,
+        stored_site=_stored(PRIVATE),
+    )
+
+    media = await files.resolve(ChannelMedia(files=(own,)), group_id=GROUP, channel_id=PRIVATE)
+
+    assert media.files == (dataclasses.replace(own, refused=True),)
 
 
 async def test_forget_drops_a_cached_folder_so_a_stored_one_is_used() -> None:
