@@ -58,3 +58,21 @@ def test_unregister_missing_slug_is_noop(tmp_path: Path) -> None:
     register_blog(path, BlogRecord(slug="pre-b", created_at=2.0))
     unregister_blog(path, "pre-absent")  # must not raise
     assert set(load_blogs(path)) == {"pre-b"}, "no-op unregister must not disturb unrelated entries"
+
+
+def test_record_without_expires_at_loads_as_permanent(tmp_path: Path) -> None:
+    from notebook_host.blogs_store import is_expired
+
+    path = tmp_path / "blogs.json"
+    path.write_text('{"pre-old": {"slug": "pre-old", "created_at": 1.0}}')
+    record = load_blogs(path)["pre-old"]
+    assert record.expires_at is None, "a record written before expiry existed is permanent"
+    assert not is_expired(record, now=10**12), "a permanent record never expires"
+
+
+def test_is_expired_once_expires_at_has_passed() -> None:
+    from notebook_host.blogs_store import is_expired
+
+    record = BlogRecord(slug="pre-a", created_at=1.0, expires_at=100.0)
+    assert not is_expired(record, now=99.0), "still inside its lifetime"
+    assert is_expired(record, now=100.0), "expired at expires_at exactly"

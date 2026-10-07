@@ -80,6 +80,16 @@ class Settings(BaseSettings):
     # the port pool or memory is exhausted, so only set it where notebook churn
     # is low and you're prepared to delete manually.
     subprocess_ttl_seconds: int = 86400
+    # Read-only notebooks are kept on disk for as long as the agent asked
+    # (``notebook_ttl_seconds`` in the upload token, clamped to this), or for
+    # ``subprocess_ttl_seconds`` when it asked for nothing. Default 365 days.
+    max_notebook_ttl_seconds: int = 365 * 86400
+    # A read-only notebook's process starts on its first visit and is stopped
+    # once nobody has visited it for this long and no websocket is open. Its
+    # files and link stay; the next visit starts it again, which costs a few
+    # seconds. Default 2h. 0 (or any value <= 0) keeps started notebooks
+    # running until they expire, which gives every one of them a port.
+    warm_window_seconds: int = 7200
     sweep_interval_seconds: int = 300
     spawn_timeout_seconds: float = 20.0
     # Before serving a published notebook, run `marimo export` to confirm its
