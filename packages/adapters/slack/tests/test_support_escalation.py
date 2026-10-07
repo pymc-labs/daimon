@@ -795,3 +795,9 @@ def test_support_modal_note_input_stays_within_slack_input_limit() -> None:
         if b["type"] == "input" and b["element"]["type"] == "plain_text_input"
     ]
     assert lengths and all(1 <= n <= 3000 for n in lengths)
+
+
+def test_ask_the_team_button_shows_the_raised_hand_beside_the_words_and_stays_unstyled() -> None:
+    button = slack_support.build_ask_human_button()
+    assert button["text"] == {"type": "plain_text", "text": "🙋 Ask the team", "emoji": True}
+    assert "style" not in button, "a styled button would tell the channel who asked"

@@ -122,14 +122,17 @@ SUPPORT_CALLBACK_ID: Final = "support_escalation"
 _NOTE_BLOCK_ID: Final = "support_note_block"
 _NOTE_INPUT_ID: Final = "support_note_input"
 
-NOT_ALLOWED: Final = "Human support isn't available to you here."
+#: The person-facing name of the button, the form and its notices.
+ASK_THE_TEAM: Final = "Ask the team"
+
+NOT_ALLOWED: Final = "Asking the team isn't available to you here."
 POLICY_UNREADABLE: Final = (
     "This workspace's access policy could not be read, so nothing was sent. "
     "Ask an admin to check it."
 )
 CHECK_FAILED: Final = "Something went wrong checking that. Nothing was spent; try again."
 FORM_DID_NOT_OPEN: Final = (
-    "Slack didn't open the form in time. Click *Ask a human* again; nothing was spent."
+    "Slack didn't open the form in time. Click *Ask the team* again; nothing was spent."
 )
 SEALED_NOTE_HINT: Final = (
     "Only turns inside this channel read it. Your note goes to the support team outside it, so "
@@ -152,16 +155,21 @@ def slack_support_enabled(support: SupportSettings) -> bool:
 
 
 def build_ask_human_button() -> dict[str, Any]:
-    """The Ask a human button, appended to the answer's feedback actions block.
+    """The Ask the team button, appended to the answer's feedback actions block.
 
     Unstyled and unchanging after a click, for the reason the vote buttons
     are: the answer message is shared, so a per-click state would tell the
-    channel who asked for help.
+    channel who asked for help. The 🙋 sits beside the words, as the vote
+    buttons carry theirs.
     """
     return {
         "type": "button",
         "action_id": ASK_HUMAN_ACTION_ID,
-        "text": {"type": "plain_text", "text": "Ask a human"},
+        "text": {
+            "type": "plain_text",
+            "text": "\N{HAPPY PERSON RAISING ONE HAND} Ask the team",
+            "emoji": True,
+        },
     }
 
 
@@ -185,7 +193,10 @@ def build_support_modal(
         {
             "type": "input",
             "block_id": _NOTE_BLOCK_ID,
-            "label": {"type": "plain_text", "text": "What do you need help with?"},
+            "label": {
+                "type": "plain_text",
+                "text": "What do you need help with? Someone from the team will reply.",
+            },
             "element": {
                 "type": "plain_text_input",
                 "action_id": _NOTE_INPUT_ID,
@@ -201,7 +212,7 @@ def build_support_modal(
             {"channel_id": channel_id, "message_ts": message_ts, "thread_ts": thread_ts},
             separators=(",", ":"),
         ),
-        "title": {"type": "plain_text", "text": "Ask a human"},
+        "title": {"type": "plain_text", "text": ASK_THE_TEAM},
         "submit": {"type": "plain_text", "text": "Send"},
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": blocks,
@@ -383,12 +394,12 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
     view_id = await open_modal(
         client,
         trigger_id=trigger_id,
-        view=notice_modal(title="Ask a human", text="Checking\N{HORIZONTAL ELLIPSIS}"),
+        view=notice_modal(title=ASK_THE_TEAM, text="Checking\N{HORIZONTAL ELLIPSIS}"),
     )
 
     async def reply(text: str) -> None:
         if view_id is not None and await update_modal(
-            client, view_id=view_id, view=notice_modal(title="Ask a human", text=text)
+            client, view_id=view_id, view=notice_modal(title=ASK_THE_TEAM, text=text)
         ):
             return
         await post_ephemeral(
