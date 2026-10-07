@@ -325,7 +325,7 @@ class DetailsView(PanelViewBase):
         action_row.add_item(coding_button)
         if self.agent is not None:
             github_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
-                label="GitHub repos", style=discord.ButtonStyle.secondary
+                label="🐙 GitHub repos", style=discord.ButtonStyle.secondary
             )
             github_button.callback = self._on_github_repos  # type: ignore[method-assign]
             action_row.add_item(github_button)
@@ -349,12 +349,23 @@ class DetailsView(PanelViewBase):
 
     async def _on_github_repos(self, interaction: discord.Interaction) -> None:
         from daimon.adapters.discord.agent_setup.github_repos import GitHubReposView
-        from daimon.core.github_panel import load_grants_panel
+        from daimon.core.github_panel import GrantsPanel, load_grants_panel
         from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 
         if self.agent is None or interaction.guild_id != self.state.guild_id:
             return
-        await interaction.response.defer()
+        gate = GitHubReposView(
+            self.state,
+            runtime=self.runtime,
+            allowed_user_id=self.allowed_user_id,
+            agent=self.agent,
+            panel=GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=False),
+        )
+        if not await gate.allowed(interaction):
+            await interaction.followup.send(
+                "You cannot view this agent's GitHub repos.", ephemeral=True
+            )
+            return
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
         agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=self.agent.ma_agent_id)
         async with self.runtime.sessionmaker() as session:

@@ -1113,16 +1113,16 @@ admission before any of this runs.
   Discord read and scoped search tools explain when the bot lacks View Channel
   or Read Message History permission, including on an otherwise empty read.
 
-- **GitHub connection invitations** start from **Connect GitHub** in the
-  Discord or Slack `/agent-setup` panel; Discord also has `/github connect`.
+- **GitHub connection invitations** start from **🐙 GitHub** in the
+  Discord or Slack `/agent-setup` panel; both platforms also have `/github`.
   The link is private to the admin who clicked and records that person as the
   requester. The CLI `daimon github connect-link` remains an operator fallback.
-  **GitHub repos** on an agent's Details screen lists connected repos and lets
-  an authorized admin stage baseline and ceiling grants, then Activate or
-  Deactivate. App-mode changes stay staged while live grants continue serving
+  **🐙 GitHub repos** on an agent's Details screen lists connected repos and lets
+  an authorized admin choose abilities and audience, then save changes or turn
+  off GitHub for that agent. App-mode changes stay staged while live grants continue serving
   turns. Activation of a PAT-backed legacy agent retires its per-agent PAT and
   GitHub env keys in the same transaction. A new installation repo is offered
-  once in a private card when an admin next opens setup; Connect preselects
+  once in a private card when an admin next opens setup; Connect repo preselects
   that repo on the confirmation page and still requires GitHub admin proof.
   When the separate `DAIMON_GITHUB_APP__*` credentials and
   encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,

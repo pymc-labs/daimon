@@ -43,32 +43,34 @@ class GrantsPanel:
     has_pending: bool = False
 
     def text(self, agent_name: str, *, page: int = 0, page_size: int = 20) -> str:
-        lines = [
-            f"GitHub repos · {agent_name}",
-            "GitHub App: active" if self.mode == "app" else "GitHub App: not active",
-        ]
+        status = (
+            "GitHub: on"
+            if self.mode == "app"
+            else "GitHub: uses a saved key (old way)"
+            if self.has_pat
+            else "GitHub: off"
+        )
+        lines = [f"Repos {agent_name} uses", status]
         if self.working_repo:
             lines.append(f"Working repo: {self.working_repo}")
         if not self.repos:
-            lines.append("No repos connected to this workspace. Connect GitHub first.")
+            lines.append("No repos connected here. Connect GitHub first.")
         for repo in self.repos[page * page_size : (page + 1) * page_size]:
-            grant = (
-                f"{repo.baseline} baseline / {repo.ceiling} ceiling"
-                if repo.baseline is not None
-                else "no grant"
+            ability = (
+                "read only" if repo.ceiling == "read" else "read and open issues and pull requests"
             )
+            audience = (
+                f"everyone who can use {agent_name}"
+                if repo.baseline not in (None, "none")
+                else "only people with access on GitHub"
+            )
+            grant = f"{ability} · {audience}" if repo.baseline is not None else "not added"
             if repo.staged:
-                live = (
-                    f"{repo.live_baseline} baseline / {repo.live_ceiling} ceiling"
-                    if repo.live_baseline is not None
-                    else "no grant"
-                )
-                lines.append(
-                    f"{repo.full_name} · staged {grant} · live {live} · limit {repo.max_access}"
-                )
+                live = "added" if repo.live_baseline is not None else "not added"
+                lines.append(f"{repo.full_name} · waiting: {grant} · now: {live}")
             else:
-                lines.append(f"{repo.full_name} · live {grant} · limit {repo.max_access}")
-        reachable = [r.full_name for r in self.repos if r.live_baseline not in (None, "none")]
+                lines.append(f"{repo.full_name} · {grant}")
+        reachable = [r.full_name for r in self.repos if r.live_ceiling is not None]
         shown = ", ".join(reachable[:10])
         more = f" +{len(reachable) - 10} more" if len(reachable) > 10 else ""
         lines.append("Can reach: " + ((shown + more) if reachable else "none"))

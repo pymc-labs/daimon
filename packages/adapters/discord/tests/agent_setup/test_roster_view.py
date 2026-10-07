@@ -415,8 +415,8 @@ def test_only_admins_get_connect_github_on_shared_roster() -> None:
     )
 
     admin_components = _structure(admin)
-    assert ("Button", "Connect GitHub", None) in admin_components
-    admin_components.remove(("Button", "Connect GitHub", None))
+    assert ("Button", "🐙 GitHub", None) in admin_components
+    admin_components.remove(("Button", "🐙 GitHub", None))
     assert _structure(member) == admin_components
 
 

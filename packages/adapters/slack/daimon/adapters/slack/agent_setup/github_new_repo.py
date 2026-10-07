@@ -6,10 +6,11 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.agent_setup.github_link import send_link
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.github_panel import CONNECT_COPY, connect_link
+from daimon.core.github_panel import connect_link
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
@@ -42,7 +43,7 @@ async def send_pending_notice(
     if notice is None:
         return
     value = f"{notice.installation_id}:{notice.repo_full_name}"
-    text = f"New repo `{notice.repo_full_name}` in the GitHub installation — connect it?"
+    text = "New repos are available on GitHub. Connect more repos?"
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": text}},
         {
@@ -51,13 +52,13 @@ async def send_pending_notice(
                 {
                     "type": "button",
                     "action_id": ACTION_CONNECT,
-                    "text": {"type": "plain_text", "text": "Connect"},
+                    "text": {"type": "plain_text", "text": "Connect repo"},
                     "value": value,
                 },
                 {
                     "type": "button",
                     "action_id": ACTION_DISMISS,
-                    "text": {"type": "plain_text", "text": "Dismiss"},
+                    "text": {"type": "plain_text", "text": "Not now"},
                     "value": value,
                 },
             ],
@@ -149,11 +150,11 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
         return
     if action_id == ACTION_CONNECT:
         assert url is not None
+        await send_link(client, channel_id=channel_id, user_id=user_id, url=url)
+    else:
         await post_ephemeral(
             client,
             channel_id=channel_id,
             user_id=user_id,
-            text=f"{CONNECT_COPY}\n<{url}|Open GitHub>",
+            text="OK. You can connect it later: 🐙 GitHub → Connect more repos.",
         )
-    else:
-        await post_ephemeral(client, channel_id=channel_id, user_id=user_id, text="Dismissed.")

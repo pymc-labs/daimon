@@ -32,10 +32,7 @@ __all__ = [
     "connect_link",
 ]
 
-CONNECT_COPY = (
-    "Open GitHub to choose repos for this workspace. Nothing is shared with "
-    "Daimon agents until you confirm the repos on the next page."
-)
+CONNECT_COPY = "Choose repos on GitHub. If someone else manages them, send them this link."
 
 
 def connect_root(settings: Settings) -> str | None:

@@ -45,6 +45,7 @@ class _Installation:
     id: int
     owner_id: int
     owner_login: str
+    repository_selection: str
     repos: tuple[_Repo, ...]
 
 
@@ -57,6 +58,7 @@ class _OwnerPayload(BaseModel):
 class _InstallationPayload(BaseModel):
     id: int
     account: _OwnerPayload
+    repository_selection: str = "all"
 
 
 class _RepoPayload(BaseModel):
@@ -118,6 +120,7 @@ async def _installations(client: httpx.AsyncClient, token: str) -> list[_Install
                 id=installation_id,
                 owner_id=owner_id,
                 owner_login=parsed.account.login,
+                repository_selection=parsed.repository_selection,
                 repos=tuple(repos),
             )
         )
@@ -293,7 +296,7 @@ def build_oauth_github_routes(
             repos: list[github_connect.RepoConfirmation] = []
             for repo_id in selected_ids:
                 repo = visible[repo_id]
-                access = fields.get(f"access_{repo_id}", ["read"])[0]
+                access = fields.get("access", ["write"])[0]
                 if access not in ("read", "write"):
                     return _error("Selection could not be verified.")
                 repos.append(
@@ -344,31 +347,80 @@ def build_oauth_github_routes(
             response = branded_page(
                 title="GitHub connected",
                 state_bar="",
-                body_html=f"<h1>Connected: {len(repos)} repos</h1>",
+                body_html=(
+                    f"<h1>Connected {len(repos)} repos.</h1>"
+                    f"<p>{html.escape(invitation.requester_label)} can now choose which "
+                    "agents use them. You can close this tab.</p>"
+                ),
             )
             response.delete_cookie(_COOKIE)
             return response
 
         workspace = invitation.workspace_label
         requested_by = invitation.requester_label
-        heading = html.escape(f"Connect to workspace {workspace}, requested by {requested_by}")
+        admin_repos = [
+            repo for installation in installations for repo in installation.repos if repo.admin
+        ]
+        selected_installations = [
+            installation
+            for installation in installations
+            if installation.repository_selection == "selected"
+        ]
+        quick_confirm = (
+            bool(admin_repos)
+            and len(selected_installations) == len(installations)
+            and request.query_params.get("change") != "1"
+            and invitation.preselected_repo_full_name is None
+        )
+        platform_label = "Discord server" if requester.platform == "discord" else "Slack workspace"
+        repo_word = "repo" if len(admin_repos) == 1 else "repos"
+        heading = html.escape(
+            f"Connect {len(admin_repos)} {repo_word} to the {workspace!r} {platform_label}?"
+            if quick_confirm
+            else f"Which repos should the {workspace!r} {platform_label} use?"
+        )
         parts = [
             f"<h1>{heading}</h1>",
-            "<p>Select repositories and choose their maximum access.</p>",
+            (
+                f"<p>{html.escape(requested_by)} can then choose which agents use them. "
+                "Agents can read them and open issues and pull requests.</p>"
+                if quick_confirm
+                else "<p>Agents can: Read and open issues and pull requests</p>"
+            ),
             f'<form method="post" action="{html.escape(root, quote=True)}/oauth/github/confirm">',
             f'<input type="hidden" name="state" value="{html.escape(state, quote=True)}">',
-            '<button type="button" id="select-all-repos">Select all repos you administer</button>',
-            '<script>document.getElementById("select-all-repos").addEventListener("click", '
-            '() => document.querySelectorAll("input[name=repo]").forEach(box => '
-            "{ box.checked = true; }));</script>",
         ]
-        access_options = '<option value="read">Read</option><option value="write">Write</option>'
+        if not quick_confirm:
+            parts.extend(
+                [
+                    '<label>Search repos <input type="search" id="search-repos"></label>',
+                    '<button type="button" id="select-all-repos">'
+                    "Select all repos you manage</button>",
+                    '<script>document.getElementById("select-all-repos").addEventListener("click", '
+                    '() => document.querySelectorAll("input[name=repo]").forEach(box => '
+                    "{ box.checked = true; }));"
+                    'document.getElementById("search-repos").addEventListener("input", event => '
+                    'document.querySelectorAll(".repo-choice").forEach(row => '
+                    "{ row.hidden = !row.textContent.toLowerCase().includes("
+                    "event.target.value.toLowerCase()); }));"
+                    "</script>",
+                ]
+            )
+        parts.append(
+            '<label>Agents can: <select name="access">'
+            '<option value="write">Read and open issues and pull requests</option>'
+            '<option value="read">Read only</option></select></label>'
+        )
         for installation in installations:
             admin_repos = [repo for repo in installation.repos if repo.admin]
             if not admin_repos:
                 continue
-            parts.append(f"<h2>{html.escape(installation.owner_login)}</h2>")
+            if not quick_confirm:
+                parts.append(f"<h2>{html.escape(installation.owner_login)}</h2>")
             for repo in admin_repos:
+                if quick_confirm:
+                    parts.append(f'<input type="hidden" name="repo" value="{repo.id}">')
+                    continue
                 selected = (
                     " checked"
                     if invitation.preselected_repo_full_name is not None
@@ -377,16 +429,21 @@ def build_oauth_github_routes(
                     else ""
                 )
                 parts.append(
-                    f'<label><input type="checkbox" name="repo" value="{repo.id}"{selected}>'
-                    f"{html.escape(repo.full_name)}</label>"
-                    f'<select name="access_{repo.id}">{access_options}</select><br>'
+                    f'<label class="repo-choice"><input type="checkbox" '
+                    f'name="repo" value="{repo.id}"{selected}>'
+                    f"{html.escape(repo.full_name)}</label><br>"
                 )
-        parts.append('<button type="submit">Connect selected</button></form>')
+        parts.append('<button type="submit">Connect repos</button></form>')
+        if quick_confirm:
+            parts.append(
+                f'<p><a href="{html.escape(root, quote=True)}/oauth/github/confirm?'
+                f'{urlencode({"state": state, "change": "1"})}">Change repos</a></p>'
+            )
         install_url = (
             f"https://github.com/apps/{html.escape(config.app_slug or '', quote=True)}"
             f"/installations/new?{urlencode({'state': state})}"
         )
-        parts.append(f'<p><a href="{install_url}">Install the GitHub App</a></p>')
+        parts.append(f'<p><a href="{install_url}">Add Daimon on GitHub</a></p>')
         return branded_page(title="Connect GitHub", state_bar="", body_html="".join(parts))
 
     return connect, callback, setup, confirm

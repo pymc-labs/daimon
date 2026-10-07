@@ -173,18 +173,19 @@ The scheduler removes expired connection flows, including their encrypted
 tokens. Run it alongside the MCP service.
 
 Open `/agent-setup` in Discord or Slack as a server or workspace admin and click
-**Connect GitHub**. Discord also offers `/github connect`. The private link
+**🐙 GitHub**, or run `/github`. The private link
 opens GitHub; the recipient signs in and confirms the repos they administer.
 Nothing is shared with agents until that confirmation. The ordinary connection
 page preselects no repo. A private new-repo card can preselect one repo, which
 still needs explicit confirmation and GitHub admin proof.
-The confirmation page has **Select all repos you administer** for bulk selection;
+The confirmation page has **Select all repos you manage** for bulk selection;
 each selected repository still requires a fresh GitHub admin check at confirmation.
 
-Open an agent's **GitHub repos** panel to choose connected repos, set each
-baseline and ceiling, then **Activate**. For an agent using a per-agent PAT,
-**Switch to GitHub App** stages write access to its working repo; review the
-other grants before Activate. Activation deletes that PAT and its GitHub env
+Open an agent's **🐙 GitHub repos** panel to choose connected repos, set what it
+can do and who can use those repos, then **Add repos** or **Save changes**. For
+an agent using a per-agent PAT, **Update GitHub connection** stages write access
+to its working repo; review the other repos before **Update and restart chats**.
+Activation deletes that PAT and its GitHub env
 keys, and live sessions restart on their next turn.
 
 The CLI remains an operator fallback. Agents remain in legacy GitHub mode until

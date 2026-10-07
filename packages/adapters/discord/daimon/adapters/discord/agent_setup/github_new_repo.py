@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
+from daimon.adapters.discord.agent_setup.github_home import GitHubLinkView
 from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.github_panel import CONNECT_COPY, connect_link
@@ -45,7 +46,7 @@ class NewRepoCard(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Connect", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Connect repo", style=discord.ButtonStyle.primary)
     async def connect(
         self, interaction: discord.Interaction, button: discord.ui.Button[NewRepoCard]
     ) -> None:
@@ -66,13 +67,13 @@ class NewRepoCard(discord.ui.View):
             )
             return
         await interaction.response.edit_message(
-            content=f"{CONNECT_COPY}\n{url}",
-            view=None,
+            content=f"{CONNECT_COPY}\nLink works once · expires in 7 days",
+            view=GitHubLinkView(url, user_id=interaction.user.id),
             allowed_mentions=discord.AllowedMentions.none(),
         )
         self.stop()
 
-    @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Not now", style=discord.ButtonStyle.secondary)
     async def dismiss(
         self, interaction: discord.Interaction, button: discord.ui.Button[NewRepoCard]
     ) -> None:
@@ -115,7 +116,9 @@ class NewRepoCard(discord.ui.View):
                 "Only a server admin can dismiss this card.", ephemeral=True
             )
             return
-        await interaction.response.edit_message(content="Dismissed.", view=None)
+        await interaction.response.edit_message(
+            content="OK. You can connect it later: 🐙 GitHub → Connect more repos.", view=None
+        )
         self.stop()
 
 
@@ -134,7 +137,7 @@ async def send_pending_notice(
         return
     try:
         await interaction.followup.send(
-            f"New repo `{notice.repo_full_name}` in the GitHub installation — connect it?",
+            "New repos are available on GitHub. Connect more repos?",
             view=NewRepoCard(runtime, notice, interaction.user.id),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),

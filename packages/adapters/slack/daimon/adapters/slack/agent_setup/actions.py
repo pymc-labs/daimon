@@ -80,6 +80,7 @@ from daimon.adapters.slack.agent_setup.coding_tools import (
     handle_coding_tools_click,
     handle_revoke_token_click,
 )
+from daimon.adapters.slack.agent_setup.github_link import send_link
 from daimon.adapters.slack.agent_setup.github_new_repo import send_pending_notice
 from daimon.adapters.slack.agent_setup.github_repos_actions import handle as handle_github_repos
 from daimon.adapters.slack.agent_setup.panel_views import (
@@ -121,7 +122,7 @@ from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
-from daimon.core.github_panel import CONNECT_COPY, connect_link
+from daimon.core.github_panel import connect_link
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
@@ -132,6 +133,7 @@ from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins, list_channel_admins
 from daimon.core.stores.channel_skills import list_channel_skills
+from daimon.core.stores.github_access import list_authorized_repos
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -228,9 +230,21 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
                 account_ids=_roster_account_ids(roster),
             )
 
-        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-            view_id=view_id,
-            view=build_agents_view(
+        if payload.get("command") == "/github":
+            async with runtime.sessionmaker() as session:
+                connected_count = (
+                    sum(
+                        repo.status == "active"
+                        for repo in await list_authorized_repos(session, tenant_id=tenant_id)
+                    )
+                    if is_admin
+                    else 0
+                )
+            rendered = panel_views.build_github_home_view(
+                meta, connected_count=connected_count, is_admin=is_admin
+            )
+        else:
+            rendered = build_agents_view(
                 roster,
                 page=paginate(roster.rows, page=0, page_size=PANEL_PAGE_SIZE),
                 meta=meta,
@@ -238,7 +252,10 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
                 attributions=attributions,
                 channel_id=channel_id,
                 routed_agent_names=routed_agent_names(answering_map),
-            ),
+            )
+        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+            view_id=view_id,
+            view=rendered,
         )
         if is_admin:
             await send_pending_notice(
@@ -295,6 +312,8 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         panel_views.ACTION_EXPAND_CONNECTIONS,
         panel_views.ACTION_NEW,
         panel_views.ACTION_GITHUB_CONNECT,
+        panel_views.ACTION_GITHUB_START,
+        panel_views.ACTION_GITHUB_CHOOSE_AGENT,
         github_repos_view.ACTION_OPEN,
         github_repos_view.ACTION_SELECT,
         github_repos_view.ACTION_STAGE,
@@ -304,6 +323,10 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         github_repos_view.ACTION_DEACTIVATE,
         github_repos_view.ACTION_PREVIOUS,
         github_repos_view.ACTION_NEXT,
+        github_repos_view.ACTION_CONFIRM_REMOVE,
+        github_repos_view.ACTION_CONFIRM_TURN_OFF,
+        github_repos_view.ACTION_CONFIRM_UPDATE_KEY,
+        github_repos_view.ACTION_CANCEL_CONFIRM,
         panel_views.ACTION_CODING_TOOLS,
         panel_views.ACTION_ADD_SKILL,
         panel_views.ACTION_REVOKE_TOKEN,
@@ -671,6 +694,31 @@ async def _dispatch_panel_action(
                 text="Only a workspace admin can connect GitHub.",
             )
             return
+        async with runtime.sessionmaker() as session:
+            connected_count = sum(
+                repo.status == "active"
+                for repo in await list_authorized_repos(session, tenant_id=tenant_id)
+            )
+        await client.views_push(  # pyright: ignore[reportUnknownMemberType]
+            trigger_id=trigger_id,
+            view=panel_views.build_github_home_view(meta, connected_count=connected_count),
+        )
+        return
+
+    if action_id == panel_views.ACTION_GITHUB_CHOOSE_AGENT:
+        if not is_admin:
+            return
+        roster_view = await load_agents_view(
+            runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin
+        )
+        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+            view_id=view_id, view=roster_view
+        )
+        return
+
+    if action_id == panel_views.ACTION_GITHUB_START:
+        if not is_admin:
+            return
         try:
             async with runtime.sessionmaker.begin() as session:
                 url = await connect_link(
@@ -688,12 +736,7 @@ async def _dispatch_panel_action(
                 text="GitHub connection is unavailable. Ask a workspace admin to check setup.",
             )
             return
-        await post_ephemeral(
-            client,
-            channel_id=meta.channel_id or user_id,
-            user_id=user_id,
-            text=f"{CONNECT_COPY}\n<{url}|Open GitHub>",
-        )
+        await send_link(client, channel_id=meta.channel_id or user_id, user_id=user_id, url=url)
         return
 
     if action_id == panel_views.ACTION_DETAILS:

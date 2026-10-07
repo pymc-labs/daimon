@@ -46,6 +46,7 @@ PanelViewName = Literal[
     "creating",
     "add_skill",
     "github_repos",
+    "github_home",
 ]
 """Which of the panel's screens a view is showing."""
 
@@ -64,6 +65,7 @@ _PANEL_VIEW_NAMES: Final[frozenset[str]] = frozenset(
         "creating",
         "add_skill",
         "github_repos",
+        "github_home",
     }
 )
 _PANEL_EXPANSIONS: Final[tuple[PanelExpansion, ...]] = ("keys", "skills", "connections")

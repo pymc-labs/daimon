@@ -1039,7 +1039,7 @@ class SlackApp:
                 self._spawn(handle_billing_command(self.runtime, payload))
             elif cmd == "/privacy":
                 self._spawn(handle_privacy_command(self.runtime, payload))
-            elif cmd == "/agent-setup":
+            elif cmd in ("/agent-setup", "/github"):
                 self._spawn(handle_agent_setup_command(self.runtime, payload))
             elif cmd == "/memory":
                 self._spawn(handle_memory_command(self.runtime, payload))
@@ -1082,6 +1082,10 @@ class SlackApp:
                     self._spawn(handle_agent_setup_action(self.runtime, payload))
                 elif action_id.startswith("github_new_repo__"):
                     from daimon.adapters.slack.agent_setup.github_new_repo import handle_action
+
+                    self._spawn(handle_action(self.runtime, payload))
+                elif action_id == "github_link__copy":
+                    from daimon.adapters.slack.agent_setup.github_link import handle_action
 
                     self._spawn(handle_action(self.runtime, payload))
                 elif action_id == SLACK_CREDENTIAL_ACTION_ID:

@@ -121,7 +121,38 @@ ACTION_EXPAND_SKILLS: Final = "agent_setup__expand:skills"
 ACTION_EXPAND_CONNECTIONS: Final = "agent_setup__expand:connections"
 ACTION_NEW: Final = "agent_setup__new"
 ACTION_GITHUB_CONNECT: Final = "agent_setup__github_connect"
+ACTION_GITHUB_START: Final = "agent_setup__github_start"
+ACTION_GITHUB_CHOOSE_AGENT: Final = "agent_setup__github_choose_agent"
 ACTION_GITHUB_REPOS: Final = "agent_setup__github_repos"
+
+
+def build_github_home_view(
+    meta: PanelMetadata, *, connected_count: int, is_admin: bool = True
+) -> dict[str, Any]:
+    """The private GitHub entry screen for workspace admins."""
+    if not is_admin:
+        summary = "Workspace admins connect repos here."
+        actions: list[dict[str, Any]] = []
+    elif connected_count:
+        summary = f"Connected: {connected_count} repos. Choose which agents can use them."
+        actions = [
+            _button(action_id=ACTION_GITHUB_CHOOSE_AGENT, label="Choose agent"),
+            _button(action_id=ACTION_GITHUB_START, label="Connect more repos"),
+        ]
+    else:
+        summary = "Connect repos here, then choose which agents can use them."
+        actions = [_button(action_id=ACTION_GITHUB_START, label="Connect GitHub")]
+    blocks: list[dict[str, Any]] = [_section(f"*GitHub*\n{summary}")]
+    if actions:
+        blocks.append({"type": "actions", "elements": actions})
+    return finish_modal(
+        title="GitHub",
+        blocks=blocks,
+        private_metadata=encode_panel_metadata(meta.with_view("github_home")),
+        callback_id="agent_setup__github_home",
+    )
+
+
 ACTION_CHANNEL_ADMINS: Final = "agent_setup__channel_admins"
 ACTION_CHANNEL_SKILLS: Final = "agent_setup__channel_skills"
 """Open the form naming this channel's admins. Workspace admins only."""
@@ -414,7 +445,7 @@ def build_agents_view(
     elements.append(_button(action_id=ACTION_NEW, label=NEW_AGENT_LABEL))
     elements.append(_button(action_id=ACTION_ROUTING, label=ROUTING_LABEL))
     if is_admin:
-        elements.append(_button(action_id=ACTION_GITHUB_CONNECT, label="Connect GitHub"))
+        elements.append(_button(action_id=ACTION_GITHUB_CONNECT, label="🐙 GitHub"))
     blocks.append({"type": "actions", "elements": elements})
     blocks.extend(_pager_blocks(page, meta=meta))
     return finish_modal(
@@ -492,7 +523,7 @@ def build_details_view(
     blocks.extend(_repo_blocks(details))
     blocks.extend(_detail_list_blocks(details, meta=meta))
     actions = [
-        _button(action_id=ACTION_GITHUB_REPOS, label="GitHub repos", value=details.name),
+        _button(action_id=ACTION_GITHUB_REPOS, label="🐙 GitHub repos", value=details.name),
         _button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name),
     ]
     if coding_tools_available:

@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.slack.agent_setup import github_new_repo as notice_module
-from daimon.adapters.slack.agent_setup.github_repos import build_view
+from daimon.adapters.slack.agent_setup import github_repos_actions as actions_module
+from daimon.adapters.slack.agent_setup.github_repos import build_confirm_view, build_view
+from daimon.adapters.slack.agent_setup.panel_views import build_github_home_view
 from daimon.adapters.slack.agent_setup.state import PanelMetadata
 from daimon.core.github_panel import GrantsPanel, RepoChoice
 from daimon.core.stores.github_new_repo_notices import NewRepoNotice
@@ -63,8 +65,58 @@ def test_slack_grants_view_shows_staged_and_live_values() -> None:
         for element in block["elements"]
         if element["type"] == "button"
     ]
-    assert "example/other · staged read baseline / read ceiling · live no grant" in text
-    assert "Activate" in actions and "Deactivate" in actions
+    assert "example/other · waiting: read only" in text
+    assert "Save changes" in actions and "Turn off GitHub" in actions
+
+
+def test_slack_github_home_and_confirmations() -> None:
+    meta = PanelMetadata(team_id="T", channel_id="C", view="agents", agent_name="helper")
+    home = build_github_home_view(meta, connected_count=2)
+    home_text = str(home["blocks"])
+    assert "Choose agent" in home_text and "Connect more repos" in home_text
+    no_admin = build_github_home_view(meta, connected_count=0, is_admin=False)
+    assert "Workspace admins connect repos here" in str(no_admin["blocks"])
+    panel = GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=True)
+    confirmed = build_confirm_view(meta, panel, choice="update_key")
+    assert "Update and restart chats" in str(confirmed["blocks"])
+    assert "Unsaved work" in str(confirmed["blocks"])
+
+
+@pytest.mark.asyncio
+async def test_slack_repo_open_refuses_unauthorized_viewer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=object())
+    context.__aexit__ = AsyncMock(return_value=None)
+    runtime = SimpleNamespace(
+        sessionmaker=lambda: context, anthropic=object(), deployment_default=MagicMock()
+    )
+    client = MagicMock()
+    client.views_push = AsyncMock()
+    monkeypatch.setattr(actions_module, "resolve_is_admin", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        actions_module,
+        "load_panel_roster",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                rows=[SimpleNamespace(name="helper", ma_agent_id="ag_helper")]
+            )
+        ),
+    )
+    refusal = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions_module, "refuse_unless_allowed_for_agent_name", refusal)
+    handled = await actions_module.handle(
+        runtime,
+        client,
+        {"trigger_id": "trigger"},
+        action={"action_id": "agent_setup__github_repos", "value": "helper"},
+        meta=PanelMetadata(team_id="T", channel_id="C", view="details"),
+        team_id="T",
+        user_id="U",
+    )
+    assert handled and refusal.await_count == 1
+    client.views_push.assert_not_awaited()
 
 
 @pytest.mark.asyncio

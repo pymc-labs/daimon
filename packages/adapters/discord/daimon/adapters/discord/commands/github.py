@@ -1,53 +1,48 @@
-"""Server-admin GitHub connection entry point."""
+"""Private `/github` entry point for Discord server admins."""
 
 from __future__ import annotations
 
 from typing import cast
 
-from daimon.adapters.discord.checks import is_guild_admin, require_registered_guild
+from daimon.adapters.discord.agent_setup.github_home import load_home
+from daimon.adapters.discord.agent_setup.hydrate import load_roster_state
+from daimon.adapters.discord.checks import (
+    is_guild_admin,
+    require_registered_guild,
+    resolve_tenant_for_interaction,
+)
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.github_panel import CONNECT_COPY, connect_link
-from daimon.core.ma_identity import derive_tenant_uuid
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+BotInteraction = discord.Interaction[commands.Bot]
+
 
 @app_commands.guild_only()
-class GithubCog(commands.GroupCog, group_name="github", group_description="GitHub access"):
+class GithubCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         super().__init__()
         self.bot = bot
 
-    @app_commands.command(name="connect", description="Connect GitHub repos to this server")
+    @app_commands.command(name="github", description="Manage GitHub repos for agents")
     @require_registered_guild
-    async def connect(self, interaction: discord.Interaction) -> None:
+    async def github(self, interaction: BotInteraction) -> None:
         if interaction.guild_id is None or not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
             await interaction.response.send_message(
-                "Only a server admin can connect GitHub.", ephemeral=True
+                "Server admins connect repos here.", ephemeral=True
             )
             return
         runtime = cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
-        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
         await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            async with runtime.sessionmaker.begin() as session:
-                url = await connect_link(
-                    session,
-                    settings=runtime.settings,
-                    tenant_id=tenant_id,
-                    platform="discord",
-                    platform_user_id=str(interaction.user.id),
-                )
-        except ValueError:
-            await interaction.followup.send(
-                "GitHub connection is unavailable. Ask a server admin to check setup.",
-                ephemeral=True,
-            )
+        tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
+        if tenant_id is None:
+            await interaction.followup.send("GitHub is unavailable here.", ephemeral=True)
             return
-        await interaction.followup.send(
-            f"{CONNECT_COPY}\n{url}",
-            ephemeral=True,
+        state = await load_roster_state(runtime, interaction, tenant_id=tenant_id, is_admin=True)
+        home = await load_home(state, runtime=runtime, user_id=interaction.user.id)
+        await interaction.edit_original_response(
+            view=home.bind_render_interaction(interaction, panel=state),
             allowed_mentions=discord.AllowedMentions.none(),
         )

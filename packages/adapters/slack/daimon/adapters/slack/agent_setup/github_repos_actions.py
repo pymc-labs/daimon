@@ -35,6 +35,10 @@ _ACTIONS = frozenset(
         github_repos.ACTION_DEACTIVATE,
         github_repos.ACTION_PREVIOUS,
         github_repos.ACTION_NEXT,
+        github_repos.ACTION_CONFIRM_REMOVE,
+        github_repos.ACTION_CONFIRM_TURN_OFF,
+        github_repos.ACTION_CONFIRM_UPDATE_KEY,
+        github_repos.ACTION_CANCEL_CONFIRM,
     }
 )
 
@@ -82,6 +86,17 @@ async def handle(
             text="That agent is no longer available here.",
         )
         return True
+    refused = await refuse_unless_allowed_for_agent_name(
+        runtime,
+        client,
+        operation="github_grant",
+        tenant_id=tenant_id,
+        agent_name=name,
+        channel_id=channel_id,
+        user_id=user_id,
+    )
+    if refused:
+        return True
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.ma_agent_id)
     selected_repo_id = meta.repo_id
     if action_id == github_repos.ACTION_SELECT:
@@ -90,23 +105,13 @@ async def handle(
             selected_repo_id = int(str(option.get("value") or ""))
         except (TypeError, ValueError):
             return True
+    confirmation: str | None = None
     if action_id not in (
         github_repos.ACTION_OPEN,
         github_repos.ACTION_SELECT,
         github_repos.ACTION_PREVIOUS,
         github_repos.ACTION_NEXT,
     ):
-        refused = await refuse_unless_allowed_for_agent_name(
-            runtime,
-            client,
-            operation="github_grant",
-            tenant_id=tenant_id,
-            agent_name=name,
-            channel_id=channel_id,
-            user_id=user_id,
-        )
-        if refused:
-            return True
         removed_pat = False
         try:
             async with runtime.sessionmaker.begin() as session:
@@ -152,6 +157,10 @@ async def handle(
                 elif action_id == github_repos.ACTION_REMOVE:
                     if repo is None:
                         raise ValueError("Choose a connected repo first.")
+                    confirmation = "remove"
+                elif action_id == github_repos.ACTION_CONFIRM_REMOVE:
+                    if repo is None:
+                        raise ValueError("Choose a connected repo first.")
                     await remove_panel_grant(
                         session,
                         tenant_id=tenant_id,
@@ -159,6 +168,13 @@ async def handle(
                         repo_id=repo.repo_id,
                         account_id=actor,
                     )
+                    if panel.mode == "app":
+                        await activate_grants(
+                            session,
+                            tenant_id=tenant_id,
+                            agent_id=agent_id,
+                            account_id=actor,
+                        )
                 elif action_id == github_repos.ACTION_SWITCH:
                     working = next(
                         (
@@ -184,15 +200,24 @@ async def handle(
                         is_working_repo=True,
                     )
                 elif action_id == github_repos.ACTION_ACTIVATE:
-                    removed_pat = await activate_grants(
-                        session, tenant_id=tenant_id, agent_id=agent_id, account_id=actor
-                    )
+                    if panel.mode == "legacy" and panel.has_pat:
+                        confirmation = "update_key"
+                    else:
+                        removed_pat = await activate_grants(
+                            session, tenant_id=tenant_id, agent_id=agent_id, account_id=actor
+                        )
                 elif action_id == github_repos.ACTION_DEACTIVATE:
+                    confirmation = "turn_off"
+                elif action_id == github_repos.ACTION_CONFIRM_TURN_OFF:
                     await deactivate_agent(
                         session,
                         tenant_id=tenant_id,
                         agent_id=agent_id,
                         changed_by_account_id=actor,
+                    )
+                elif action_id == github_repos.ACTION_CONFIRM_UPDATE_KEY:
+                    removed_pat = await activate_grants(
+                        session, tenant_id=tenant_id, agent_id=agent_id, account_id=actor
                     )
         except ValueError as error:
             await post_ephemeral(client, channel_id=channel_id, user_id=user_id, text=str(error))
@@ -202,8 +227,7 @@ async def handle(
                 client,
                 channel_id=channel_id,
                 user_id=user_id,
-                text="GitHub App active. Live sessions restart on the next turn "
-                "because they held a token.",
+                text=f"Updated {name}. Open chats restart on the next turn.",
             )
     async with runtime.sessionmaker() as session:
         panel = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
@@ -219,7 +243,18 @@ async def handle(
     next_meta = dataclasses.replace(
         meta, view="github_repos", agent_name=name, repo_id=selected_repo_id, page=next_page
     )
-    view = github_repos.build_view(next_meta, panel)
+    view = (
+        github_repos.build_confirm_view(next_meta, panel, choice=confirmation)
+        if action_id
+        not in (
+            github_repos.ACTION_OPEN,
+            github_repos.ACTION_SELECT,
+            github_repos.ACTION_PREVIOUS,
+            github_repos.ACTION_NEXT,
+        )
+        and confirmation is not None
+        else github_repos.build_view(next_meta, panel)
+    )
     if action_id == github_repos.ACTION_OPEN:
         await client.views_push(trigger_id=str(payload.get("trigger_id") or ""), view=view)  # pyright: ignore[reportUnknownMemberType]
     else:
