@@ -77,9 +77,16 @@ class NotebookProcess:
     public_url_base: str | None = None
     started_at: float = field(default_factory=time.time)
     mode: Literal["edit", "run"] = "edit"
-    # A blog: kept alive forever and respawned from disk. Separate from
-    # ``mode`` because a scratch notebook is read-only (run) by default too.
-    permanent: bool = False
+    # Recorded in the registry (``blogs_store``): a read-only notebook the
+    # host starts on a visit and stops once it has gone unvisited for the warm
+    # window. False for the editor, which lives for ``subprocess_ttl_seconds``
+    # and is never restarted.
+    registered: bool = False
+    # When the proxy last forwarded a request to it, and how many websockets
+    # are open through it now. The sweep stops a registered notebook only when
+    # both say nobody is using it.
+    last_active: float = field(default_factory=time.time)
+    open_sockets: int = 0
     # The subprocess's own marimo session token (``new_access_token``). The
     # port is reachable from every other notebook on the host and the slug is
     # in ``ps``, so this token is the only thing standing between one
@@ -109,20 +116,33 @@ class NotebookProcess:
     def is_alive(self) -> bool:
         return self.process.poll() is None
 
+    def touch(self) -> None:
+        self.last_active = time.time()
+
+    def is_idle(self, warm_window_seconds: int, *, now: float) -> bool:
+        """Unvisited for the whole warm window, with no websocket open.
+
+        ``warm_window_seconds <= 0`` keeps a started notebook running.
+        """
+        return (
+            warm_window_seconds > 0
+            and self.open_sockets == 0
+            and now - self.last_active > warm_window_seconds
+        )
+
 
 def should_reap(np: NotebookProcess, ttl_seconds: int) -> bool:
     """Whether the sweeper should reclaim this subprocess.
 
-    Blogs (``permanent``) are never killed-and-deleted by age or death here
-    (their liveness/respawn is the sweep's separate concern). For a scratch
-    notebook, read-only or editor alike, a dead subprocess is always reaped; an
-    alive one is reaped only when a *positive* TTL is configured and it has
-    outlived it.
+    Registered notebooks are never killed-and-deleted here: their files live
+    until the registry record expires, and the sweep handles that separately.
+    For the editor, a dead subprocess is always reaped; an alive one is reaped
+    only when a *positive* TTL is configured and it has outlived it.
     ``ttl_seconds <= 0`` disables age-based reaping entirely — the notebook lives
     until its kernel dies or it is explicitly deleted. Shared by the background
     sweep loop and the ``/admin/sweep`` endpoint so the two never diverge.
     """
-    if np.permanent:
+    if np.registered:
         return False
     if not np.is_alive():
         return True

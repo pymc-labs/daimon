@@ -54,8 +54,9 @@ def _mint(
     jti: str = "j1",
     ttl: int = 300,
     secret: str = _SECRET,
+    notebook_ttl_seconds: int | None = None,
 ) -> str:
-    payload = {
+    payload: dict[str, object] = {
         "slug": slug,
         "op": op,
         "name": name,
@@ -63,6 +64,8 @@ def _mint(
         "exp": int(datetime.now(UTC).timestamp()) + ttl,
         "jti": jti,
     }
+    if notebook_ttl_seconds is not None:
+        payload["notebook_ttl_seconds"] = notebook_ttl_seconds
     payload_b64 = _b64(json.dumps(payload, separators=(",", ":")).encode())
     sig = hmac.new(secret.encode(), payload_b64.encode(), hashlib.sha256).digest()
     return f"{payload_b64}.{_b64(sig)}"
@@ -142,6 +145,17 @@ def test_upload_notebook_returns_expires_at(
     r = client.put(f"/upload/{_mint('notebook', 'scratch')}", content=b"# nb\n")
     assert r.status_code == 200, f"notebook upload should succeed, got {r.status_code}: {r.text}"
     assert "expires_at" in r.json(), "ephemeral notebook reports its TTL expiry"
+
+
+def test_upload_notebook_keeps_it_for_the_lifetime_in_the_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = _make_app(tmp_path, monkeypatch)
+    tok = _mint("notebook", "month", notebook_ttl_seconds=30 * 86400)
+    r = client.put(f"/upload/{tok}", content=b"# nb\n")
+    assert r.status_code == 200, r.text
+    delta = (datetime.fromisoformat(r.json()["expires_at"]) - datetime.now(UTC)).total_seconds()
+    assert 30 * 86400 - 5 < delta <= 30 * 86400 + 5, "the agent's 30 days reach the registry"
 
 
 def test_upload_rejects_forged_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

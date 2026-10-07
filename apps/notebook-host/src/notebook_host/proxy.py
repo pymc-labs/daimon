@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import time
 from collections.abc import Mapping
 
 import httpx
@@ -22,7 +23,9 @@ from fastapi import (
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from notebook_host.admin import AdminState
-from notebook_host.lifecycle import NotebookProcess
+from notebook_host.blogs_store import load_blogs
+from notebook_host.lazy_spawn import ensure_running
+from notebook_host.lifecycle import NotebookProcess, origin_label_for
 
 _log = logging.getLogger(__name__)
 
@@ -125,19 +128,42 @@ def _response_headers(
     return out
 
 
-def _resolve(
+def _may_start(state: AdminState, slug: str, headers: Mapping[str, str]) -> bool:
+    """Whether this request may start the slug's stopped notebook.
+
+    In per-notebook-origin mode only a request on the notebook's own origin
+    can, checked against the label of its saved token before anything is
+    spawned. In path mode any request for the slug can; the registry lookup
+    in ``ensure_running`` decides whether there is anything to start.
+    """
+    base = state.settings.origin_base
+    if base is None:
+        return True
+    record = load_blogs(state.settings.resolved_blogs_file).get(slug)
+    if record is None or not record.access_token:
+        return False
+    own_host = f"{origin_label_for(record.access_token)}.{base}".lower()
+    return headers.get("host", "").lower() == own_host
+
+
+async def _resolve(
     state: AdminState, slug: str, headers: Mapping[str, str]
 ) -> tuple[NotebookProcess, str | None] | None:
     """The live notebook this request may reach, and the origin it must come from.
 
-    Path mode (no ``origin_base``): by slug, no origin. Per-notebook-origin
-    mode: the Host must be exactly ``<label>.<origin_base>`` for this slug's
-    label, so ``/n/<slug>/`` on the shared host, or on another notebook's
-    origin, reaches nothing.
+    A registered notebook that is stopped is started first (``ensure_running``
+    raises 503 when it cannot be). Path mode (no ``origin_base``): by slug, no
+    origin. Per-notebook-origin mode: the Host must be exactly
+    ``<label>.<origin_base>`` for this slug's label, so ``/n/<slug>/`` on the
+    shared host, or on another notebook's origin, reaches nothing.
     """
     np = state.processes.get(slug)
     if np is None or not np.is_alive():
-        return None
+        if not _may_start(state, slug, headers):
+            return None
+        np = await ensure_running(state, slug, now=time.time())
+        if np is None:
+            return None
     base = state.settings.origin_base
     if base is None:
         return np, None
@@ -179,12 +205,13 @@ def create_proxy_router(state: AdminState) -> APIRouter:
     async def proxy_http(  # pyright: ignore[reportUnusedFunction]
         slug: str, path: str, request: Request
     ) -> Response:
-        resolved = _resolve(state, slug, request.headers)
+        resolved = await _resolve(state, slug, request.headers)
         if resolved is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no active notebook: {slug}")
         np, own_origin = resolved
         if own_origin is not None and _cross_origin(request.headers, own_origin):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "cross-origin request refused")
+        np.touch()
 
         backend_url = f"http://localhost:{np.port}/n/{slug}/{path}"
         if request.url.query:
@@ -225,7 +252,11 @@ def create_proxy_router(state: AdminState) -> APIRouter:
                 await websocket.close(code=1008, reason="origin not allowed")
                 return
 
-        resolved = _resolve(state, slug, websocket.headers)
+        try:
+            resolved = await _resolve(state, slug, websocket.headers)
+        except HTTPException:
+            await websocket.close(code=1013, reason="notebook is starting; try again")
+            return
         if resolved is None:
             await websocket.close(code=1011, reason="no active notebook")
             return
@@ -259,7 +290,10 @@ def create_proxy_router(state: AdminState) -> APIRouter:
         }
 
         await websocket.accept()
-
+        # An open session keeps the notebook from being stopped as idle, however
+        # long it goes without a new HTTP request.
+        np.open_sockets += 1
+        np.touch()
         try:
             async with websockets.connect(  # type: ignore[attr-defined]
                 backend_url, open_timeout=10.0, additional_headers=auth_headers
@@ -303,6 +337,8 @@ def create_proxy_router(state: AdminState) -> APIRouter:
             with contextlib.suppress(RuntimeError):
                 await websocket.close(code=1011, reason=f"backend ws error: {type(e).__name__}")
         finally:
+            np.open_sockets -= 1
+            np.touch()
             with contextlib.suppress(RuntimeError):
                 await websocket.close()
 
