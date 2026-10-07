@@ -77,6 +77,52 @@ async def test_known_human_author_never_fetches_message() -> None:
     channel.fetch_message.assert_not_awaited()
 
 
+async def test_human_reactions_reuse_channel_webhook_listing() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 456
+    channel.fetch_message = AsyncMock()
+    bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
+    bot.http = MagicMock()
+    bot.http.channel_webhooks = AsyncMock(return_value=[])
+    cog = FeedbackReactionCog(bot)
+    for author_id in (1234, 1235):
+        payload = _build_payload(
+            message_id=author_id,
+            channel_id=456,
+            user_id=_REACTOR_ID,
+            guild_id=_GUILD_ID,
+            emoji_name="👍",
+            message_author_id=author_id,
+        )
+        await cog._record_vote_from_reaction(payload)  # pyright: ignore[reportPrivateUsage]
+    bot.http.channel_webhooks.assert_awaited_once_with(456)
+    channel.fetch_message.assert_not_awaited()
+
+
+async def test_webhook_listing_403_is_cached_and_does_not_fetch_human_messages() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 456
+    channel.fetch_message = AsyncMock()
+    bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
+    bot.http = MagicMock()
+    bot.http.channel_webhooks = AsyncMock(
+        side_effect=discord.Forbidden(MagicMock(status=403), {"message": "Missing Permissions"})
+    )
+    cog = FeedbackReactionCog(bot)
+    for message_id in (1234, 1235):
+        payload = _build_payload(
+            message_id=message_id,
+            channel_id=456,
+            user_id=_REACTOR_ID,
+            guild_id=_GUILD_ID,
+            emoji_name="👍",
+            message_author_id=message_id,
+        )
+        await cog._record_vote_from_reaction(payload)  # pyright: ignore[reportPrivateUsage]
+    bot.http.channel_webhooks.assert_awaited_once_with(456)
+    channel.fetch_message.assert_not_awaited()
+
+
 async def test_webhook_after_restart_is_discovered_without_application_id() -> None:
     channel = MagicMock(spec=discord.TextChannel)
     channel.id = 456

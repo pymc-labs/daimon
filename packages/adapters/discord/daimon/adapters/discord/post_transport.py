@@ -24,7 +24,7 @@ _UNAVAILABLE_SECONDS = 600
 _locks: dict[int, asyncio.Lock] = {}
 _webhooks: dict[int, dict[int, discord.Webhook]] = {}
 _unavailable_until: dict[int, float] = {}
-_send_unavailable_until: dict[int, float] = {}
+_send_unavailable_until: dict[tuple[int, str, str | None], float] = {}
 _log = structlog.get_logger()
 
 
@@ -126,6 +126,9 @@ class DiscordPostTransport:
             or message.webhook_id in pool
         )
 
+    def _send_cooldown_key(self, channel_id: int) -> tuple[int, str, str | None]:
+        return channel_id, self.name, self.avatar_url
+
     async def _webhook(
         self, *, create: bool = True, webhook_id: int | None = None
     ) -> discord.Webhook | None:
@@ -137,10 +140,16 @@ class DiscordPostTransport:
         parent, thread = destination
         if create and thread is not None and thread.locked:
             return None
-        if create and _send_unavailable_until.get(parent.id, 0) > time.monotonic():
+        if (
+            create
+            and _send_unavailable_until.get(self._send_cooldown_key(parent.id), 0)
+            > time.monotonic()
+        ):
             return None
         application_id = self.client.application_id
         if application_id is None:
+            if webhook_id is not None:
+                raise discord.ClientException("application identity unavailable")
             return None
         lock = _locks.setdefault(parent.id, asyncio.Lock())
         async with lock:
@@ -154,6 +163,8 @@ class DiscordPostTransport:
                 return self._pick(pool)
             if create and _unavailable_until.get(parent.id, 0) > time.monotonic():
                 return None
+            if webhook_id is not None and _unavailable_until.get(parent.id, 0) > time.monotonic():
+                raise discord.ClientException("webhook lookup unavailable")
             if create:
                 member = parent.guild.me
                 if member is None or not parent.permissions_for(member).manage_webhooks:  # pyright: ignore[reportUnnecessaryComparison]
@@ -163,19 +174,26 @@ class DiscordPostTransport:
                 return self._pick(pool)
             try:
                 raw_hooks = await self.client.http.channel_webhooks(parent.id)
+                target_listed = False
                 for raw in raw_hooks:
                     if is_our_discord_webhook(
                         application_id=_snowflake(raw.get("application_id")),
                         channel_id=_snowflake(raw.get("channel_id")),
                         our_application_id=application_id,
                         target_channel_id=parent.id,
-                    ) and raw.get("token"):
+                    ):
+                        if webhook_id is not None and _snowflake(raw.get("id")) == webhook_id:
+                            target_listed = True
+                        if not raw.get("token"):
+                            continue
                         hook = discord.Webhook.from_state(  # pyright: ignore[reportPrivateUsage]
                             data=raw,
                             state=self.client._connection,  # pyright: ignore[reportPrivateUsage]
                         )
                         pool[hook.id] = hook
                 if webhook_id is not None:
+                    if target_listed and webhook_id not in pool:
+                        raise discord.ClientException("own webhook token unavailable")
                     return pool.get(webhook_id)
                 while create and len(pool) <= target_index and len(pool) < _POOL_SIZE:
                     try:
@@ -197,9 +215,13 @@ class DiscordPostTransport:
             except discord.HTTPException as exc:
                 if _cooldown(exc):
                     _unavailable_until[parent.id] = time.monotonic() + _UNAVAILABLE_SECONDS
+                if webhook_id is not None:
+                    raise discord.ClientException("webhook lookup failed") from exc
                 return pool.get(webhook_id) if webhook_id is not None else self._pick(pool)
             except Exception as exc:
                 _log.warning("discord.webhook_lookup_failed", error_type=type(exc).__name__)
+                if webhook_id is not None:
+                    raise discord.ClientException("webhook lookup failed") from exc
                 return pool.get(webhook_id) if webhook_id is not None else self._pick(pool)
 
     def _pick(self, pool: dict[int, discord.Webhook]) -> discord.Webhook | None:
@@ -253,7 +275,7 @@ class DiscordPostTransport:
                 if exc.code == 10015:
                     _webhooks.get(destination[0].id, {}).pop(hook.id, None)
                 elif exc.status == 400:
-                    _send_unavailable_until[destination[0].id] = (
+                    _send_unavailable_until[self._send_cooldown_key(destination[0].id)] = (
                         time.monotonic() + _UNAVAILABLE_SECONDS
                     )
                 webhook_rejected = True

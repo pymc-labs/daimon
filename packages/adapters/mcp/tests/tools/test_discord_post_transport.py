@@ -172,6 +172,55 @@ async def test_missing_webhook_token_posts_update_as_new_message(
     assert send.call_args.kwargs["content"] == "updated"
 
 
+async def test_webhook_edit_403_lookup_does_not_post_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock(spec=discord.Client)
+    client.application_id = 10
+    client.http = MagicMock()
+    client.http.channel_webhooks = AsyncMock(
+        side_effect=discord.Forbidden(MagicMock(status=403), {"message": "Missing Permissions"})
+    )
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 91
+    message = MagicMock(spec=discord.Message)
+    message.id = 40
+    message.webhook_id = 30
+    message.application_id = 10
+    message.author.name = "Research"
+    send = AsyncMock()
+    monkeypatch.setattr(_post_transport, "send_agent_message", send)
+    _post_transport._lookup_unavailable_until.clear()  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(discord.ClientException, match="webhook lookup failed"):
+        await _post_transport.edit_own_message(client, channel, message, content="updated")
+    with pytest.raises(discord.ClientException, match="webhook lookup unavailable"):
+        await _post_transport.edit_own_message(client, channel, message, content="updated again")
+    client.http.channel_webhooks.assert_awaited_once_with(channel.id)
+    send.assert_not_awaited()
+
+
+async def test_listed_webhook_without_token_does_not_post_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock(spec=discord.Client)
+    client.application_id = 10
+    client.http = MagicMock()
+    client.http.channel_webhooks = AsyncMock(
+        return_value=[{"id": "30", "application_id": "10", "channel_id": "92", "token": None}]
+    )
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 92
+    message = MagicMock(spec=discord.Message)
+    message.id = 40
+    message.webhook_id = 30
+    message.application_id = 10
+    send = AsyncMock()
+    monkeypatch.setattr(_post_transport, "send_agent_message", send)
+    with pytest.raises(discord.ClientException, match="own webhook token unavailable"):
+        await _post_transport.edit_own_message(client, channel, message, content="updated")
+    send.assert_not_awaited()
+
+
 async def test_mcp_thread_uses_same_sorted_webhook_mapping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

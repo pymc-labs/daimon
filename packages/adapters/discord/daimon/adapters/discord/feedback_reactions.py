@@ -32,6 +32,8 @@ down-vote, open the private follow-up (`_send_feedback_prompt`).
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 from typing import cast
 
@@ -68,6 +70,7 @@ import discord
 from discord.ext import commands
 
 log = structlog.get_logger()
+_WEBHOOK_LOOKUP_TTL_SECONDS = 600
 
 # Cap on the per-process memo of resolved author verdicts. The fallback is
 # rare today, but if `message_author_id` ever stops arriving then EVERY
@@ -94,7 +97,8 @@ class FeedbackReactionCog(commands.Cog):
         # actually resolved an author. Per-process and deliberately not
         # persisted: it is a REST-amplification bound, not a source of truth.
         self._author_is_bot: dict[int, bool] = {}
-        self._channel_webhook_ids: dict[int, frozenset[int]] = {}
+        self._channel_webhook_ids: dict[int, tuple[float, frozenset[int] | None]] = {}
+        self._channel_webhook_locks: dict[int, asyncio.Lock] = {}
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
@@ -220,35 +224,46 @@ class FeedbackReactionCog(commands.Cog):
         parent = channel.parent if isinstance(channel, discord.Thread) else channel
         if not isinstance(parent, (discord.TextChannel, discord.ForumChannel)):
             return False
-        cached = self._channel_webhook_ids.get(parent.id, frozenset())
-        if author_id in cached:
-            return True
-        application_id = self._bot.application_id
-        if application_id is None:
-            return True
-        http = getattr(self._bot, "http", None)
-        if http is None:
-            return False
-        try:
-            hooks = await http.channel_webhooks(parent.id)
-        except discord.HTTPException:
-            # Ownership can still be verified from the fetched message's
-            # application_id when listing is temporarily unavailable.
-            return True
-        ids = frozenset(
-            int(raw["id"])
-            for raw in hooks
-            if is_our_discord_webhook(
-                application_id=int(raw["application_id"])
-                if raw.get("application_id") is not None
-                else None,
-                channel_id=int(raw["channel_id"]) if raw.get("channel_id") is not None else None,
-                our_application_id=application_id,
-                target_channel_id=parent.id,
+        lock = self._channel_webhook_locks.setdefault(parent.id, asyncio.Lock())
+        async with lock:
+            cached = self._channel_webhook_ids.get(parent.id)
+            if cached is not None and cached[0] > time.monotonic():
+                return cached[1] is not None and author_id in cached[1]
+            application_id = self._bot.application_id
+            if application_id is None:
+                return True
+            http = getattr(self._bot, "http", None)
+            if http is None:
+                return False
+            try:
+                hooks = await http.channel_webhooks(parent.id)
+            except discord.HTTPException as exc:
+                if exc.status == 403:
+                    self._channel_webhook_ids[parent.id] = (
+                        time.monotonic() + _WEBHOOK_LOOKUP_TTL_SECONDS,
+                        None,
+                    )
+                    return False
+                return True
+            ids = frozenset(
+                int(raw["id"])
+                for raw in hooks
+                if is_our_discord_webhook(
+                    application_id=int(raw["application_id"])
+                    if raw.get("application_id") is not None
+                    else None,
+                    channel_id=int(raw["channel_id"])
+                    if raw.get("channel_id") is not None
+                    else None,
+                    our_application_id=application_id,
+                    target_channel_id=parent.id,
+                )
             )
-        )
-        self._channel_webhook_ids[parent.id] = ids
-        return author_id in ids
+            self._channel_webhook_ids[parent.id] = (
+                time.monotonic() + _WEBHOOK_LOOKUP_TTL_SECONDS,
+                ids,
+            )
+            return author_id in ids
 
     async def _is_bot_message_via_fetch(
         self, payload: discord.RawReactionActionEvent, *, bot_user_id: int
@@ -294,14 +309,15 @@ class FeedbackReactionCog(commands.Cog):
                 self._bot, channel, name=message.author.name, avatar_url=None, builtin=False
             )
             destination = transport._destination()  # pyright: ignore[reportPrivateUsage]
-            loaded_ids = (
-                self._channel_webhook_ids.get(destination[0].id, frozenset[int]())
+            cached = (
+                self._channel_webhook_ids.get(destination[0].id)
                 if destination is not None
-                else frozenset[int]()
+                else None
             )
-            is_bot_message = message.webhook_id in loaded_ids or await transport.owns_message(
-                message
-            )
+            loaded_ids = cached[1] if cached is not None and cached[0] > time.monotonic() else None
+            is_bot_message = (
+                loaded_ids is not None and message.webhook_id in loaded_ids
+            ) or await transport.owns_message(message)
             if not is_bot_message and message.application_id is None:
                 is_bot_message = await self._is_recorded_agent_post(payload)
                 if not is_bot_message:

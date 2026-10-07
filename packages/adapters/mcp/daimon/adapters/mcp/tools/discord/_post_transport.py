@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import time
 from typing import Any, cast
 
 import discord
@@ -18,6 +19,8 @@ from daimon.core.agent_post_identity import (
 )
 
 _locks: dict[int, asyncio.Lock] = {}
+_lookup_unavailable_until: dict[int, float] = {}
+_LOOKUP_UNAVAILABLE_SECONDS = 600
 
 
 def _fresh_files(files: list[discord.File]) -> list[discord.File]:
@@ -79,12 +82,18 @@ async def own_webhook(
 ) -> discord.Webhook | None:
     parent = channel.parent if isinstance(channel, discord.Thread) else channel
     if not isinstance(parent, (discord.TextChannel, discord.ForumChannel)):
+        if webhook_id is not None:
+            raise discord.ClientException("webhook channel unavailable")
         return None
     if isinstance(channel, discord.Thread) and channel.locked and create:
         return None
     application_id = await ensure_application_id(client)
     if application_id is None:
+        if webhook_id is not None:
+            raise discord.ClientException("application identity unavailable")
         return None
+    if webhook_id is not None and _lookup_unavailable_until.get(parent.id, 0) > time.monotonic():
+        raise discord.ClientException("webhook lookup unavailable")
     if create:
         member = parent.guild.me
         if member is None and client.user is not None:  # pyright: ignore[reportUnnecessaryComparison]
@@ -109,6 +118,16 @@ async def own_webhook(
                 )
                 and raw.get("token")
             ]
+            target_listed = webhook_id is not None and any(
+                _snowflake(raw.get("id")) == webhook_id
+                and is_our_discord_webhook(
+                    application_id=_snowflake(raw.get("application_id")),
+                    channel_id=_snowflake(raw.get("channel_id")),
+                    our_application_id=application_id,
+                    target_channel_id=parent.id,
+                )
+                for raw in raw_hooks
+            )
             hook = (
                 next((item for item in hooks if item.id == webhook_id), None)
                 if webhook_id
@@ -122,8 +141,16 @@ async def own_webhook(
                 hook = next(item for item in hooks if item.id == chosen)
             if hook is None and create:
                 hook = await parent.create_webhook(name=DISCORD_AGENT_WEBHOOK_NAME)
+            if hook is None and target_listed:
+                raise discord.ClientException("own webhook token unavailable")
             return hook if hook is not None and hook.token is not None else None
-        except discord.HTTPException:
+        except discord.HTTPException as exc:
+            if exc.status == 403:
+                _lookup_unavailable_until[parent.id] = (
+                    time.monotonic() + _LOOKUP_UNAVAILABLE_SECONDS
+                )
+            if webhook_id is not None:
+                raise discord.ClientException("webhook lookup failed") from exc
             return None
 
 

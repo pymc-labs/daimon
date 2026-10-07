@@ -135,6 +135,26 @@ async def test_webhook_403_falls_back_with_name_and_caches_unavailability() -> N
     channel.send.assert_awaited_once_with(content="**Research** answer")
 
 
+async def test_webhook_400_cooldown_only_applies_to_that_agent_identity() -> None:
+    client, channel, hook = _world()
+    hook.send = AsyncMock(
+        side_effect=[
+            discord.HTTPException(MagicMock(status=400), {"code": 50035, "message": "bad"}),
+            MagicMock(spec=discord.Message),
+        ]
+    )
+    research = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    writer = DiscordPostTransport(client, channel, name="Writer", avatar_url=None, builtin=False)
+    await research.send(content="first")
+    await writer.send(content="second")
+    assert hook.send.await_count == 2
+    assert channel.send.await_count == 1
+    assert (channel.id, "Research", None) in _send_unavailable_until
+    assert (channel.id, "Writer", None) not in _send_unavailable_until
+
+
 async def test_webhook_limit_is_cached_for_ten_minutes() -> None:
     client, channel, _ = _world()
     channel.create_webhook = AsyncMock(
@@ -280,6 +300,43 @@ async def test_missing_webhook_token_posts_edit_as_replacement() -> None:
     assert replacement is channel.send.return_value
     channel.send.assert_awaited_once_with(content="**Research** updated")
     hook.edit_message.assert_not_awaited()
+
+
+async def test_webhook_edit_403_lookup_does_not_post_replacement() -> None:
+    client, channel, _ = _world()
+    client.http.channel_webhooks = AsyncMock(
+        side_effect=discord.Forbidden(MagicMock(status=403), {"message": "Missing Permissions"})
+    )
+    message = MagicMock(spec=discord.Message)
+    message.id = 40
+    message.webhook_id = 30
+    message.application_id = client.application_id
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    with pytest.raises(discord.ClientException, match="webhook lookup failed"):
+        await transport.edit(message, content="updated")
+    with pytest.raises(discord.ClientException, match="webhook lookup unavailable"):
+        await transport.edit(message, content="updated again")
+    client.http.channel_webhooks.assert_awaited_once_with(channel.id)
+    channel.send.assert_not_awaited()
+
+
+async def test_listed_webhook_without_token_does_not_post_replacement() -> None:
+    client, channel, _ = _world()
+    client.http.channel_webhooks = AsyncMock(
+        return_value=[{"id": "30", "application_id": "10", "channel_id": "20", "token": None}]
+    )
+    message = MagicMock(spec=discord.Message)
+    message.id = 40
+    message.webhook_id = 30
+    message.application_id = client.application_id
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    with pytest.raises(discord.ClientException):
+        await transport.edit(message, content="updated")
+    channel.send.assert_not_awaited()
 
 
 async def test_loaded_webhook_id_proves_ownership_without_application_id() -> None:
