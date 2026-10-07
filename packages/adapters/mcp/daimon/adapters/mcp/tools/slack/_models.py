@@ -21,6 +21,16 @@ class SlackChannelRow(BaseModel):
     num_members: int | None = None
 
 
+class SlackFileRow(BaseModel):
+    """A message file with an expiring proxy URL, when the deployment can mint one."""
+
+    id: str
+    name: str
+    mimetype: str
+    size: int | None = None
+    url: str | None = None
+
+
 class SlackMessageRow(BaseModel):
     ts: str
     user_id: str | None = None
@@ -28,6 +38,7 @@ class SlackMessageRow(BaseModel):
     text: str
     thread_ts: str | None = None
     reply_count: int | None = None
+    files: list[SlackFileRow] = []
     trust: UntrustedMarker | None = None
     """"untrusted" when this row was read back rather than just sent by daimon."""
 
@@ -43,6 +54,8 @@ class SlackThreadResult(UntrustedResult):
     thread_ts: str
     messages: list[SlackMessageRow]
     has_more: bool
+    next_cursor: str | None = None
+    hint: str | None = None
 
 
 class SlackSearchMatch(BaseModel):
@@ -54,6 +67,7 @@ class SlackSearchMatch(BaseModel):
     username: str | None = None
     text: str
     permalink: str | None = None
+    files: list[SlackFileRow] = []
 
 
 class SlackSearchResult(UntrustedResult):

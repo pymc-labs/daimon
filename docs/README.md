@@ -17,8 +17,7 @@ pieces fit together.
 - [mcp-tools.md](mcp-tools.md) — every MCP tool the agent can call, grouped by
   module, with who may call it. Generated from the tool registry.
 - [permissions.md](permissions.md) — channel and agent rules: who may read
-  and write a channel, where an agent runs, and the protected, sealed,
-  confidential and pinned presets.
+  and write a channel, where an agent runs, and what each limits.
 - [routines.md](routines.md) — scheduled routines: creating one, how the
   scheduler fires it, the timeouts, permissions and what a failure leaves.
 - [billing.md](billing.md) — the credit model: metering, pricing, the balance
@@ -27,6 +26,8 @@ pieces fit together.
   skills, `daimon defaults apply` and `verify`, the seeded-skill fingerprint.
 - [slack.md](slack.md) — the Slack adapter's trust model: file delivery and
   per-user access.
+- [agent-identity.md](agent-identity.md) — per-message agent names, avatars,
+  platform limits and reply-routing design.
 - [teams.md](teams.md) — the Teams adapter: where it answers, admins,
   channel history and files, agent tools, restarts and current limits.
 - [plugin.md](plugin.md) — the Claude Code plugin: what the hub login mounts

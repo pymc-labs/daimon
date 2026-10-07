@@ -41,13 +41,13 @@ def _old_is_write_protected(
     category_unresolved: bool = False,
 ) -> bool:
     # access_policy.is_write_protected
-    if channel_id in policy.protected_channel_ids:
+    closed = {c for c, r in policy.channel_rules.items() if r.writers == "none"}
+    closed_categories = {c for c, r in policy.category_rules.items() if r.writers == "none"}
+    if channel_id in closed or (parent_channel_id is not None and parent_channel_id in closed):
         return True
-    if parent_channel_id is not None and parent_channel_id in policy.protected_channel_ids:
+    if category_unresolved and closed_categories:
         return True
-    if category_unresolved and policy.protected_category_ids:
-        return True
-    return category_id is not None and category_id in policy.protected_category_ids
+    return category_id is not None and category_id in closed_categories
 
 
 def _old_creator_refusal(
@@ -88,6 +88,7 @@ def _old_delivery_refusal(
 
 _OLD_SPEC: frozenset[str] = frozenset({"agent_spec_edit", "skill_add", "skill_remove"})
 _OLD_POSTED_TOKEN: frozenset[str] = frozenset({"key_add", "keys_import", "mcp_connect"})
+_NEW_ADMIN_ONLY: frozenset[str] = frozenset({"github_connect", "github_grant"})
 
 
 def _old_reachable_outcome(target: TargetFacts) -> PolicyOutcome:
@@ -165,7 +166,7 @@ def test_protection_decisions_match() -> None:
                 policy, subject=Subject(), action=Action.POST, surface=surface, place=place
             )
             assert bool(new) is not old, (policy, place, surface)
-            assert old is (new.reason == "channel_protected")
+            assert old is (new.reason == "writers_none")
 
 
 def test_creator_decisions_match() -> None:
@@ -228,7 +229,9 @@ def test_no_agent_post_ignores_subject_and_pins() -> None:
             assert bool(decision) is (channel != "C1")
 
 
-@pytest.mark.parametrize("operation", get_args(OperationKind))
+@pytest.mark.parametrize(
+    "operation", [kind for kind in get_args(OperationKind) if kind not in _NEW_ADMIN_ONLY]
+)
 def test_shared_agent_table_matches(operation: OperationKind) -> None:
     for is_admin, managed, reachable, local, held, unattended, unplaced in itertools.product(
         (False, True), repeat=7
@@ -260,4 +263,6 @@ def test_every_operation_kind_is_in_one_old_family() -> None:
         "repo_bind",
         "skill_repo_connect",
     }
-    assert set(get_args(OperationKind)) == attachment | _OLD_SPEC | _OLD_POSTED_TOKEN
+    assert (
+        set(get_args(OperationKind)) == attachment | _OLD_SPEC | _OLD_POSTED_TOKEN | _NEW_ADMIN_ONLY
+    )

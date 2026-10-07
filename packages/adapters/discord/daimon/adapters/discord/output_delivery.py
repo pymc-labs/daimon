@@ -41,7 +41,7 @@ async def deliver_session_outputs(
 
     async def check_protection() -> None:
         if not await may_post():
-            raise OutputPostingUnavailable("channel_protected")
+            raise OutputPostingUnavailable("writers_none")
 
     async def post(file: DeliverableFile) -> None:
         await check_protection()

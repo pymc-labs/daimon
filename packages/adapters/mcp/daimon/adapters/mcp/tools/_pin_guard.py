@@ -1,13 +1,13 @@
-"""The MCP side of the pinned-agent write rule (`daimon.core.agent_pins`).
+"""The MCP side of the agent rule's write check (`daimon.core.agent_pins`).
 
 Every tool that adds to or edits what an agent reaches calls
 `require_pin_write_access` once it has resolved the target: the private-form
 request tools with the turn origin they were called from, and the direct
 configuration tools (`update_agent`, `attach_mcp_server`, `detach_mcp_server`,
 `remove_agent_key`) with none: their `origin_context_id` only finds the agent. With no origin a
-member is outside every pin, so a pinned agent's direct configuration is an
-admin's, or a channel admin's who runs every channel it is pinned to; a member
-inside its channels uses the request tools instead.
+member is outside every rule's channels, so the direct configuration of an
+agent with a rule is an admin's, or a channel admin's who runs every channel
+its rule names; a member inside those channels uses the request tools instead.
 """
 
 from __future__ import annotations
@@ -30,14 +30,14 @@ from daimon.core.authz import (
     authorize,
     build_agent_ref,
 )
-from daimon.core.permissions import any_pinned
+from daimon.core.permissions import any_agent_rules
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
 
 
 def _trusted_credential(auth: AuthIdentity) -> bool:
-    """A credential whose stored roles this guard trusts to configure a pinned agent.
+    """A credential whose stored roles this guard trusts to configure an agent with a rule.
 
     - A chat turn's credential (``chat_agent_id``): minted for one turn whose
       admission recorded the adapter's live platform role (and role ids) as
@@ -68,11 +68,11 @@ async def require_pin_write_access(
 ) -> None:
     """Raise unless this caller may change ``ma_agent`` from ``origin``.
 
-    ``ma_agent`` may be a resolver, called only when the tenant pins anything,
+    ``ma_agent`` may be a resolver, called only when the tenant has agent rules,
     for paths that don't otherwise look the agent up.
 
     A trusted credential (`_trusted_credential`) of an admin, or of a
-    channel admin of every pinned channel, may write from anywhere; agent
+    channel admin of every channel its rule names, may write from anywhere; agent
     keys never are trusted.
     """
     trusted = _trusted_credential(auth)
@@ -83,7 +83,7 @@ async def require_pin_write_access(
             policy = await load_access_policy(session, tenant_id=auth.tenant_id)
         except AccessPolicyUnreadable as exc:
             raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
-    if not any_pinned(policy):
+    if not any_agent_rules(policy):
         return
     if callable(ma_agent):
         ma_agent = await ma_agent()

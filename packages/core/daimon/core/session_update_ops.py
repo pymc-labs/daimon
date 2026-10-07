@@ -49,9 +49,10 @@ from daimon.core.agent_mcp_credentials import (
     resolve_hidden_mcp_server_names,
     sync_agent_mcp_credentials,
 )
-from daimon.core.config import McpSettings
+from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import assemble_env_bytes, upload_env_file
 from daimon.core.errors import DaimonError
+from daimon.core.github_app_session import rotate_live_app_tokens
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import resolve_clone_token
 from daimon.core.session_compat import (
@@ -59,6 +60,7 @@ from daimon.core.session_compat import (
     RemirrorVaultCredentials,
     ReplaceEnvFile,
     ReplaceToolsAndMcpServers,
+    RotateAppTokens,
     RotateRepoToken,
     UpdateOp,
 )
@@ -171,6 +173,8 @@ async def _replace_env_file(
     """
     async with sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
+    if snapshot.github_mode == "app":
+        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
 
     file_id = await upload_env_file(anthropic, sessionmaker, rows=rows) if rows else None
     cleared = snapshot.model_copy(
@@ -270,7 +274,10 @@ async def apply_update_ops(
     github_fallback_pat: str | None,
     github_app_id: str | None,
     github_app_private_key: str | None,
+    agent_github_app: GithubAppSettings | None = None,
+    is_external: bool = False,
     now: dt.datetime,
+    asks_before_publishing: bool = False,
 ) -> AppliedOps | SessionBusy:
     """Run `ops` against the live session and return what it runs afterwards.
 
@@ -305,7 +312,13 @@ async def apply_update_ops(
                     server_urls={server.name: server.url for server in agent.mcp_servers},
                 )
                 public_url = None if mcp.public_url is None else str(mcp.public_url)
-                tools = session_tools(agent, hidden, tool_safety=tool_safety, public_url=public_url)
+                tools = session_tools(
+                    agent,
+                    hidden,
+                    tool_safety=tool_safety,
+                    public_url=public_url,
+                    asks_before_publishing=asks_before_publishing,
+                )
                 servers = session_mcp_servers(
                     agent, hidden, tool_safety=tool_safety, public_url=public_url
                 )
@@ -344,6 +357,26 @@ async def apply_update_ops(
                         update={"repo_token_issued_at": int(now.timestamp())}
                     )
                     applied.append("repo_token_age")
+            case RotateAppTokens():
+                if snapshot.vault_id is None or fernet is None:
+                    raise ValueError("App session has no vault or encryption")
+                await rotate_live_app_tokens(
+                    anthropic,
+                    sessionmaker,
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    account_id=account_id,
+                    is_external=is_external,
+                    vault_id=snapshot.vault_id,
+                    resource_ids=op.resource_ids,
+                    config=agent_github_app or GithubAppSettings(),
+                    fernet=fernet,
+                )
+                snapshot = snapshot.model_copy(
+                    update={"repo_token_issued_at": int(now.timestamp())}
+                )
+                applied.append("repo_token_age")
             case RemirrorVaultCredentials():
                 if fernet is not None and mcp.public_url is not None and mcp.jwt_secret is not None:
                     await sync_agent_mcp_credentials(
@@ -356,6 +389,7 @@ async def apply_update_ops(
                         jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
                         public_url=str(mcp.public_url),
                         now=now,
+                        exclude_github_copilot=snapshot.github_mode == "app",
                     )
 
     return AppliedOps(snapshot=snapshot, applied=tuple(applied))

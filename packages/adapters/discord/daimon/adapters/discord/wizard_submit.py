@@ -500,16 +500,16 @@ async def run_wizard_submit_turn_observed(
             )
             return
         except AdmissionDenied as err:
-            if err.reason == "channel_protected":
+            if err.reason == "writers_none":
                 # No post into a protected channel, not even a refusal.
                 _log.info("wizard_submit.skipped.channel_protected", short_id=row.id)
             elif err.reason == "invoker_not_allowed":
                 _log.info(
                     "wizard_submit.skipped.invoker_not_allowed", user_id=str(interaction.user.id)
                 )
-            elif err.reason == "agent_pinned_elsewhere":
+            elif err.reason == "runs_elsewhere":
                 _log.info("wizard_submit.skipped.agent_pinned_elsewhere", short_id=row.id)
-            elif err.reason == "channel_isolated":
+            elif err.reason == "own_agents_only":
                 _log.info("wizard_submit.skipped.channel_isolated", short_id=row.id)
             elif err.reason == "balance_depleted":
                 _log.info("wizard_submit.skipped.over_balance", tenant_id=str(row.tenant_id))
@@ -517,7 +517,7 @@ async def run_wizard_submit_turn_observed(
                 _log.info("wizard_submit.skipped.over_channel_budget", short_id=row.id)
             else:
                 _log.info("wizard_submit.skipped.over_cap", user_id=str(interaction.user.id))
-            if err.reason != "channel_protected":
+            if err.reason != "writers_none":
                 await channel.send(
                     "Your answers were recorded. "
                     + admission_refusal_message(err.reason, bot.runtime.settings)

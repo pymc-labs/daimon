@@ -56,7 +56,6 @@ from daimon.core.channel_admins import (
     load_administered_channel_ids,
     load_live_subject,
 )
-from daimon.core.channel_isolation import load_isolation_viewer
 from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
@@ -75,8 +74,9 @@ from daimon.core.panel_operator_tokens import (
     mint_panel_operator_token,
     revoke_panel_operator_token,
 )
-from daimon.core.permissions import any_pinned
+from daimon.core.permissions import any_agent_rules
 from daimon.core.roster import Roster, load_roster, paginate
+from daimon.core.rule_views import load_rule_viewer
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
 from microsoft_teams.api import (
@@ -95,7 +95,7 @@ GONE = "That agent is no longer available. It may have been deleted."
 NOT_CONFIGURED = "This deployment is not set up for coding-tool access yet. Ask the operator."
 NEEDS_ADMIN = (
     "Minting an access token for {name} needs an admin, or an admin of every channel "
-    "it is pinned to, binding it to one of them."
+    "its rule runs it in, binding it to one of them."
 )
 NOT_MINTER = "Only the person who minted this token can revoke it."
 OPERATOR_NEEDS_ADMIN = "Only an admin can mint or revoke operator tokens."
@@ -269,7 +269,7 @@ class SetupPanel:
             viewer = (
                 None
                 if is_admin is None
-                else await load_isolation_viewer(
+                else await load_rule_viewer(
                     session,
                     self._runtime.anthropic,
                     tenant_id=tenant_id,
@@ -314,7 +314,7 @@ class SetupPanel:
                 default=self._runtime.deployment_default,
                 viewer=None
                 if viewer is None
-                else await load_isolation_viewer(
+                else await load_rule_viewer(
                     session,
                     self._runtime.anthropic,
                     tenant_id=tenant_id,
@@ -544,7 +544,7 @@ class SetupPanel:
         except AccessPolicyUnreadable:
             return dialog_message(POLICY_UNREADABLE_REFUSAL)
         agent = AgentRef.of(name)
-        if target is not None and channel_id is not None and any_pinned(policy):
+        if target is not None and channel_id is not None and any_agent_rules(policy):
             ma_agent = await self._runtime.anthropic.beta.agents.retrieve(target.ma_agent_id)
             agent = build_agent_ref(ma_agent.name, ma_agent.metadata, target.name)
         decision, bound_channel_id = authorize_coding_token(

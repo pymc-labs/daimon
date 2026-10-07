@@ -44,7 +44,12 @@ from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import new_command
 from daimon.adapters.teams.setup_panel import SetupPanel
-from daimon.adapters.teams.site_grant import CALLBACK_PATH, callback_route
+from daimon.adapters.teams.site_grant import (
+    CALLBACK_PATH,
+    GrantedSite,
+    GrantTarget,
+    callback_route,
+)
 from daimon.adapters.teams.support import VERB as SUPPORT_VERB
 from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support import enabled as support_enabled
@@ -55,6 +60,11 @@ from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.domain import TeamsChannelSiteRow
+from daimon.core.stores.teams_channel_sites import (
+    get_teams_channel_site,
+    upsert_teams_channel_site,
+)
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, TeamGroups
 from daimon.core.teams_sharepoint import SharePoint
@@ -309,7 +319,16 @@ def create_teams_http_service(
         entra_tenant_id=settings.tenant_id,
         alert_url=runtime.settings.ops.alert_webhook_url,
     )
-    files = ChannelFiles(SharePoint(graph, runtime.http_client), groups, channel_names)
+
+    async def stored_site(channel_id: str) -> TeamsChannelSiteRow | None:
+        async with runtime.sessionmaker() as session:
+            return await get_teams_channel_site(
+                session, tenant_id=teams_tenant, channel_id=channel_id
+            )
+
+    files = ChannelFiles(
+        SharePoint(graph, runtime.http_client), groups, channel_names, stored_site=stored_site
+    )
     reader = ThreadReader(graph, groups, bot_app_id=settings.client_id, files=files)
     routines = RoutinesPanel(runtime)
 
@@ -389,7 +408,21 @@ def create_teams_http_service(
     teams_app.on_message_submit_feedback(handle_feedback)
     teams_app.on_file_consent(turns.outputs.handle_consent)
     if settings.public_url is not None:
-        grant = callback_route(settings, runtime.http_client, on_granted=files.forget)
+
+        async def files_granted(target: GrantTarget, site: GrantedSite) -> None:
+            async with runtime.sessionmaker.begin() as session:
+                await upsert_teams_channel_site(
+                    session,
+                    tenant_id=teams_tenant,
+                    channel_id=target.channel_id,
+                    group_id=target.group_id,
+                    site_id=site.site_id,
+                    drive_id=site.folder.drive_id,
+                    folder_id=site.folder.item_id,
+                )
+            files.forget(target.group_id)
+
+        grant = callback_route(settings, runtime.http_client, on_granted=files_granted)
         fastapi_app.add_api_route(CALLBACK_PATH, grant, methods=["GET"])
     return TeamsHttpService(
         app=fastapi_app,

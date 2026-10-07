@@ -31,7 +31,6 @@ from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
     handle_agent_setup_command,
 )
-from daimon.adapters.slack.agent_setup.isolation import ISOLATION_NEED_ADMIN_MESSAGE
 from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_ADD_SKILL,
     ACTION_CHANNEL_ADMINS,
@@ -39,23 +38,24 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_DETAILS,
     ACTION_EXPAND_CONNECTIONS,
     ACTION_EXPAND_KEYS,
-    ACTION_ISOLATE,
-    ACTION_ISOLATE_COPY,
-    ACTION_LIFT_ISOLATION,
     ACTION_NEW,
     ACTION_OPERATOR_MINT,
     ACTION_PAGE_NEXT,
     ACTION_REVOKE_TOKEN,
     ACTION_ROUTING,
+    ACTION_RULE_COPY,
+    ACTION_RULE_READERS,
+    ACTION_RULE_RELEASE,
     CALLBACK_ADD_SKILL,
 )
+from daimon.adapters.slack.agent_setup.rules import RULE_NEED_ADMIN_MESSAGE
 from daimon.adapters.slack.agent_setup.state import (
     PanelMetadata,
     decode_panel_metadata,
     encode_panel_metadata,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_pins import PIN_WRITE_REFUSAL
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
@@ -199,12 +199,15 @@ def _action_payload(
     *,
     meta: PanelMetadata,
     value: str | None = None,
+    selected: str | None = None,
     view_id: str = _ROOT_VIEW_ID,
     view_hash: str = _VIEW_HASH,
 ) -> dict[str, Any]:
     action: dict[str, Any] = {"action_id": action_id}
     if value is not None:
         action["value"] = value
+    if selected is not None:
+        action["selected_option"] = {"value": selected}
     return {
         "team": {"id": _TEAM_ID},
         "user": {"id": _USER_ID},
@@ -887,32 +890,34 @@ async def test_operator_token_click_refuses_a_member(
     assert (event.tool_name, event.outcome) == ("panel:operator_token_mint", "denied")
 
 
-async def test_isolation_click_refuses_a_member(
+async def test_rule_click_refuses_a_member(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """A member's click on a rendered isolation button is refused and changes nothing."""
+    """A member's pick on a rendered Permissions select is refused and changes nothing."""
     tenant_id, fernet_key = await _seed_team(db_session)
     await db_session.commit()
     runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
 
     await handle_agent_setup_action(
         runtime,
-        _action_payload(ACTION_ISOLATE, meta=_meta(view="routing"), view_id="V_ROUTING"),
+        _action_payload(
+            ACTION_RULE_READERS, meta=_meta(view="routing"), selected="own", view_id="V_ROUTING"
+        ),
     )
 
     ephemerals = _sent(
         fake_slack_web_client.mock,
         ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")),
     )
-    assert [e["text"] for e in ephemerals] == [ISOLATION_NEED_ADMIN_MESSAGE]
+    assert [e["text"] for e in ephemerals] == [RULE_NEED_ADMIN_MESSAGE]
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-    assert policy.isolated_channel_ids == (), "nothing was isolated"
+    assert policy.channel_rules == {}, "no rule was set"
 
 
-async def test_isolation_click_refuses_a_shared_agent_then_isolates_with_a_copy(
+async def test_rule_clicks_refuse_a_shared_agent_then_keep_the_channel_to_a_copy(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
@@ -953,38 +958,31 @@ async def test_isolation_click_refuses_a_shared_agent_then_isolates_with_a_copy(
         repeat=True,
     )
 
-    for action_id in (ACTION_ISOLATE, ACTION_ISOLATE_COPY):
-        await handle_agent_setup_action(
-            runtime,
-            _action_payload(
-                action_id, meta=_meta(view="routing", channel_id=room), view_id="V_ROUTING"
-            ),
-        )
+    def click(action_id: str, selected: str | None = None) -> dict[str, Any]:
+        meta = _meta(view="routing", channel_id=room)
+        return _action_payload(action_id, meta=meta, selected=selected, view_id="V_ROUTING")
 
-    texts = [
-        e["text"] for e in _sent(mock, ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")))
-    ]
-    assert "also answers outside this channel" in texts[0], "the plain click says why not"
-    assert "*team-alpha*, a copy of *shared*" in texts[1], "the copy click makes one"
+    def texts() -> list[str]:
+        posted = _sent(mock, ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")))
+        return [e["text"] for e in posted]
+
+    await handle_agent_setup_action(runtime, click(ACTION_RULE_READERS, "own"))
+    await handle_agent_setup_action(runtime, click(ACTION_RULE_COPY))
+    assert "also answers outside this channel" in texts()[0], "the plain pick says why not"
+    assert "team-alpha, a copy of shared, is its own agent" in texts()[1], "the copy click"
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-    assert policy.isolated_channel_ids == (room,)
+    assert policy.channel_rules == {room: ChannelRule(readers="own", writers="own")}
+    assert policy.agent_rules == {"team-alpha": AgentRule(runs_in=(room,))}
     assert len(_sent(mock, _VIEWS_UPDATE_KEY)) == 2, "each click refreshes Who answers where"
 
-    await handle_agent_setup_action(
-        runtime,
-        _action_payload(
-            ACTION_LIFT_ISOLATION, meta=_meta(view="routing", channel_id=room), view_id="V_ROUTING"
-        ),
-    )
-    texts = [
-        e["text"] for e in _sent(mock, ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")))
-    ]
-    assert "no longer private" in texts[2], "lifting says the agent may answer elsewhere"
+    await handle_agent_setup_action(runtime, click(ACTION_RULE_READERS, "any"))
+    assert "team-alpha still run only there" in texts()[2], "opening keeps the copy's rule"
+    await handle_agent_setup_action(runtime, click(ACTION_RULE_RELEASE))
+    assert "team-alpha may now run elsewhere" in texts()[3], "releasing says so"
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-    assert (policy.isolated_channel_ids, policy.sealed_channel_ids) == ((), ()), "all lifted"
-    assert "team-alpha" not in policy.agent_channel_pins, "the copy's pin is lifted"
+    assert (policy.channel_rules, policy.agent_rules) == ({}, {}), "all lifted"
 
 
 async def test_add_skill_opens_the_form_or_refuses_by_where_the_agent_answers(
@@ -1019,17 +1017,17 @@ async def test_add_skill_opens_the_form_or_refuses_by_where_the_agent_answers(
     assert "changing its skills needs a workspace admin" in refusal["text"]
 
 
-async def test_add_skill_on_a_pinned_agent_opens_only_inside_its_channels(
+async def test_add_skill_on_an_agent_with_a_rule_opens_only_inside_its_channels(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """The panel's channel is the place: outside the pin a member's click is refused."""
+    """The panel's channel is the place: outside the rule a member's click is refused."""
     tenant_id, fernet_key = await _seed_team(db_session)
     await set_access_policy(
         db_session,
         tenant_id=tenant_id,
-        policy=TenantAccessPolicy(agent_channel_pins={_OTHER_AGENT: ("C_ELSEWHERE",)}),
+        policy=TenantAccessPolicy(agent_rules={_OTHER_AGENT: AgentRule(runs_in=("C_ELSEWHERE",))}),
     )
     await db_session.commit()
     agent = _agent_payload(tenant_id=tenant_id, name=_OTHER_AGENT, agent_id="agent_other")
@@ -1046,12 +1044,12 @@ async def test_add_skill_on_a_pinned_agent_opens_only_inside_its_channels(
         )
 
     await handle_agent_setup_action(runtime, click(_CHANNEL_ID))
-    assert _sent(mock, _VIEWS_PUSH_KEY) == [], "refused outside the pin"
+    assert _sent(mock, _VIEWS_PUSH_KEY) == [], "refused outside the rule"
     (refusal,) = _sent(mock, ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")))
     assert refusal["text"] == PIN_WRITE_REFUSAL
 
     await handle_agent_setup_action(runtime, click("C_ELSEWHERE"))
-    assert len(_sent(mock, _VIEWS_PUSH_KEY)) == 1, "opens inside the pin"
+    assert len(_sent(mock, _VIEWS_PUSH_KEY)) == 1, "opens inside the rule"
 
 
 async def test_add_skill_ignores_the_members_own_conversations_with_the_agent(

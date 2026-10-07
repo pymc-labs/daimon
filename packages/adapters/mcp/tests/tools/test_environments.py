@@ -456,7 +456,8 @@ async def test_opening_or_archiving_a_sealed_channels_environment_needs_confirmi
 
     for config in (unrestricted, a_host):
         with pytest.raises(
-            ToolError, match="Sealed channels would run in the closed.*confirm_open"
+            ToolError,
+            match="Channels only turns inside them read would run in the closed.*confirm_open",
         ):
             await _update_environment_impl(
                 runtime, auth, name="closed", config=config, description=None
@@ -529,7 +530,10 @@ async def test_a_sealed_thread_counts_under_the_channel_a_session_ran_it_in(
     )
     async with committing_sessionmaker.begin() as session:
         await make_thread_session(session, tenant=tenant, thread_id="200", channel_id="100")
-    with pytest.raises(ToolError, match="Sealed channels would run in the closed.*confirm_open"):
+    with pytest.raises(
+        ToolError,
+        match="Channels only turns inside them read would run in the closed.*confirm_open",
+    ):
         await _update_environment_impl(
             runtime, auth, name="closed", config=unrestricted, description=None
         )

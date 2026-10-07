@@ -401,6 +401,17 @@ class TeamsInstallationRow(BaseModel):
     name: str | None = None
 
 
+class TeamsChannelSiteRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    channel_id: str
+    group_id: str
+    site_id: str
+    drive_id: str
+    folder_id: str
+
+
 class SlackUserTokenRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -736,6 +747,11 @@ class GitHubAppInstallationRow(BaseModel):
     installation_id: int
     account_login: str
     repo_full_names: tuple[str, ...]
+    account_id: int | None = None
+    account_type: str | None = None
+    repository_selection: str | None = None
+    permissions: dict[str, str] | None = None
+    suspended_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -875,6 +891,7 @@ class MessageFeedbackRow(BaseModel):
     ma_session_id: str | None
     vote: str
     feedback_text: str | None
+    feedback_reasons: list[str] | None
     created_at: datetime
     updated_at: datetime
 

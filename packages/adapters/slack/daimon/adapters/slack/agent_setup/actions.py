@@ -54,8 +54,9 @@ from __future__ import annotations
 
 import contextlib
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import aiohttp
 import anthropic
@@ -78,11 +79,6 @@ from daimon.adapters.slack.agent_setup.coding_tools import (
     handle_coding_tools_click,
     handle_revoke_token_click,
 )
-from daimon.adapters.slack.agent_setup.isolation import (
-    ISOLATION_NEED_ADMIN_MESSAGE,
-    IsolationChoice,
-    change_isolation,
-)
 from daimon.adapters.slack.agent_setup.panel_views import (
     build_agents_view,
     build_details_view,
@@ -97,6 +93,7 @@ from daimon.adapters.slack.agent_setup.read import (
     load_panel_roster,
     resolve_attributions,
 )
+from daimon.adapters.slack.agent_setup.rules import RULE_NEED_ADMIN_MESSAGE, change_rule
 from daimon.adapters.slack.agent_setup.state import (
     PANEL_PAGE_SIZE,
     PanelExpansion,
@@ -118,7 +115,7 @@ from daimon.adapters.slack.setup_conversations import (
 )
 from daimon.core.answering_map import AnsweringMap, routed_agent_names
 from daimon.core.channel_admins import GroupLookupFailed
-from daimon.core.channel_isolation import channel_isolation_status
+from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -266,12 +263,14 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
 # Panel views (Agents / Details / Who answers where)
 # ---------------------------------------------------------------------------
 
-_ISOLATION_ACTIONS: dict[str, IsolationChoice] = {
-    panel_views.ACTION_ISOLATE: "isolate",
-    panel_views.ACTION_ISOLATE_COPY: "copy",
-    panel_views.ACTION_END_ISOLATION: "end",
-    panel_views.ACTION_LIFT_ISOLATION: "lift",
-}
+_RULE_ACTIONS = frozenset(
+    {
+        panel_views.ACTION_RULE_READERS,
+        panel_views.ACTION_RULE_WRITERS,
+        panel_views.ACTION_RULE_COPY,
+        panel_views.ACTION_RULE_RELEASE,
+    }
+)
 
 #: Every action id the three panel views emit. Kept as a set so the dispatcher
 #: routes the in-view ones in one branch and leaves the legacy editor ids to
@@ -295,7 +294,7 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         panel_views.ACTION_OPERATOR_MINT,
         panel_views.ACTION_OPERATOR_REVOKE,
         panel_views.ACTION_ENVIRONMENT,
-        *_ISOLATION_ACTIONS,
+        *_RULE_ACTIONS,
     }
 )
 
@@ -414,7 +413,7 @@ async def load_routing_view(
     user_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the Who-answers-where view for `meta`'s page; admins also get the channel
-    admins and this channel's isolation.
+    admins and this channel's permissions.
 
     `user_id` lets an admin of this channel see its environment select;
     workspace admins get it without one.
@@ -438,8 +437,8 @@ async def load_routing_view(
             if is_admin and runtime.settings.mcp.jwt_secret is not None
             else None
         )
-        isolation = (
-            channel_isolation_status(
+        rule_status = (
+            channel_rule_status(
                 await load_access_policy(session, tenant_id=tenant_id), meta.channel_id
             )
             if is_admin and meta.channel_id
@@ -496,7 +495,7 @@ async def load_routing_view(
         unrouted_agent_name=unrouted_agent_name,
         channel_admins=channel_admins,
         environment_picker=environment_picker,
-        isolation=isolation,
+        rule_status=rule_status,
         operator_tokens=operator_tokens,
         channel_skills=channel_skills,
     )
@@ -882,26 +881,35 @@ async def _dispatch_panel_action(
         await post_ephemeral(client, channel_id=meta.channel_id, user_id=user_id, text=note)
         return
 
-    if action_id in _ISOLATION_ACTIONS:
+    if action_id in _RULE_ACTIONS:
+        option = cast("Mapping[str, object]", action.get("selected_option") or {})
+        value = str(option.get("value") or "")
         if not is_admin or not meta.channel_id:
-            text = ISOLATION_NEED_ADMIN_MESSAGE
+            text = RULE_NEED_ADMIN_MESSAGE
             await record_panel_write(
                 runtime.sessionmaker,
                 tenant_id=tenant_id,
                 platform="slack",
                 platform_user_id=user_id,
-                op="isolation",
+                op="channel_rule",
                 outcome="denied",
                 reason="needs_admin",
             )
         else:
-            text = await change_isolation(
+            text = await change_rule(
                 runtime,
                 client,
                 tenant_id=tenant_id,
                 user_id=user_id,
                 channel_id=meta.channel_id,
-                choice=_ISOLATION_ACTIONS[action_id],
+                readers=as_readers(value)
+                if action_id == panel_views.ACTION_RULE_READERS
+                else "own"
+                if action_id == panel_views.ACTION_RULE_COPY
+                else None,
+                writers=as_writers(value) if action_id == panel_views.ACTION_RULE_WRITERS else None,
+                copy=action_id == panel_views.ACTION_RULE_COPY,
+                release=action_id == panel_views.ACTION_RULE_RELEASE,
             )
         await post_ephemeral(
             client, channel_id=meta.channel_id or user_id, user_id=user_id, text=text

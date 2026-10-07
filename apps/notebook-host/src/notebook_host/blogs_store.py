@@ -1,9 +1,14 @@
-"""Durable registry of persistent blogs.
+"""Durable registry of read-only notebooks the host starts on demand.
 
-A "blog" is a marimo subprocess the host keeps alive forever (run mode). This
-file records which slugs are blogs so the host can (a) respawn them at startup,
-(b) exempt them from TTL reaping, and (c) self-heal a dead one in the sweep. It
-lives on the same persistent volume as the notebook source files.
+Every read-only notebook is recorded here: blogs (``expires_at`` None, kept
+forever) and scratch notebooks (kept until ``expires_at``). The host does not
+keep their processes running. A visit starts one (``lazy_spawn``), and the
+sweep stops it again once it has gone unvisited for the warm window, so a
+notebook that lives for months does not hold a port and a kernel for months.
+The registry is what lets a stopped notebook come back under the same link,
+and it lives on the same persistent volume as the notebook source files. The
+file keeps its historical name, ``blogs.json``, so existing hosts read their
+blogs without a migration.
 
 Pure functions only — the single I/O is the file read/write (no clock, no
 process control, no network). Mirrors pids_store.py's posture: a malformed file
@@ -34,6 +39,14 @@ class BlogRecord(BaseModel):
     # the link it was published under. None only for records written before
     # tokens existed; the respawn mints and records one.
     access_token: str | None = None
+    # Unix epoch seconds after which the sweep deletes the notebook. None for a
+    # blog, which is kept until someone deletes it.
+    expires_at: float | None = None
+
+
+def is_expired(record: BlogRecord, *, now: float) -> bool:
+    """Whether the notebook has outlived its lifetime. A blog never does."""
+    return record.expires_at is not None and now >= record.expires_at
 
 
 def load_blogs(path: Path) -> dict[str, BlogRecord]:

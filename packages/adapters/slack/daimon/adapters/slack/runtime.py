@@ -24,6 +24,7 @@ from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.errors import AdmissionDenialReason
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import drain_outcomes
+from daimon.core.turn_origin import ResponderAccount
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -77,6 +78,18 @@ def responder_handle(settings: Settings) -> str:
     responder so the difference is never read as a second agent.
     """
     return f"@{resolve_bot_display_name(settings)}"
+
+
+def responder_account(bot_user_id: str) -> ResponderAccount | None:
+    """The bot account a mention in this workspace names, for the turn controls.
+
+    `bot_user_id` comes from `auth.test` and differs per workspace; people's
+    messages carry it as `<@U…>`, never as the display handle. Empty (Slack
+    returned no user) renders no account rather than an unmatchable one.
+    """
+    if not bot_user_id:
+        return None
+    return ResponderAccount(user_id=bot_user_id, mention=f"<@{bot_user_id}>")
 
 
 @asynccontextmanager

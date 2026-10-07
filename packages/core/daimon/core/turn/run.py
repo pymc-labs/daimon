@@ -677,6 +677,7 @@ async def run_prepared_turn_impl(
         confirm=confirm_write,
         attended=attended if attended is not None else origin != "routine",
         trusted_servers=trusted_servers_for(deps.public_url),
+        asks_before_publishing=prepared.admission.asks_before_publishing,
     )
 
     # Tracks the session/mapping id (and whether recovery has taken over) the

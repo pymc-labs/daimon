@@ -354,7 +354,7 @@ def token_channel_form(
                 value=choices[0].value,
                 choices=choices,
             ),
-            _text("A bound token runs under that channel's pins, seal and budget.", subtle=True),
+            _text("A bound token runs under that channel's rules and budget.", subtle=True),
         ],
         actions=[SubmitAction(title="Mint token", data=submit)],
         fallback_text=f"Use {agent_name} from your coding tools",
@@ -367,7 +367,7 @@ def token_card(
     """The minted token, shown once inside a dialog, with a Revoke button."""
     revoke = SubmitAction(title="🗑 Revoke this token", data=SubmitData(TOKEN_DIALOG, {"jti": jti}))
     bound = (
-        f" It runs in channel `{channel_id}`, under that channel's pins, seal and budget."
+        f" It runs in channel `{channel_id}`, under that channel's rules and budget."
         if channel_id is not None
         else ""
     )

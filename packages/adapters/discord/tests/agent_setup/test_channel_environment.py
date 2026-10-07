@@ -513,7 +513,9 @@ async def test_a_channel_admin_of_a_sealed_channel_is_refused_an_open_network(
     select._values = ["env:science"]  # pyright: ignore[reportPrivateUsage]  # a real dispatch sets this
     await select.callback(interaction)
 
-    assert "sealed" in interaction.followup.send.call_args.args[0], "the refusal names the seal"
+    assert "Only turns inside" in interaction.followup.send.call_args.args[0], (
+        "the refusal names the rule"
+    )
     assert (
         await get_scope(
             db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=str(CHANNEL_ID))

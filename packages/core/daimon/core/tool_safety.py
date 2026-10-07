@@ -27,9 +27,11 @@ Three questions, each a total function of its arguments:
   asks: `add_skill`, once its input names the reviewed `content_hash`
   (`CONFIRMED_DAIMON_TOOLS`), since it puts new files in front of everyone
   the agent answers. A run nobody watches never confirms one, whatever
-  `unattended_writes` allows.
+  `unattended_writes` allows. Daimon's `PUBLISH_TOOLS` ask too in a session
+  that asks before publishing (an agent with a rule, `AgentPermissions.publishes`),
+  tool safety on or off.
 
-With `enabled=False` (the default) nothing changes: every toolset stays
+With `enabled=False` (the default) nothing else changes: every toolset stays
 `always_allow` and every call is allowed, which is the behaviour before this
 module existed.
 
@@ -50,6 +52,7 @@ __all__ = [
     "CONFIRMED_DAIMON_TOOLS",
     "DAIMON_SERVER_NAME",
     "OPEN_TOOL_SAFETY",
+    "PUBLISH_TOOLS",
     "PermissionPolicyType",
     "ToolAnnotations",
     "ToolCall",
@@ -83,6 +86,10 @@ VerdictReason = Literal[
     "unattended_write",
     #: The operator put this server or tool on the deny list.
     "denied_by_operator",
+    #: Publishing from a session that asks first, while a person is present.
+    "publish_needs_confirmation",
+    #: Publishing from a session that asks first, in a run nobody is watching.
+    "unattended_publish",
 ]
 
 #: Name of the deployment's own MCP server entry on every agent. Same value as
@@ -98,6 +105,13 @@ ANY_KEY: Final[str] = "*"
 #: to the input field whose presence makes the call the write. Without it the
 #: call only previews, and runs. With it, an unattended run is always refused.
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {"add_skill": "content_hash"}
+
+#: Daimon's own tools that put content behind a link whoever holds it opens.
+#: A session that asks before publishing waits for the card on each, and an
+#: unattended run is refused them.
+PUBLISH_TOOLS: Final[frozenset[str]] = frozenset(
+    {"publish_report", "create_notebook_upload_url", "create_attachment_upload_url"}
+)
 
 # Leading verbs that name a read. Deliberately short: a verb that is sometimes
 # a write ("run_", "sync_", "export_", and "query_", which on a SQL server can
@@ -352,6 +366,11 @@ def _confirmed_daimon_write(call: ToolCall) -> bool:
     )
 
 
+def is_publish_call(call: ToolCall, trusted_servers: frozenset[str]) -> bool:
+    """`call` publishes through daimon's own server (`PUBLISH_TOOLS`)."""
+    return call.server_name in trusted_servers and call.tool_name in PUBLISH_TOOLS
+
+
 def trusted_servers_for(public_url: str | None) -> frozenset[str]:
     """The servers exempt from gating in a session: the built-in daimon server,
     and only when this deployment runs one (`public_url` set).
@@ -409,7 +428,13 @@ def decide_tool_call(
     (chat) or not (routines, wakes, smoke runs). `trusted_servers` is
     `trusted_servers_for(public_url)`; empty (the default) gates every server.
     A trusted server's call is a write only when `CONFIRMED_DAIMON_TOOLS` says so.
+    A trusted `PUBLISH_TOOLS` call pauses only in a session that asks before
+    publishing, so it asks (or, unattended, is refused) even with the policy off.
     """
+    if is_publish_call(call, trusted_servers):
+        if attended:
+            return ToolVerdict(outcome="ask", effect="write", reason="publish_needs_confirmation")
+        return ToolVerdict(outcome="deny", effect="write", reason="unattended_publish")
     if not policy.enabled:
         return ToolVerdict(outcome="allow", effect="read", reason="disabled")
     if call.server_name is None:
@@ -459,36 +484,46 @@ def session_tools_for_policy(
     tools: Sequence[Mapping[str, Any]],
     *,
     trusted_servers: frozenset[str] = frozenset(),
+    asks_before_publishing: bool = False,
 ) -> list[dict[str, Any]] | None:
     """`tools` (SDK params dicts) with every toolset's policy set, or `None`.
 
-    `None` means nothing needs to change: enforcement is off, or every toolset
-    already carries the policy this deployment wants. Otherwise each gated
-    toolset gets `always_ask` as its default and on every per-tool config
-    under it, since a per-tool `always_allow` would let that one tool skip
-    the pause. Daimon's own trusted toolset stays `always_allow` except for
-    its `CONFIRMED_DAIMON_TOOLS`, which ask. Every config written here is
-    complete (`enabled` and `permission_policy`), so the session reports back
-    exactly what was sent and its tools hash the same on the next bind.
+    `None` means nothing needs to change: enforcement is off and nothing asks
+    before publishing, or every toolset already carries the policy wanted.
+    Otherwise each gated toolset gets `always_ask` as its default and on every
+    per-tool config under it, since a per-tool `always_allow` would let that
+    one tool skip the pause. Daimon's own trusted toolset stays `always_allow`
+    except for its `CONFIRMED_DAIMON_TOOLS`, which ask, and with
+    `asks_before_publishing` its `PUBLISH_TOOLS`; with the policy off only
+    those publish configs are written. Every config written here is complete
+    (`enabled` and `permission_policy`), so the session reports back exactly
+    what was sent and its tools hash the same on the next bind.
 
     The session carries this, not the agent: `create_session` sends it as an
     `agent_with_overrides`, so however the agent was written (panel, chat
     tools, a fork, the API directly) its sessions are gated.
     """
-    if not policy.enabled:
+    if not policy.enabled and not asks_before_publishing:
         return None
+    asked = (
+        *(CONFIRMED_DAIMON_TOOLS if policy.enabled else ()),
+        *(sorted(PUBLISH_TOOLS) if asks_before_publishing else ()),
+    )
     changed = False
     out: list[dict[str, Any]] = []
     for tool in tools:
         entry = dict(tool)
-        if entry.get("type") == "mcp_toolset":
-            server_name = entry.get("mcp_server_name")
+        server_name = entry.get("mcp_server_name")
+        if entry.get("type") != "mcp_toolset":
+            out.append(entry)
+            continue
+        default_config = dict(entry.get("default_config") or {})
+        if policy.enabled:
             wanted = toolset_permission_policy(
                 policy,
                 server_name=server_name if isinstance(server_name, str) else "",
                 trusted_servers=trusted_servers,
             )
-            default_config = dict(entry.get("default_config") or {})
             if default_config.get("permission_policy") != wanted:
                 default_config["permission_policy"] = wanted
                 changed = True
@@ -499,27 +534,26 @@ def session_tools_for_policy(
                     changed = changed or config.get("permission_policy") != wanted
                     configs.append({**config, "permission_policy": wanted})
                 entry["configs"] = configs
-            elif server_name == DAIMON_SERVER_NAME and server_name in trusted_servers:
-                configs, asked = _ask_for_confirmed_tools(
-                    entry.get("configs") or [], enabled=default_config.get("enabled", True)
-                )
-                changed = changed or asked
-                entry["configs"] = configs
+        if server_name == DAIMON_SERVER_NAME and server_name in trusted_servers:
+            entry["configs"], asking = _ask_for(
+                entry.get("configs") or [], asked, enabled=default_config.get("enabled", True)
+            )
+            changed = changed or asking
         out.append(entry)
     return out if changed else None
 
 
-def _ask_for_confirmed_tools(
-    configs: Sequence[Mapping[str, Any]], *, enabled: bool
+def _ask_for(
+    configs: Sequence[Mapping[str, Any]], names: Sequence[str], *, enabled: bool
 ) -> tuple[list[dict[str, Any]], bool]:
-    """The trusted toolset's per-tool configs with each `CONFIRMED_DAIMON_TOOLS` on `always_ask`.
+    """The trusted toolset's per-tool configs with each of `names` on `always_ask`.
 
     A config added here takes the toolset's own `enabled`, as an omitted one would.
     """
     ask: dict[str, PermissionPolicyType] = {"type": "always_ask"}
     out = [dict(config) for config in configs]
     changed = False
-    for name in CONFIRMED_DAIMON_TOOLS:
+    for name in names:
         config = next((c for c in out if c.get("name") == name), None)
         if config is None:
             out.append({"name": name, "enabled": enabled, "permission_policy": ask})

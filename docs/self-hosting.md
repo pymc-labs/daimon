@@ -53,8 +53,18 @@ Leave it unset to disable operator alerts.
 4. Under **OAuth2 → URL Generator**, select the `bot` and
    `applications.commands` scopes, then under **Bot Permissions** select at
    least `Send Messages`, `Send Messages in Threads`,
-   `Create Public Threads`, `Manage Threads` and `Read Message History`.
+   `Create Public Threads`, `Manage Threads`, `Read Message History` and
+   `Embed Links`. Select `View Channels` and `Manage Webhooks` too. With
+   exactly these eight permissions, the invite permissions integer is
+   `326954470400`.
 5. Open the generated URL and invite the bot to a test server you control.
+
+For a server where the bot is already installed, open **Server Settings → Roles**,
+select the bot's role, enable **Manage Webhooks**, and save. Check each channel
+where agents answer: **Edit Channel → Permissions** must also allow the bot role
+to manage webhooks. Discord's channel overrides can deny a permission granted
+at server level. Without it, agent replies still post through the bot with a
+bold agent name on the first answer chunk.
 
 Setup and routines commands require Discord's `Manage Server` permission.
 
@@ -155,6 +165,39 @@ from an env var, and Slack will not redirect to `localhost`.
 [`slack.md`](slack.md) covers the trust model for per-user Slack access.
 Read it before enabling that feature.
 
+## GitHub App (optional)
+
+Register one GitHub App for this deployment. Set its user authorization callback
+to `<root>/oauth/github/callback` and its setup URL to
+`<root>/oauth/github/setup`, where `<root>` is the public MCP URL with the
+trailing `/mcp` removed. For example, if `DAIMON_MCP__PUBLIC_URL` is
+`https://example.com/mcp`, use `https://example.com/oauth/github/callback` and
+`https://example.com/oauth/github/setup`. GitHub must be able to reach those
+URLs, so a localhost URL only works with a suitable tunnel.
+
+Set `DAIMON_GITHUB_APP__APP_ID`, `APP_SLUG`, `PRIVATE_KEY`, `CLIENT_ID` and
+`CLIENT_SECRET` in `.env` using the values from that App. Set
+`DAIMON_CRYPTO__KEYS` to encrypt the short-lived user tokens. The connect routes
+are mounted only when these values and `DAIMON_MCP__PUBLIC_URL` are present.
+The scheduler removes expired connection flows, including their encrypted
+tokens. Run it alongside the MCP service.
+
+A deployment operator can print a seven-day, single-use invitation with
+`daimon github connect-link --tenant <workspace-uuid> --requester <platform-user-id>`.
+The invitation is minted on that workspace admin's behalf. The recipient signs in
+to GitHub and confirms the repositories they administer. No repository is
+preselected.
+The confirmation page has **Select all repos you administer** for bulk selection;
+each selected repository still requires a fresh GitHub admin check at confirmation.
+
+Agents remain in legacy GitHub mode until a server admin stages grants with
+`daimon github grants stage --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id> --baseline read --ceiling read`
+and runs `daimon github grants activate --tenant <workspace-uuid> --agent <agent-uuid>`.
+Use `grants list`, `remove`, and `deactivate` with the same tenant and agent options.
+While app mode is active, `grants stage` updates access immediately. Existing
+sessions rotate tokens in place when the repository set is unchanged; a changed
+repository set closes the sessions so the next turn mounts the new checkouts.
+
 ## Microsoft Teams (optional)
 
 Teams takes the most setup of the three platforms, because the pieces live in
@@ -175,7 +218,8 @@ Two things work differently from Discord and Slack:
 - **One deployment serves one organisation.** The bot answers only people in
   the Microsoft 365 organisation it is registered in, and turns away
   messages from anywhere else, except from people of another organisation
-  (external participants and guests) inside a confidential channel (below).
+  (external participants and guests) inside a channel kept to its own agents
+  (below).
 
 What the bot does once it is running (1:1 chats, channel threads, commands,
 files and its limits) is in [`teams.md`](teams.md).
@@ -428,8 +472,9 @@ Teams](https://learn.microsoft.com/en-us/microsoftteams/shared-channels)):
    participants don't use guest accounts, but guest access must be enabled
    to invite them. The SharePoint and Microsoft 365 Groups guest settings
    must stay on too (the default).
-4. Create the shared channel, mark it confidential in daimon (the setup panel's
-   Channel settings, `set_channel_isolation` or `daimon channels isolate`),
+4. Create the shared channel, set its readers and writers to `own` in daimon
+   (the setup panel's Channel settings, `set_channel_rule` or
+   `daimon channels rule set`),
    then add the other organisation's people as channel members. Guests,
    including guests converted to members, can't be added to a shared
    channel; someone who also has a guest account in your organisation is

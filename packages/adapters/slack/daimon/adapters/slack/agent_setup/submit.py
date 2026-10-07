@@ -53,13 +53,13 @@ from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.agent_reach import record_created_for_channel
-from daimon.core.channel_isolation import load_isolation_viewer
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.rule_views import load_rule_viewer
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -344,7 +344,7 @@ async def run_new_agent_submission(
             viewer = (
                 None
                 if details is not None
-                else await load_isolation_viewer(
+                else await load_rule_viewer(
                     session,
                     runtime.anthropic,
                     tenant_id=tenant_id,

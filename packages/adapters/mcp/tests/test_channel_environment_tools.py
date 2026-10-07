@@ -477,7 +477,7 @@ async def test_a_channel_admin_never_opens_the_network_of_a_sealed_channel(
     await _seal(committing_sessionmaker, tenant_id, CHANNEL)
     member = await _verified(runtime, _auth(tenant_id, account_id))
 
-    with pytest.raises(ToolError, match="sealed.*unrestricted network"):
+    with pytest.raises(ToolError, match="Only turns inside.*unrestricted network"):
         await _set_channel_environment_impl(
             runtime, member, environment_name="open", channel_id=CHANNEL
         )
@@ -490,7 +490,7 @@ async def test_a_channel_admin_never_opens_the_network_of_a_sealed_channel(
     )
     assert closed.changed, "a limited network stays the channel admin's pick"
     admin = _auth(tenant_id, account_id, admin=True)
-    with pytest.raises(ToolError, match="sealed.*Never confirm on their behalf"):
+    with pytest.raises(ToolError, match="Only turns inside.*Never confirm on their behalf"):
         await _set_channel_environment_impl(
             runtime, admin, environment_name="open", channel_id=CHANNEL
         )
@@ -501,7 +501,7 @@ async def test_a_channel_admin_never_opens_the_network_of_a_sealed_channel(
         runtime, admin, environment_name="open", channel_id=CHANNEL, confirm_open_network=True
     )
     assert opened.changed, "a server admin may pick an unrestricted network there, confirmed"
-    with pytest.raises(ToolError, match="sealed"):
+    with pytest.raises(ToolError, match="Only turns inside"):
         await _set_channel_environment_impl(
             runtime, member, environment_name="open", channel_id=THREAD
         )
@@ -522,7 +522,7 @@ async def test_a_channel_admin_clears_a_sealed_pick_only_onto_a_limited_default(
     )
     await _set_channel_environment_impl(runtime, admin, environment_name="open", channel_id=None)
 
-    with pytest.raises(ToolError, match="sealed.*the default it would fall back to"):
+    with pytest.raises(ToolError, match="Only turns inside.*the default it would fall back to"):
         await _clear_channel_environment_impl(runtime, member, channel_id=CHANNEL)
     await _set_channel_environment_impl(runtime, admin, environment_name="closed", channel_id=None)
     cleared = await _clear_channel_environment_impl(runtime, member, channel_id=CHANNEL)
@@ -565,7 +565,9 @@ async def test_a_workspace_default_sealed_channels_follow_onto_an_open_network_i
     await _set_channel_environment_impl(runtime, admin, environment_name="closed", channel_id=None)
     await _seal(committing_sessionmaker, tenant_id, CHANNEL)
 
-    with pytest.raises(ToolError, match="Sealed channels would run in the open.*confirm_open"):
+    with pytest.raises(
+        ToolError, match="Channels only turns inside them read would run in the open.*confirm_open"
+    ):
         await _set_channel_environment_impl(
             runtime, admin, environment_name="open", channel_id=None
         )
@@ -644,7 +646,7 @@ async def test_a_sealed_discord_thread_keeps_its_channel_network_closed(
     await _seal(committing_sessionmaker, tenant_id, THREAD)
     member = await _verified(runtime, _auth(tenant_id, account_id))
 
-    with pytest.raises(ToolError, match="sealed.*unrestricted network"):
+    with pytest.raises(ToolError, match="Only turns inside.*unrestricted network"):
         await _set_channel_environment_impl(
             runtime, member, environment_name="open", channel_id=THREAD
         )
@@ -666,7 +668,9 @@ async def test_a_channel_pick_counts_a_sealed_thread_a_session_ran_under_it(
     await _seal(committing_sessionmaker, tenant.id, THREAD)
     member = await _verified(runtime, _auth(tenant.id, account.id))
 
-    with pytest.raises(ToolError, match="sealed.*unrestricted network"):
+    with pytest.raises(
+        ToolError, match="Only turns inside this channel read it.*unrestricted network"
+    ):
         await _set_channel_environment_impl(
             runtime, member, environment_name="open", channel_id=CHANNEL
         )

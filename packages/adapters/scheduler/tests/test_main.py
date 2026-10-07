@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Literal
 
 import pytest
@@ -24,6 +25,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.scheduler.main import (
     _build_fire,  # pyright: ignore[reportPrivateUsage]  # test seam for balance gate + debit binding
     _CapsAdapter,  # pyright: ignore[reportPrivateUsage]  # named test seam for cap wiring
+    _close_github_app_sessions,  # pyright: ignore[reportPrivateUsage]  # vault cleanup retry
     _settle_promo_credit,  # pyright: ignore[reportPrivateUsage]  # test seam for the promo settlement wrapper
     _sweep_retired_turn_card_intents,  # pyright: ignore[reportPrivateUsage]  # test seam for the card-intent sweep wrapper
     _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
@@ -31,15 +33,15 @@ from daimon.adapters.scheduler.main import (
     _validate_mcp_settings,  # pyright: ignore[reportPrivateUsage]  # boot-validation seam
 )
 from daimon.core.billing import BillingConfig
-from daimon.core.channel_isolation import RoutineOrigin
 from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.pricing import MODEL_PRICING, ModelRates
 from daimon.core.promo_codes import build_promo_code_terms
+from daimon.core.rule_views import RoutineOrigin
 from daimon.core.scheduler import run_one_tick
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
+from daimon.core.stores import github_issued_tokens, tenant_ledger, tenant_user_caps, usage_events
 from daimon.core.stores import promo_codes as promo_store
-from daimon.core.stores import tenant_ledger, tenant_user_caps, usage_events
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import create_routine, get_routine
@@ -72,6 +74,40 @@ _TEST_BILLING = BillingConfig(
     success_url="http://test/success",
     cancel_url="http://test/cancel",
 )
+
+
+async def test_app_vault_archive_retries_after_failure(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await github_issued_tokens.register_headless_app_session(
+        db_session,
+        session_id="retry-vault-session",
+        tenant_id=tenant.id,
+        vault_id="retry-vault",
+    )
+    await github_issued_tokens.finish_headless_app_session(
+        db_session, session_id="retry-vault-session"
+    )
+    await db_session.commit()
+    archive = unittest.mock.AsyncMock(side_effect=[RuntimeError("temporary failure"), None])
+    anthropic = SimpleNamespace(beta=SimpleNamespace(vaults=SimpleNamespace(archive=archive)))
+
+    await _close_github_app_sessions(anthropic, db_session_factory, fernet=None)
+    async with db_session_factory() as session:
+        assert (
+            len(await github_issued_tokens.list_closed_app_sessions(session, now=datetime.now(UTC)))
+            == 1
+        )
+
+    await _close_github_app_sessions(anthropic, db_session_factory, fernet=None)
+    async with db_session_factory() as session:
+        assert (
+            await github_issued_tokens.list_closed_app_sessions(session, now=datetime.now(UTC))
+            == []
+        )
+    assert archive.await_count == 2
 
 
 async def test_caps_adapter_returns_true_when_user_over_cap(
@@ -679,7 +715,7 @@ async def test_fire_checks_the_agent_pin_before_the_channel_budget(
     async with db_session_factory() as s:
         after = await get_routine(s, row.id, tenant_id=tenant.id)
     assert after is not None
-    assert after.last_error == "agent_pinned_elsewhere", (
+    assert after.last_error == "runs_elsewhere", (
         "the pin refusal must win over the channel budget refusal"
     )
     assert ran == [], "a refused fire must not run a turn"
@@ -1246,7 +1282,7 @@ async def test_sweep_retired_turn_card_intents_forwards_sessionmaker_and_now(
     [
         ('{"invoker_user_ids": ["staff"]}', "invoker_not_allowed"),
         ("null", "access_policy_unreadable"),
-        ('{"agent_channel_pins": {"daimon": ["rx-chan"]}}', "agent_pinned_elsewhere"),
+        ('{"agent_channel_pins": {"daimon": ["rx-chan"]}}', "runs_elsewhere"),
     ],
     ids=["creator-not-allowlisted", "unreadable-policy", "agent-pinned-elsewhere"],
 )
@@ -1673,7 +1709,7 @@ async def test_fire_skips_a_routine_that_would_post_across_an_isolated_channels_
 
     async with db_session_factory() as s:
         fetched = await get_routine(s, row.id, tenant_id=tenant.id)
-    assert fetched is not None and fetched.last_error == "channel_isolated"
+    assert fetched is not None and fetched.last_error == "own_agents_only"
     await client.close()
 
 
@@ -1763,7 +1799,7 @@ async def test_fire_checks_the_pin_on_the_agent_that_will_run_by_its_display_nam
         after = await get_routine(s, row.id, tenant_id=tenant.id)
     assert after is not None
     if pinned_out:
-        assert after.last_error == "agent_pinned_elsewhere" and ran == []
+        assert after.last_error == "runs_elsewhere" and ran == []
     else:
         assert after.last_error is None and len(ran) == 1
     await client.close()

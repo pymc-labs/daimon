@@ -52,8 +52,9 @@ redirect or a 401. The proxy forwards only what the browser sends (and, for
 WebSockets, only its `Cookie` and `Authorization` headers). A slug keeps its
 token across re-publishes in the same mode; switching between read-only and
 editor mints a new one, and the editor is refused (409) on a published blog.
-A blog's token is persisted in `blogs.json` (0600, host-only) so its link
-survives restarts. Deleting or reaping a slug invalidates its link. marimo runs
+A read-only notebook's token is persisted in `blogs.json` (0600, host-only) so
+its link survives stops and restarts. Deleting or expiring a slug invalidates
+its link. marimo runs
 with `-q`, so its startup banner (which prints the tokenized URL) never reaches
 the slug's log, and the host's logs redact `access_token=` (plain or
 url-encoded). marimo is pinned exactly in `pyproject.toml`, which the Docker
@@ -72,7 +73,8 @@ directory or file should be (possible in trees from older releases) is
 unlinked, never followed. `notebook.py`, attachments and the log are 0600.
 
 **Leftover processes and uids.** Before a slug's uid is released, and before a
-slug or a blog is respawned, the host kills every process running as that uid,
+slug or a stopped notebook is started again, the host kills every process
+running as that uid,
 not just marimo's process group: it becomes the uid and calls `kill(-1,
 SIGKILL)`, then rescans `/proc` until none are left. If one survives the
 deadline, the uid is quarantined (never handed out again) rather than
@@ -146,6 +148,45 @@ subprocesses run as separate uids, but an editor notebook can see other
 notebooks' process list and reach the host's network. On a public host, keep
 editors off (`allow_editable`) unless the host serves one client.
 
+## Lifetimes
+
+| | Kept on disk | Process |
+|---|---|---|
+| Read-only notebook | until `expires_at`: the agent's `notebook_ttl_seconds` (1 to 365 days, clamped to `max_notebook_ttl_seconds`), or `subprocess_ttl_seconds` when the token asks for none | started on a visit, stopped after `warm_window_seconds` without one |
+| Blog | until deleted | started on a visit, stopped after `warm_window_seconds` without one |
+| Editor | `subprocess_ttl_seconds` | started at upload, never restarted |
+
+Every read-only notebook is recorded in `blogs.json` (the name predates
+scratch notebooks living there) with its token and `expires_at` (null for a
+blog), so its link keeps working after its process stops or the host
+restarts. The host starts nothing at boot. A request for a stopped notebook
+starts it only when it carries the notebook's `access_token` (and, in
+per-notebook-origin mode, arrives on its own origin): slugs are readable by
+every notebook on the host, the origin label travels in clear in TLS SNI, and
+a start can stop another notebook, so neither may start one. A bookmarked
+bare URL works while the notebook runs and 404s once it is stopped; the full
+link starts it. The start runs under the slug lock and waits up to
+`spawn_timeout_seconds`; if the notebook is not ready by then the request
+gets a 503 with `Retry-After`. When all ports are taken, a start stops the
+least recently visited read-only notebook with no websocket open whose slug
+lock is free; if there is none, it gets a 503.
+
+Stopping a notebook, for any reason, kills every process its jail uid runs
+before its port is freed. A cell's detached child would otherwise outlive
+marimo and could bind the port before the next notebook does, receiving that
+notebook's requests and token. If a process survives, the port stays
+reserved and the sweep tries again.
+
+The sweep (every `sweep_interval_seconds`, or `POST /admin/sweep`) deletes
+notebooks past `expires_at` and editors past `subprocess_ttl_seconds`, with
+their files, and stops read-only notebooks nobody has visited for
+`warm_window_seconds` while keeping their files. An open websocket counts as
+a visit for as long as it is open.
+
+Each stored notebook keeps a jail uid until it is deleted, so the uid range
+(`jail_uid_start`..`jail_uid_end`, 1000 by default) bounds how many can be
+kept at once, along with the volume's free space.
+
 ## Configuration
 
 All settings use the `DAIMON_NOTEBOOK__` env prefix with `__` as the nested
@@ -160,6 +201,8 @@ delimiter.
 | `marimo_port_start` | `DAIMON_NOTEBOOK__MARIMO_PORT_START` | `8100` |
 | `marimo_port_end` | `DAIMON_NOTEBOOK__MARIMO_PORT_END` | `8160` |
 | `subprocess_ttl_seconds` | `DAIMON_NOTEBOOK__SUBPROCESS_TTL_SECONDS` | `86400` |
+| `max_notebook_ttl_seconds` | `DAIMON_NOTEBOOK__MAX_NOTEBOOK_TTL_SECONDS` | `31536000` |
+| `warm_window_seconds` | `DAIMON_NOTEBOOK__WARM_WINDOW_SECONDS` | `7200` |
 | `sweep_interval_seconds` | `DAIMON_NOTEBOOK__SWEEP_INTERVAL_SECONDS` | `300` |
 | `spawn_timeout_seconds` | `DAIMON_NOTEBOOK__SPAWN_TIMEOUT_SECONDS` | `20` |
 | `validate_on_publish` | `DAIMON_NOTEBOOK__VALIDATE_ON_PUBLISH` | `true` (run `marimo export` before serving, catching notebooks that fail to execute) |

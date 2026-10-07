@@ -31,18 +31,18 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Final, Literal, cast
+from typing import Final, Literal
 
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_subject
-from daimon.core.permissions import any_protected
+from daimon.core.permissions import any_writers_none
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import claim_routine_deliveries, settle_routine_delivery
-from daimon.core.turn.state import ToolUseBlock, TurnState
+from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -74,12 +74,9 @@ log = structlog.get_logger(__name__)
 DELIVERY_LEASE: Final[timedelta] = timedelta(minutes=2)
 DELIVERY_POLL_INTERVAL_S: Final[float] = 15.0
 
-#: daimon's own MCP server and its posting tool: a call to it naming the
-#: destination is the agent delivering the result itself.
-_DAIMON_SERVER: Final[str] = "daimon-mcp"
+#: daimon's own posting tool: a call to it naming the destination is the
+#: agent delivering the result itself.
 _POST_TOOL: Final[str] = "send_message"
-#: The MCP search interface's proxy: `call_tool(name=..., arguments=...)`.
-_CALL_TOOL: Final[str] = "call_tool"
 
 _SLACK_CHANNEL: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}")
 _SLACK_THREAD: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}:[0-9]+\.[0-9]+")
@@ -101,7 +98,7 @@ SkipReason = Literal[
     "destination_unavailable",
     "post_failed",
     "no_result",
-    "channel_isolated",
+    "own_agents_only",
 ]
 
 
@@ -189,10 +186,10 @@ def render_routine_controls(
             "posts the end of your final reply there for you."
         )
     elif direct_post == "protected":
-        # Protected since the routine was made: never invite a write there.
+        # Writers none since the routine was made: never invite a write there.
         delivery = (
-            "The destination is now a protected channel: do not post there. daimon sends "
-            "the end of your final reply to the routine's creator instead."
+            "The destination's rule now lets nobody write there: do not post there. daimon "
+            "sends the end of your final reply to the routine's creator instead."
         )
     else:
         # Its parent channel or category could not be checked here: never
@@ -214,24 +211,9 @@ def render_routine_controls(
 
 
 def _posted_channel(block: ToolUseBlock) -> str | None:
-    """The `channel_id` a successful daimon `send_message` posted to, or None.
-
-    Recognises the direct call and the same call made through the MCP search
-    interface (`call_tool(name="send_message", arguments={...})`), which is
-    how a large daimon catalog is reached.
-    """
-    if block.mcp_server_name != _DAIMON_SERVER or block.status != "complete" or block.is_error:
-        return None
-    arguments: object = block.input
-    if block.name == _CALL_TOOL:
-        if block.input.get("name") != _POST_TOOL:
-            return None
-        arguments = block.input.get("arguments")
-    elif block.name != _POST_TOOL:
-        return None
-    if not isinstance(arguments, dict):
-        return None
-    channel_id = cast("dict[str, object]", arguments).get("channel_id")
+    """The `channel_id` a successful daimon `send_message` posted to, or None."""
+    arguments = daimon_tool_arguments(block, _POST_TOOL)
+    channel_id = None if arguments is None else arguments.get("channel_id")
     return channel_id if isinstance(channel_id, str) else None
 
 
@@ -287,7 +269,7 @@ def render_fallback_post(row: RoutineRow) -> str:
 
 
 _DM_REASONS: Final[dict[str, str]] = {
-    "protected_channel": "its destination is a protected channel daimon does not post in",
+    "protected_channel": "its destination's rule lets nobody write there",
     "creator_cannot_post": "you can no longer post in its destination",
     "destination_unavailable": "its destination could not be reached (missing, moved, or "
     "outside this workspace)",
@@ -447,8 +429,8 @@ def placement_unknown_is_unsafe(
     if platform != "discord":
         return False
     if kind == "thread":
-        return any_protected(policy)
-    return any_protected(policy, categories_only=True)
+        return any_writers_none(policy)
+    return any_writers_none(policy, categories_only=True)
 
 
 @dataclass(frozen=True)

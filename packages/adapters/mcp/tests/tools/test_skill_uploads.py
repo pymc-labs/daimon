@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import anthropic
 import httpx
 import pytest
+from aioresponses import aioresponses
 from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -27,6 +28,7 @@ from daimon.adapters.mcp.tools.skill_uploads import (
 from daimon.adapters.mcp.tools.skills import _list_impl  # pyright: ignore[reportPrivateUsage]
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import tenant_scoped_display_title
+from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.session_snapshot import SessionSnapshot, desired_snapshot
@@ -37,6 +39,7 @@ from daimon.core.stores.agent_creation_channels import record_creation_channel
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import create_origin
@@ -286,24 +289,45 @@ async def test_a_skill_that_changed_since_its_preview_is_not_uploaded(
     assert world.created == []
 
 
-@pytest.mark.parametrize(
-    "where", ["no_origin", "ungated_session", "another_agents_session", "no_live_session"]
-)
+#: What a preview says for each reason a chat turn can't show the card.
+_NO_CARD_REASONS = {
+    "no_origin_context": "did not pass this turn's origin_context_id",
+    "unverified_origin": "is not this turn's",
+    "not_a_chat_turn": "does not come from a chat turn",
+    "agent_key": "runs on an agent key",
+    "no_live_session": "has no live session",
+    "other_agents_session": "runs a different agent",
+    "session_not_gated": "does not ask before add_skill yet",
+    "session_unreadable": "could not read this thread's session",
+}
+
+
+@pytest.mark.parametrize("where", sorted(_NO_CARD_REASONS))
 async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_first(
     db_session_factory: async_sessionmaker[AsyncSession], where: str
 ) -> None:
-    """With tool safety on, an agent_chat or unattended call (no origin), a session created
-    before the gate, or an origin whose live session is not its own adds nothing."""
+    """With tool safety on, a call from outside a verified chat turn, a session created
+    before the gate, or an origin whose live session is not its own adds nothing, and
+    the preview and the refusal both say which it was."""
     world = await _world(db_session_factory)
     auth, origin = await _chat_turn(
-        world, gated=where != "ungated_session", live=where != "no_live_session"
+        world, gated=where != "session_not_gated", live=where != "no_live_session"
     )
-    if where == "another_agents_session":
+    if where == "other_agents_session":
         frozen = ma_session_agent(id="agent_other", tools=[_daimon_toolset(gated=True)])
         world.sessions[f"sesn_{CHAT_THREAD}"] = ma_session(
             id=f"sesn_{CHAT_THREAD}", agent=frozen
         ).model_dump(mode="json")
-    context = None if where == "no_origin" else origin
+    if where == "session_unreadable":
+        del world.sessions[f"sesn_{CHAT_THREAD}"]
+    if where == "not_a_chat_turn":
+        auth = world.auth()
+    if where == "agent_key":
+        auth = dataclasses.replace(auth, agent_id=auth.chat_agent_id, chat_agent_id=None)
+    context: str | None = {
+        "no_origin_context": None,
+        "unverified_origin": str(uuid.uuid4()),
+    }.get(where, origin)
 
     async def add(**extra: Any) -> AddSkillResult:
         return await _add_skill_impl(
@@ -317,9 +341,14 @@ async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_firs
         )
 
     preview = await add()
-    assert "content_hash=" not in preview.summary and "/agent-setup" in preview.summary
-    with pytest.raises(ToolError, match="this conversation can't show one"):
+    summary = preview.summary
+    assert "content_hash=" not in summary and "/agent-setup" in summary
+    assert "this conversation can't show one" in summary
+    assert _NO_CARD_REASONS[where] in summary, "the preview names why no card can show"
+    assert "turned off on this deployment" not in summary, "the deployment has cards on"
+    with pytest.raises(ToolError, match="this conversation can't show one") as refused:
         await add(content_hash=preview.preview.content_hash)
+    assert _NO_CARD_REASONS[where] in str(refused.value)
     assert world.created == [], "nothing was uploaded"
 
 
@@ -429,32 +458,6 @@ async def test_a_session_reported_with_other_tools_is_taken_at_its_word(
     assert world.created == [], "nothing was uploaded"
 
 
-async def test_a_session_that_cannot_be_read_previews_but_never_confirms(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A live row whose MA session is gone fails closed with the no-card refusal."""
-    world = await _world(db_session_factory)
-    auth, origin = await _chat_turn(world)
-    del world.sessions[f"sesn_{CHAT_THREAD}"]
-
-    async def add(**extra: Any) -> AddSkillResult:
-        return await _add_skill_impl(
-            world.runtime,
-            auth,
-            agent_name="helper",
-            expected_ma_agent_id="agent_helper",
-            skill_md=_MD,
-            origin_context_id=origin,
-            **extra,
-        )
-
-    preview = await add()
-    assert "/agent-setup" in preview.summary, "the preview still shows, pointing at the panel"
-    with pytest.raises(ToolError, match="this conversation can't show one"):
-        await add(content_hash=preview.preview.content_hash)
-    assert world.created == [], "nothing was uploaded"
-
-
 async def test_exactly_one_source_is_taken(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -540,7 +543,7 @@ async def test_a_channel_admin_may_change_an_agent_local_to_their_channel(
             skill_md=_MD,
         )
 
-    with pytest.raises(ToolError, match="not made for, pinned to or given to"):
+    with pytest.raises(ToolError, match="not made for, limited by its rule to or given to"):
         await add()
     async with db_session_factory.begin() as session:
         await record_creation_channel(
@@ -593,6 +596,82 @@ async def test_a_slack_file_link_from_another_workspace_is_refused(
             expected_ma_agent_id="agent_helper",
             attachment_url=f"https://daimon.example/slack/file/{token}",
         )
+
+
+def _mock_slack_file_shared_in(m: aioresponses, shares: dict[str, list[dict[str, str]]]) -> None:
+    m.get(  # pyright: ignore[reportUnknownMemberType]
+        re.compile(r"https://slack\.com/api/files\.info.*"),
+        payload={"ok": True, "file": {"id": "F1", "shares": {"public": shares}}},
+    )
+
+
+async def _slack_skill_world(factory: async_sessionmaker[AsyncSession]) -> _World:
+    world = await _world(factory)
+    assert world.runtime.fernet is not None
+    async with factory.begin() as session:
+        await upsert_slack_bot_token(
+            session, team_id="T_MINE", encrypted_token=encrypt_token(world.runtime.fernet, "xoxb")
+        )
+    return world
+
+
+async def test_a_slack_file_link_is_refused_unless_the_caller_can_read_the_file(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link is a bearer token: another turn's link to a DM file proves nothing here."""
+    world = await _slack_skill_world(db_session_factory)
+    fetched: list[str] = []
+
+    async def fake_fetch(*_: object, file_id: str, **__: object) -> tuple[bytes, str, str]:
+        fetched.append(file_id)
+        return _MD.encode(), "text/markdown", "SKILL.md"
+
+    monkeypatch.setattr(skill_uploads, "fetch_slack_file", fake_fetch)
+    token = mint_file_token(team_id="T_MINE", file_id="F1", exp=2**40, secret="proxy-secret")
+    with aioresponses() as m:
+        _mock_slack_file_shared_in(m, {"D_SOMEONE": [{"ts": "1.0"}]})
+        with pytest.raises(ToolError, match="not shared anywhere the requester can read"):
+            await _add_skill_impl(
+                world.runtime,
+                world.auth(platform="slack", external_id="T_MINE"),
+                agent_name="helper",
+                expected_ma_agent_id="agent_helper",
+                attachment_url=f"https://daimon.example/slack/file/{token}",
+            )
+    assert fetched == [], "a refused file must never be downloaded"
+
+
+async def test_a_slack_file_link_shared_in_a_channel_the_caller_reads_is_fetched(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = await _slack_skill_world(db_session_factory)
+    fetched: list[str] = []
+
+    async def fake_fetch(*_: object, file_id: str, **__: object) -> tuple[bytes, str, str]:
+        fetched.append(file_id)
+        return _MD.encode(), "text/markdown", "SKILL.md"
+
+    monkeypatch.setattr(skill_uploads, "fetch_slack_file", fake_fetch)
+    token = mint_file_token(team_id="T_MINE", file_id="F1", exp=2**40, secret="proxy-secret")
+    with aioresponses() as m:
+        _mock_slack_file_shared_in(m, {"C1": [{"ts": "1.0"}]})
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            re.compile(r"https://slack\.com/api/conversations\.info.*"),
+            payload={"ok": True, "channel": {"id": "C1", "is_private": False}},
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            re.compile(r"https://slack\.com/api/users\.info.*"),
+            payload={"ok": True, "user": {"id": USER, "is_restricted": False}},
+        )
+        result = await _add_skill_impl(
+            world.runtime,
+            world.auth(platform="slack", external_id="T_MINE"),
+            agent_name="helper",
+            expected_ma_agent_id="agent_helper",
+            attachment_url=f"https://daimon.example/slack/file/{token}",
+        )
+    assert fetched == ["F1"], "a file shared in a channel the caller reads is downloaded"
+    assert result.status == "preview"
 
 
 async def test_a_discord_attachment_zip_is_previewed(
@@ -838,25 +917,35 @@ async def test_a_pin_or_share_added_during_the_fetch_still_refuses_the_upload(
     assert world.state.agents["agent_helper"]["skills"] == []
 
 
-async def test_without_a_confirmation_card_chat_adds_nothing_and_points_to_the_panel(
-    db_session_factory: async_sessionmaker[AsyncSession],
+@pytest.mark.parametrize("caller", ["chat_turn", "direct"])
+async def test_with_approval_cards_off_the_preview_says_the_deployment_turned_them_off(
+    db_session_factory: async_sessionmaker[AsyncSession], caller: str
 ) -> None:
+    """Even from a chat turn whose session is gated, tool safety off means no card,
+    and the preview and refusal blame the deployment, not the conversation."""
     world = await _world(db_session_factory)
     world.runtime.settings.tool_safety = ToolSafetyPolicy(enabled=False)
+    auth, origin = await _chat_turn(world) if caller == "chat_turn" else (world.auth(), None)
 
-    preview = await _add_skill_impl(
-        world.runtime, world.auth(), agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
-    )
-    assert "/agent-setup" in preview.summary and "content_hash=" not in preview.summary
-    with pytest.raises(ToolError, match="shows none"):
-        await _add_skill_impl(
+    async def add(**extra: Any) -> AddSkillResult:
+        return await _add_skill_impl(
             world.runtime,
-            world.auth(),
+            auth,
             agent_name="helper",
-            expected_ma_agent_id=None,
+            expected_ma_agent_id="agent_helper",
             skill_md=_MD,
-            content_hash=preview.preview.content_hash,
+            origin_context_id=origin,
+            **extra,
         )
+
+    preview = await add()
+    summary = preview.summary
+    assert "/agent-setup" in summary and "content_hash=" not in summary
+    assert "approval cards are turned off on this deployment" in summary
+    assert "tool_safety.enabled" in summary, "the operator is told which setting"
+    assert "this conversation can't show one" not in summary
+    with pytest.raises(ToolError, match="approval cards are turned off on this deployment"):
+        await add(content_hash=preview.preview.content_hash)
     assert world.created == [], "the confirm staged and uploaded nothing"
 
 

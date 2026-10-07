@@ -21,6 +21,40 @@ def _check_view_permission(  # pyright: ignore[reportUnusedFunction]
         raise ToolError("missing view_channel permission")
 
 
+def _bot_read_error(  # pyright: ignore[reportUnusedFunction]
+    channel: discord.abc.GuildChannel | discord.Thread | str,
+    *,
+    missing_history: bool = False,
+) -> ToolError:
+    """Explain a Discord bot permission denial without exposing an HTTP error."""
+    label = f"#{channel.name}" if not isinstance(channel, str) else f"#{channel}"
+    verb = "read" if missing_history else "view"
+    return ToolError(
+        f"daimon's Discord role can't {verb} {label}; a server admin can grant "
+        "View Channel and Read Message History"
+    )
+
+
+async def _bot_lacks_read_permission(  # pyright: ignore[reportUnusedFunction]
+    guild: discord.Guild, channel: discord.abc.GuildChannel | discord.Thread
+) -> str | None:
+    """Check the bot's actual role permissions after an empty read."""
+    me = guild._state.user  # pyright: ignore[reportPrivateUsage]
+    if me is None:
+        return None
+    bot = await guild.fetch_member(me.id)
+    if isinstance(channel, discord.Thread):
+        parent = await _ensure_thread_parent_cached(channel)
+        perms = parent.permissions_for(bot)
+    else:
+        perms = channel.permissions_for(bot)
+    if not perms.view_channel:
+        return "view"
+    if not perms.read_message_history:
+        return "history"
+    return None
+
+
 def _check_send_permission(  # pyright: ignore[reportUnusedFunction]
     channel: discord.abc.GuildChannel | discord.Thread, member: discord.Member
 ) -> None:

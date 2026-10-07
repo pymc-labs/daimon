@@ -50,6 +50,7 @@ from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
+from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.adapters.slack.blockkit import (
     NOTICE_MAX_CHARS,
     EmbedEvent,
@@ -63,12 +64,19 @@ from daimon.adapters.slack.blockkit import (
 )
 from daimon.adapters.slack.errors import bound_request_id
 from daimon.adapters.slack.feedback import build_feedback_actions_block
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
+from daimon.adapters.slack.mrkdwn import (
+    escape_mrkdwn_preserving_mentions,
+    markdown_block_fallback,
+    prose_mentions,
+    seal_markdown_block,
+)
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.support_escalation import build_ask_human_button
 from daimon.adapters.slack.tables import render_slack_tables
+from daimon.core.agent_identity import AgentIdentity
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
+from daimon.core.channel_tidy import record_turn_post
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
@@ -81,7 +89,7 @@ from daimon.core.turn.state import (
     extract_final_response,
     extract_sealed_responses,
 )
-from daimon.core.turn.termination import termination_reason
+from daimon.core.turn.termination import TerminationReason, termination_reason
 from pydantic import SecretStr
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -112,7 +120,8 @@ _NOTIFICATION_TEXT_MAX = 3000
 
 
 def _notification_text(chunk: str) -> str:
-    """Bound a content chunk for use as the `text` notification fallback."""
+    """Escape code and bound a markdown block's text for the mrkdwn `text` fallback."""
+    chunk = markdown_block_fallback(chunk)
     if len(chunk) <= _NOTIFICATION_TEXT_MAX:
         return chunk
     return chunk[: _NOTIFICATION_TEXT_MAX - 1] + "…"
@@ -173,6 +182,8 @@ class SlackTurnLifecycle:
         budget_channel_id: str | None = None,
         alert_webhook_url: SecretStr | None = None,
         ask_human: bool = False,
+        identity: AgentIdentity | None = None,
+        ma_agent_id: str | None = None,
     ) -> None:
         self._trigger_ts = trigger_ts
         # Whether the final answer offers Ask a human beside the vote buttons
@@ -185,6 +196,9 @@ class SlackTurnLifecycle:
         self._request_id = request_id
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
+        self._identity = identity
+        self._ma_agent_id = ma_agent_id
+        self._intent_id = intent_id
         self._budget_channel_id = budget_channel_id
         self._alert_webhook_url = alert_webhook_url
         self._channel = channel
@@ -259,6 +273,43 @@ class SlackTurnLifecycle:
         """
         return self._status_ts
 
+    async def record_post(self, ts: str) -> None:
+        if (
+            self._sessionmaker is not None
+            and self._tenant_id is not None
+            and self._ma_agent_id is not None
+            and self._intent_id is not None
+        ):
+            await record_turn_post(
+                self._sessionmaker,
+                tenant_id=self._tenant_id,
+                platform="slack",
+                ma_agent_id=self._ma_agent_id,
+                channel_id=self._channel,
+                message_id=ts,
+                requester_platform_user_id=self._author_id,
+                source="turn",
+                turn_card_intent_id=self._intent_id,
+                thread_ts=self._thread_ts,
+            )
+
+    def _set_header_customized(self, customized: bool) -> None:
+        self._state = dataclasses.replace(self._state, header_customized=customized)
+
+    async def post_notice(self, text: str, *, blocks: list[dict[str, Any]] | None = None) -> str:
+        """Post a turn notice with the same header and ownership as its answer."""
+        kwargs: dict[str, Any] = {
+            "channel": self._channel,
+            "thread_ts": self._thread_ts,
+            "text": text,
+        }
+        if blocks is not None:
+            kwargs["blocks"] = blocks
+        resp = await post_as_agent(self._client, self._identity, **kwargs)
+        ts = cast(str, resp["ts"])
+        await self.record_post(ts)
+        return ts
+
     async def post_initial(self) -> None:
         """Post the initial status card immediately, before session setup.
 
@@ -308,7 +359,10 @@ class SlackTurnLifecycle:
                 self._register_pending(self._cancel_key, self._cancel, self._author_id)
                 self._pending_registered = True
             try:
-                resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                resp = await post_as_agent(
+                    self._client,
+                    self._identity,
+                    on_customized=self._set_header_customized,
                     channel=self._channel,
                     thread_ts=self._thread_ts,
                     blocks=blocks,
@@ -326,6 +380,7 @@ class SlackTurnLifecycle:
             if self._pending_registered and self._deregister_pending is not None:
                 self._deregister_pending(self._cancel_key)
                 self._pending_registered = False
+            await self.record_post(self._status_ts)
             self._last_flush = now
         elif now - self._last_flush >= _DEBOUNCE_S:
             # Debounce elapsed — update the status message in place.
@@ -370,7 +425,10 @@ class SlackTurnLifecycle:
         prior SSE flush.
         """
         if self._status_ts is None:
-            resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+            resp = await post_as_agent(
+                self._client,
+                self._identity,
+                on_customized=self._set_header_customized,
                 channel=self._channel,
                 thread_ts=self._thread_ts,
                 blocks=blocks,
@@ -378,6 +436,7 @@ class SlackTurnLifecycle:
             )
             self._status_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
             self._register(self._status_ts, self._cancel, self._author_id)
+            await self.record_post(self._status_ts)
         else:
             await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel,
@@ -402,7 +461,9 @@ class SlackTurnLifecycle:
             except Exception:
                 log.warning("turn.balance_footer_failed", exc_info=True)
 
-    async def _flush_terminal(self, fallback_text: str | None = None) -> None:
+    async def _flush_terminal(
+        self, fallback_text: str | None = None, *, feedback: bool = False
+    ) -> None:
         """Unconditionally flush the terminal Block Kit surface, bypassing debounce.
 
         Sets _terminal=True so subsequent _maybe_flush calls become no-ops. The
@@ -410,10 +471,21 @@ class SlackTurnLifecycle:
         (done/error) so to_blocks emits the collapsed footer with no cancel button.
         ``fallback_text`` replaces the generic top-level ``text`` that
         notifications and screen readers show instead of the blocks.
+        ``feedback`` appends the vote (and Ask a human) controls, for a turn
+        whose product is this card: a tool-only turn has no answer to carry them.
         """
         self._terminal = True
         blocks = to_blocks(self._state, now=self._clock(), cancel_key=self._cancel_key)
+        if feedback:
+            blocks.append(self._feedback_block())
         await self._post_or_update(blocks, fallback_text or f"{self._state.phase.value} …")
+
+    def _feedback_block(self) -> dict[str, Any]:
+        """👍/👎, plus Ask a human when this deployment offers it."""
+        block = build_feedback_actions_block()
+        if self._ask_human:
+            block["elements"].append(build_ask_human_button())
+        return block
 
     async def _flush_cancelled(self) -> None:
         """Replace the status message with a plain 'Turn cancelled.' notice.
@@ -451,8 +523,9 @@ class SlackTurnLifecycle:
     async def on_terminal_success(self, state: TurnState) -> None:
         """Replace status message with final answer; post overflow chunks; widen final_ts.
 
-        If no final text (tool-only or cancelled), collapses to the done footer
-        in place. Always deregisters the cancel Event in finally.
+        Interrupted turns show cancellation even when tools ran, retain any
+        partial answer, and do not send completion pings. A completed tool-only
+        turn collapses to the done footer. Always deregisters Cancel in finally.
 
         Does not re-raise on Slack send errors — the lifecycle boundary absorbs
         render failures (same contract as on_terminal_failure), logging at
@@ -489,22 +562,33 @@ class SlackTurnLifecycle:
             if final_response:
                 answer_parts.append(final_response)
             final_text = "\n\n".join(answer_parts)
+            cancelled = state.termination == TerminationReason.INTERRUPTED
+            notify_on_completion = self._notify_on_completion and not cancelled
+            if cancelled:
+                if not final_text:
+                    await self._flush_cancelled()
+                    self.final_ts = self._status_ts
+                    return
+                final_text = f"{final_text}\n\nTurn cancelled."
             if not final_text:
                 # No final answer. A tool-only turn keeps the collapsed done
                 # footer; a truly empty turn (cancellation) shows "Turn
                 # cancelled." — matches the Discord parity reference.
                 if any(isinstance(block, ToolUseBlock) for block in state.content):
-                    await self._flush_terminal()
+                    await self._flush_terminal(feedback=True)
                     # #79: no reply to hang the notice under on a tool-only
                     # turn, so a dropped server is named on its own line.
                     tool_only_notice = render_degraded_notice(state.mcp_failures)
                     if tool_only_notice is not None:
-                        await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                        resp = await post_as_agent(
+                            self._client,
+                            self._identity,
                             channel=self._channel,
                             thread_ts=self._thread_ts,
                             blocks=[{"type": "markdown", "text": tool_only_notice}],
                             text=tool_only_notice,
                         )
+                        await self.record_post(cast(str, resp["ts"]))
                 else:
                     await self._flush_cancelled()
                 self.final_ts = self._status_ts
@@ -522,13 +606,13 @@ class SlackTurnLifecycle:
             deliveries = await render_slack_tables(
                 final_text,
                 enabled=self._render_tables,
-                preserve_mentions=not self._notify_on_completion,
+                preserve_mentions=not notify_on_completion,
             )
             # Rejected tables become Markdown in the same delivery slot, leaving
             # earlier answer chunks intact. The first successful delivery owns
             # continuity notices, and only the last carries feedback controls.
             self._terminal = True
-            if self._notify_on_completion:
+            if notify_on_completion:
                 await self._flush_terminal()
             index = 0
             first_markdown_prefixed = False
@@ -536,9 +620,7 @@ class SlackTurnLifecycle:
             while index < len(deliveries):
                 chunk, block = deliveries[index]
                 mention = (
-                    f"<@{self._author_id}>"
-                    if self._notify_on_completion and self._author_id
-                    else None
+                    f"<@{self._author_id}>" if notify_on_completion and self._author_id else None
                 )
                 if (
                     index == 0
@@ -546,9 +628,13 @@ class SlackTurnLifecycle:
                     and block.get("type") == "markdown"
                     and not first_markdown_prefixed
                 ):
+                    # Re-splitting can move code into prose; only the ping stays live.
                     deliveries[0:1] = [
                         (plain, {"type": "markdown", "text": plain})
-                        for plain in split_for_slack_safe(f"{mention}\n{chunk}")
+                        for plain in (
+                            seal_markdown_block(part, mentions=frozenset({mention}))
+                            for part in split_for_slack_safe(f"{mention}\n{chunk}")
+                        )
                     ]
                     first_markdown_prefixed = True
                     continue
@@ -559,24 +645,24 @@ class SlackTurnLifecycle:
                         blocks.insert(0, {"type": "markdown", "text": mention})
                         notification_chunk = f"{mention}\n{chunk}"
                     blocks.extend(to_blocks(self._state, now=self._clock()))
-                if index == len(deliveries) - 1:
-                    feedback_block = build_feedback_actions_block()
-                    if self._ask_human:
-                        feedback_block["elements"].append(build_ask_human_button())
-                    blocks.append(feedback_block)
+                if index == len(deliveries) - 1 and not cancelled:
+                    blocks.append(self._feedback_block())
                 try:
-                    if index == 0 and not self._notify_on_completion:
+                    if index == 0 and not notify_on_completion:
                         await self._post_or_update(blocks, _notification_text(notification_chunk))
                         current_ts = self._status_ts
                     else:
-                        resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                        resp = await post_as_agent(
+                            self._client,
+                            self._identity,
                             channel=self._channel,
                             thread_ts=self._thread_ts,
                             blocks=blocks,
                             text=_notification_text(notification_chunk),
-                            link_names=False if self._notify_on_completion else None,
+                            link_names=False if notify_on_completion else None,
                         )
                         current_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
+                        await self.record_post(current_ts)
                     if index == 0:
                         self._answer_ts = current_ts
                         self._revealed_first_chunk = notification_chunk
@@ -587,10 +673,14 @@ class SlackTurnLifecycle:
                         raise
                     log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
                     # The renderer retains escaped original Markdown alongside
-                    # the native table. Avoid double-escaping it on retry.
+                    # the native table. Avoid double-escaping it on retry, but
+                    # seal each part: a split can move code into prose.
                     deliveries[index : index + 1] = [
                         (plain, {"type": "markdown", "text": plain})
-                        for plain in split_for_slack_safe(chunk)
+                        for plain in (
+                            seal_markdown_block(part, mentions=frozenset())
+                            for part in split_for_slack_safe(chunk)
+                        )
                     ]
                     continue
                 index += 1
@@ -627,7 +717,11 @@ class SlackTurnLifecycle:
         """
         if self._revealed_first_chunk is None or self._revealed_first_blocks is None:
             return False
-        updated = f"{escape_mrkdwn_preserving_mentions(notice)}\n\n{self._revealed_first_chunk}"
+        escaped_notice = escape_mrkdwn_preserving_mentions(notice)
+        updated = seal_markdown_block(
+            f"{escaped_notice}\n\n{self._revealed_first_chunk}",
+            mentions=prose_mentions(escaped_notice) | prose_mentions(self._revealed_first_chunk),
+        )
         if len(split_for_slack_safe(updated)) > 1:
             return False
         blocks = list(self._revealed_first_blocks)

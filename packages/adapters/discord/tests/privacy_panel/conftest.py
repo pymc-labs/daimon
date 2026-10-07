@@ -29,6 +29,7 @@ def _make_preview(**overrides: Any) -> PurgePreview:
         "account": PurgePreviewRow(count=1, example=None),
         "user_skills": PurgePreviewRow(count=0, example=None),
         "github_credentials": PurgePreviewRow(count=0, example=None),
+        "github_user_links": PurgePreviewRow(count=0, example=None),
         "github_oauth_states": PurgePreviewRow(count=0, example=None),
         "mcp_tokens": PurgePreviewRow(count=0, example=None),
         "agent_github_binding": PurgePreviewRow(count=0, example=None),

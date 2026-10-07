@@ -16,13 +16,13 @@ import uuid
 from collections.abc import Sequence
 
 from anthropic import AsyncAnthropic
-from daimon.core.channel_isolation import IsolationViewer
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
     account_id_from_metadata,
 )
+from daimon.core.rule_views import RuleViewer
 from daimon.core.scope import ConfigTier, DeploymentDefault, ScopeContext
 from daimon.core.stores import scoped_config_read
 from daimon.core.stores.domain import Platform
@@ -129,7 +129,7 @@ async def load_roster(
     channel_id: str | None,
     thread_id: str | None,
     default: DeploymentDefault,
-    viewer: IsolationViewer | None = None,
+    viewer: RuleViewer | None = None,
 ) -> Roster:
     """Build the tenant's roster, marking whichever agent answers for the caller.
 

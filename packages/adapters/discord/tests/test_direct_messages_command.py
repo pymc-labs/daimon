@@ -63,7 +63,7 @@ async def test_dm_move_from_a_sealed_channel_refuses_before_history(
     member.create_dm.assert_not_called()
     start_dm.assert_not_called()
     interaction.followup.send.assert_awaited_once()
-    assert "sealed" in interaction.followup.send.await_args.args[0]
+    assert "Only turns inside" in interaction.followup.send.await_args.args[0]
 
 
 async def test_dm_move_drops_system_notices_such_as_a_sealed_threads_created_notice(

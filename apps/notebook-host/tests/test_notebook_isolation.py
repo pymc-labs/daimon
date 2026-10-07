@@ -172,8 +172,9 @@ def test_scratch_upload_defaults_to_a_read_only_app(
     assert r.status_code == 200, r.text
     assert calls[-1]["mode"] == "run", "a shared scratch link must not hand out a code editor"
     np = state.processes["scratch"]
-    assert np.permanent is False, "a read-only scratch notebook is still TTL-reaped"
-    assert "expires_at" in r.json(), "and still reports its expiry"
+    assert np.registered is True, "a read-only scratch notebook starts on a visit once stopped"
+    assert r.json()["expires_at"] is not None, "and still reports its expiry"
+    assert r.json()["permanent"] is False
     assert "access_token=" in r.json()["url"], "the returned link carries the token"
     assert calls[-1]["access_token"] == np.access_token, "marimo gets the same token"
 
@@ -185,7 +186,7 @@ def test_notebook_edit_op_is_the_only_way_to_get_the_editor(
     r = client.put(f"/upload/{_mint('notebook_edit', 'ed')}", content=b"# nb\n")
     assert r.status_code == 200, r.text
     assert calls[-1]["mode"] == "edit", "an explicit notebook_edit token spawns the editor"
-    assert state.processes["ed"].permanent is False
+    assert state.processes["ed"].registered is False, "the editor is never restarted on a visit"
 
 
 def test_each_notebook_gets_a_distinct_token_that_survives_reupload(
@@ -203,7 +204,7 @@ def test_each_notebook_gets_a_distinct_token_that_survives_reupload(
     )
 
 
-def test_ephemeral_run_mode_notebook_is_reaped() -> None:
+def test_registered_notebook_is_never_reaped_by_the_editor_ttl() -> None:
     from notebook_host.lifecycle import NotebookProcess, should_reap
 
     dead = unittest.mock.MagicMock(spec=subprocess.Popen)
@@ -214,19 +215,20 @@ def test_ephemeral_run_mode_notebook_is_reaped() -> None:
         process=dead,
         public_host="h",
         host_port=1,
-        mode="run",
-        permanent=False,
+        mode="edit",
+        registered=False,
     )
-    assert should_reap(np, 0) is True, "a dead read-only scratch notebook is reclaimed"
-    np.permanent = True
-    assert should_reap(np, 0) is False, "a blog is never reaped"
+    assert should_reap(np, 0) is True, "a dead editor is reclaimed"
+    np.registered = True
+    assert should_reap(np, 0) is False, "a registered notebook's files outlive its process"
 
 
-def test_blog_token_is_persisted_and_reused_on_respawn(
+def test_blog_token_is_persisted_and_reused_on_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import notebook_host.main as main_mod
+    import notebook_host.lazy_spawn as lazy_mod
     from notebook_host.blogs_store import load_blogs
+    from notebook_host.lazy_spawn import ensure_running
 
     client, state, calls = _make_app(tmp_path, monkeypatch)
     r = client.put(f"/upload/{_mint('blog', 'post')}", content=b"# blog\n")
@@ -242,33 +244,11 @@ def test_blog_token_is_persisted_and_reused_on_respawn(
     async def _fake_wait(*_args: object, **_kwargs: object) -> bool:
         return True
 
-    monkeypatch.setattr(main_mod, "wait_for_port", _fake_wait)
+    monkeypatch.setattr(lazy_mod, "wait_for_port", _fake_wait)
     state.processes.clear()
-    assert asyncio.run(main_mod._spawn_blog_process(state, "post")) is True  # pyright: ignore[reportPrivateUsage]
-    assert calls[-1]["access_token"] == tok, "respawn keeps the published link valid"
-    assert state.processes["post"].permanent is True
-
-
-def test_legacy_blog_without_token_gets_one_on_respawn(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import notebook_host.main as main_mod
-    from notebook_host.blogs_store import BlogRecord, load_blogs, register_blog
-
-    _, state, calls = _make_app(tmp_path, monkeypatch)
-    paths = get_slug_paths(tmp_path, "old")
-    paths.notebook.parent.mkdir(parents=True, exist_ok=True)
-    paths.notebook.write_text("# old\n", encoding="utf-8")
-    register_blog(state.settings.resolved_blogs_file, BlogRecord(slug="old", created_at=1.0))
-
-    async def _fake_wait(*_args: object, **_kwargs: object) -> bool:
-        return True
-
-    monkeypatch.setattr(main_mod, "wait_for_port", _fake_wait)
-    assert asyncio.run(main_mod._spawn_blog_process(state, "old")) is True  # pyright: ignore[reportPrivateUsage]
-    tok = calls[-1]["access_token"]
-    assert tok, "a pre-token blog is never served without auth"
-    assert load_blogs(state.settings.resolved_blogs_file)["old"].access_token == tok
+    assert asyncio.run(ensure_running(state, "post", now=time.time())) is not None
+    assert calls[-1]["access_token"] == tok, "a restart keeps the published link valid"
+    assert state.processes["post"].registered is True
 
 
 def test_switching_a_read_only_slug_to_the_editor_rotates_its_token(
@@ -573,10 +553,10 @@ def test_admin_put_notebook_is_read_only_by_default(
     assert r.status_code == 403, "the editor needs allow_editable on the host"
 
 
-def test_respawning_a_blog_kills_leftovers_of_its_uid_first(
+def test_restarting_a_blog_kills_leftovers_of_its_uid_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import notebook_host.main as main_mod
+    import notebook_host.lazy_spawn as lazy_mod
     from notebook_host.blogs_store import BlogRecord, register_blog
 
     _, state, calls = _make_app(tmp_path, monkeypatch)
@@ -584,17 +564,17 @@ def test_respawning_a_blog_kills_leftovers_of_its_uid_first(
     paths.notebook.parent.mkdir(parents=True, exist_ok=True)
     paths.notebook.write_text("# post\n", encoding="utf-8")
     register_blog(state.settings.resolved_blogs_file, BlogRecord(slug="post", created_at=1.0))
-    monkeypatch.setattr(main_mod, "resolve_jail_uid", lambda *_a, **_k: 100007)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
-    monkeypatch.setattr(main_mod, "ensure_slug_jail", lambda d, s, uid=None: get_slug_paths(d, s))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(lazy_mod, "resolve_jail_uid", lambda *_a, **_k: 100007)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(lazy_mod, "ensure_slug_jail", lambda d, s, uid=None: get_slug_paths(d, s))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
     killed: list[int] = []
-    monkeypatch.setattr(main_mod, "kill_uid_processes", lambda uid, **_k: killed.append(uid))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(lazy_mod, "kill_uid_processes", lambda uid, **_k: killed.append(uid))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
 
     async def _fake_wait(*_args: object, **_kwargs: object) -> bool:
         return True
 
-    monkeypatch.setattr(main_mod, "wait_for_port", _fake_wait)
-    assert asyncio.run(main_mod._spawn_blog_process(state, "post")) is True  # pyright: ignore[reportPrivateUsage]
-    assert killed == [100007], "a dead blog's detached children don't share the new process"
+    monkeypatch.setattr(lazy_mod, "wait_for_port", _fake_wait)
+    assert asyncio.run(lazy_mod.ensure_running(state, "post", now=time.time())) is not None
+    assert killed == [100007], "a stopped blog's detached children don't share the new process"
     assert calls
 
 

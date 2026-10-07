@@ -141,6 +141,9 @@ its budget window against the budget's limit; see
 [channel budgets](#channel-budgets). A DM moved with `/dm` counts toward the
 channel it came from. A turn with no channel (an older DM, an MCP turn from
 a key not minted in a channel) and a channel with no budget are never gated.
+On Discord and Slack, a finished turn shows the remaining active channel
+budget on its status card. A channel without an active budget shows the
+tenant's prepaid balance when one exists.
 
 A denial raises `AdmissionDenied` carrying only the reason literal
 (`balance_depleted`, `cap_exceeded` or `channel_budget_exceeded`); the wording
@@ -153,7 +156,7 @@ tool (`fetch_youtube_transcript`) adds the budget of the calling turn's
 channel, found from its `origin_context_id` (or the key's own channel). A
 routine such a key saves without a destination records that channel. Each scheduled
 routine fire runs all three, the budget last against the routine's channel
-(after the agent pin check), and records the reason as that run's error
+(after the agent rule check), and records the reason as that run's error
 instead of raising. Wakes pass through
 chat admission, so all three apply. Unprompted thread participation (Discord and Teams)
 checks all three too, and skips silently, on the grounds that a billing
@@ -261,12 +264,13 @@ What a budget does not cover:
   count toward it and are gated by it. `get_channel_budget` in such a DM
   reads that channel's budget.
 - **MCP turns from an unbound key.** An agent key minted with "Use from your
-  coding tools" in a sealed channel, or in one its agent is pinned to, records
+  coding tools" in a channel with limited readers, or in one its agent's rule
+  names, records
   that channel (`mcp_tokens.channel_id`): its `start_turn`, `ask` and
   `continue_turn` are gated by that channel's budget, and the sessions it
   opens carry `daimon_budget_channel`, so their spend is attributed there.
   Every other key, the hub and bearer tokens record no channel and are not
-  gated, except on a confidential channel's own agent: every run of it, an
+  gated, except on a channel's own agent: every run of it, an
   admin's or that channel's admin's from the hub or a DM included, is gated
   by and charged to that channel. Its routines can only post there, so they
   already are. A media tool call without a live `origin_context_id` is not
@@ -535,12 +539,14 @@ content-free usage references join `usage_events` on `(managed_session_id,
 event_id)`; one outcome may refer to multiple model calls or recovered sessions.
 Refused turns have no usage references, and each admission refusal has its own
 reason: `admission_balance_depleted`, `admission_cap_exceeded`,
-`admission_channel_budget_exceeded`, `admission_channel_protected`,
-`admission_agent_pinned_elsewhere`, `admission_channel_isolated` and
-`admission_concurrency_shed`. `admission_denied` covers the invoker allowlist,
+`admission_channel_budget_exceeded`, `admission_channel_protected` (writers
+`none`), `admission_agent_pinned_elsewhere` (its agent rule names other
+channels), `admission_channel_isolated` (readers `own`, and the agent isn't one
+of the channel's own) and `admission_concurrency_shed`; the stored names
+predate channel and agent rules. `admission_denied` covers the invoker allowlist,
 an unreadable access policy and any other gate; rows written before
-`0045_admission_refusal_reasons` record every protection, pin and confidential-channel
-refusal under it. The best-effort outcome writer never
+`0045_admission_refusal_reasons` record every channel and agent rule refusal
+under it. The best-effort outcome writer never
 changes a balance, cap, price or ledger debit, and a missing diagnostic row does
 not mean no model work was billed. See the turn-outcome contract in
 [architecture](architecture.md#durable-turn-outcomes).

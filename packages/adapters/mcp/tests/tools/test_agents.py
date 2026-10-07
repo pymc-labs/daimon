@@ -5084,7 +5084,9 @@ async def test_fork_agent_impl_refuses_to_copy_a_pinned_agent_even_for_an_admin(
         account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
     )
 
-    with pytest.raises(ToolError, match="pinned to specific channels"):
+    with pytest.raises(
+        ToolError, match="agent rule limiting where it runs|runs it only in certain channels"
+    ):
         await _fork_agent_impl(
             _runtime(
                 build_fake_anthropic(router.dispatch),

@@ -1,7 +1,7 @@
 """Slack /help handler.
 
 Pure `build_help_blocks()` returns raw Block Kit section dicts listing the
-four admin commands and the @bot configure-by-chat entrypoint.
+app's slash commands and the @bot configure-by-chat entrypoint.
 
 `handle_help_command` posts an ephemeral message (no modal, no trigger_id).
 Text constants ported verbatim from the Discord `commands/help.py` and adapted
@@ -29,6 +29,7 @@ log = structlog.get_logger()
 _BODY = """\
 *Agent management*
 /agent-setup — See your agents, who answers where, and make changes
+/memory — List what this channel's agent remembers; add a path to see one file
 
 *Routines*
 /routines — Show scheduled routines for this workspace
@@ -36,10 +37,15 @@ _BODY = """\
 *Billing*
 /billing — Show your billing usage (admins see per-member breakdown)
 
+*Direct messages*
+/dm — Continue this channel privately in your DMs, once an admin runs `/dm enable` \
+(`/dm disable` turns it off)
+
 *Privacy*
 /privacy — See, export, or delete what {display_name} stores about you
 
 *Meta*
+/here — Who answers here, what it can read and holds
 /help — List commands and the @bot conversational entrypoint\
 """
 

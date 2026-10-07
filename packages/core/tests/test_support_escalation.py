@@ -122,7 +122,7 @@ def test_shared_copy_names_the_remaining_count() -> None:
 
     assert "You have 7 support request(s) left" in offer_text(remaining=7)
     assert "You have 3 left." in received_text(remaining=3)
-    assert "used all your human-support requests" in OUT_OF_CREDITS
+    assert "used all your support requests" in OUT_OF_CREDITS
 
 
 def test_support_credits_are_not_the_billing_ledger() -> None:

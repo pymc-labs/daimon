@@ -17,12 +17,12 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._isolation import load_caller_hidden_environments
+from daimon.adapters.mcp.tools._rule_view import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.channel_environments import (
     archive_needs_confirm,
     build_archive_environment_note,
-    build_sealed_channels_confirm,
+    build_limited_channels_confirm,
     update_needs_confirm,
 )
 from daimon.core.defaults.ma_index import (
@@ -171,7 +171,7 @@ async def _update_environment_impl(
             )
         if confirm:
             raise ToolError(
-                build_sealed_channels_confirm(environment_name=name) + CONFIRM_OPEN_NETWORK_ASK
+                build_limited_channels_confirm(environment_name=name) + CONFIRM_OPEN_NETWORK_ASK
             )
     updated = await runtime.client.beta.environments.update(env.id, **patch)
     return EnvironmentInfo.from_ma(updated)
@@ -215,7 +215,7 @@ async def _archive_environment_impl(
             )
         if confirm:
             raise ToolError(
-                build_sealed_channels_confirm(environment_name=None) + CONFIRM_OPEN_NETWORK_ASK
+                build_limited_channels_confirm(environment_name=None) + CONFIRM_OPEN_NETWORK_ASK
             )
     await runtime.client.beta.environments.archive(env.id)
     async with runtime.session_factory.begin() as session:

@@ -26,7 +26,7 @@ from typing import Annotated, Literal, cast
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._isolation import load_caller_isolation
+from daimon.adapters.mcp.tools._rule_view import load_caller_view
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.authz import Action, build_agent_ref
 from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
@@ -133,7 +133,7 @@ async def _hand_off_task_impl(
     agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     # A thread under an isolated channel hands off only to that channel's own
     # agents; anywhere else, never to them.
-    caller = await load_caller_isolation(
+    caller = await load_caller_view(
         runtime, auth, agents=agents, location_channel_id=origin.parent_channel_id
     )
     destination = next((agent for agent in agents if agent.id == agent_id), None)
@@ -308,8 +308,8 @@ async def _hand_off_task_impl(
     )
     if work_withheld:
         confirmation += (
-            f"\n{destination_name} can't read this conversation's sealed history, so the work "
-            "you named was not passed on."
+            f"\n{destination_name} can't read this conversation's history, which only turns "
+            "inside its channel read, so the work you named was not passed on."
         )
     return TaskHandoffResult(
         destination_name=destination_name,
@@ -326,10 +326,10 @@ def _refusal_text(refusal: HandoffRefused, *, channel: str) -> str:
         return render_tool_refusal_setup_thread(refusal.destination_name)
     if refusal.reason == "unreachable":
         return render_tool_refusal_unreachable(refusal.destination_name, channel)
-    if refusal.reason == "pinned_elsewhere":
+    if refusal.reason == "runs_elsewhere":
         return "\n".join(
             [
-                f"{refusal.destination_name} is pinned to other channels by an operator, "
+                f"{refusal.destination_name} only runs in other channels (its agent rule), "
                 "so it can't take over a conversation here.",
                 "Tell the caller to ask in one of that agent's own channels.",
                 "Nothing was changed. Do not retry.",
@@ -339,7 +339,7 @@ def _refusal_text(refusal: HandoffRefused, *, channel: str) -> str:
         return "\n".join(
             [
                 f"{refusal.destination_name} is not one of this channel's agents (the one "
-                "it answers with, or one pinned to it), and handing a conversation to "
+                "it answers with, or one whose agent rule names it), and handing a conversation to "
                 "another agent brings its repository, keys and connectors here, so only "
                 "a server admin can do it, or a channel admin of this channel when the agent "
                 "is one of their own that answers only in their channels.",
@@ -348,7 +348,7 @@ def _refusal_text(refusal: HandoffRefused, *, channel: str) -> str:
                 "Nothing was changed. Do not retry.",
             ]
         )
-    if refusal.reason in ("channel_protected", "invoker_not_allowed", "channel_isolated", "sealed"):
+    if refusal.reason in ("writers_none", "invoker_not_allowed", "own_agents_only", "not_a_reader"):
         return "\n".join(
             [
                 render_handoff_refused(refusal, channel=channel),

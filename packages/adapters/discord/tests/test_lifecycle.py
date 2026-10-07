@@ -110,6 +110,32 @@ def _make_success_state(text: str = "Hello response") -> TurnState:
     return TurnState(content=[TextBlock(kind="text", text=text)])
 
 
+@pytest.mark.parametrize("partial_text", ["", "Partial analysis before cancellation."])
+async def test_interrupted_tool_turn_shows_cancelled_and_preserves_partial_answer(
+    partial_text: str,
+) -> None:
+    lc, sends, edits = _make_lifecycle(notify_on_completion=True)
+    await lc.post_initial()
+    content = [
+        ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
+    ]
+    if partial_text:
+        content.append(TextBlock(kind="text", text=partial_text))
+
+    await lc.on_terminal_success(
+        TurnState(content=content, termination=TerminationReason.INTERRUPTED)
+    )
+
+    rendered = "\n".join(
+        str(kwargs.get("content", "")) for kwargs in sends + [kwargs for _, kwargs in edits]
+    )
+    assert "Turn cancelled." in rendered
+    if partial_text:
+        assert partial_text in rendered
+    assert "<@123>" not in rendered, "cancellation must not send a completion ping"
+    assert not lc.was_answered
+
+
 @pytest.mark.parametrize("status", [400, 429])
 async def test_spend_limit_posts_notice_and_error_log(
     status: int, monkeypatch: pytest.MonkeyPatch
@@ -580,6 +606,15 @@ def _sealed_state(answer: str, *, trailing: str = "") -> TurnState:
 
 
 class TestSealedResponsePersistence:
+    async def test_early_answer_labels_only_first_chunk_on_bot_fallback(self) -> None:
+        lc, sends, _ = _make_lifecycle()
+        lc._fallback_active = lambda: True  # pyright: ignore[reportPrivateUsage]
+        await lc.on_render(_sealed_state("x" * 2100))
+        chunks = [sent["content"] for sent in sends if "content" in sent]
+        assert len(chunks) > 1
+        assert chunks[0].startswith("**test-agent** ")
+        assert all(not chunk.startswith("**test-agent** ") for chunk in chunks[1:])
+
     async def test_on_render_posts_sealed_answer_once(self) -> None:
         """A >=500-char text block sealed by a tool use posts as a permanent
         message on the next render tick — and only once across ticks."""
@@ -1535,7 +1570,9 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
 ) -> None:
     tenant = await make_tenant(db_session)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("12.50"))
-    await make_channel_budget(db_session, tenant=tenant, channel_id="C1", limit_usd=Decimal("5"))
+    await make_channel_budget(
+        db_session, tenant=tenant, channel_id="C1", window="total", limit_usd=Decimal("5")
+    )
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("-1.25"), channel_id="C1")
     await make_channel_budget(
         db_session,
@@ -1560,3 +1597,27 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
         assert footers[channel].endswith("· $11.25 left"), (
             f"{channel}: an inactive or missing budget shows the tenant balance"
         )
+
+
+@pytest.mark.asyncio
+async def test_answer_keeps_the_channel_budget_footer_on_the_visible_message(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await make_channel_budget(
+        db_session, tenant=tenant, channel_id="C1", window="total", limit_usd=Decimal("25")
+    )
+    await db_session.commit()
+    lc, _sends, edits = _make_lifecycle(
+        sessionmaker=db_session_factory, tenant_id=tenant.id, budget_channel_id="C1"
+    )
+    await lc.post_initial()
+    await lc.on_terminal_success(_make_success_state())
+
+    assert _terminal_embed(edits).footer.text.endswith("· $25.00 of channel budget left")
+    final_edit = edits[-1][1]
+    assert final_edit["content"] == "Hello response"
+    assert "embed" not in final_edit, "editing the answer must retain the terminal embed"
+    assert await lc.prepend_revealed_answer("Recovered files.")
+    assert "embed" not in edits[-1][1], "a later answer edit must retain the footer too"

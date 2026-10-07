@@ -1052,7 +1052,7 @@ async def test_send_message_into_a_protected_channel_is_refused_and_posts_nothin
         external_id="111",
         platform_user_id="42",
     )
-    with pytest.raises(ToolError, match="protected"):
+    with pytest.raises(ToolError, match="writers to none"):
         await _send_message_impl(
             _runtime_with_discord_token(session_factory=db_session_factory),
             auth,

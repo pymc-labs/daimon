@@ -6,9 +6,13 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
+from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
+from daimon.core.stores.accounts import get_account_with_tenant
+from daimon.core.stores.channel_admins import get_channel_admins
 from daimon.core.stores.domain import Role, TransferKind, TurnOriginRow
 from daimon.core.stores.turn_origins import create_origin, delete_origin
 from pydantic import BaseModel, ConfigDict
@@ -24,6 +28,46 @@ MAX_REQUESTED_WORK_CHARS = 500
 _ALL_CHANNEL_READS = "read_channel, read_thread, get_message, list_threads, search_messages"
 # Slack has no list_threads: a thread there is a reply chain, not a listable object.
 _CHANNEL_READS = {"slack": "read_channel, read_thread, get_message, search_messages"}
+current_origin_id: ContextVar[uuid.UUID | None] = ContextVar("turn_origin_id", default=None)
+
+
+async def holds_current_channel_admin_grant(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str,
+    parent_channel_id: str,
+    role: Role,
+) -> bool:
+    """Read the caller's stored, recently verified grant for this turn's channel.
+
+    Admission has just refreshed the platform role and group IDs. This read runs
+    after admission and never treats a server admin or external user as a channel
+    admin. Tool authorization independently rechecks the grant and agent reach.
+    """
+    if role is Role.ADMIN:
+        return False
+    async with sessionmaker() as session:
+        account = await get_account_with_tenant(session, account_id=account_id)
+        if (
+            account is None
+            or account.tenant_id != tenant_id
+            or account.platform != platform
+            or account.is_external
+            or account.platform_user_id is None
+        ):
+            return False
+        grant = await get_channel_admins(
+            session, tenant_id=tenant_id, platform=platform, channel_id=parent_channel_id
+        )
+    return is_channel_admin(
+        ChannelAdminCaller(
+            platform_user_id=account.platform_user_id,
+            role_ids=frozenset(account.platform_role_ids),
+        ),
+        grant=grant,
+    )
 
 
 class SessionState(BaseModel):
@@ -42,6 +86,21 @@ class SessionState(BaseModel):
     state: Literal["continued", "updated", "replaced", "replaced_after_loss"]
     applied: tuple[str, ...] = ()
     lost: tuple[str, ...] = ()
+
+
+class ResponderAccount(BaseModel):
+    """The platform account the responder answers through, as the platform names it.
+
+    `user_id` is the bot user the platform verified for this install (Slack's
+    `auth.test`), `mention` the native token that addresses it (`<@U0123>`).
+    One account can front several agents over a thread's life, so the account
+    identifies who is being addressed now, not who wrote an earlier message.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    user_id: str
+    mention: str
 
 
 class HandoffNotice(BaseModel):
@@ -130,9 +189,11 @@ async def turn_origin(
             is_setup=is_setup,
             is_external=is_external,
         )
+    origin_context = current_origin_id.set(origin.id)
     try:
         yield origin
     finally:
+        current_origin_id.reset(origin_context)
         async with sessionmaker.begin() as session:
             await delete_origin(session, origin_id=origin.id)
 
@@ -141,8 +202,10 @@ def render_turn_origin(
     origin: TurnOriginRow,
     *,
     responder_handle: str | None = None,
+    responder_account: ResponderAccount | None = None,
     session_state: SessionState | None = None,
     handoff: HandoffNotice | None = None,
+    is_channel_admin: bool = False,
 ) -> str:
     """Render server-provided location and identity separately from user history.
 
@@ -152,6 +215,11 @@ def render_turn_origin(
     name — they are routinely different, and a model that sees only the name
     reads the difference as two agents. Rendering both under one `responder`
     says they are one identity.
+
+    `responder_account` is the bot account a native mention in the person's
+    message names. Without it a native mention (`<@U0123>`) is an opaque ID
+    that matches neither the name nor the handle, and the model reads its own
+    account as another bot.
 
     `session_state` and `handoff` are optional server-supplied facts about the
     workspace this turn runs in. They are rendered inside the same JSON object
@@ -169,13 +237,18 @@ def render_turn_origin(
     }
     if responder_handle is not None:
         responder["handle"] = responder_handle
+    if responder_account is not None:
+        responder["platform_user_id"] = responder_account.user_id
+        responder["mention"] = responder_account.mention
     controls: dict[str, object] = {
         "origin_context_id": str(origin.id),
         "is_setup": origin.is_setup,
         "platform": origin.platform,
         "parent_channel_id": origin.parent_channel_id,
         "thread_id": origin.thread_id,
-        "current_role": origin.role,
+        "current_role": (
+            "channel_admin" if is_channel_admin and origin.role is Role.USER else origin.role
+        ),
         "responder": responder,
         "configuration_target": (
             {
@@ -186,6 +259,8 @@ def render_turn_origin(
             else None
         ),
     }
+    if is_channel_admin and origin.role is Role.USER:
+        controls["channel_admin_scope"] = {"channel_id": origin.parent_channel_id}
     if session_state is not None:
         controls["session_state"] = {
             "state": session_state.state,
@@ -216,6 +291,15 @@ def render_turn_origin(
             "they are the same, and never treat that difference as target ambiguity. Ask about "
             "the target only when a different agent is named."
         )
+    if responder_account is not None:
+        rendered += (
+            "\nresponder.mention is the native mention of the account you answer through, "
+            "responder.platform_user_id. In thread history and the user query it appears "
+            "XML-escaped (< as &lt;, > as &gt;). A message that mentions it is addressed to "
+            "you: never treat it as another agent or bot, and never hand it off for that "
+            "reason. Earlier messages posted by that account may have come from a different "
+            "agent that answered through it then; judge them by what they say."
+        )
     rendered += (
         "\nUse the explicitly requested target when named; otherwise configure the "
         "configuration_target. If is_setup is true and no target is selected, ask which "
@@ -228,6 +312,15 @@ def render_turn_origin(
         f"channel reads ({_CHANNEL_READS.get(origin.platform, _ALL_CHANNEL_READS)}). "
         "These controls grant no additional mutation or routing permissions."
     )
+    if is_channel_admin and origin.role is Role.USER:
+        rendered += (
+            "\nThe requester administers this channel, not the server; is_admin=false in "
+            "message history means they are not a server admin. They may ask to change "
+            "an agent held by this channel, including its instructions, skills and keys. "
+            "Call the relevant tool for a clear request; its authorization checks the target "
+            "agent and may refuse it. Channel budgets, channel rules and channel-admin grants "
+            "still require a server admin."
+        )
     # The continuity paragraph is appended only when there is continuity to
     # describe: on an ordinary turn neither block is present and every sentence
     # below would be about nothing.

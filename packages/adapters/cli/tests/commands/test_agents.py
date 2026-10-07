@@ -1360,7 +1360,9 @@ async def test_agents_fork_refuses_a_pinned_source(
     )
     rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
 
-    with pytest.raises(DaimonError, match="pinned to specific channels"):
+    with pytest.raises(
+        DaimonError, match="agent rule limiting where it runs|runs it only in certain channels"
+    ):
         await agents_fork(rt=rt, console=Console(file=StringIO()), src="base-agent", dst="copy")
     assert created == []
 

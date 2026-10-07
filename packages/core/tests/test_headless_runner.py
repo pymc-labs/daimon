@@ -61,12 +61,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_unknown_error import (
     BetaManagedAgentsUnknownError,
 )
 from cryptography.fernet import Fernet
-from daimon.core.channel_isolation import RoutineOrigin
 from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT
 from daimon.core.errors import TurnError
 from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
 from daimon.core.headless_runner import LAST_RESULT_TAIL_MAX, run_turn
+from daimon.core.rule_views import RoutineOrigin
 from daimon.core.stores import agent_github_binding as github_binding_store
 from daimon.core.stores import agent_repo_binding as repo_binding_store
 from daimon.core.stores.agent_files import put_agent_file

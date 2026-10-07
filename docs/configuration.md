@@ -29,6 +29,7 @@ typo is silent — check the spelling here.
 - [Slack](#slack)
 - [Teams](#teams)
 - [GitHub](#github)
+- [GitHub App](#github-app)
 - [Crypto](#crypto)
 - [Credentials](#credentials)
 - [Gemini](#gemini)
@@ -528,6 +529,16 @@ Slack OAuth app client secret, used during the 'Add to Slack' install flow.
 Maximum number of agent turns a single tenant (Slack workspace) may have in flight at
 once. Caps one noisy workspace from starving others on the shared Anthropic key.
 
+### `DAIMON_SLACK__HISTORY_PAGE_LIMIT`
+
+`int` · optional · default `100`
+
+Messages requested per conversations.replies call when replaying thread history. Slack
+clamps this per workspace: an app commercially distributed outside the Marketplace gets
+15 whatever it asks for, an internal-app install gets the full page up to 1000, which is
+also the largest value Slack accepts. The default matches the 100 messages Discord
+replays; every replayed message is first-turn context the model pays for.
+
 ### `DAIMON_SLACK__HEALTH_PORT`
 
 `int` · optional · default `8083`
@@ -619,17 +630,18 @@ else is a regular user.
 `bool` · optional · default `True`
 
 When True, guests (Entra B2B guest accounts in this tenant) are treated as people from
-another organisation: answered only in a confidential channel, with a few conversation
-tools and no commands or admin role. The tenant access policy's member guest list
-exempts some. When False, guests are treated as team members.
+another organisation: answered only in a channel kept to its own agents, with a few
+conversation tools and no commands or admin role. The tenant access policy's member
+guest list exempts some. When False, guests are treated as team members.
 
 ### `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS`
 
 `bool` · optional · default `True`
 
 When True, a shared channel's external participants (people from another tenant, via B2B
-direct connect) are answered only in a confidential channel, with a few conversation
-tools and no commands or admin role. When False, they are treated as team members.
+direct connect) are answered only in a channel kept to its own agents, with a few
+conversation tools and no commands or admin role. When False, they are treated as team
+members.
 
 ## GitHub
 
@@ -701,6 +713,48 @@ production).
 Decompressed (extracted) size cap enforced against the sum of tar member sizes before
 extraction, guarding against zip bombs. 200 MiB is the operator default. Set to 0 to
 disable (not recommended in production).
+
+## GitHub App
+
+Read from `daimon.core.config.GithubAppSettings`. Prefix `DAIMON_GITHUB_APP__`.
+
+Credentials for agent-scoped GitHub App access.
+
+### `DAIMON_GITHUB_APP__APP_ID`
+
+`str | None` · optional · default unset
+
+GitHub App ID for agent-scoped access.
+
+### `DAIMON_GITHUB_APP__APP_SLUG`
+
+`str | None` · optional · default unset
+
+GitHub App URL slug used for installation links.
+
+### `DAIMON_GITHUB_APP__PRIVATE_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+GitHub App private key as PEM or base64-encoded PEM.
+
+### `DAIMON_GITHUB_APP__WEBHOOK_SECRET`
+
+`SecretStr | None` · optional · default unset · secret
+
+Secret for verifying this App's webhook signatures.
+
+### `DAIMON_GITHUB_APP__CLIENT_ID`
+
+`str | None` · optional · default unset
+
+GitHub App client ID for user authorization.
+
+### `DAIMON_GITHUB_APP__CLIENT_SECRET`
+
+`SecretStr | None` · optional · default unset · secret
+
+GitHub App client secret for user authorization.
 
 ## Crypto
 
@@ -924,7 +978,7 @@ The bot must be able to post there.
 `str | None` · optional · default unset
 
 Slack channel id where human-support requests from Slack are posted. Unset (the default)
-disables the Ask a human button on Slack. Slack requests never go to the Discord
+disables the Ask the team button on Slack. Slack requests never go to the Discord
 channel, nor Discord requests here. The bot must be a member of the channel.
 
 ### `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID`
@@ -1171,6 +1225,14 @@ shared env file would set both.
 ### `DAIMON_NOTEBOOK__SUBPROCESS_TTL_SECONDS`
 
 `int` · optional · default `86400`
+
+### `DAIMON_NOTEBOOK__MAX_NOTEBOOK_TTL_SECONDS`
+
+`int` · optional · default `31536000`
+
+### `DAIMON_NOTEBOOK__WARM_WINDOW_SECONDS`
+
+`int` · optional · default `7200`
 
 ### `DAIMON_NOTEBOOK__SWEEP_INTERVAL_SECONDS`
 

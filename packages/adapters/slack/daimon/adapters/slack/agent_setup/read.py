@@ -15,9 +15,9 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.answering_map import AnsweringMap, load_answering_map
-from daimon.core.channel_isolation import load_isolation_viewer
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.roster import Roster, load_roster
+from daimon.core.rule_views import load_rule_viewer
 from daimon.core.scope import (
     DeploymentDefault,
 )
@@ -92,7 +92,7 @@ async def load_panel_roster(
         channel_id=channel_id,
         thread_id=thread_id,
         default=default,
-        viewer=await load_isolation_viewer(
+        viewer=await load_rule_viewer(
             session, anthropic, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
         ),
     )
@@ -155,7 +155,7 @@ async def load_panel_answering_map(
         tenant_id=tenant_id,
         platform="slack",
         default=default,
-        viewer=await load_isolation_viewer(
+        viewer=await load_rule_viewer(
             session, anthropic, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
         ),
     )

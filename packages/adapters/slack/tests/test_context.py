@@ -49,13 +49,46 @@ def _fifteen_messages() -> list[dict[str, str]]:
     return [{"user": "U1", "text": f"msg {i}", "ts": f"{100 + i}.0"} for i in range(15)]
 
 
-async def test_build_context_xml_requests_the_slack_page_cap() -> None:
-    """The first-turn replay asks for exactly the 15 messages Slack will return.
+@pytest.mark.parametrize("returned_count,has_more", [(40, False), (15, True)])
+async def test_context_requests_custom_page_and_marks_workspace_truncation(
+    returned_count: int, has_more: bool
+) -> None:
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES_PATTERN,
+            payload={
+                "ok": True,
+                "messages": [
+                    {"user": "U1", "text": f"msg {i}", "ts": f"{100 + i}.0"}
+                    for i in range(returned_count)
+                ],
+                "has_more": has_more,
+            },
+        )
+        xml = await build_context_xml(
+            _make_client(), channel="C1", thread_ts="100.0", user_query="hi", page_limit=50
+        )
+        assert _replies_request_params(mock)["limit"] == "50"
+    assert xml.count("<message ") == returned_count
+    assert ('truncated="true"' in xml) is has_more
 
-    Non-Marketplace apps get at most 15 objects per conversations.replies call;
-    asking for more is silently clamped, so the request must state the real
-    ceiling rather than a number the API ignores.
-    """
+
+async def test_delta_requests_the_configured_page_size() -> None:
+    with AioResponsesMock() as mock:
+        mock.get(_REPLIES_PATTERN, payload={"ok": True, "messages": [], "has_more": False})
+        await build_delta_xml(
+            _make_client(),
+            channel="C1",
+            thread_ts="100.0",
+            watermark_ts="101.0",
+            user_query="hi",
+            page_limit=75,
+        )
+        assert _replies_request_params(mock)["limit"] == "75"
+
+
+async def test_build_context_xml_requests_the_configured_page_size() -> None:
+    """Request the default page size and retain every message Slack returns."""
     with AioResponsesMock() as mock:
         mock.get(
             _REPLIES_PATTERN,
@@ -65,7 +98,7 @@ async def test_build_context_xml_requests_the_slack_page_cap() -> None:
         xml = await build_context_xml(client, channel="C1", thread_ts="100.0", user_query="hi")
         params = _replies_request_params(mock)
 
-    assert params["limit"] == "15"
+    assert params["limit"] == "100"
     assert xml.count("<message ") == 15, "every returned message reaches the model"
     assert '<thread_history source="slack" trust="untrusted">' in xml, (
         "a complete window carries no truncation marker"
@@ -479,3 +512,80 @@ async def test_a_replayed_message_cannot_escape_the_untrusted_envelope(builder: 
     assert [child.tag for child in envelope] == ["message"]
     assert _INJECTION in "".join(envelope[0].itertext())
     assert xml.count("<user_query") == 1, "only the real request is a user_query"
+
+
+def _thread_with_own_status_card() -> list[dict[str, str]]:
+    return [
+        {"user": "U_PERSON", "text": "<@U_BOT> earlier question", "ts": "100.0"},
+        {"user": "U_BOT", "bot_id": "B_SELF", "text": "Earlier answer", "ts": "101.0"},
+        {"user": "U_OTHER_BOT", "bot_id": "B_OTHER", "text": "Other bot note", "ts": "102.0"},
+        {"user": "U_PERSON", "text": "<@U_BOT> new question", "ts": "103.0"},
+        {"user": "U_BOT", "bot_id": "B_SELF", "text": "Thinking · 0s", "ts": "104.0"},
+    ]
+
+
+async def test_context_leaves_out_only_this_turns_status_card() -> None:
+    """The live card is not history; the account's earlier answers and other bots are."""
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES_PATTERN,
+            payload={"ok": True, "messages": _thread_with_own_status_card(), "has_more": False},
+        )
+        xml = await build_context_xml(
+            _make_client(),
+            channel="C1",
+            thread_ts="100.0",
+            user_query="<@U_BOT> new question",
+            status_ts="104.0",
+        )
+
+    assert "Thinking" not in xml, "this turn's own card must not replay as another bot's post"
+    assert "Earlier answer" in xml, "an earlier answer from the same account stays in history"
+    assert "Other bot note" in xml, "other bots' messages stay in history"
+    assert xml.count("<message ") == 4, "exactly one message, the live card, is left out"
+    assert "&lt;@U_BOT&gt; new question</user_query>" in xml, (
+        "the native mention keeps its XML escaping in the query"
+    )
+
+
+async def test_delta_leaves_out_only_this_turns_status_card() -> None:
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES_PATTERN,
+            payload={
+                "ok": True,
+                "messages": _thread_with_own_status_card()[2:],
+                "has_more": False,
+            },
+        )
+        xml = await build_delta_xml(
+            _make_client(),
+            channel="C1",
+            thread_ts="100.0",
+            watermark_ts="101.0",
+            user_query="<@U_BOT> new question",
+            status_ts="104.0",
+        )
+
+    assert "Thinking" not in xml, "this turn's own card must not replay as another bot's post"
+    assert "Other bot note" in xml, "other bots' messages stay in the delta"
+    assert "new question</message>" in xml, "the person's message stays in the delta"
+    assert xml.count("<message ") == 2, "exactly one message, the live card, is left out"
+
+
+async def test_status_ts_keeps_a_human_message_at_the_same_ts() -> None:
+    """Only a bot post at the card's ts is the card; a human message is always kept."""
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES_PATTERN,
+            payload={
+                "ok": True,
+                "messages": [{"user": "U_PERSON", "text": "root", "ts": "100.0"}],
+                "has_more": False,
+            },
+        )
+        xml = await build_context_xml(
+            _make_client(), channel="C1", thread_ts="100.0", user_query="hi", status_ts="100.0"
+        )
+
+    assert "root</message>" in xml, "only a bot post at the card's ts is treated as the card"

@@ -34,8 +34,8 @@ from daimon.adapters.mcp.tools.channel_admins import (
     _list_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
     _set_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.channel_isolation import (
-    _set_channel_isolation_impl,  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.channel_rules import (
+    _set_channel_rule_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.environments import (
     _list_environments_impl,  # pyright: ignore[reportPrivateUsage]
@@ -52,7 +52,7 @@ from daimon.adapters.mcp.tools.propagation import (
 from daimon.adapters.mcp.tools.tenant_summary import (
     _get_tenant_summary_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.mcp_auth import mint_operator_mcp_token
 from daimon.core.operator_tokens import OperatorScope, scope_tag
@@ -164,7 +164,8 @@ async def test_tenant_summary_lists_configured_and_budgeted_channels(
         "helper",
     ), "the tenant's balance, funding mode and default agent"
     assert [
-        (c.channel_id, c.agent_name, c.environment_name, c.isolated) for c in summary.channels
+        (c.channel_id, c.agent_name, c.environment_name, c.own_agents_only)
+        for c in summary.channels
     ] == [("c1", "helper", "data-env", False), ("c2", "helper", "default-env", False)], (
         "every configured or budgeted channel, with what resolves there"
     )
@@ -250,7 +251,7 @@ async def test_tenant_summary_leaves_out_dm_channels(
     assert [c.channel_id for c in summary.channels] == ["c1"], "DM channels are not listed"
 
 
-async def test_tenant_summary_marks_isolated_channels(
+async def test_tenant_summary_marks_channels_kept_to_their_own_agents(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
@@ -259,20 +260,19 @@ async def test_tenant_summary_marks_isolated_channels(
             session,
             tenant_id=tenant.id,
             policy=TenantAccessPolicy(
-                sealed_channel_ids=("c3",),
-                isolated_channel_ids=("c3",),
-                agent_channel_pins={"local": ("c3",)},
+                channel_rules={"c3": ChannelRule(readers="own", writers="own")},
+                agent_rules={"local": AgentRule(runs_in=("c3",))},
             ),
         )
 
     summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
 
-    assert [(c.channel_id, c.isolated) for c in summary.channels] == [("c3", True)], (
-        "an isolated channel is listed and marked even with no other setting"
+    assert [(c.channel_id, c.own_agents_only) for c in summary.channels] == [("c3", True)], (
+        "a channel kept to its own agents is listed and marked even with no other setting"
     )
 
 
-async def test_tenant_summary_omits_seals_and_protection_and_lists_timed_credit(
+async def test_tenant_summary_omits_readers_and_writers_and_lists_timed_credit(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
@@ -282,10 +282,8 @@ async def test_tenant_summary_omits_seals_and_protection_and_lists_timed_credit(
             session,
             tenant_id=tenant.id,
             policy=TenantAccessPolicy(
-                sealed_channel_ids=("c3",),
-                protected_channel_ids=("c3",),
-                isolated_channel_ids=("c3",),
-                agent_channel_pins={"local": ("c3",)},
+                channel_rules={"c3": ChannelRule(readers="own", writers="own")},
+                agent_rules={"local": AgentRule(runs_in=("c3",))},
             ),
         )
         terms = build_promo_code_terms(
@@ -313,22 +311,25 @@ async def test_tenant_summary_omits_seals_and_protection_and_lists_timed_credit(
         "channel_id",
         "agent_name",
         "environment_name",
-        "isolated",
+        "own_agents_only",
         "admins",
         "budget",
-    }, "seal and protection are omitted, not sent as false, for a caller that can't read them"
+    }, "readers and writers are omitted, not sent as null, for a caller that can't read them"
     assert [(c.remaining_usd, c.ends_at) for c in summary.timed_credit] == [
         ("7.00", terms.credit_ends_at.isoformat() if terms.credit_ends_at else None)
     ], "the live timed credit and when it ends"
 
 
-async def test_channel_isolation_requires_channels_write(
+async def test_channel_rule_requires_channels_write(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     _tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
     with pytest.raises(ToolError, match="does not have the channels:write scope"):
-        await _set_channel_isolation_impl(
-            _runtime(committing_sessionmaker), auth, channel_id="111111111111111111", isolated=True
+        await _set_channel_rule_impl(
+            _runtime(committing_sessionmaker),
+            auth,
+            channel_id="111111111111111111",
+            readers="inside",
         )
 
 
@@ -521,7 +522,7 @@ async def _verified_operator_identity(
     return captured[0]
 
 
-async def test_pin_guard_never_trusts_an_operator_token_as_the_deployment_operator(
+async def test_agent_rule_guard_never_trusts_an_operator_token_as_the_deployment_operator(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     operator = await _verified_operator_identity(sessionmaker)

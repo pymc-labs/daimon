@@ -94,6 +94,7 @@ async def test_discord_429_routes_and_window_reset(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("daimon.core.runtime_health.structlog.get_logger", lambda: logger)
     engine = create_async_engine("postgresql+asyncpg://test:test@localhost/test")
     http_logger = logging.getLogger("discord.http")
+    webhook_logger = logging.getLogger("discord.webhook.async_")
     warning = "We are being rate limited. %s %s responded with 429. Retrying in %.2f seconds."
     try:
         async with runtime_health("discord", engine, 0):
@@ -113,12 +114,16 @@ async def test_discord_429_routes_and_window_reset(monkeypatch: pytest.MonkeyPat
             http_logger.warning(
                 warning, "DELETE", "https://discord.com/api/v10/channels/1/messages/2", 1.0
             )
+            webhook_logger.warning(
+                "Webhook ID %s is rate limited. Retrying in %.2f seconds.", 30, 1.0
+            )
             await log_health_once("discord", engine, [], lambda: (0, None))
             assert logger.info.call_args.kwargs["discord_ratelimits"] == {
                 "thread_create": {"count": 2, "max_retry_s": 7.0},
                 "message_send": {"count": 1, "max_retry_s": 2.0},
                 "message_edit": {"count": 1, "max_retry_s": 3.0},
                 "other": {"count": 1, "max_retry_s": 1.0},
+                "webhook": {"count": 1, "max_retry_s": 0.0},
             }
             await log_health_once("discord", engine, [], lambda: (0, None))
             assert logger.info.call_args.kwargs["discord_ratelimits"] == {}

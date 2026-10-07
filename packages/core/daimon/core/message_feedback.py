@@ -43,6 +43,7 @@ require im:write separately; that scope does not change feedback capture.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Final, Literal
 
 Vote = Literal["up", "down"]
@@ -127,3 +128,25 @@ def should_trigger_feedback_dm(*, previous_vote: Vote | None, new_vote: Vote) ->
     not.
     """
     return new_vote == "down" and previous_vote != "down"
+
+
+# The reasons a "What went wrong?" form offers, as stored in
+# `message_feedback.feedback_reasons`, mapped to the label a person sees. The
+# codes are the stored contract; the labels may change.
+FEEDBACK_REASONS: Final[dict[str, str]] = {
+    "inaccurate": "Wrong or inaccurate",
+    "ignored_request": "Didn't do what I asked",
+    "incomplete": "Incomplete or cut off",
+    "too_slow": "Too slow",
+    "other": "Something else",
+}
+
+
+def known_feedback_reasons(codes: Sequence[str]) -> list[str]:
+    """Keep the known reason codes, in vocabulary order, once each.
+
+    A submission is client-built, so anything outside the vocabulary is
+    dropped rather than stored.
+    """
+    picked = set(codes)
+    return [code for code in FEEDBACK_REASONS if code in picked]

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.channel_environments import save_scope_environment
 from daimon.core.channel_overview import (
     ChannelAdminSet,
@@ -25,13 +25,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 ROOM = "C_ROOM"
 OTHER = "C_OTHER"
 POLICY = TenantAccessPolicy(
-    sealed_channel_ids=(ROOM,),
-    isolated_channel_ids=(ROOM,),
-    protected_channel_ids=(ROOM,),
-    agent_channel_pins={"room-agent": (ROOM,)},
+    channel_rules={ROOM: ChannelRule(readers="own", writers="own")},
+    agent_rules={"room-agent": AgentRule(runs_in=(ROOM,))},
 )
 EVERYTHING: frozenset[OverviewFact] = frozenset(
-    {"isolation", "seal", "protection", "budget", "environment", "admins"}
+    {"own_agents", "rule", "budget", "environment", "admins"}
 )
 
 
@@ -42,7 +40,7 @@ EVERYTHING: frozenset[OverviewFact] = frozenset(
         (
             ChannelViewer(is_server_admin=True),
             ROOM,
-            frozenset({"isolation", "budget", "environment", "admins"}),
+            frozenset({"own_agents", "budget", "environment", "admins"}),
         ),
         (
             ChannelViewer(sees_channel=True, inside_channel_id=ROOM),
@@ -56,7 +54,7 @@ EVERYTHING: frozenset[OverviewFact] = frozenset(
     ],
     ids=[
         "operator sees everything",
-        "server admin sees all but seal and protection",
+        "server admin sees all but the rule itself",
         "member inside sees the budget and environment",
         "member outside sees only the budget",
         "member inside sees no environment outside",
@@ -78,9 +76,8 @@ def test_each_viewer_sees_only_what_it_can_already_learn(
     assert overview.shown == shown, "the shown facts follow the viewer"
     hidden = EVERYTHING - shown
     values = {
-        "isolation": overview.isolated,
-        "seal": overview.sealed,
-        "protection": overview.protected,
+        "own_agents": overview.own_agents_only,
+        "rule": overview.readers,
         "environment": overview.environment_name,
         "admins": overview.admins,
     }
@@ -98,8 +95,8 @@ def test_shown_facts_carry_their_values() -> None:
         budget=None,
         admins=None,
     )
-    assert (overview.isolated, overview.sealed, overview.protected) == (True, True, True), (
-        "all three hold"
+    assert (overview.own_agents_only, overview.readers, overview.writers) == (True, "own", "own"), (
+        "the rule is shown as set"
     )
     assert overview.admins == ChannelAdminSet(), "shown with nobody is an empty set"
     assert overview.budget is None and "budget" in overview.shown, "shown: no budget"
@@ -111,8 +108,8 @@ def test_shown_facts_carry_their_values() -> None:
         budget=None,
         admins=None,
     )
-    assert (outside.isolated, outside.sealed, outside.protected) == (False, False, False), (
-        "a shown fact that does not hold is false"
+    assert (outside.own_agents_only, outside.readers, outside.writers) == (False, "any", "any"), (
+        "a channel with no rule reads as open"
     )
 
 
@@ -161,13 +158,13 @@ async def test_load_reads_one_channel_and_skips_what_the_viewer_cannot_see(
         )
 
     admin = await load(ChannelViewer(is_server_admin=True))
-    assert admin.isolated is True and admin.environment_name == "gpu", "admin sees the room"
+    assert admin.own_agents_only is True and admin.environment_name == "gpu", "admin sees the room"
     assert admin.budget is not None and admin.budget.budget.limit_usd == Decimal("50"), "budget"
     assert admin.admins == ChannelAdminSet(("R1",), ("U1",)), "the grant's ids are shown"
-    assert admin.sealed is None and admin.protected is None, "the seal is the operator's"
+    assert admin.readers is None and admin.writers is None, "the rule itself is the operator's"
 
     member = await load(ChannelViewer(sees_channel=True))
     assert member.budget is not None, "anyone shown the channel reads its budget"
-    assert (member.isolated, member.admins, member.environment_name) == (None, None, None), (
+    assert (member.own_agents_only, member.admins, member.environment_name) == (None, None, None), (
         "outside the room a member learns nothing else of it"
     )

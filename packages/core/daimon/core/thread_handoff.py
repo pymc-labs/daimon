@@ -425,18 +425,18 @@ def render_handoff_refused(refusal: HandoffRefused, *, channel: str) -> str:
     name = refusal.destination_name
     reasons: dict[str, str] = {
         "setup_thread": "This is a setup conversation, so it always answers as Daimon.",
-        "channel_protected": "Daimon doesn't post here, so no agent can take this over.",
+        "writers_none": "Daimon doesn't post here, so no agent can take this over.",
         "invoker_not_allowed": "This workspace limits who can use Daimon, and you aren't on "
         "that list.",
-        "pinned_elsewhere": f"{name} is pinned to other channels, so it can't answer here.",
-        "channel_isolated": f"{channel} only runs its own agents, and {name} isn't one of them.",
+        "runs_elsewhere": f"{name} only runs in other channels, so it can't answer here.",
+        "own_agents_only": f"{channel} only runs its own agents, and {name} isn't one of them.",
         "unreachable": f"{name} doesn't answer anywhere in this workspace any more.",
         "same_agent": f"{name} already answers in this conversation.",
         "admin_required": f"{name} isn't an agent of {channel}. A server admin can hand this "
         f"conversation to it, or a channel admin of {channel} when {name} is one of their own "
         "agents.",
-        "sealed": f"{channel} is sealed and {name} isn't one of its agents, so only a server "
-        "admin can hand this conversation to it.",
+        "not_a_reader": f"Only turns inside {channel} read it and {name} isn't one of its "
+        "agents, so only a server admin can hand this conversation to it.",
     }
     return f"{reasons[refusal.reason]} Nothing was changed."
 

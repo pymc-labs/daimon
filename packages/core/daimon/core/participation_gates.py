@@ -22,9 +22,9 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.channel_isolation import is_thread_turn_refused
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.pricing import MODEL_PRICING
+from daimon.core.rule_views import is_thread_turn_refused
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.thread_participation import (
     count_auto_responses_since,

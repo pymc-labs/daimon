@@ -242,7 +242,9 @@ async def test_an_edit_arriving_while_the_recorder_holds_the_locks_waits_then_ap
     assert _ephemeral_texts(fake_slack_web_client) == [received_text(remaining=19)]
     async with factory() as s:
         policy = await load_access_policy(s, tenant_id=tenant_id)
-    assert policy.protected_channel_ids == (_CHANNEL,), "the edit applies after the request"
+    assert {c: r.writers for c, r in policy.channel_rules.items()} == {_CHANNEL: "none"}, (
+        "the edit applies after the request"
+    )
 
 
 @pytest.mark.parametrize(

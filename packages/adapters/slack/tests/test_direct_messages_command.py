@@ -33,4 +33,4 @@ async def test_dm_move_from_a_sealed_channel_refuses_before_history(
     client.conversations_open.assert_not_called()
     start_dm.assert_not_called()
     client.chat_postEphemeral.assert_awaited_once()
-    assert "sealed" in client.chat_postEphemeral.await_args.kwargs["text"]
+    assert "Only turns inside" in client.chat_postEphemeral.await_args.kwargs["text"]

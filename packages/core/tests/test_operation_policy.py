@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import get_args
 
+from daimon.core.agent_reach import WIDE_SHARING_OPERATIONS
 from daimon.core.operation_policy import (
     OperationKind,
     TargetFacts,
@@ -38,6 +39,45 @@ def test_attachment_allows_admin_on_managed_agent() -> None:
         "an admin binding a repo to the seeded/managed agent is the "
         "first-run onboarding step this family exists to allow"
     )
+
+
+def test_github_connect_requires_server_admin() -> None:
+    held = TargetFacts(
+        is_daimon_managed=False,
+        is_reachable_in_tenant=True,
+        is_local_to_caller_channels=True,
+        is_held_by_caller=True,
+    )
+    assert decide_operation("github_connect", is_admin=False, target=held) == "needs_admin"
+    assert decide_operation("github_connect", is_admin=True, target=held) == "allow"
+    assert not needs_reachability_read("github_connect", is_admin=False, is_daimon_managed=False)
+
+
+def test_github_grant_requires_server_admin_or_local_channel_admin_holding_agent() -> None:
+    assert "github_grant" in WIDE_SHARING_OPERATIONS
+    for local in (False, True):
+        for held in (False, True):
+            target = TargetFacts(
+                is_daimon_managed=False,
+                is_reachable_in_tenant=True,
+                is_local_to_caller_channels=local,
+                is_held_by_caller=held,
+            )
+            assert decide_operation("github_grant", is_admin=False, target=target) == (
+                "allow" if local and held else "needs_admin"
+            )
+            assert decide_operation("github_grant", is_admin=True, target=target) == "allow"
+    assert needs_reachability_read("github_grant", is_admin=False, is_daimon_managed=False)
+    assert not needs_reachability_read("github_grant", is_admin=True, is_daimon_managed=False)
+    managed = TargetFacts(
+        is_daimon_managed=True,
+        is_reachable_in_tenant=True,
+        is_local_to_caller_channels=True,
+        is_held_by_caller=True,
+    )
+    assert decide_operation("github_grant", is_admin=False, target=managed) == "needs_admin"
+    assert decide_operation("github_grant", is_admin=True, target=managed) == "allow"
+    assert not needs_reachability_read("github_grant", is_admin=False, is_daimon_managed=True)
 
 
 def test_posted_token_operations_allow_non_admin_on_shared_agent() -> None:

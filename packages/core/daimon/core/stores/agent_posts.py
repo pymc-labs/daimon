@@ -1,4 +1,7 @@
-"""Async store for agent_posted_messages: what each agent posted through the channel tools.
+"""Async store for agent_posted_messages: what each agent posted.
+
+Rows come from the channel tools (`source='tool'`) and from the chat
+adapters for what a turn posted (`source='turn'`, `'auto_thread'`).
 
 The channel tidy tools read this to decide whether a message is the calling
 agent's own. Rows hold ids and a keyed HMAC of the text, never the text.
@@ -17,11 +20,12 @@ from typing import Any, Literal, cast
 
 from daimon.core._models import AgentPostedMessage
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import CursorResult, delete, select, update
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 PostKind = Literal["message", "thread"]
+PostSource = Literal["tool", "turn", "auto_thread"]
 
 
 class AgentPostRow(BaseModel):
@@ -37,6 +41,9 @@ class AgentPostRow(BaseModel):
     kind: PostKind
     agent_id: uuid.UUID
     content_hmac: str | None
+    source: PostSource
+    requester_platform_user_id: str | None
+    turn_card_intent_id: uuid.UUID | None
     posted_at: datetime
     deleted_at: datetime | None
 
@@ -53,6 +60,9 @@ async def record_post(
     parent_channel_id: str | None = None,
     thread_ts: str | None = None,
     content_hmac: str | None = None,
+    source: PostSource = "tool",
+    requester_platform_user_id: str | None = None,
+    turn_card_intent_id: uuid.UUID | None = None,
 ) -> None:
     """Record one post. A second record of the same target keeps the first owner."""
     await session.execute(
@@ -67,6 +77,9 @@ async def record_post(
             kind=kind,
             agent_id=agent_id,
             content_hmac=content_hmac,
+            source=source,
+            requester_platform_user_id=requester_platform_user_id,
+            turn_card_intent_id=turn_card_intent_id,
         )
         .on_conflict_do_nothing(constraint="uq_agent_posted_messages_target")
     )
@@ -139,6 +152,43 @@ async def mark_deleted(session: AsyncSession, *, post_ids: list[uuid.UUID], now:
         update(AgentPostedMessage).where(AgentPostedMessage.id.in_(post_ids)).values(deleted_at=now)
     )
     await session.flush()
+
+
+def _requester_rows(tenant_id: uuid.UUID, platform: str, platform_user_id: str) -> Any:  # noqa: ANN401
+    return (
+        AgentPostedMessage.tenant_id == tenant_id,
+        AgentPostedMessage.platform == platform,
+        AgentPostedMessage.requester_platform_user_id == platform_user_id,
+    )
+
+
+async def count_requester(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, platform_user_id: str
+) -> int:
+    """How many recorded posts name this person as who asked (erasure preview)."""
+    count = await session.scalar(
+        select(func.count())
+        .select_from(AgentPostedMessage)
+        .where(*_requester_rows(tenant_id, platform, platform_user_id))
+    )
+    return count or 0
+
+
+async def clear_requester(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, platform_user_id: str
+) -> int:
+    """Erasure: drop a person's id from the posts recorded for their turns and threads.
+
+    The posts stay owned by their agent; with no requester, only a server admin
+    (or the opener of the thread they are in) can have them tidied.
+    """
+    result = await session.execute(
+        update(AgentPostedMessage)
+        .where(*_requester_rows(tenant_id, platform, platform_user_id))
+        .values(requester_platform_user_id=None)
+    )
+    await session.flush()
+    return cast(CursorResult[Any], result).rowcount
 
 
 async def prune_posts(session: AsyncSession, *, tenant_id: uuid.UUID, older_than: datetime) -> int:

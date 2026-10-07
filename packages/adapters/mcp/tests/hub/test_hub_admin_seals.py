@@ -22,10 +22,10 @@ import pytest
 from daimon.adapters.mcp.hub.app import build_hub_app
 from daimon.adapters.mcp.hub.claims import encode_hub_claims
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.channel_isolation import routine_origin
 from daimon.core.defaults.metadata import MA_METADATA_KEY_PRIVATE_DM
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.rule_views import routine_origin
 from daimon.core.session_seal import origin_stamp
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role

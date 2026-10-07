@@ -133,22 +133,22 @@ def test_any_other_agent_needs_a_server_admin_or_a_channel_admin_who_could_bind_
 def test_in_a_sealed_thread_a_channel_admin_cant_bring_in_an_outside_agent() -> None:
     sealed = TenantAccessPolicy(sealed_channel_ids=("C1",))
     channel_admin = Subject(platform_user_id="U1", administered_channel_ids=frozenset({"C1"}))
-    assert _hand_off(sealed, subject=channel_admin) == "sealed"
+    assert _hand_off(sealed, subject=channel_admin) == "not_a_reader"
     assert _hand_off(sealed, subject=Subject(is_admin=True, platform_user_id="U1")) is None
     assert _hand_off(sealed, answers_here=True) is None, "the channel's own agent still may"
     thread_sealed = TenantAccessPolicy(sealed_channel_ids=("C1:T1",))
-    assert _hand_off(thread_sealed, subject=channel_admin) == "sealed", "a Slack thread seal"
+    assert _hand_off(thread_sealed, subject=channel_admin) == "not_a_reader", "a Slack thread seal"
 
 
 def test_pins_isolation_protection_and_the_invoker_list_bind_admins_too() -> None:
     admin = Subject(is_admin=True, platform_user_id="U1")
     pinned_elsewhere = TenantAccessPolicy(agent_channel_pins={"research-bot": ("C9",)})
-    assert _hand_off(pinned_elsewhere, subject=admin) == "agent_pinned_elsewhere"
-    assert _hand_off(pinned_elsewhere, answers_here=True) == "agent_pinned_elsewhere"
+    assert _hand_off(pinned_elsewhere, subject=admin) == "runs_elsewhere"
+    assert _hand_off(pinned_elsewhere, answers_here=True) == "runs_elsewhere"
     isolated = TenantAccessPolicy(sealed_channel_ids=("C1",), isolated_channel_ids=("C1",))
-    assert _hand_off(isolated, subject=admin, answers_here=True) == "channel_isolated"
+    assert _hand_off(isolated, subject=admin, answers_here=True) == "own_agents_only"
     protected = TenantAccessPolicy(protected_channel_ids=("C1",))
-    assert _hand_off(protected, subject=admin, answers_here=True) == "channel_protected"
+    assert _hand_off(protected, subject=admin, answers_here=True) == "writers_none"
     invokers = TenantAccessPolicy(invoker_user_ids=("U2",))
     assert _hand_off(invokers, answers_here=True) == "invoker_not_allowed"
     assert _hand_off(invokers, subject=admin) is None, "admins are never locked out"
@@ -157,7 +157,7 @@ def test_pins_isolation_protection_and_the_invoker_list_bind_admins_too() -> Non
         isolated_channel_ids=("C9",),
         agent_channel_pins={"research-bot": ("C9",)},
     )
-    assert _hand_off(own_agent_out, subject=admin) == "agent_pinned_elsewhere", (
+    assert _hand_off(own_agent_out, subject=admin) == "runs_elsewhere", (
         "an isolated channel's own agent never leaves it"
     )
 
@@ -165,7 +165,7 @@ def test_pins_isolation_protection_and_the_invoker_list_bind_admins_too() -> Non
 def test_a_dm_scope_is_outside_every_pin() -> None:
     dm = Place.from_origin(parent_channel_id="D1", thread_id="dm:abc")
     pinned = TenantAccessPolicy(agent_channel_pins={"research-bot": ("C1",)})
-    assert _hand_off(pinned, place=dm, answers_here=True) == "agent_pinned_elsewhere"
+    assert _hand_off(pinned, place=dm, answers_here=True) == "runs_elsewhere"
     assert _hand_off(TenantAccessPolicy(), place=dm, answers_here=True) is None
 
 
@@ -245,13 +245,13 @@ async def test_a_member_switch_to_an_agent_pinned_here_binds_the_thread(
 @pytest.mark.parametrize(
     ("policy", "reason"),
     [
-        (TenantAccessPolicy(agent_channel_pins={"research-bot": ("C9",)}), "pinned_elsewhere"),
+        (TenantAccessPolicy(agent_channel_pins={"research-bot": ("C9",)}), "runs_elsewhere"),
         (
             TenantAccessPolicy(sealed_channel_ids=("C1",), isolated_channel_ids=("C1",)),
-            "channel_isolated",
+            "own_agents_only",
         ),
-        (TenantAccessPolicy(protected_channel_ids=("C1",)), "channel_protected"),
-        (TenantAccessPolicy(sealed_channel_ids=("C1",)), "sealed"),
+        (TenantAccessPolicy(protected_channel_ids=("C1",)), "writers_none"),
+        (TenantAccessPolicy(sealed_channel_ids=("C1",)), "not_a_reader"),
     ],
     ids=["pinned-elsewhere", "isolated", "protected", "sealed"],
 )
@@ -357,7 +357,7 @@ async def test_a_pin_committed_before_the_decision_refuses_the_switch(
         await _until_lock_wait(race_engine, await switcher_pid)
     with pytest.raises(ThreadHandoffRefused) as refused:
         await asyncio.wait_for(switching, 10)
-    assert refused.value.refusal.reason == "pinned_elsewhere"
+    assert refused.value.refusal.reason == "runs_elsewhere"
     assert await _binding(factory, tenant_id) is None, "nothing was switched"
 
 
@@ -675,7 +675,7 @@ async def test_a_channel_admin_cant_hand_a_once_sealed_session_to_an_outside_age
     if refused:
         with pytest.raises(ThreadHandoffRefused) as error:
             await switch()
-        assert error.value.refusal.reason == "sealed"
+        assert error.value.refusal.reason == "not_a_reader"
         assert await _binding(db_session_factory, tenant_id) is None
     else:
         await switch()
@@ -819,7 +819,7 @@ async def test_channel_admin_switch_refuses_unread_session_without_persisting_se
         now=_NOW,
     )
     assert not outcome.switched
-    assert "sealed" in outcome.text
+    assert "Only turns inside" in outcome.text
     assert await _binding(db_session_factory, tenant.id) is None
     async with db_session_factory() as session:
         unchanged = await get_thread_session_by_id(session, id=row.id)
@@ -866,7 +866,7 @@ async def test_channel_admin_switch_refuses_legacy_seal_without_a_channel(
         now=_NOW,
     )
     assert not outcome.switched
-    assert "sealed" in outcome.text
+    assert "Only turns inside" in outcome.text
     async with db_session_factory() as session:
         unchanged = await get_thread_session_by_id(session, id=row.id)
     assert unchanged is not None and unchanged.seal_ids is None

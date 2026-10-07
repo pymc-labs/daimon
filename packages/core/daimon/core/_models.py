@@ -38,6 +38,28 @@ class Base(DeclarativeBase):
     """Declarative base for all daimon-core ORM models."""
 
 
+class AgentAvatar(Base):
+    __tablename__ = "agent_avatars"
+    __table_args__ = (
+        CheckConstraint("source IN ('default', 'upload')", name="ck_agent_avatars_source"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    token: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    png: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Tenant(Base):
     __tablename__ = "tenants"
     __table_args__ = (
@@ -1366,6 +1388,11 @@ class GitHubAppInstallation(Base):
     installation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     account_login: Mapped[str] = mapped_column(Text, nullable=False)
     repo_full_names: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    account_id: Mapped[int | None] = mapped_column(BigInteger)
+    account_type: Mapped[str | None] = mapped_column(Text)
+    repository_selection: Mapped[str | None] = mapped_column(Text)
+    permissions: Mapped[dict[str, str] | None] = mapped_column(JSONB)
+    suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1591,6 +1618,33 @@ class TeamsInstallation(Base):
     installed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TeamsChannelSite(Base):
+    """A Teams channel's Files folder, on a SharePoint site granted to daimon.
+
+    Written when an admin turns files on from the channel: their sign-in finds
+    the folder, which `Sites.Selected` cannot. A private or shared channel's
+    folder is on a site of its own, so this row is the only way to it.
+    """
+
+    __tablename__ = "teams_channel_sites"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "channel_id", name="pk_teams_channel_sites"),
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_teams_channel_sites_tenants"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    channel_id: Mapped[str] = mapped_column(Text)
+    group_id: Mapped[str] = mapped_column(Text, nullable=False)
+    site_id: Mapped[str] = mapped_column(Text, nullable=False)
+    drive_id: Mapped[str] = mapped_column(Text, nullable=False)
+    folder_id: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1835,6 +1889,9 @@ class MessageFeedback(Base):
     ma_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     vote: Mapped[str] = mapped_column(Text, nullable=False)
     feedback_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Reason codes picked in the "What went wrong?" form
+    # (`daimon.core.message_feedback.FEEDBACK_REASONS`); NULL when none were.
+    feedback_reasons: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -2201,6 +2258,9 @@ class TurnOrigin(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Set by `archive_thread` on this turn's own thread; the adapter archives
+    # the thread after the turn's last post.
+    archive_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SessionPreparation(Base):
@@ -2396,6 +2456,200 @@ class TurnOutcome(Base):
     billing_posture: Mapped[str | None] = mapped_column(Text)
 
 
+class TenantGitHubRepo(Base):
+    __tablename__ = "tenant_github_repos"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "repo_id"),
+        CheckConstraint("max_access IN ('read', 'write')"),
+        CheckConstraint("status IN ('active', 'suspended', 'revoked')"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    repo_id: Mapped[int] = mapped_column(BigInteger)
+    owner_id: Mapped[int] = mapped_column(BigInteger)
+    installation_id: Mapped[int] = mapped_column(BigInteger)
+    repo_full_name: Mapped[str] = mapped_column(Text)
+    max_access: Mapped[str] = mapped_column(Text)
+    authorized_by_github_user_id: Mapped[int] = mapped_column(BigInteger)
+    authorized_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+    authorized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    status: Mapped[str] = mapped_column(Text, server_default="active")
+    status_reason: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, server_default="1")
+
+
+class GitHubConnectInvitation(Base):
+    __tablename__ = "github_connect_invitations"
+    token_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    requester_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE")
+    )
+    workspace_label: Mapped[str] = mapped_column(Text)
+    requester_label: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GitHubConnectFlow(Base):
+    __tablename__ = "github_connect_flows"
+    state_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    invitation_hash: Mapped[str] = mapped_column(
+        Text, ForeignKey("github_connect_invitations.token_hash", ondelete="CASCADE")
+    )
+    cookie_hash: Mapped[str] = mapped_column(Text)
+    encrypted_verifier: Mapped[bytes] = mapped_column(LargeBinary)
+    encrypted_user_token: Mapped[bytes | None] = mapped_column(LargeBinary)
+    github_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AgentGitHubGrant(Base):
+    __tablename__ = "agent_github_grants"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "repo_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "repo_id"],
+            ["tenant_github_repos.tenant_id", "tenant_github_repos.repo_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("baseline_access IN ('none', 'read', 'write')"),
+        CheckConstraint("ceiling_access IN ('read', 'write')"),
+        CheckConstraint(
+            "baseline_access = 'none' OR baseline_access = 'read' OR ceiling_access = 'write'"
+        ),
+    )
+    # max_access belongs to tenant_github_repos, so the grant-writing store
+    # must enforce ceiling_access <= max_access in the same transaction.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    repo_id: Mapped[int] = mapped_column(BigInteger)
+    baseline_access: Mapped[str] = mapped_column(Text)
+    ceiling_access: Mapped[str] = mapped_column(Text)
+    staged: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    mount_path: Mapped[str | None] = mapped_column(Text)
+    is_working_repo: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    granted_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    version: Mapped[int] = mapped_column(Integer, server_default="1")
+
+
+class GitHubNewRepoNotice(Base):
+    """A new installation repository awaiting a workspace-admin announcement."""
+
+    __tablename__ = "github_new_repo_notices"
+    __table_args__ = (PrimaryKeyConstraint("tenant_id", "installation_id", "repo_full_name"),)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    installation_id: Mapped[int] = mapped_column(BigInteger)
+    repo_full_name: Mapped[str] = mapped_column(Text)
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AgentGitHubMode(Base):
+    __tablename__ = "agent_github_mode"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id"),
+        CheckConstraint("mode IN ('legacy', 'app')"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    mode: Mapped[str] = mapped_column(Text, server_default="legacy")
+
+
+class GitHubUserLink(Base):
+    __tablename__ = "github_user_links"
+    __table_args__ = (CheckConstraint("status IN ('active', 'broken')"),)
+    github_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    login: Mapped[str] = mapped_column(Text)
+    encrypted_access_token: Mapped[bytes] = mapped_column(LargeBinary)
+    encrypted_refresh_token: Mapped[bytes | None] = mapped_column(LargeBinary)
+    access_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    refresh_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    token_generation: Mapped[int] = mapped_column(Integer, server_default="1")
+    link_generation: Mapped[int] = mapped_column(Integer, server_default="1")
+    status: Mapped[str] = mapped_column(Text, server_default="active")
+    linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AccountGitHubLink(Base):
+    __tablename__ = "account_github_links"
+    __table_args__ = (
+        CheckConstraint("verified_via IN ('discord_oauth', 'slack_oidc', 'auto_attach_discord')"),
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    github_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("github_user_links.github_user_id", ondelete="CASCADE")
+    )
+    platform: Mapped[str] = mapped_column(Text)
+    platform_user_id: Mapped[str] = mapped_column(Text)
+    verified_via: Mapped[str] = mapped_column(Text)
+    linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GitHubIssuedToken(Base):
+    __tablename__ = "github_issued_tokens"
+    __table_args__ = (CheckConstraint("status IN ('pending', 'stored', 'delivered', 'revoked')"),)
+    token_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    # Tenant deletion must revoke live installation tokens before this row cascades.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    session_id: Mapped[str] = mapped_column(Text)
+    installation_id: Mapped[int] = mapped_column(BigInteger)
+    repo_ids: Mapped[list[int]] = mapped_column(ARRAY(BigInteger))
+    permissions: Mapped[dict[str, str]] = mapped_column(JSONB)
+    grant_versions: Mapped[dict[str, int]] = mapped_column(JSONB)
+    requester_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+    github_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    link_generation: Mapped[int | None] = mapped_column(Integer)
+    encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(Text, server_default="pending")
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoke_attempts: Mapped[int] = mapped_column(Integer, server_default="0")
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoke_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GitHubAppSessionVault(Base):
+    __tablename__ = "github_app_session_vaults"
+
+    session_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    vault_id: Mapped[str] = mapped_column(Text)
+    is_unmapped: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SecurityAuditEvent(Base):
     """Append-only security metadata with dedicated erasure and retention maintenance."""
 
@@ -2432,6 +2686,14 @@ class SecurityAuditEvent(Base):
     token_kind: Mapped[str | None] = mapped_column(Text)
     token_jti: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     scope: Mapped[str | None] = mapped_column(Text)
+    github_token_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    github_session_id: Mapped[str | None] = mapped_column(Text)
+    github_installation_id: Mapped[int | None] = mapped_column(BigInteger)
+    github_repo_ids: Mapped[list[int] | None] = mapped_column(ARRAY(BigInteger))
+    github_permissions: Mapped[dict[str, str] | None] = mapped_column(JSONB)
+    github_grant_versions: Mapped[dict[str, int] | None] = mapped_column(JSONB)
+    github_turn_origin_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    github_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Set only by the channel tidy tools: which message an edit or delete
     # touched, a keyed HMAC of the text it replaced, and the turn it ran in.
     target_channel_id: Mapped[str | None] = mapped_column(Text)
@@ -2441,11 +2703,14 @@ class SecurityAuditEvent(Base):
 
 
 class AgentPostedMessage(Base):
-    """A message or thread an agent posted through the channel tools.
+    """A message or thread an agent posted.
 
-    Written at send time by `send_message` and `create_thread`; the channel
-    tidy tools edit or delete only what this table says the calling agent
-    posted. Holds ids and a keyed HMAC of the text, never the text itself.
+    Written at send time by `send_message` and `create_thread` (`source='tool'`),
+    and by chat adapters for a turn's status cards, answers and notices
+    (`source='turn'`) and the thread it opens from a mention
+    (`source='auto_thread'`). The channel tidy tools edit or delete only what
+    this table says the calling agent posted. Holds ids and a keyed HMAC of
+    the text, never the text itself.
     `channel_id` is where the message lives (a Discord thread id for a
     message in a thread); a Discord thread is its own row with
     `kind='thread'`, the parent channel as `channel_id` and the thread id as
@@ -2462,6 +2727,13 @@ class AgentPostedMessage(Base):
             name="uq_agent_posted_messages_target",
         ),
         CheckConstraint("kind IN ('message', 'thread')", name="ck_agent_posted_messages_kind"),
+        CheckConstraint(
+            "source IN ('tool', 'turn', 'auto_thread')", name="ck_agent_posted_messages_source"
+        ),
+        CheckConstraint(
+            "source <> 'turn' OR turn_card_intent_id IS NOT NULL",
+            name="ck_agent_posted_messages_turn_intent",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -2478,6 +2750,12 @@ class AgentPostedMessage(Base):
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     content_hmac: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'tool'"))
+    # The person whose message started the turn (`turn`) or whose mention
+    # opened the thread (`auto_thread`). NULL for tool posts.
+    requester_platform_user_id: Mapped[str | None] = mapped_column(Text)
+    # The turn that posted a `turn` row; no FK, intents are pruned once retired.
+    turn_card_intent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     posted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

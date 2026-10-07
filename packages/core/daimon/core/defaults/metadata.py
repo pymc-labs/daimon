@@ -39,9 +39,9 @@ MA_METADATA_KEY_ACCOUNT = "daimon_account"
 MA_METADATA_KEY_MANAGED = "daimon_managed"
 MA_METADATA_KEY_SPEC_HASH = "daimon_spec_hash"
 MA_METADATA_KEY_ISOLATED = "daimon_isolated"
-# Stamped on the copy `set_channel_isolation` makes, with the channel it was
-# made for, so `archive_isolation_copy` archives only such copies.
-MA_METADATA_KEY_ISOLATION_COPY = "daimon_isolation_copy"
+# Stamped on the copy `set_channel_rule` makes, with the channel it was
+# made for, so `archive_channel_copy` archives only such copies.
+MA_METADATA_KEY_CHANNEL_COPY = "daimon_isolation_copy"
 # Stamped on a reader variant (see `daimon.core.reader_agent`) with the
 # source agent's spec-hash-or-fallback fingerprint, so a subsequent publish
 # can tell "unchanged source, reuse the variant" from "source moved, update

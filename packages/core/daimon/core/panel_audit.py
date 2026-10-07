@@ -27,7 +27,7 @@ __all__ = ["PanelOp", "PanelOutcome", "record_panel_write"]
 log = structlog.get_logger(__name__)
 
 PanelOp = Literal[
-    "isolation",
+    "channel_rule",
     "channel_admins",
     "environment",
     "channel_skills",

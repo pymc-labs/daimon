@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Annotated, Final, cast
 
 import typer
+from daimon.adapters.cli.commands.channels import agent_rule_app
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import GUILD_OPTION, JSON_OPTION, TENANT_OPTION, YES_OPTION
 from daimon.adapters.cli.output import emit_rows
@@ -48,7 +49,8 @@ from daimon.core.stores.tenants import list_tenants_by_platform
 from pydantic import BaseModel
 from rich.console import Console
 
-agents_app = typer.Typer(help="Agents: create, list, get, update, archive, fork.")
+agents_app = typer.Typer(help="Agents: create, list, get, update, archive, fork, rule.")
+agents_app.add_typer(agent_rule_app, name="rule")
 
 
 @agents_app.callback()
@@ -427,6 +429,7 @@ async def agents_archive(
     # rather than degrade silently.
     async with rt.sessionmaker.begin() as session:
         await clear_agent_references(session, tenant_id=tenant_id, agent_name=name)
+
     console.print(f"[green]✓ archived agent {name!r}[/green]")
 
 

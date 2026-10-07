@@ -30,6 +30,7 @@ from daimon.core.errors import SlackOAuthError
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.slack_customize_scope import clear_missing_customize_scope
 from daimon.core.slack_oauth import (
     SLACK_BOT_SCOPES,
     SLACK_USER_SCOPES,
@@ -293,6 +294,13 @@ def _page(
 </body>
 </html>"""
     return HTMLResponse(doc, status_code=status)
+
+
+def render_branded_page(
+    *, title: str, state_bar: str, body_html: str, status: int = 200
+) -> HTMLResponse:
+    """Public page renderer shared by browser authorization flows."""
+    return _page(title=title, state_bar=state_bar, body_html=body_html, status=status)
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +697,7 @@ def build_oauth_slack_routes(
                 expires_at=expires_at,
                 refresh_token=encrypted_refresh,
             )
+        clear_missing_customize_scope(result.access_token)
         # A reinstall after an uninstall finds its tenant soft-archived, and
         # provision_tenant leaves an existing row alone. Clear it only after
         # the token is stored: teardown locks the tenant row and skips when

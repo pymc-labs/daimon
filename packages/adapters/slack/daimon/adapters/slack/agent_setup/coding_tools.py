@@ -46,7 +46,7 @@ from daimon.core.mcp_auth import (
     token_jti,
 )
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
-from daimon.core.permissions import any_pinned
+from daimon.core.permissions import any_agent_rules
 from daimon.core.roster import RosterAgent
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -74,7 +74,7 @@ TOKEN_REVOKED_MESSAGE: Final[str] = "Token revoked."
 def _needs_admin_message(agent_name: str) -> str:
     return (
         f"Minting an access token for {agent_name} needs a workspace admin, or channel "
-        "admin of every channel it is pinned to, pressed inside one of them. "
+        "admin of every channel its rule runs it in, pressed inside one of them. "
         "Ask an admin to open Details and use this button."
     )
 
@@ -102,7 +102,7 @@ def render_coding_tools_message(
         agent_name=agent_name, public_url=public_url, jwt=jwt
     )
     bound = (
-        f"\nIt runs in <#{channel_id}>, under that channel's pins, seal and budget."
+        f"\nIt runs in <#{channel_id}>, under that channel's rules and budget."
         if channel_id is not None
         else ""
     )
@@ -377,7 +377,7 @@ async def _authorize_mint(
             session, tenant_id=tenant_id, platform="slack", caller=caller
         )
     agent = AgentRef.of(target.name)
-    if channel_id is not None and any_pinned(policy):
+    if channel_id is not None and any_agent_rules(policy):
         ma_agent = await runtime.anthropic.beta.agents.retrieve(target.ma_agent_id)
         agent = build_agent_ref(ma_agent.name, ma_agent.metadata, target.name)
     return authorize_coding_token(policy, subject=subject, agent=agent, channel_id=channel_id)

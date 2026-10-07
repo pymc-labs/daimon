@@ -20,6 +20,10 @@ from daimon.adapters.mcp.tools.slack._client import (
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
     slack_web_client,
 )
+from daimon.adapters.mcp.tools.slack._send import (
+    _agent_identity_kwargs,  # pyright: ignore[reportPrivateUsage]
+    _post_with_identity,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.teams._direct import teams_direct_message
 from daimon.core.config import DirectMessagePolicy
 from fastmcp.exceptions import ToolError
@@ -108,8 +112,11 @@ async def send_direct_message_impl(
                 )
         opened = await client.conversations_open(users=recipient_id)  # pyright: ignore[reportUnknownMemberType]
         channel = cast(dict[str, str], opened["channel"])["id"]
+        identity_kwargs = await _agent_identity_kwargs(runtime, auth)
         for chunk in chunks:
-            response = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+            response = await _post_with_identity(
+                client,
+                identity_kwargs,
                 channel=channel,
                 text=chunk,
                 mrkdwn=False,

@@ -1059,7 +1059,7 @@ async def test_create_routine_refuses_a_channel_in_a_protected_category(
     from daimon.core.access_policy import TenantAccessPolicy
 
     _discord_channels(monkeypatch, {1234: _text_channel(category_id=77)})
-    with pytest.raises(ToolError, match="protected channel"):
+    with pytest.raises(ToolError, match="lets nobody write there"):
         await _create(
             committing_sessionmaker,
             db_session,
@@ -1411,7 +1411,9 @@ async def test_create_routine_refuses_a_pinned_agent_without_a_pinned_destinatio
     runtime = _runtime(committing_sessionmaker, client=client)
     auth = _auth_identity(platform="discord", external_id="guild_pin", tenant_id=tenant.id)
 
-    with pytest.raises(ToolError, match="pinned to specific channels"):
+    with pytest.raises(
+        ToolError, match="agent rule limiting where it runs|runs it only in certain channels"
+    ):
         await _create_routine_impl(
             runtime,
             auth,
@@ -1577,7 +1579,9 @@ async def test_update_routine_refuses_moving_a_pinned_agent_out_of_its_channels(
     runtime = _runtime(committing_sessionmaker, client=client)
     admin = _auth_identity(tenant_id=tenant.id, is_admin=True)
 
-    with pytest.raises(ToolError, match="pinned to specific channels"):
+    with pytest.raises(
+        ToolError, match="agent rule limiting where it runs|runs it only in certain channels"
+    ):
         if pinned_routine:
             await _update_routine_impl(
                 runtime, admin, routine_id=created.id, clear_destination=True
@@ -1615,7 +1619,9 @@ async def test_create_routine_checks_the_pin_on_every_name_of_the_resolved_agent
         committing_sessionmaker, client=_ma_client_with_agents([_display_named_agent(tenant.id)])
     )
 
-    with pytest.raises(ToolError, match="pinned to specific channels"):
+    with pytest.raises(
+        ToolError, match="agent rule limiting where it runs|runs it only in certain channels"
+    ):
         await _create_routine_impl(
             runtime,
             _auth_identity(tenant_id=tenant.id, is_admin=True),
@@ -1653,7 +1659,9 @@ async def test_update_routine_checks_the_pin_on_the_existing_agents_display_name
         committing_sessionmaker, client=_ma_client_with_agents([_display_named_agent(tenant.id)])
     )
 
-    with pytest.raises(ToolError, match="pinned to specific channels"):
+    with pytest.raises(
+        ToolError, match="agent rule limiting where it runs|runs it only in certain channels"
+    ):
         await _update_routine_impl(
             runtime,
             _auth_identity(tenant_id=tenant.id, is_admin=True),

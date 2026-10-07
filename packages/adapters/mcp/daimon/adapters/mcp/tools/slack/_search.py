@@ -22,10 +22,11 @@ from daimon.adapters.mcp.tools.slack._client import (
     build_connect_hint,
     slack_read_client,
 )
+from daimon.adapters.mcp.tools.slack._files import file_url_minter, to_file_rows
 from daimon.adapters.mcp.tools.slack._leak_policy import get_destination, is_dm_destination
 from daimon.adapters.mcp.tools.slack._models import SlackSearchMatch, SlackSearchResult
 from daimon.adapters.mcp.tools.slack._visibility import map_slack_api_error
-from daimon.core.permissions import any_sealed
+from daimon.core.permissions import any_readers_limited
 from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
 
@@ -57,6 +58,7 @@ async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
         raise ToolError("slack search needs the user's connected account" + (hint or ""))
     destination = await get_destination(runtime, auth, now=datetime.now(tz=UTC))
     dm_ok = is_dm_destination(destination)
+    files = file_url_minter(runtime, team_id=team_id, now=int(time.time()))
     try:
         resp = await rc.client.search_messages(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             query=content, count=min(limit, _SEARCH_LIMIT_CAP)
@@ -88,9 +90,10 @@ async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
                 username=str(m["username"]) if m.get("username") else None,
                 text=str(m.get("text", "")),
                 permalink=str(m["permalink"]) if m.get("permalink") else None,
+                files=to_file_rows(cast(list[dict[str, Any]], m.get("files") or []), files),
             )
         )
-    if any_sealed(read_policy.policy):
+    if any_readers_limited(read_policy.policy):
         # Slack's total counts every page, sealed hits included, so it would
         # answer "does the sealed channel mention X?". Report only what is
         # shown, as Discord does for unscoped searches.

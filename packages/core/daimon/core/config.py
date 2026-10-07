@@ -493,6 +493,20 @@ class SlackSettings(BaseModel):
             "starving others on the shared Anthropic key."
         ),
     )
+    history_page_limit: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+        description=(
+            "Messages requested per conversations.replies call when replaying "
+            "thread history. Slack clamps this per workspace: an app "
+            "commercially distributed outside the Marketplace gets 15 whatever "
+            "it asks for, an internal-app install gets the full page up to "
+            "1000, which is also the largest value Slack accepts. The default "
+            "matches the 100 messages Discord replays; every replayed message "
+            "is first-turn context the model pays for."
+        ),
+    )
     health_port: int = Field(
         default=8083,
         description=(
@@ -585,7 +599,7 @@ class TeamsSettings(BaseModel):
         description=(
             "When True, guests (Entra B2B guest accounts in this tenant) are "
             "treated as people from another organisation: answered only in a "
-            "confidential channel, with a few conversation tools and no commands or "
+            "channel kept to its own agents, with a few conversation tools and no commands or "
             "admin role. The tenant access policy's member guest list exempts "
             "some. When False, guests are treated as team members."
         ),
@@ -595,7 +609,7 @@ class TeamsSettings(BaseModel):
         description=(
             "When True, a shared channel's external participants (people from "
             "another tenant, via B2B direct connect) are answered only in a "
-            "confidential channel, with a few conversation tools and no commands or "
+            "channel kept to its own agents, with a few conversation tools and no commands or "
             "admin role. When False, they are treated as team members."
         ),
     )
@@ -627,6 +641,40 @@ class TeamsSettings(BaseModel):
             raise ValueError(
                 "DAIMON_TEAMS__TENANT_ID must be the Entra directory tenant's UUID"
             ) from None
+
+
+def decode_github_app_private_key(value: object) -> object:
+    """Accept raw PEM or base64-encoded PEM for both App settings groups."""
+    if value is None:
+        return value
+    raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+    if not isinstance(raw, str) or "-----BEGIN" in raw:
+        return value
+    try:
+        decoded = base64.b64decode(raw, validate=True).decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return value
+    return decoded if "-----BEGIN" in decoded else value
+
+
+def validate_github_app_slug(value: str | None) -> str | None:
+    """Require GitHub's URL slug shape before building an installation link."""
+    if value is None:
+        return value
+    if (
+        not value
+        or not all(char.isascii() and (char.isalnum() or char == "-") for char in value)
+        or value.startswith("-")
+        or value.endswith("-")
+        or len(value) > 100
+    ):
+        shown = value if len(value) <= 40 else f"{value[:40]}...(truncated)"
+        raise ValueError(
+            f"app_slug must be a non-empty string of ASCII letters, digits and "
+            f"hyphens, with no leading or trailing hyphen and at most 100 "
+            f"characters; got shape of: {shown!r}"
+        )
+    return value
 
 
 class GithubSettings(BaseModel):
@@ -707,54 +755,43 @@ class GithubSettings(BaseModel):
     @field_validator("app_private_key", mode="before")
     @classmethod
     def _decode_base64_private_key(cls, value: object) -> object:
-        """Accept the RSA private key as raw PEM or base64-encoded PEM.
-
-        Multi-line PEM survives env delivery on Fly and Cloud Run, but the GCP
-        worker VM loads secrets through docker-compose ``env_file``, whose
-        format cannot represent multi-line values. base64 is single-line (its
-        alphabet has no dashes), so a ``-----BEGIN`` check distinguishes raw
-        PEM from a base64-encoded PEM. A value that is neither is passed through
-        untouched to fail loudly downstream rather than be silently mangled.
-        """
-        if value is None:
-            return value
-        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
-        if not isinstance(raw, str) or "-----BEGIN" in raw:
-            return value
-        try:
-            decoded = base64.b64decode(raw, validate=True).decode("utf-8")
-        except (binascii.Error, ValueError, UnicodeDecodeError):
-            return value
-        return decoded if "-----BEGIN" in decoded else value
+        return decode_github_app_private_key(value)
 
     @field_validator("app_slug")
     @classmethod
     def _validate_app_slug(cls, value: str | None) -> str | None:
-        """Reject anything outside a GitHub App slug's real shape.
+        return validate_github_app_slug(value)
 
-        The slug is interpolated into a URL that is shown to users and
-        clicked, so a typo or a pasted URL fragment must fail at settings
-        load rather than produce a link that goes somewhere unintended.
-        This is the mitigation for this deployment's phishing-shaped
-        threat: the URL is built from configuration only, and the
-        configuration is validated here.
-        """
-        if value is None:
-            return value
-        if (
-            not value
-            or not all(char.isascii() and (char.isalnum() or char == "-") for char in value)
-            or value.startswith("-")
-            or value.endswith("-")
-            or len(value) > 100
-        ):
-            shown = value if len(value) <= 40 else f"{value[:40]}...(truncated)"
-            raise ValueError(
-                f"app_slug must be a non-empty string of ASCII letters, digits and "
-                f"hyphens, with no leading or trailing hyphen and at most 100 "
-                f"characters; got shape of: {shown!r}"
-            )
-        return value
+
+class GithubAppSettings(BaseModel):
+    """Credentials for agent-scoped GitHub App access."""
+
+    app_id: str | None = Field(default=None, description="GitHub App ID for agent-scoped access.")
+    app_slug: str | None = Field(
+        default=None, description="GitHub App URL slug used for installation links."
+    )
+    private_key: SecretStr | None = Field(
+        default=None, description="GitHub App private key as PEM or base64-encoded PEM."
+    )
+    webhook_secret: SecretStr | None = Field(
+        default=None, description="Secret for verifying this App's webhook signatures."
+    )
+    client_id: str | None = Field(
+        default=None, description="GitHub App client ID for user authorization."
+    )
+    client_secret: SecretStr | None = Field(
+        default=None, description="GitHub App client secret for user authorization."
+    )
+
+    @field_validator("private_key", mode="before")
+    @classmethod
+    def _decode_private_key(cls, value: object) -> object:
+        return decode_github_app_private_key(value)
+
+    @field_validator("app_slug")
+    @classmethod
+    def _validate_slug(cls, value: str | None) -> str | None:
+        return validate_github_app_slug(value)
 
 
 class CryptoSettings(BaseModel):
@@ -1009,7 +1046,7 @@ class SupportSettings(BaseModel):
         default=None,
         description=(
             "Slack channel id where human-support requests from Slack are "
-            "posted. Unset (the default) disables the Ask a human button on "
+            "posted. Unset (the default) disables the Ask the team button on "
             "Slack. Slack requests never go to the Discord channel, nor Discord "
             "requests here. The bot must be a member of the channel."
         ),
@@ -1193,6 +1230,7 @@ class Settings(BaseSettings):
     slack: SlackSettings | None = None
     teams: TeamsSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)
+    github_app: GithubAppSettings = Field(default_factory=GithubAppSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)

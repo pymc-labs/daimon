@@ -110,9 +110,9 @@ _BY_DENIAL: dict[str, TerminationReason] = {
     "balance_depleted": TerminationReason.ADMISSION_BALANCE_DEPLETED,
     "cap_exceeded": TerminationReason.ADMISSION_CAP_EXCEEDED,
     "channel_budget_exceeded": TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
-    "channel_protected": TerminationReason.ADMISSION_CHANNEL_PROTECTED,
-    "agent_pinned_elsewhere": TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE,
-    "channel_isolated": TerminationReason.ADMISSION_CHANNEL_ISOLATED,
+    "writers_none": TerminationReason.ADMISSION_CHANNEL_PROTECTED,
+    "runs_elsewhere": TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE,
+    "own_agents_only": TerminationReason.ADMISSION_CHANNEL_ISOLATED,
 }
 
 

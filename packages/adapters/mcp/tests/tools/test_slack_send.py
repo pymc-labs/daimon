@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
+from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock
 
+import aiohttp
+import httpx
 import pytest
 from aioresponses import aioresponses
 from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy
+from daimon.adapters.mcp.tools._tidy import PostRecord
+from daimon.adapters.mcp.tools.slack import _send
 from daimon.adapters.mcp.tools.slack._send import (  # pyright: ignore[reportPrivateUsage]
     _slack_create_thread_impl,
     _slack_send_message_impl,
@@ -29,13 +37,17 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.github_credentials import build_multifernet, encrypt_token
+from daimon.core.output_delivery import MAX_BYTES_PER_FILE
 from daimon.core.scope import DeploymentDefault
+from daimon.core.slack_file_token import mint_file_token
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
+from daimon.core.stores.file_uploads import create_upload, store_upload_content
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.testing.factories import make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
+from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
@@ -46,8 +58,43 @@ _CONVERSATIONS_MEMBERS = re.compile(r"https://slack\.com/api/conversations\.memb
 _USERS_INFO = re.compile(r"https://slack\.com/api/users\.info.*")
 _CHAT_POST_MESSAGE = "https://slack.com/api/chat.postMessage"
 _POST_KEY = ("POST", URL(_CHAT_POST_MESSAGE))
+_GET_UPLOAD_URL = re.compile(r"https://slack\.com/api/files\.getUploadURLExternal.*")
+_UPLOAD = re.compile(r"https://files\.slack\.com/upload/v1/.*")
+_COMPLETE_UPLOAD = re.compile(r"https://slack\.com/api/files\.completeUploadExternal.*")
+_FILES_INFO = re.compile(r"https://slack\.com/api/files\.info.*")
+_ROOT_SHARE_IN_C1 = {"C1": [{"ts": "1690000000.000100"}]}
 
 _FULL_MEMBER = {"ok": True, "user": {"id": "U_CALLER", "is_restricted": False}}
+
+
+@pytest.mark.asyncio
+async def test_post_message_passes_agent_header_and_falls_back_only_for_customize_scope() -> None:
+    client = AsyncWebClient(token="xoxb-agent-identity-test")
+    _send._NO_CUSTOMIZE_SCOPE.clear()  # pyright: ignore[reportPrivateUsage]
+    with aioresponses() as mock:
+        mock.post(
+            _CHAT_POST_MESSAGE,
+            payload={"ok": False, "error": "missing_scope", "needed": "chat:write.customize"},
+        )  # pyright: ignore[reportUnknownMemberType]
+        mock.post(_CHAT_POST_MESSAGE, payload={"ok": True, "ts": "1.000001"}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        await _send._post_message(  # pyright: ignore[reportPrivateUsage]
+            client,
+            channel_id="C1",
+            content="hello",
+            thread_ts="1.000000",
+            identity_kwargs={"username": "Ada", "icon_url": "https://example.test/ada.png"},
+        )
+        await _send._post_message(  # pyright: ignore[reportPrivateUsage]
+            client,
+            channel_id="C1",
+            content="again",
+            thread_ts="1.000000",
+            identity_kwargs={"username": "Ada"},
+        )
+    posts = mock.requests[_POST_KEY]
+    assert posts[0].kwargs["json"]["username"] == "Ada"
+    assert posts[0].kwargs["json"]["icon_url"] == "https://example.test/ada.png"
+    assert all("username" not in post.kwargs["json"] for post in posts[1:])
 
 
 def _auth(**overrides: object) -> AuthIdentity:
@@ -63,7 +110,18 @@ def _auth(**overrides: object) -> AuthIdentity:
     return AuthIdentity(**base)  # type: ignore[arg-type]  # test kwargs are shape-correct
 
 
-def _build_settings(*, fernet_key: SecretStr) -> Settings:
+_FILE_PROXY_SECRET = "file-proxy-secret"
+_APP_ROOT = "https://mcp.example.com"
+
+
+def _build_settings(*, fernet_key: SecretStr, file_proxy: bool = False) -> Settings:
+    mcp = (
+        McpSettings(
+            public_url=HttpUrl(f"{_APP_ROOT}/mcp"), jwt_secret=SecretStr(_FILE_PROXY_SECRET)
+        )
+        if file_proxy
+        else McpSettings()
+    )
     return Settings(
         database=DatabaseSettings(
             url=PostgresDsn("postgresql+asyncpg://daimon:daimon@localhost:5432/daimon"),
@@ -74,13 +132,15 @@ def _build_settings(*, fernet_key: SecretStr) -> Settings:
         ),
         crypto=CryptoSettings(keys=(fernet_key,)),
         credentials=CredentialsSettings(google_sa_json=None),
-        mcp=McpSettings(),
+        mcp=mcp,
         slack=None,
     )
 
 
 async def _make_runtime(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    file_proxy: bool = False,
 ) -> McpRuntime:
     fernet_key = SecretStr(Fernet.generate_key().decode("ascii"))
     fernet = build_multifernet((fernet_key.get_secret_value(),))
@@ -92,7 +152,7 @@ async def _make_runtime(
     return McpRuntime(
         session_factory=committing_sessionmaker,
         client=MagicMock(spec=AsyncAnthropic),
-        settings=_build_settings(fernet_key=fernet_key),
+        settings=_build_settings(fernet_key=fernet_key, file_proxy=file_proxy),
         deployment_default=DeploymentDefault(),
         fernet=fernet,
     )
@@ -104,6 +164,85 @@ def _mock_public_channel_access(m: aioresponses) -> None:
         payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
     )
     m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+
+
+def _mock_file_shares(
+    m: aioresponses,
+    *,
+    public: dict[str, list[dict[str, str]]] | None = None,
+    private: dict[str, list[dict[str, str]]] | None = None,
+) -> None:
+    """files.info as the repost source check reads it: where Slack shows the file."""
+    m.get(  # pyright: ignore[reportUnknownMemberType]
+        _FILES_INFO,
+        payload={
+            "ok": True,
+            "file": {"id": "F_CHART", "shares": {"public": public or {}, "private": private or {}}},
+        },
+    )
+
+
+def _recorded(m: aioresponses, path_fragment: str) -> list[tuple[URL, dict[str, Any]]]:
+    """Every recorded (url, kwargs) whose url contains the fragment, in call order."""
+    return [
+        (url, call.kwargs)  # pyright: ignore[reportUnknownMemberType]
+        for (_, url), calls in m.requests.items()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        if path_fragment in str(url)
+        for call in calls  # pyright: ignore[reportUnknownVariableType]
+    ]
+
+
+def _mock_upload_flow(m: aioresponses) -> None:
+    m.post(  # pyright: ignore[reportUnknownMemberType]
+        _GET_UPLOAD_URL,
+        payload={
+            "ok": True,
+            "file_id": "F1",
+            "upload_url": "https://files.slack.com/upload/v1/ABC",
+        },
+    )
+    m.post(_UPLOAD, status=200, body="OK", content_type="text/plain")  # pyright: ignore[reportUnknownMemberType]
+    m.post(  # pyright: ignore[reportUnknownMemberType]
+        _COMPLETE_UPLOAD, payload={"ok": True, "files": [{"id": "F1", "title": "chart.png"}]}
+    )
+
+
+async def _stage_uploads(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    payloads: list[bytes],
+) -> list[str]:
+    """Mint and fill upload rows for the caller's tenant, creating the tenant."""
+    now = datetime.now(UTC)
+    handles: list[str] = []
+    async with committing_sessionmaker() as session:
+        await make_tenant(session, platform="slack", workspace_id="T_TEST", id=tenant_id)
+        for payload in payloads:
+            row, token = await create_upload(
+                session,
+                tenant_id=tenant_id,
+                title="chart",
+                display_filename="chart.png",
+                content_type="image/png",
+                now=now,
+            )
+            await store_upload_content(session, upload_token=token, data=payload, now=now)
+            handles.append(row.id)
+        await session.commit()
+    return handles
+
+
+async def _stage_upload(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    payload: bytes,
+) -> str:
+    (handle,) = await _stage_uploads(
+        committing_sessionmaker, tenant_id=tenant_id, payloads=[payload]
+    )
+    return handle
 
 
 def _post_body(m: aioresponses) -> dict[str, object]:
@@ -403,14 +542,51 @@ async def test_send_message_over_12000_chars_refused_with_zero_api_calls(
         assert m.requests == {}, "an over-length call must cost zero Slack API calls"
 
 
+def _file_link(*, team_id: str = "T_TEST", file_id: str = "F_CHART", exp_offset: int = 3600) -> str:
+    token = mint_file_token(
+        team_id=team_id,
+        file_id=file_id,
+        exp=int(datetime.now(UTC).timestamp()) + exp_offset,
+        secret=_FILE_PROXY_SECRET,
+    )
+    return f"{_APP_ROOT}/slack/file/{token}"
+
+
+def _slack_file_transport(
+    payload: bytes, *, seen: list[str] | None = None, advertised_size: int | None = None
+) -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer xoxb-secret", (
+            "the fetch must authenticate with the workspace bot token"
+        )
+        if seen is not None:
+            seen.append(str(request.url))
+        if request.url.path.endswith("/files.info"):
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "file": {
+                        "url_private_download": "https://files.slack.com/F_CHART/dl",
+                        "mimetype": "image/png",
+                        "name": "original.png",
+                        "size": advertised_size,
+                    },
+                },
+            )
+        return httpx.Response(200, content=payload)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
 @pytest.mark.asyncio
-async def test_send_message_attachments_refused_naming_files_write_no_api_calls(
+async def test_send_message_external_url_attachment_refused_naming_file_links_no_api_calls(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    runtime = await _make_runtime(committing_sessionmaker)
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
     auth = _auth()
     with aioresponses() as m:
-        with pytest.raises(ToolError, match="files:write"):
+        with pytest.raises(ToolError, match="slack/file"):
             await _slack_send_message_impl(
                 runtime,
                 auth,
@@ -423,22 +599,629 @@ async def test_send_message_attachments_refused_naming_files_write_no_api_calls(
 
 
 @pytest.mark.asyncio
-async def test_send_message_file_handles_refused_naming_files_write_no_api_calls(
+async def test_send_message_file_link_for_another_workspace_refused_no_api_calls(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    runtime = await _make_runtime(committing_sessionmaker)
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
     auth = _auth()
     with aioresponses() as m:
-        with pytest.raises(ToolError, match="files:write"):
+        with pytest.raises(ToolError, match="another workspace"):
             await _slack_send_message_impl(
                 runtime,
                 auth,
                 channel_id="C1",
                 content="hi",
+                attachments=[{"url": _file_link(team_id="T_OTHER"), "filename": "f.png"}],
+                file_handles=None,
+            )
+        assert m.requests == {}, "a link minted for another install must relay nothing"
+
+
+@pytest.mark.asyncio
+async def test_send_message_expired_file_link_refused_no_api_calls(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
+    auth = _auth()
+    with aioresponses() as m:
+        with pytest.raises(ToolError, match="expired"):
+            await _slack_send_message_impl(
+                runtime,
+                auth,
+                channel_id="C1",
+                content="hi",
+                attachments=[{"url": _file_link(exp_offset=-1), "filename": "f.png"}],
+                file_handles=None,
+            )
+        assert m.requests == {}
+
+
+@pytest.mark.asyncio
+async def test_send_message_file_link_attachment_is_fetched_with_the_bot_token_and_reposted(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
+    auth = _auth()
+    payload = bytes(range(256)) * 4
+    seen: list[str] = []
+    http_client = _slack_file_transport(payload, seen=seen)
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        _mock_file_shares(m, public=_ROOT_SHARE_IN_C1)
+        _mock_public_channel_access(m)
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            _CHAT_POST_MESSAGE, payload={"ok": True, "ts": "1700000001.000100"}
+        )
+        _mock_upload_flow(m)
+        row = await _slack_send_message_impl(
+            runtime,
+            auth,
+            channel_id="C1",
+            content="reposting",
+            attachments=[{"url": _file_link(), "filename": "chart.png"}],
+            file_handles=None,
+            http_client=http_client,
+        )
+        get_url = _recorded(m, "getUploadURLExternal")
+        upload = _recorded(m, "files.slack.com")
+    await http_client.aclose()
+
+    assert row.ts == "1700000001.000100"
+    assert any("file=F_CHART" in url for url in seen), "the fetch names the file from the token"
+    assert upload[0][1]["data"] == payload, "fetched bytes must reach the upload byte-identical"
+    assert get_url[0][1]["params"]["filename"] == "chart.png", (
+        "the caller's filename wins over the original upload name"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_oversized_file_link_refused_before_posting(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
+    auth = _auth()
+    http_client = _slack_file_transport(b"x" * (MAX_BYTES_PER_FILE + 1))
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        _mock_file_shares(m, public=_ROOT_SHARE_IN_C1)
+        _mock_public_channel_access(m)
+        with pytest.raises(ToolError, match="MiB"):
+            await _slack_send_message_impl(
+                runtime,
+                auth,
+                channel_id="C1",
+                content="big",
+                attachments=[{"url": _file_link(), "filename": "big.bin"}],
+                file_handles=None,
+                http_client=http_client,
+            )
+        assert _POST_KEY not in m.requests, (
+            "an oversized file must be refused before the text posts"
+        )
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_send_message_large_file_metadata_refuses_before_downloading(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
+    auth = _auth()
+    seen: list[str] = []
+    async with _slack_file_transport(
+        b"small", seen=seen, advertised_size=MAX_BYTES_PER_FILE + 1
+    ) as http_client:
+        with aioresponses() as m:
+            _mock_public_channel_access(m)
+            _mock_file_shares(m, public=_ROOT_SHARE_IN_C1)
+            _mock_public_channel_access(m)
+            m.post(_CHAT_POST_MESSAGE, payload={"ok": True, "ts": "1700000001.000100"})
+            _mock_upload_flow(m)
+            with pytest.raises(ToolError, match="MiB"):
+                await _slack_send_message_impl(
+                    runtime,
+                    auth,
+                    channel_id="C1",
+                    content="chart",
+                    attachments=[{"url": _file_link()}],
+                    file_handles=None,
+                    http_client=http_client,
+                )
+            assert _POST_KEY not in m.requests
+    assert len(seen) == 1 and "/files.info" in seen[0]
+
+
+@pytest.mark.asyncio
+async def test_send_message_refuses_a_file_shared_only_where_the_requester_cannot_see_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A file link is a bearer token: holding one proves nothing about the requester."""
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
+    auth = _auth()
+    async with _slack_file_transport(b"secret") as http_client:
+        with aioresponses() as m:
+            _mock_public_channel_access(m)
+            _mock_file_shares(m, private={"G_SECRET": [{"ts": "1690000000.000100"}]})
+            m.get(  # pyright: ignore[reportUnknownMemberType]
+                _CONVERSATIONS_INFO,
+                payload={
+                    "ok": True,
+                    "channel": {"id": "G_SECRET", "name": "secret", "is_private": True},
+                },
+            )
+            m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+            m.get(  # pyright: ignore[reportUnknownMemberType]
+                _CONVERSATIONS_MEMBERS,
+                payload={"ok": True, "members": ["U_OTHER"], "response_metadata": {}},
+            )
+            with pytest.raises(ToolError, match="not shared anywhere the requester can read"):
+                await _slack_send_message_impl(
+                    runtime,
+                    auth,
+                    channel_id="C1",
+                    content="leak",
+                    attachments=[{"url": _file_link()}],
+                    file_handles=None,
+                    http_client=http_client,
+                )
+            assert _POST_KEY not in m.requests, "a refused source must post nothing"
+
+
+@pytest.mark.asyncio
+async def test_send_message_refuses_reposting_a_dm_file_into_a_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """1:1 DM content is shareable only in a DM with daimon, files included."""
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
+    auth = _auth()
+    async with _slack_file_transport(b"private") as http_client:
+        with aioresponses() as m:
+            _mock_public_channel_access(m)
+            _mock_file_shares(m, private={"D_CALLER": [{"ts": "1690000000.000100"}]})
+            m.get(  # pyright: ignore[reportUnknownMemberType]
+                _CONVERSATIONS_INFO,
+                payload={
+                    "ok": True,
+                    "channel": {"id": "D_CALLER", "is_im": True, "user": "U_CALLER"},
+                },
+            )
+            with pytest.raises(ToolError, match="not shared anywhere the requester can read"):
+                await _slack_send_message_impl(
+                    runtime,
+                    auth,
+                    channel_id="C1",
+                    content="from my DM",
+                    attachments=[{"url": _file_link()}],
+                    file_handles=None,
+                    http_client=http_client,
+                )
+            assert _POST_KEY not in m.requests, "a DM file must not reach a channel"
+
+
+@pytest.mark.asyncio
+async def test_send_message_refuses_a_sealed_thread_file_outside_that_thread(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
+    auth = _auth()
+    sealed = ChannelReadPolicy(
+        policy=TenantAccessPolicy(sealed_channel_ids=("C1:1690000000.000100",))
+    )
+    async with _slack_file_transport(b"sealed") as http_client:
+        with aioresponses() as m:
+            _mock_public_channel_access(m)
+            _mock_file_shares(
+                m,
+                public={"C1": [{"ts": "1690000000.000200", "thread_ts": "1690000000.000100"}]},
+            )
+            with pytest.raises(ToolError, match="sealed thread or a 1:1 DM"):
+                await _slack_send_message_impl(
+                    runtime,
+                    auth,
+                    channel_id="C1",
+                    content="out of the thread",
+                    attachments=[{"url": _file_link()}],
+                    file_handles=None,
+                    http_client=http_client,
+                    read_policy=sealed,
+                )
+            assert _POST_KEY not in m.requests
+
+
+@pytest.mark.asyncio
+async def test_send_message_reposts_a_sealed_thread_file_into_that_same_thread(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Reposting where the file already is shows it to nobody new."""
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
+    auth = _auth()
+    sealed = ChannelReadPolicy(
+        policy=TenantAccessPolicy(sealed_channel_ids=("C1:1690000000.000100",))
+    )
+    async with _slack_file_transport(b"sealed") as http_client:
+        with aioresponses() as m:
+            _mock_public_channel_access(m)
+            m.get(  # pyright: ignore[reportUnknownMemberType]
+                _CONVERSATIONS_REPLIES,
+                payload={"ok": True, "messages": [{"ts": "1690000000.000100", "text": "root"}]},
+            )
+            _mock_file_shares(
+                m,
+                public={"C1": [{"ts": "1690000000.000200", "thread_ts": "1690000000.000100"}]},
+            )
+            m.post(  # pyright: ignore[reportUnknownMemberType]
+                _CHAT_POST_MESSAGE,
+                payload={
+                    "ok": True,
+                    "ts": "1690000000.000300",
+                    "message": {"thread_ts": "1690000000.000100"},
+                },
+            )
+            _mock_upload_flow(m)
+            await _slack_send_message_impl(
+                runtime,
+                auth,
+                channel_id="C1:1690000000.000100",
+                content="again, here",
+                attachments=[{"url": _file_link()}],
+                file_handles=None,
+                http_client=http_client,
+                read_policy=sealed,
+            )
+            assert len(_recorded(m, "completeUploadExternal")) == 1, (
+                "a file reposted into its own sealed thread must upload"
+            )
+
+
+@pytest.mark.asyncio
+async def test_send_message_records_the_upload_messages_for_tidying(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """delete_thread refuses a thread holding messages the agent has no record of."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    handle = await _stage_upload(committing_sessionmaker, tenant_id=auth.tenant_id, payload=b"x")
+    recorded: list[PostRecord] = []
+
+    async def record(*_: object, posts: list[PostRecord], **__: object) -> None:
+        recorded.extend(posts)
+
+    monkeypatch.setattr(_send, "record_agent_posts", record)
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            _CHAT_POST_MESSAGE, payload={"ok": True, "ts": "1700000001.000100"}
+        )
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            _GET_UPLOAD_URL,
+            payload={
+                "ok": True,
+                "file_id": "F1",
+                "upload_url": "https://files.slack.com/upload/v1/ABC",
+            },
+        )
+        m.post(_UPLOAD, status=200, body="OK", content_type="text/plain")  # pyright: ignore[reportUnknownMemberType]
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            _COMPLETE_UPLOAD,
+            payload={
+                "ok": True,
+                "files": [
+                    {
+                        "id": "F1",
+                        "shares": {
+                            "public": {
+                                "C1": [
+                                    {"ts": "1700000001.000200", "thread_ts": "1700000001.000100"}
+                                ]
+                            }
+                        },
+                    }
+                ],
+            },
+        )
+        await _slack_send_message_impl(
+            runtime,
+            auth,
+            channel_id="C1",
+            content="the chart",
+            attachments=None,
+            file_handles=[handle],
+        )
+
+    assert [(p.message_id, p.thread_ts) for p in recorded] == [
+        ("1700000001.000100", None),
+        ("1700000001.000200", "1700000001.000100"),
+    ], "the caption and the message carrying its files are both recorded"
+
+
+@pytest.mark.asyncio
+async def test_send_message_links_and_handles_share_the_ten_file_cap(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
+    auth = _auth()
+    with aioresponses() as m:
+        with pytest.raises(ToolError, match="max 10"):
+            await _slack_send_message_impl(
+                runtime,
+                auth,
+                channel_id="C1",
+                content="too many",
+                attachments=[{"url": _file_link(), "filename": "f.png"}] * 6,
+                file_handles=["h"] * 5,
+            )
+        assert m.requests == {}
+
+
+@pytest.mark.asyncio
+async def test_send_message_file_handles_with_empty_content_refused_no_api_calls(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        with pytest.raises(ToolError, match="caption"):
+            await _slack_send_message_impl(
+                runtime,
+                auth,
+                channel_id="C1",
+                content="   ",
                 attachments=None,
                 file_handles=["handle_1"],
             )
         assert m.requests == {}
+
+
+@pytest.mark.asyncio
+async def test_send_message_unknown_file_handle_refused_naming_it_no_api_calls(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        with pytest.raises(ToolError, match="nope.png"):
+            await _slack_send_message_impl(
+                runtime,
+                auth,
+                channel_id="C1",
+                content="here",
+                attachments=None,
+                file_handles=["nope.png"],
+            )
+        assert m.requests == {}, "a bad handle must be caught before the text is posted"
+
+
+@pytest.mark.asyncio
+async def test_send_message_file_handles_post_text_then_upload_threaded_under_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    payload = bytes(range(256)) * 4
+    handle = await _stage_upload(committing_sessionmaker, tenant_id=auth.tenant_id, payload=payload)
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            _CHAT_POST_MESSAGE, payload={"ok": True, "ts": "1700000001.000100"}
+        )
+        _mock_upload_flow(m)
+        row = await _slack_send_message_impl(
+            runtime,
+            auth,
+            channel_id="C1",
+            content="the chart",
+            attachments=None,
+            file_handles=[handle],
+        )
+        get_url = _recorded(m, "getUploadURLExternal")
+        upload = _recorded(m, "files.slack.com")
+        complete = _recorded(m, "completeUploadExternal")
+
+    assert row.ts == "1700000001.000100", "the returned row is the text message"
+    assert len(get_url) == 1 and len(upload) == 1 and len(complete) == 1, (
+        "one file must run the 3-request upload flow exactly once"
+    )
+    assert get_url[0][1]["params"]["filename"] == "chart.png", (
+        "the upload row's display filename must name the Slack file"
+    )
+    assert upload[0][1]["data"] == payload, "uploaded bytes must reach Slack byte-identical"
+    complete_params = complete[0][1]["params"]
+    assert complete_params["channel_id"] == "C1"
+    assert complete_params["thread_ts"] == "1700000001.000100", (
+        "a channel-root post threads its files under the text it just posted"
+    )
+    assert "content_type" not in get_url[0][1]["params"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_file_handles_into_thread_target_upload_uses_that_thread(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    handle = await _stage_upload(committing_sessionmaker, tenant_id=auth.tenant_id, payload=b"x")
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES,
+            payload={"ok": True, "messages": [{"ts": "1700000000.000001", "text": "root"}]},
+        )
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            _CHAT_POST_MESSAGE,
+            payload={
+                "ok": True,
+                "ts": "1700000002.000100",
+                "message": {"thread_ts": "1700000000.000001"},
+            },
+        )
+        _mock_upload_flow(m)
+        row = await _slack_send_message_impl(
+            runtime,
+            auth,
+            channel_id="C1:1700000000.000001",
+            content="the chart",
+            attachments=None,
+            file_handles=[handle],
+        )
+        complete_params = _recorded(m, "completeUploadExternal")[0][1]["params"]
+
+    assert row.thread_ts == "1700000000.000001"
+    assert complete_params["thread_ts"] == "1700000000.000001", (
+        "files aimed at a thread land in that thread, not under the new reply"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_two_file_handles_share_one_completion_call(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    first, second = await _stage_uploads(
+        committing_sessionmaker, tenant_id=auth.tenant_id, payloads=[b"a", b"b"]
+    )
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            _CHAT_POST_MESSAGE, payload={"ok": True, "ts": "1700000001.000100"}
+        )
+        for file_id in ("F1", "F2"):
+            m.post(  # pyright: ignore[reportUnknownMemberType]
+                _GET_UPLOAD_URL,
+                payload={
+                    "ok": True,
+                    "file_id": file_id,
+                    "upload_url": f"https://files.slack.com/upload/v1/{file_id}",
+                },
+            )
+            m.post(_UPLOAD, status=200, body="OK", content_type="text/plain")  # pyright: ignore[reportUnknownMemberType]
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            _COMPLETE_UPLOAD,
+            payload={"ok": True, "files": [{"id": "F1"}, {"id": "F2"}]},
+        )
+        await _slack_send_message_impl(
+            runtime,
+            auth,
+            channel_id="C1",
+            content="two charts",
+            attachments=None,
+            file_handles=[first, second],
+        )
+        complete = _recorded(m, "completeUploadExternal")
+
+    assert len(complete) == 1, "several files complete in one call, so they share one message"
+    completed_ids = [f["id"] for f in json.loads(complete[0][1]["params"]["files"])]
+    assert completed_ids == ["F1", "F2"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_missing_files_scope_names_reinstall_and_the_already_posted_text(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    handle = await _stage_upload(committing_sessionmaker, tenant_id=auth.tenant_id, payload=b"x")
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            _CHAT_POST_MESSAGE, payload={"ok": True, "ts": "1700000001.000100"}
+        )
+        m.post(_GET_UPLOAD_URL, payload={"ok": False, "error": "missing_scope"})  # pyright: ignore[reportUnknownMemberType]
+        with pytest.raises(ToolError) as excinfo:
+            await _slack_send_message_impl(
+                runtime,
+                auth,
+                channel_id="C1",
+                content="the chart",
+                attachments=None,
+                file_handles=[handle],
+            )
+        assert len(m.requests[_POST_KEY]) == 1, "the text goes out before the upload is tried"
+
+    message = str(excinfo.value)
+    assert "files:write" in message and "reinstall" in message, (
+        "a scope-less install must be told what to fix, not shown a raw error code"
+    )
+    assert "already posted" in message, "the agent must learn the text landed, or it re-sends it"
+
+
+@pytest.mark.asyncio
+async def test_upload_connection_failure_reports_caption_already_posted(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    handle = await _stage_upload(committing_sessionmaker, tenant_id=auth.tenant_id, payload=b"x")
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        m.post(_CHAT_POST_MESSAGE, payload={"ok": True, "ts": "1700000001.000100"})
+        m.post(_GET_UPLOAD_URL, exception=aiohttp.ClientConnectionError("connection lost"))
+        with pytest.raises(ToolError, match="text was already posted"):
+            await _slack_send_message_impl(
+                runtime,
+                auth,
+                channel_id="C1",
+                content="chart",
+                attachments=None,
+                file_handles=[handle],
+            )
+        assert len(m.requests[_POST_KEY]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,body",
+    [
+        (502, '{"broken":'),
+        (502, '["upstream unavailable"]'),
+        (200, '["upstream unavailable"]'),
+    ],
+)
+async def test_upload_malformed_slack_response_reports_caption_already_posted(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    status: int,
+    body: str,
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    handle = await _stage_upload(committing_sessionmaker, tenant_id=auth.tenant_id, payload=b"x")
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        m.post(_CHAT_POST_MESSAGE, payload={"ok": True, "ts": "1700000001.000100"})
+        m.post(_GET_UPLOAD_URL, status=status, body=body, content_type="application/json")
+        with pytest.raises(ToolError, match="text was already posted"):
+            await _slack_send_message_impl(
+                runtime,
+                auth,
+                channel_id="C1",
+                content="chart",
+                attachments=None,
+                file_handles=[handle],
+            )
+        assert len(m.requests[_POST_KEY]) == 1
+
+
+@pytest.mark.asyncio
+async def test_send_message_oversized_file_handle_is_refused_before_posting(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    handle = await _stage_upload(
+        committing_sessionmaker, tenant_id=auth.tenant_id, payload=b"x" * (MAX_BYTES_PER_FILE + 1)
+    )
+    with aioresponses() as m:
+        with pytest.raises(ToolError, match="MiB"):
+            await _slack_send_message_impl(
+                runtime,
+                auth,
+                channel_id="C1",
+                content="chart",
+                attachments=None,
+                file_handles=[handle],
+            )
+        assert m.requests == {}, "oversized files must be refused before any Slack post"
 
 
 @pytest.mark.asyncio
@@ -570,7 +1353,7 @@ async def test_send_message_into_a_protected_channel_is_refused_and_posts_nothin
     auth = await _auth_for_protected_tenant(committing_sessionmaker, protected=("C1",))
     with aioresponses() as m:
         _mock_public_channel_access(m)
-        with pytest.raises(ToolError, match="protected"):
+        with pytest.raises(ToolError, match="writers to none"):
             await _slack_send_message_impl(
                 runtime, auth, channel_id=target, content="hi", attachments=None, file_handles=None
             )
@@ -585,7 +1368,7 @@ async def test_create_thread_in_a_protected_channel_is_refused_and_posts_nothing
     auth = await _auth_for_protected_tenant(committing_sessionmaker, protected=("C1",))
     with aioresponses() as m:
         _mock_public_channel_access(m)
-        with pytest.raises(ToolError, match="protected"):
+        with pytest.raises(ToolError, match="writers to none"):
             await _slack_create_thread_impl(runtime, auth, channel_id="C1", content="hi")
         assert _POST_KEY not in m.requests, "a protected channel must receive no thread root"
 

@@ -54,14 +54,20 @@ from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
-from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
+from daimon.core.ma_resolver import (
+    MAResolverMissError,
+    resolve_agent,
+    resolve_environment,
+    retrieve_agent_cached,
+    retrieve_environment_cached,
+)
 from daimon.core.permissions import (
     agent_permissions,
     at_home,
     channel_permissions,
-    confidential_channel_of,
-    dm_source_sealed,
-    seal_ids_at,
+    dm_source_limited,
+    home_of,
+    limiting_ids_at,
 )
 from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
@@ -72,6 +78,7 @@ from daimon.core.stores.accounts import (
     set_platform_role_ids,
     set_role,
 )
+from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
@@ -160,6 +167,9 @@ class Admission:
     # Turn from a sealed channel (or a thread under one), or from a DM when the
     # tenant asks for it: memory mounts must be read-only.
     memory_read_only: bool = False
+    # The turn's agent may not publish freely (`AgentPermissions.publishes`): its
+    # session's publish tools wait for the requester's Approve on a card.
+    asks_before_publishing: bool = False
     # The channel or thread itself is sealed (DM memory policy aside). Callers
     # that copy content out of the channel, such as /dm, must refuse.
     source_sealed: bool = False
@@ -313,52 +323,41 @@ async def admit_impl(
                 ),
             )
         )
-    mark("policy_and_admins")
+        mark("policy_and_admins")
 
-    # --- Channel protection, first of the policy gates: the turn's reply
-    # would land in its thread or channel, so a protected target refuses the
-    # turn itself -- before any thread, reply or upload exists, and before the
-    # invoker gate, whose refusal the adapters would otherwise post there.
-    # Admins get no exemption. `category_id` is the Discord category the
-    # channel sits in; `category_unresolved` says the adapter couldn't look it
-    # up, which fails closed when any category is protected. ---
-    # --- Invoker policy: a tenant may restrict who can start a turn. Only a
-    # live ADMIN role passed by the adapter exempts the caller; no role means
-    # non-admin, never a stored role the user may have lost. An unreadable
-    # policy raised `AccessPolicyUnreadable` above -- refused, never open.
-    # Both gates are `authorize(START_TURN)`, protection first. ---
-    subject = build_subject(
-        is_admin=role is Role.ADMIN,
-        platform_user_id=external_user_id,
-        administered_channel_ids=administered,
-    )
-    turn_place = build_turn_place(
-        channel_id=channel_id,
-        thread_id=thread_id,
-        category_id=category_id,
-        category_unresolved=category_unresolved,
-    )
-    _require_turn_start(policy, subject, turn_place)
-    # --- External participant: someone from another organisation (a Teams
-    # shared channel's B2B direct connect participant) is answered only
-    # inside an isolated channel, its threads included, never in a DM. ---
-    _require_external_inside_isolation(
-        policy, is_external=is_external, is_dm=is_dm, channel_id=channel_id, thread_id=thread_id
-    )
-    mark("start_policy")
+        # Refusals must happen before config is read. Keeping the session here
+        # reuses its connection for the config cascade after authorization.
+        subject = build_subject(
+            is_admin=role is Role.ADMIN,
+            platform_user_id=external_user_id,
+            administered_channel_ids=administered,
+        )
+        turn_place = build_turn_place(
+            channel_id=channel_id,
+            thread_id=thread_id,
+            category_id=category_id,
+            category_unresolved=category_unresolved,
+        )
+        _require_turn_start(policy, subject, turn_place)
+        _require_external_inside_home(
+            policy,
+            is_external=is_external,
+            is_dm=is_dm,
+            channel_id=channel_id,
+            thread_id=thread_id,
+        )
+        mark("start_policy")
 
-    if (observation := current_outcome.get()) is not None:
-        observation.account_id = principal.account_id
+        if (observation := current_outcome.get()) is not None:
+            observation.account_id = principal.account_id
 
-    # --- Config resolution (per turn) ---
-    scope = ScopeContext(
-        account_id=principal.account_id,
-        tenant_id=tenant_id,
-        channel_id=channel_id,
-        platform=platform,
-        thread_id=thread_id,
-    )
-    async with deps.sessionmaker() as session:
+        scope = ScopeContext(
+            account_id=principal.account_id,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            platform=platform,
+            thread_id=thread_id,
+        )
         config = await resolve_config(session, context=scope, default=deps.deployment_default)
     mark("config")
 
@@ -428,7 +427,9 @@ async def admit_impl(
         agent = await get_setup_responder(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
     else:
         try:
-            agent = await deps.anthropic.beta.agents.retrieve(agent_id)
+            agent = await retrieve_agent_cached(
+                deps.anthropic, deps.resolver_cache, tenant_id, agent_id
+            )
         except APIStatusError as err:
             if err.status_code not in (400, 404):
                 raise
@@ -439,7 +440,9 @@ async def admit_impl(
     if (observation := current_outcome.get()) is not None:
         observation.agent_id = agent.id
     try:
-        environment = await deps.anthropic.beta.environments.retrieve(env_id)
+        environment = await retrieve_environment_cached(
+            deps.anthropic, deps.resolver_cache, tenant_id, env_id
+        )
     except APIStatusError as err:
         if err.status_code not in (400, 404):
             raise
@@ -457,11 +460,13 @@ async def admit_impl(
     # adapter catch sites renders unchanged -- no new error taxonomy. ---
     if agent.archived_at is not None:
         deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
+        deps.resolver_cache.agents.pop((tenant_id, agent_id), None)
         async with deps.sessionmaker() as session, session.begin():
             await clear_agent_references(session, tenant_id=tenant_id, agent_name=config.agent_name)
         raise MAResolverMissError(kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name)
     if environment.archived_at is not None:
         deps.resolver_cache.pop((tenant_id, "environment", config.environment_name), None)
+        deps.resolver_cache.environments.pop((tenant_id, env_id), None)
         raise MAResolverMissError(
             kind="environment", tenant_id=tenant_id, daimon_tag=config.environment_name
         )
@@ -494,35 +499,49 @@ async def admit_impl(
     _require_run_agent(policy, grant)
     mark("agent_policy")
 
-    # --- Admission gate: per-tenant balance -- independent of Stripe config ---
-    if await is_over_balance(sessionmaker=deps.sessionmaker, tenant_id=tenant_id):
-        raise AdmissionDenied(reason="balance_depleted")
-    mark("balance")
-
-    # --- Admission gate: monthly usage cap ---
-    if await is_over_cap(
-        billing_config=deps.billing_config,
-        sessionmaker=deps.sessionmaker,
-        tenant_id=tenant_id,
-        user_id=external_user_id,
-        now=now,
-    ):
-        raise AdmissionDenied(reason="cap_exceeded")
-    mark("user_cap")
-
-    # --- Admission gate: channel budget; a DM counts toward the channel it came from,
-    # and an isolated channel's own agent toward that channel wherever an exempt
-    # caller (an admin, or that channel's admin) runs it ---
     budget_channel_id = agent_permissions(policy, grant.agent.names).budget_channel or (
         dm_source_channel_id if is_dm else channel_id
     )
-    if await is_over_channel_budget(
-        sessionmaker=deps.sessionmaker,
-        tenant_id=tenant_id,
-        platform=platform,
-        channel_id=budget_channel_id,
-        now=now,
-    ):
+    # The three independent billing decisions still run in their original
+    # order, under READ COMMITTED, but share one checked-out connection.
+    async with deps.sessionmaker() as billing_session:
+        # --- Per-tenant balance -- independent of Stripe config ---
+        if await is_over_balance(
+            sessionmaker=deps.sessionmaker, tenant_id=tenant_id, session=billing_session
+        ):
+            raise AdmissionDenied(reason="balance_depleted")
+        mark("balance")
+
+        # --- Monthly usage cap ---
+        if await is_over_cap(
+            billing_config=deps.billing_config,
+            sessionmaker=deps.sessionmaker,
+            tenant_id=tenant_id,
+            user_id=external_user_id,
+            now=now,
+            session=billing_session,
+        ):
+            raise AdmissionDenied(reason="cap_exceeded")
+        mark("user_cap")
+
+        # --- Channel budget, including the source of a DM or isolated agent ---
+        budget_exceeded = await is_over_channel_budget(
+            sessionmaker=deps.sessionmaker,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=budget_channel_id,
+            now=now,
+            session=billing_session,
+        )
+        mark("channel_budget")
+        channel_skill_rows = (
+            []
+            if is_dm or budget_exceeded
+            else await list_channel_skills(
+                billing_session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+            )
+        )
+    if budget_exceeded:
         if tenant_id not in deps.budget_notices_off:
             spawn_budget_notice(
                 sessionmaker=deps.sessionmaker,
@@ -534,12 +553,11 @@ async def admit_impl(
                 group_members=deps.group_members,
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
-    mark("channel_budget")
 
     # Every id that seals the turn: its channel, and the thread sealed on its
     # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
     # them are recorded, so unsealing one later leaves the others holding.
-    seal_ids = seal_ids_at(policy, channel_id=channel_id, thread_id=thread_id)
+    seal_ids = limiting_ids_at(policy, channel_id=channel_id, thread_id=thread_id)
     source_sealed = bool(seal_ids)
     memory_read_only = (source_sealed and not _is_own_agent(policy, grant)) or (
         is_dm and policy.dm_memory_read_only
@@ -556,6 +574,7 @@ async def admit_impl(
             channel_id=channel_id,
             agent=agent,
             agent_names=grant.agent.names,
+            rows=channel_skill_rows,
         )
     )
 
@@ -563,6 +582,7 @@ async def admit_impl(
 
     result = Admission(
         memory_read_only=memory_read_only,
+        asks_before_publishing=_asks_before_publishing(policy, grant),
         source_sealed=source_sealed,
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,
@@ -600,11 +620,11 @@ def _require_turn_start(policy: TenantAccessPolicy, subject: Subject, place: Pla
         raise AdmissionDenied(
             reason="invoker_not_allowed"
             if decision.reason == "invoker_not_allowed"
-            else "channel_protected"
+            else "writers_none"
         )
 
 
-def _require_external_inside_isolation(
+def _require_external_inside_home(
     policy: TenantAccessPolicy,
     *,
     is_external: bool,
@@ -638,10 +658,18 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
     )
     if not decision:
         raise AdmissionDenied(
-            reason="channel_isolated"
-            if decision.reason == "channel_isolated"
-            else "agent_pinned_elsewhere"
+            reason="own_agents_only" if decision.reason == "own_agents_only" else "runs_elsewhere"
         )
+
+
+def _asks_before_publishing(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
+    return not authorize(
+        policy,
+        subject=grant.subject,
+        action=Action.PUBLISH,
+        agent=grant.agent,
+        origin=grant.run_place,
+    )
 
 
 def _is_own_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
@@ -674,7 +702,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
     _require_turn_start(policy, grant.subject, grant.turn_place)
-    _require_external_inside_isolation(
+    _require_external_inside_home(
         policy,
         is_external=grant.is_external,
         is_dm=grant.is_dm,
@@ -683,14 +711,14 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         setup_thread=grant.run_place.setup_thread,
     )
     _require_run_agent(policy, grant)
-    if grant.dm_source is not None and dm_source_sealed(
+    if grant.dm_source is not None and dm_source_limited(
         policy,
         source_channel_id=grant.dm_source.channel_id,
         source_thread_id=grant.dm_source.thread_id,
         source_thread_keys=grant.dm_source.thread_keys,
     ):
-        raise DmSourceSealedError("dm_source_sealed")
-    seal_ids = admission.origin_seal_ids | seal_ids_at(
+        raise DmSourceSealedError("dm_source_limited")
+    seal_ids = admission.origin_seal_ids | limiting_ids_at(
         policy, channel_id=grant.channel_id, thread_id=grant.thread_id
     )
     # Memory posture is decided from the policy as it is now, not only from
@@ -701,13 +729,19 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         or (bool(seal_ids) and not _is_own_agent(policy, grant))
         or (grant.is_dm and policy.dm_memory_read_only)
     )
-    if seal_ids == admission.origin_seal_ids and memory_read_only == admission.memory_read_only:
+    asks_before_publishing = _asks_before_publishing(policy, grant)
+    if (
+        seal_ids == admission.origin_seal_ids
+        and memory_read_only == admission.memory_read_only
+        and asks_before_publishing == admission.asks_before_publishing
+    ):
         return admission
     return replace(
         admission,
         origin_seal_ids=seal_ids,
         source_sealed=admission.source_sealed or bool(seal_ids),
         memory_read_only=memory_read_only,
+        asks_before_publishing=asks_before_publishing,
     )
 
 
@@ -722,7 +756,7 @@ async def restrict_inherited_memory(
     if grant is not None:
         async with deps.sessionmaker() as db:
             policy = await load_access_policy(db, tenant_id=grant.tenant_id)
-        own_channel = agent_permissions(policy, grant.agent.names).own_channel
+        own_channel = agent_permissions(policy, grant.agent.names).home
         own = _is_own_agent(policy, grant) and all(
             seal
             in {
@@ -730,7 +764,7 @@ async def restrict_inherited_memory(
                 grant.thread_id,
                 f"{own_channel}:{grant.thread_id}" if grant.thread_id is not None else None,
             }
-            or confidential_channel_of(policy, seal) == own_channel
+            or home_of(policy, seal) == own_channel
             for seal in seals
         )
     return admission if own else replace(admission, memory_read_only=True)
@@ -751,6 +785,7 @@ def decide_before_send(deps: TurnDeps, admission: Admission) -> Callable[[], Awa
         if (
             current.origin_seal_ids != admission.origin_seal_ids
             or current.memory_read_only != admission.memory_read_only
+            or (current.asks_before_publishing and not admission.asks_before_publishing)
         ):
             raise SessionBusyError(
                 pending_reasons=("seal",), retry_after=datetime.now(UTC) + timedelta(seconds=1)

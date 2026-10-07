@@ -25,6 +25,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.broker import dispatch_mint_token
 from daimon.core.broker.errors import NoBindingError, ProviderConfigError
+from daimon.core.stores.github_access import get_agent_mode
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -44,6 +45,12 @@ async def _get_cli_token_impl(
     """
     auth = await _auth(ctx)
     agent_id = auth.agent_id or (auth.chat_agent_id if service == "gcloud" else None)
+    github_agent_id = auth.agent_id or auth.chat_agent_id
+    if service == "github" and github_agent_id is not None:
+        async with runtime.session_factory() as session:
+            mode = await get_agent_mode(session, tenant_id=auth.tenant_id, agent_id=github_agent_id)
+        if mode == "app":
+            raise ToolError("GitHub CLI tokens are unavailable in App mode")
     try:
         # Only Google uses chat execution identity. GitHub chat callers retain
         # their account principal-default PAT; operator defaults are never returned.

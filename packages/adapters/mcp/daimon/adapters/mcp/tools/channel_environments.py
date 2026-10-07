@@ -22,7 +22,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._isolation import load_caller_hidden_environments
+from daimon.adapters.mcp.tools._rule_view import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.environments import CONFIRM_OPEN_NETWORK_ASK
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
@@ -31,9 +31,9 @@ from daimon.core.channel_environments import (
     EnvironmentPick,
     authorize_environment_pick,
     build_clear_environment_note,
-    build_sealed_channels_confirm,
-    build_sealed_network_confirm,
-    build_sealed_network_refusal,
+    build_limited_channels_confirm,
+    build_limited_network_confirm,
+    build_limited_network_refusal,
     build_set_environment_note,
     save_scope_environment,
 )
@@ -124,7 +124,7 @@ async def _require_pick_allowed(
             raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
     if not pick.decision:
         record_authz_denial(Action.SET_CHANNEL_ENVIRONMENT, pick.decision.reason)
-    if not pick.decision and pick.decision.reason != "sealed":
+    if not pick.decision and pick.decision.reason != "not_a_reader":
         if target.channel_id is None:
             _require_admin(auth)  # the workspace default's own copy
         raise ToolError(_NEEDS_ADMIN)
@@ -132,17 +132,17 @@ async def _require_pick_allowed(
     hidden = await load_caller_hidden_environments(runtime, auth)
     if environment_name in hidden:
         raise ToolError(_missing(environment_name))
-    if not pick.decision:  # sealed
+    if not pick.decision:  # not_a_reader
         raise ToolError(
-            build_sealed_network_refusal(environment_name=environment_name) + " Do not retry."
+            build_limited_network_refusal(environment_name=environment_name) + " Do not retry."
         )
     if pick.missing:
         raise ToolError(_missing(environment_name))
     if pick.needs_confirm and not confirm_open_network:
         confirm = (
-            build_sealed_network_confirm(environment_name=environment_name)
+            build_limited_network_confirm(environment_name=environment_name)
             if target.channel_id is not None
-            else build_sealed_channels_confirm(environment_name=environment_name)
+            else build_limited_channels_confirm(environment_name=environment_name)
         )
         raise ToolError(confirm + CONFIRM_OPEN_NETWORK_ASK)
     return pick, hidden

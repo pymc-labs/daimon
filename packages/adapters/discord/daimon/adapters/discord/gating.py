@@ -12,18 +12,22 @@ def should_process_message(
     author_is_bot: bool,
     author_id: str,
     bot_mentioned: bool,
+    reply_to_recorded_post: bool = False,
+    author_is_webhook: bool = False,
     guild_id: str | None,
     self_user_id: str | None = None,
     qa_bot_user_ids: Collection[str] = (),
 ) -> bool:
     """Pre-DB gate checks for on_message. Returns True if message passes all non-DB filters."""
+    if author_is_webhook:
+        return False
     if author_is_bot and not _is_allowed_bot_author(
         author_id=author_id,
         self_user_id=self_user_id,
         qa_bot_user_ids=qa_bot_user_ids,
     ):
         return False
-    if not bot_mentioned:
+    if not (bot_mentioned or reply_to_recorded_post):
         return False
     return guild_id is not None
 

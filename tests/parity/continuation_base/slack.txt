@@ -6,7 +6,7 @@ from typing import Any, cast
 import anthropic as anthropic_pkg
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.adapters.slack.context import THREAD_PAGE_LIMIT
+from daimon.adapters.slack.context import DEFAULT_PAGE_LIMIT as THREAD_PAGE_LIMIT
 from daimon.core.continuity.continuation import ContinuationRequest, ResponderChanged, decide_continuation
 from daimon.core.continuity.wakes import WAKE_RETRY_DELAY, busy_retry_at, claim_wake, list_dispatchable_wakes, release_wake, settle_wake, start_wake
 from daimon.core.errors import DaimonError

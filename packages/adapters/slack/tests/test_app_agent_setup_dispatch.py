@@ -113,6 +113,31 @@ async def test_on_request_agent_setup_slash_when_command_arrives_spawns_handler(
     )
 
 
+async def test_on_request_here_slash_spawns_handler() -> None:
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+    called: list[str] = []
+
+    async def _fake_here_command(runtime: Any, payload: Any) -> None:
+        called.append(str(payload["command"]))
+
+    req = SocketModeRequest(
+        type="slash_commands",
+        envelope_id="env_here_slash_001",
+        payload={
+            "command": "/here",
+            "team_id": "T_TEST",
+            "user_id": "U_TEST",
+            "channel_id": "C_TEST",
+        },
+    )
+    with patch("daimon.adapters.slack.app.handle_here_command", new=_fake_here_command):
+        await app.on_request(fake_client, req)  # type: ignore[arg-type]
+        await _drain(app)
+    assert fake_client.call_log[0] == "send_socket_mode_response"
+    assert called == ["/here"]
+
+
 # ---------------------------------------------------------------------------
 # view_submission ack-before-I/O ordering + error path (STURN-01)
 # ---------------------------------------------------------------------------

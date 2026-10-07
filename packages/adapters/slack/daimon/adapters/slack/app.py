@@ -82,7 +82,12 @@ from daimon.adapters.slack.boot_sweep import (
 )
 from daimon.adapters.slack.budget_notice import with_budget_notifier
 from daimon.adapters.slack.channel_admin_groups import user_group_ids
-from daimon.adapters.slack.context import build_context_xml, build_delta_xml
+from daimon.adapters.slack.channel_reads import load_channel_read_policy
+from daimon.adapters.slack.context import (
+    build_channel_context_xml,
+    build_context_xml,
+    build_delta_xml,
+)
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.credential_requests import (
     CredentialSubmissionDecision,
@@ -101,7 +106,10 @@ from daimon.adapters.slack.direct_messages import (
 )
 from daimon.adapters.slack.errors import generate_request_id, render_error
 from daimon.adapters.slack.feedback import (
+    FEEDBACK_DETAILS_ACTION_ID,
+    FeedbackTextDecision,
     evaluate_feedback_text_submission,
+    handle_feedback_details_click,
     handle_feedback_vote,
     run_feedback_text_submission,
 )
@@ -111,6 +119,7 @@ from daimon.adapters.slack.gating import (
     mentions_bot,
 )
 from daimon.adapters.slack.help import handle_help_command
+from daimon.adapters.slack.here import handle_here_command
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.memory import handle_memory_command
@@ -138,6 +147,7 @@ from daimon.adapters.slack.runtime import (
     SlackRuntime,
     admission_refusal_message,
     resolve_bot_display_name,
+    responder_account,
     responder_handle,
 )
 from daimon.adapters.slack.setup_conversations import handle_setup_lifecycle
@@ -164,6 +174,7 @@ from daimon.adapters.slack.vision import (
     is_vision_image,
 )
 from daimon.core.access_policy import DM_SCOPE_PREFIX
+from daimon.core.agent_identity import AgentIdentity, is_builtin_agent, resolve_agent_identity
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -230,6 +241,7 @@ from daimon.core.turn.thread_queue import (
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import (
     build_handoff_notice,
+    holds_current_channel_admin_grant,
     render_turn_origin,
     turn_origin,
 )
@@ -251,6 +263,9 @@ _DRAIN_GRACE_S: float = 50.0
 # delay instead of leaving the process permanently unable to turn.
 _ORPHAN_RECOVERY_RETRY_DELAY_S: float = 1.0
 _ORPHAN_RECOVERY_MAX_RETRY_DELAY_S: float = 30.0
+
+# Marks a request queued behind the thread's active turn.
+_PENDING_REACTION = "hourglass_flowing_sand"
 
 _CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
 _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
@@ -290,6 +305,16 @@ def _compose_queued_content(events: list[dict[str, Any]]) -> str:
     if len(user_ids) == 1:
         return "\n\n".join(str(e.get("text", "")) for e in events)
     return "\n\n".join(f"[{_author_id(e)}]: {e.get('text', '')}" for e in events)
+
+
+def _is_top_level(event: dict[str, Any]) -> bool:
+    """Whether the event was posted in the channel itself, not in a thread.
+
+    Decided from the event, never from the session: a first turn in an
+    existing thread still replays that thread.
+    """
+    thread_ts = event.get("thread_ts")
+    return not thread_ts or thread_ts == event.get("ts")
 
 
 def _envelope_event_time(payload: dict[str, Any]) -> datetime | None:
@@ -923,17 +948,10 @@ class SlackApp:
                         *,
                         _t: str = str(_fb_team_info.get("id") or ""),
                         _u: str = str(_fb_user_info.get("id") or ""),
-                        _c: str = _fb_decision.channel_id,
-                        _f: str = _fb_decision.feedback_id,
-                        _x: str = _fb_decision.text,
+                        _d: FeedbackTextDecision = _fb_decision,
                     ) -> None:
                         await run_feedback_text_submission(
-                            self.runtime,
-                            team_id=_t,
-                            user_id=_u,
-                            channel_id=_c,
-                            feedback_id=_f,
-                            text=_x,
+                            self.runtime, team_id=_t, user_id=_u, decision=_d
                         )
 
                     self._spawn(_run_feedback_text())
@@ -1013,6 +1031,8 @@ class SlackApp:
                 self._spawn(handle_dm_command(self.runtime, payload))
             elif cmd == "/help":
                 self._spawn(handle_help_command(self.runtime, payload))
+            elif cmd == "/here":
+                self._spawn(handle_here_command(self.runtime, payload))
             elif cmd == "/routines":
                 self._spawn(handle_routines_command(self.runtime, payload))
             elif cmd == "/billing":
@@ -1064,6 +1084,8 @@ class SlackApp:
                     self._spawn(handle_credential_request_click(self.runtime, payload))
                 elif action_id.startswith("feedback_vote:"):
                     self._spawn(handle_feedback_vote(self.runtime, payload))
+                elif action_id == FEEDBACK_DETAILS_ACTION_ID:
+                    self._spawn(handle_feedback_details_click(self.runtime, payload))
                 elif action_id == ASK_HUMAN_ACTION_ID:
                     self._spawn(handle_ask_human_click(self.runtime, payload))
                 elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
@@ -1221,7 +1243,7 @@ class SlackApp:
         )
         if not post_state.may_post:
             log.info(
-                "turn.skipped.channel_protected",
+                "turn.skipped.writers_none",
                 team_id=team_id,
                 channel_id=channel,
                 state=post_state.value,
@@ -1264,23 +1286,18 @@ class SlackApp:
             # nothing is posted into a thread that may never have mentioned it.
             # Dedup already recorded the event, so a Slack retry will not
             # re-deliver it — accepted for this once-per-process call.
-            bot_user_id = self._bot_user_ids.get(team_id)
-            if bot_user_id is None:
-                try:
-                    auth_resp = await client.auth_test()  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                except SlackApiError as exc:
-                    log.error(
-                        "slack.event_dropped.bot_user_id_unresolved",
-                        team_id=team_id,
-                        channel=channel,
-                        event_ts=event_ts,
-                        exc_info=exc,
-                    )
-                    capture_exception_with_scope(exc)
-                    return
-                bot_user_id = str(auth_resp.get("user_id") or "")
-                if bot_user_id:
-                    self._bot_user_ids[team_id] = bot_user_id
+            try:
+                bot_user_id = await self._bot_user_id(team_id, client)
+            except SlackApiError as exc:
+                log.error(
+                    "slack.event_dropped.bot_user_id_unresolved",
+                    team_id=team_id,
+                    channel=channel,
+                    event_ts=event_ts,
+                    exc_info=exc,
+                )
+                capture_exception_with_scope(exc)
+                return
             if not mentions_bot(event, bot_user_id=bot_user_id):
                 log.info(
                     "slack.event_dropped.no_explicit_mention",
@@ -1347,6 +1364,21 @@ class SlackApp:
                         text=render_error(exc, request_id=request_id),
                     )
 
+    async def _bot_user_id(self, team_id: str, client: AsyncWebClient) -> str:
+        """This app's bot user in `team_id`, resolved via auth.test once per workspace.
+
+        Empty when Slack names no user; that result is not cached, so the next
+        event asks again. Raises `SlackApiError` when auth.test fails.
+        """
+        bot_user_id = self._bot_user_ids.get(team_id)
+        if bot_user_id is not None:
+            return bot_user_id
+        auth_resp = await client.auth_test()  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
+        bot_user_id = str(auth_resp.get("user_id") or "")
+        if bot_user_id:
+            self._bot_user_ids[team_id] = bot_user_id
+        return bot_user_id
+
     async def _maybe_post_connect_nudge(
         self,
         web_client: AsyncWebClient,
@@ -1404,6 +1436,13 @@ class SlackApp:
             )
             await s.commit()
 
+    def _history_page_limit(self) -> int:
+        slack_settings = self.runtime.settings.slack
+        assert slack_settings is not None, (
+            "SlackApp requires slack settings (entrypoint validates at boot)"
+        )
+        return slack_settings.history_page_limit
+
     async def _orchestrate(
         self,
         event: dict[str, Any],
@@ -1418,7 +1457,8 @@ class SlackApp:
 
         Gate order (strict):
         1. Per-thread queue check: if thread already processing → reactions_add ⌛
-           and enqueue. No slot consumed.
+           and enqueue. No slot consumed. The drain or the owner's finally
+           removes the ⌛ once that request settles.
         2. Per-tenant cap: read-check-increment in one synchronous span (no await
            between read and increment) — mirrors Discord bot.py:516-529.
         3. Turn body via ``_run_thread_turn``.
@@ -1444,8 +1484,7 @@ class SlackApp:
             if setup_root is not None:
                 if str(event.get("ts") or "") == thread_id:
                     return
-                auth = await web_client.auth_test()  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                if event.get("user") == auth.get("user_id"):
+                if event.get("user") == await self._bot_user_id(team_id, web_client):
                     return
 
         assert self.runtime.settings.slack is not None, (
@@ -1466,7 +1505,7 @@ class SlackApp:
                 await web_client.reactions_add(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                     channel=channel,
                     timestamp=event_ts,
-                    name="hourglass_flowing_sand",
+                    name=_PENDING_REACTION,
                 )
             return
 
@@ -1530,7 +1569,7 @@ class SlackApp:
                 thread_id=thread_id,
             ):
                 log.info(
-                    "turn.skipped.channel_protected",
+                    "turn.skipped.writers_none",
                     tenant_id=str(tenant_id),
                     team_id=team_id,
                     channel_id=channel,
@@ -1602,6 +1641,16 @@ class SlackApp:
             )
             return None
 
+        # Composed events leave the thread queue before their batch runs, so the
+        # owner's cleanup never sees them. Whatever was composed but not run when
+        # the drain exits (authorless events, batches abandoned by a cancel) is
+        # cleared here.
+        unsettled: dict[int, dict[str, Any]] = {}
+
+        def compose(queued: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+            unsettled.update((id(event), event) for event in queued)
+            return group_by_author(queued, author)
+
         async def run(user_events: list[dict[str, Any]]) -> None:
             try:
                 await self._run_thread_turn(
@@ -1638,12 +1687,49 @@ class SlackApp:
                         text=("Sorry, something went wrong handling that — please try again."),
                         thread_ts=thread_id,
                     )
+            finally:
+                for event in user_events:
+                    unsettled.pop(id(event), None)
+                await self._clear_pending_reactions(
+                    user_events, channel=channel, web_client=web_client
+                )
 
-        await self._thread_queue.drain(
-            thread_id,
-            compose=lambda queued: group_by_author(queued, author),
-            run=run,
-        )
+        try:
+            await self._thread_queue.drain(thread_id, compose=compose, run=run)
+        finally:
+            await self._clear_pending_reactions(
+                list(unsettled.values()), channel=channel, web_client=web_client
+            )
+
+    async def _clear_pending_reactions(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        channel: str,
+        web_client: AsyncWebClient,
+    ) -> None:
+        """Remove the ⌛ from requests whose queued work has settled.
+
+        Best-effort: a second removal, or one after a failed add, reports
+        ``no_reaction``, and a stale ⌛ is cosmetic, so no error may reach the
+        turn that settled these requests.
+        """
+        for event in events:
+            q_channel: str = event.get("channel") or channel
+            q_ts: str = event.get("event_ts") or event.get("ts") or ""
+            try:
+                await web_client.reactions_remove(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                    channel=q_channel,
+                    timestamp=q_ts,
+                    name=_PENDING_REACTION,
+                )
+            except (SlackApiError, aiohttp.ClientError, TimeoutError) as exc:
+                log.info(
+                    "slack.pending_reaction.remove_failed",
+                    channel_id=q_channel,
+                    message_ts=q_ts,
+                    error=str(exc),
+                )
 
     async def _notify_undrained_mentions(
         self,
@@ -1665,6 +1751,7 @@ class SlackApp:
                     text="Sorry, something went wrong handling that — please try again.",
                     thread_ts=thread_id,
                 )
+        await self._clear_pending_reactions(events, channel=channel, web_client=web_client)
 
     async def _run_thread_turn(
         self,
@@ -1719,7 +1806,9 @@ class SlackApp:
         against the mapping row.
 
         On first mention for a thread: creates a new MA session + ``thread_sessions``
-        row, replays thread history via ``build_context_xml`` (one Slack page).
+        row, replays thread history via ``build_context_xml`` (one Slack page),
+        or for a top-level mention the channel's preceding messages via
+        ``build_channel_context_xml``.
         On follow-up mentions: reuses the existing MA session, replays only the
         delta since the watermark via ``build_delta_xml``.
 
@@ -1730,6 +1819,10 @@ class SlackApp:
         No try/except — errors propagate to the listener boundary in
         ``_handle_app_mention``.
         """
+        # The bot account the mention names, resolved before anything is
+        # posted. The mention gate has cached it, so this is normally no Slack
+        # call.
+        account = responder_account(await self._bot_user_id(team_id, web_client))
         # --- Live admin lookup: one users.info per turn, before admit().
         # admin_status distinguishes "not an admin" (False) from "lookup failed"
         # (None) so the role write below can skip on failure rather than
@@ -1810,11 +1903,11 @@ class SlackApp:
             )
             return
         except AdmissionDenied as err:
-            if err.reason == "channel_protected":
+            if err.reason == "writers_none":
                 # Nothing may be posted into a protected channel, a refusal
                 # included; the log is the only trace.
                 log.info(
-                    "turn.skipped.channel_protected",
+                    "turn.skipped.writers_none",
                     tenant_id=str(tenant_id),
                     team_id=team_id,
                     channel_id=channel,
@@ -1828,17 +1921,17 @@ class SlackApp:
                     team_id=team_id,
                     channel_id=channel,
                 )
-            elif err.reason == "agent_pinned_elsewhere":
+            elif err.reason == "runs_elsewhere":
                 log.info(
-                    "turn.skipped.agent_pinned_elsewhere",
+                    "turn.skipped.runs_elsewhere",
                     tenant_id=str(tenant_id),
                     team_id=team_id,
                     channel_id=channel,
                     thread_id=thread_id,
                 )
-            elif err.reason == "channel_isolated":
+            elif err.reason == "own_agents_only":
                 log.info(
-                    "turn.skipped.channel_isolated",
+                    "turn.skipped.own_agents_only",
                     tenant_id=str(tenant_id),
                     team_id=team_id,
                     channel_id=channel,
@@ -1869,7 +1962,7 @@ class SlackApp:
                     channel_id=channel,
                     thread_id=thread_id,
                 )
-            if err.reason != "channel_protected":
+            if err.reason != "writers_none":
                 await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel,
                     thread_ts=thread_id,
@@ -1880,6 +1973,22 @@ class SlackApp:
         agent = admission.agent
         _lc_agent_name: str = agent.name
         _lc_model_id: str = agent.model.id
+        turn_identity: AgentIdentity | None = None
+        try:
+            async with self.runtime.sessionmaker.begin() as identity_session:
+                turn_identity = await resolve_agent_identity(
+                    identity_session,
+                    tenant_id=tenant_id,
+                    agent_name=agent.name,
+                    is_builtin=is_builtin_agent(
+                        name=agent.name,
+                        metadata=agent.metadata,
+                        default_agent_name=self.runtime.deployment_default.agent_name,
+                    ),
+                    public_base_url=self.runtime.settings.mcp.app_root_url,
+                )
+        except (anthropic.APIError, SQLAlchemyError) as exc:
+            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
 
         # Commit the intent before Slack can accept the initial card. If the
         # response is lost or this task is cancelled during the request, a
@@ -1922,6 +2031,8 @@ class SlackApp:
             register_pending=self._register_cancel,
             deregister_pending=self._deregister_cancel,
             intent_id=card_intent.id,
+            identity=turn_identity,
+            ma_agent_id=str(agent.id),
         )
         lifecycle_holder: list[SlackTurnLifecycle] = [lifecycle]
 
@@ -2041,11 +2152,7 @@ class SlackApp:
                     )
                     intent_terminal = True
                 else:
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                        channel=channel,
-                        thread_ts=thread_id,
-                        text=explanation,
-                    )
+                    await lifecycle.post_notice(explanation)
                 return
             except SessionBusyError:
                 # Nothing failed and nothing is misconfigured: the previous
@@ -2065,11 +2172,7 @@ class SlackApp:
                     )
                     intent_terminal = True
                 else:
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                        channel=channel,
-                        thread_ts=thread_id,
-                        text=busy_text,
-                    )
+                    await lifecycle.post_notice(busy_text)
                 return
             except SessionAgentMismatch as error:
                 # The recorded (previous) responder's display name is a
@@ -2104,12 +2207,7 @@ class SlackApp:
                     )
                     intent_terminal = True
                 else:
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                        channel=channel,
-                        thread_ts=thread_id,
-                        text=explanation,
-                        blocks=hand_over,
-                    )
+                    await lifecycle.post_notice(explanation, blocks=hand_over)
                 return
             ma_session_id = prepared.ma_session_id
             watermark = prepared.watermark
@@ -2218,9 +2316,32 @@ class SlackApp:
             user_text = (
                 content_override if content_override is not None else str(event.get("text") or "")
             )
-            if not reused:
-                # First turn: replay thread history (one Slack page from the root).
-                user_message = await build_context_xml(
+
+            async def _first_turn_context() -> str:
+                """A top-level mention's channel up to the mention, else its thread.
+
+                Rebuilt on a recovery reseed with the same cutoff (the
+                trigger) and the access policy as it is then.
+                """
+                if _is_top_level(event):
+                    return await build_channel_context_xml(
+                        web_client,
+                        channel=channel,
+                        trigger_ts=str(event.get("ts") or thread_id),
+                        user_query=user_text,
+                        read_policy=await load_channel_read_policy(
+                            self.runtime.sessionmaker,
+                            tenant_id=tenant_id,
+                            grant=admission.grant,
+                            channel_id=channel,
+                            thread_ts=thread_id,
+                        ),
+                        author_id=author_id,
+                        is_admin=is_admin,
+                        proxy=proxy_ctx,
+                        key_names=key_names,
+                    )
+                return await build_context_xml(
                     web_client,
                     channel=channel,
                     thread_ts=thread_id,
@@ -2229,7 +2350,12 @@ class SlackApp:
                     is_admin=is_admin,
                     proxy=proxy_ctx,
                     key_names=key_names,
+                    page_limit=self._history_page_limit(),
+                    status_ts=lifecycle.status_ts,
                 )
+
+            if not reused:
+                user_message = await _first_turn_context()
             elif watermark is not None:
                 # Continuation: replay only messages since the last watermark.
                 user_message = await build_delta_xml(
@@ -2242,6 +2368,8 @@ class SlackApp:
                     is_admin=is_admin,
                     proxy=proxy_ctx,
                     key_names=key_names,
+                    page_limit=self._history_page_limit(),
+                    status_ts=lifecycle.status_ts,
                 )
             else:
                 # Reused session with no watermark (prior turn's final_ts was None).
@@ -2276,10 +2404,8 @@ class SlackApp:
                 # Only claim the images were "linked" when the proxy is configured —
                 # that's the branch that actually minted fetchable URLs into the prefix.
                 if images_skipped:
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                        channel=channel,
-                        thread_ts=thread_id,
-                        text=(
+                    await lifecycle.post_notice(
+                        (
                             "Some images couldn't be inlined — I've linked them for the agent to "
                             "fetch instead: "
                             + ", ".join(f"`{f['name']}` ({r})" for f, r in images_skipped)
@@ -2298,16 +2424,7 @@ class SlackApp:
 
             async def _reseed_user_message() -> str:
                 """Full history re-seed for the recreated session (dead-session recovery)."""
-                full_message = await build_context_xml(
-                    web_client,
-                    channel=channel,
-                    thread_ts=thread_id,
-                    user_query=user_text,
-                    author_id=author_id,
-                    is_admin=is_admin,
-                    proxy=proxy_ctx,
-                    key_names=key_names,
-                )
+                full_message = await _first_turn_context()
                 if synthetic_prefix:
                     full_message = synthetic_prefix + "\n" + full_message
                 async with self.runtime.sessionmaker() as session:
@@ -2327,7 +2444,9 @@ class SlackApp:
                     render_turn_origin(
                         recovery_origin,
                         responder_handle=responder_handle(self.runtime.settings),
+                        responder_account=account,
                         session_state=session_state,
+                        is_channel_admin=is_channel_admin,
                     )
                     + "\n"
                     + full_message
@@ -2363,6 +2482,8 @@ class SlackApp:
                     # second, successful card.
                     adopt_status_ts=lifecycle.status_ts,
                     intent_id=card_intent.id,
+                    identity=turn_identity,
+                    ma_agent_id=str(agent.id),
                 )
                 # The replacement summary belongs to the turn, not to the
                 # lifecycle object that happens to render it -- a recovery
@@ -2390,6 +2511,14 @@ class SlackApp:
                     started_at=datetime.now(tz=UTC),
                 )
                 await s.commit()
+            is_channel_admin = await holds_current_channel_admin_grant(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                account_id=admission.account_id,
+                platform="slack",
+                parent_channel_id=channel,
+                role=Role.ADMIN if is_admin else Role.USER,
+            )
             try:
                 async with turn_origin(
                     self.runtime.sessionmaker,
@@ -2416,7 +2545,9 @@ class SlackApp:
                             render_turn_origin(
                                 origin,
                                 responder_handle=responder_handle(self.runtime.settings),
+                                responder_account=account,
                                 session_state=session_state,
+                                is_channel_admin=is_channel_admin,
                             )
                             + "\n"
                             + user_message
@@ -2429,7 +2560,11 @@ class SlackApp:
                         render_interval_s=2.0,
                         deadline=turn_deadline_at,
                         confirm_write=self._confirmations.hook(
-                            web_client, channel=channel, thread_ts=thread_id
+                            web_client,
+                            channel=channel,
+                            thread_ts=thread_id,
+                            identity=turn_identity,
+                            record_post=lifecycle.record_post,
                         ),
                     )
                     intent_terminal = lifecycle_holder[0].final_ts is not None
@@ -2464,16 +2599,12 @@ class SlackApp:
                 # back to a message when there is no answer to sit above (a
                 # tool-only or failed turn) or it will not fit.
                 if not await final_lifecycle.prepend_revealed_answer(loss_notice):
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                        channel=channel, thread_ts=thread_id, text=loss_notice
-                    )
+                    await final_lifecycle.post_notice(loss_notice)
             if replacement_summary is not None and not final_lifecycle.answer_prefix_applied:
                 # The turn produced no answer to carry the summary (tool-only,
                 # cancelled, or failed). The person still has to be told what
                 # the replacement carried across, so it goes out on its own.
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel, thread_ts=thread_id, text=replacement_summary
-                )
+                await final_lifecycle.post_notice(replacement_summary)
 
             # --- Watermark --- Preserves Slack's original gate exactly (unconditional
             # on final_ts, no state.error branch) -- Discord's inline sequence had an
@@ -2501,10 +2632,8 @@ class SlackApp:
             # the change is saved and will apply at their NEXT message here,
             # not this one -- the answer they just got used the old config.
             if prepared.continuity.pending:
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=render_current_work_must_finish(admission.agent.name, handoff=False),
+                await final_lifecycle.post_notice(
+                    render_current_work_must_finish(admission.agent.name, handoff=False)
                 )
 
             # This turn's own marker is cleared BEFORE anything is dispatched.
@@ -2534,6 +2663,7 @@ class SlackApp:
                 channel=channel,
                 thread_id=thread_id,
                 account_id=admission.account_id,
+                team_id=team_id,
             )
 
             # Detached output sweep. `outcome.ma_session_id` is the post-recovery
@@ -2598,6 +2728,7 @@ class SlackApp:
         tenant_id: uuid.UUID,
         channel: str,
         thread_id: str,
+        team_id: str,
     ) -> None:
         with observe_turn(
             self.runtime.sessionmaker,
@@ -2614,6 +2745,7 @@ class SlackApp:
                 tenant_id=tenant_id,
                 channel=channel,
                 thread_id=thread_id,
+                team_id=team_id,
             )
 
     async def _run_continuation_turn_observed(
@@ -2625,6 +2757,7 @@ class SlackApp:
         tenant_id: uuid.UUID,
         channel: str,
         thread_id: str,
+        team_id: str,
     ) -> None:
         """Run the receiving agent's first turn for one dispatched continuation.
 
@@ -2660,6 +2793,21 @@ class SlackApp:
             else None
         )
 
+        # The bot account the mention names, resolved before the card posts.
+        # A continuation can be the first turn this process runs for the
+        # workspace, so the gate may not have cached it yet. A failed lookup
+        # runs the turn without it: the dispatcher settles a raising
+        # continuation as failed and never retries it.
+        try:
+            account = responder_account(await self._bot_user_id(team_id, web_client))
+        except (SlackApiError, aiohttp.ClientError, TimeoutError) as exc:
+            log.warning(
+                "slack.continuation.bot_user_id_unresolved",
+                team_id=team_id,
+                thread_id=thread_id,
+                exc_info=exc,
+            )
+            account = None
         # The follow-up runs as the requester, so it carries their role as it
         # stands NOW, read from Slack the way a mention reads it. A failed
         # lookup runs the turn as USER -- never more than the requester holds.
@@ -2723,6 +2871,22 @@ class SlackApp:
             )
             await intent_session.commit()
         follow_cancel = asyncio.Event()
+        follow_identity: AgentIdentity | None = None
+        try:
+            async with self.runtime.sessionmaker.begin() as identity_session:
+                follow_identity = await resolve_agent_identity(
+                    identity_session,
+                    tenant_id=tenant_id,
+                    agent_name=follow_admission.agent.name,
+                    is_builtin=is_builtin_agent(
+                        name=follow_admission.agent.name,
+                        metadata=follow_admission.agent.metadata,
+                        default_agent_name=self.runtime.deployment_default.agent_name,
+                    ),
+                    public_base_url=self.runtime.settings.mcp.app_root_url,
+                )
+        except (anthropic.APIError, SQLAlchemyError) as exc:
+            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
@@ -2744,6 +2908,8 @@ class SlackApp:
             register_pending=self._register_cancel,
             deregister_pending=self._deregister_cancel,
             intent_id=card_intent.id,
+            identity=follow_identity,
+            ma_agent_id=str(follow_admission.agent.id),
         )
         lifecycle_holder: list[SlackTurnLifecycle] = [follow_lifecycle]
         await follow_lifecycle.post_initial()
@@ -2800,7 +2966,9 @@ class SlackApp:
                 render_turn_origin(
                     recovery_origin,
                     responder_handle=responder_handle(self.runtime.settings),
+                    responder_account=account,
                     handoff=handoff_notice,
+                    is_channel_admin=is_channel_admin,
                 )
                 + "\n"
                 + seed_user_message
@@ -2828,6 +2996,9 @@ class SlackApp:
                 register_pending=self._register_cancel,
                 deregister_pending=self._deregister_cancel,
                 adopt_status_ts=follow_lifecycle.status_ts,
+                intent_id=card_intent.id,
+                identity=follow_identity,
+                ma_agent_id=str(follow_admission.agent.id),
             )
             lifecycle_holder[0] = new_lifecycle
             if follow_lifecycle.status_ts is not None:
@@ -2836,6 +3007,14 @@ class SlackApp:
                 )
             return new_lifecycle
 
+        is_channel_admin = await holds_current_channel_admin_grant(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=follow_admission.account_id,
+            platform="slack",
+            parent_channel_id=channel,
+            role=role,
+        )
         try:
             async with turn_origin(
                 self.runtime.sessionmaker,
@@ -2865,7 +3044,9 @@ class SlackApp:
                         render_turn_origin(
                             follow_origin,
                             responder_handle=responder_handle(self.runtime.settings),
+                            responder_account=account,
                             handoff=handoff_notice,
+                            is_channel_admin=is_channel_admin,
                         )
                         + "\n"
                         + seed_user_message
@@ -2877,7 +3058,11 @@ class SlackApp:
                     render_interval_s=2.0,
                     deadline=follow_deadline,
                     confirm_write=self._confirmations.hook(
-                        web_client, channel=channel, thread_ts=thread_id
+                        web_client,
+                        channel=channel,
+                        thread_ts=thread_id,
+                        identity=follow_identity,
+                        record_post=follow_lifecycle.record_post,
                     ),
                 )
         finally:
@@ -2912,6 +3097,7 @@ class SlackApp:
         channel: str,
         thread_id: str,
         account_id: uuid.UUID,
+        team_id: str,
     ) -> None:
         """Claim and settle every pending continuation for this thread, guard held.
 
@@ -2942,6 +3128,7 @@ class SlackApp:
             channel=channel,
             thread_id=thread_id,
             active_turn=live_row is not None and live_row.active_turn_message_id is not None,
+            page_limit=self._history_page_limit(),
             run_follow_up=lambda row, seed: self._run_continuation_turn(
                 row,
                 seed,
@@ -2949,6 +3136,7 @@ class SlackApp:
                 tenant_id=tenant_id,
                 channel=channel,
                 thread_id=thread_id,
+                team_id=team_id,
             ),
         )
 
@@ -2987,6 +3175,7 @@ class SlackApp:
                     channel=channel,
                     thread_id=thread_id,
                     account_id=account_id,
+                    team_id=team_id,
                 ),
                 lambda: self._drain_pending_mentions(
                     channel=channel,

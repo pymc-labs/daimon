@@ -31,14 +31,14 @@ from anthropic.types.beta import BetaEnvironment
 from anthropic.types.beta.beta_cloud_config_params import BetaCloudConfigParams
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.answering_map import AnsweringMap
-from daimon.core.authz import Action, Decision, Place, Subject, authorize, holds_seal
-from daimon.core.channel_isolation import IsolationViewer, load_isolation_viewer
+from daimon.core.authz import Action, Decision, Place, Subject, authorize, holds_limited_readers
 from daimon.core.defaults.ma_index import (
     find_environment_by_daimon_tag,
     list_environments_by_tenant,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.permissions import confidential_channel_of, sealed_ids
+from daimon.core.permissions import home_of, limited_ids
+from daimon.core.rule_views import RuleViewer, load_rule_viewer
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -109,22 +109,22 @@ def build_clear_environment_note(*, channel: str | None, cleared: bool) -> str:
     )
 
 
-def build_sealed_network_refusal(*, environment_name: str | None) -> str:
-    """Why a channel admin's pick in a sealed channel was refused; None is a clear."""
+def build_limited_network_refusal(*, environment_name: str | None) -> str:
+    """Why a channel admin's pick in a channel with limited readers was refused; None is a clear."""
     what = (
         f"the {environment_name} environment has"
         if environment_name is not None
         else "the default it would fall back to has"
     )
     return (
-        f"This channel is sealed, and {what} unrestricted network access, so only a server "
-        "admin can make that change here. Nothing changed. Pick an environment with limited "
-        "networking and no allowed hosts, or ask a server admin."
+        f"Only turns inside this channel read it, and {what} unrestricted network access, "
+        "so only a server admin can make that change here. Nothing changed. Pick an "
+        "environment with limited networking and no allowed hosts, or ask a server admin."
     )
 
 
-def build_sealed_network_confirm(*, environment_name: str | None, panel: bool = False) -> str:
-    """Why a server admin's pick in a sealed channel waits for a confirmation.
+def build_limited_network_confirm(*, environment_name: str | None, panel: bool = False) -> str:
+    """Why a server admin's pick in a channel with limited readers waits for a confirmation.
 
     A panel has no confirm step, so it points at chat, whose tool asks for one.
     """
@@ -134,25 +134,26 @@ def build_sealed_network_confirm(*, environment_name: str | None, panel: bool = 
         else "the default it would fall back to has"
     )
     note = (
-        f"This channel is sealed, and {what} unrestricted network access, so its content "
-        "could leave through it. Nothing changed."
+        f"Only turns inside this channel read it, and {what} unrestricted network access, "
+        "so its content could leave through it. Nothing changed."
     )
     if panel:
         note += " To use it anyway, ask daimon to make the change in chat and confirm there."
     return note
 
 
-def build_sealed_channels_confirm(*, environment_name: str | None) -> str:
-    """Why a change beyond one channel waits for a confirmation: it leaves sealed
-    channels on an open network (a workspace default, an environment edit or archive)."""
+def build_limited_channels_confirm(*, environment_name: str | None) -> str:
+    """Why a change beyond one channel waits for a confirmation: it leaves channels
+    with limited readers on an open network (a workspace default, an environment
+    edit or archive)."""
     what = (
         f"the {environment_name} environment"
         if environment_name is not None
         else "the environment they would fall back to"
     )
     return (
-        f"Sealed channels would run in {what}, which has unrestricted network access, so "
-        "their content could leave through it. Nothing changed."
+        f"Channels only turns inside them read would run in {what}, which has unrestricted "
+        "network access, so their content could leave through it. Nothing changed."
     )
 
 
@@ -257,7 +258,7 @@ async def list_environment_names(
 
 
 def hidden_environment_names(
-    viewer: IsolationViewer,
+    viewer: RuleViewer,
     *,
     tenant: TenantConfigRow | None,
     channels: Sequence[ChannelConfigRow],
@@ -272,7 +273,7 @@ def hidden_environment_names(
     shown = {tenant.environment_name if tenant is not None else None, default.environment_name}
     for row in channels:
         if row.environment_name:
-            owner = confidential_channel_of(viewer.policy, row.channel_id)
+            owner = home_of(viewer.policy, row.channel_id)
             across = owner not in (None, viewer.inside_channel_id)
             (hidden if across else shown).add(row.environment_name)
     return frozenset(hidden - shown)
@@ -282,7 +283,7 @@ async def load_hidden_environment_names(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    viewer: IsolationViewer | None,
+    viewer: RuleViewer | None,
     default: DeploymentDefault,
 ) -> frozenset[str]:
     """`hidden_environment_names` for `viewer`; None, or nothing isolated, hides none."""
@@ -302,7 +303,7 @@ async def load_panel_hidden_environment_names(
     default: DeploymentDefault,
 ) -> frozenset[str]:
     """What a panel reader at `channel_id` doesn't see; a server admin sees every name."""
-    viewer = await load_isolation_viewer(
+    viewer = await load_rule_viewer(
         session, client, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
     )
     return await load_hidden_environment_names(
@@ -391,7 +392,11 @@ async def authorize_environment_pick(
     workspace default that moves a sealed channel or thread onto one.
     """
     policy = await load_access_policy(session, tenant_id=tenant_id)
-    if channel_id is not None and thread_id is None and not holds_seal(policy, channel_id):
+    if (
+        channel_id is not None
+        and thread_id is None
+        and not holds_limited_readers(policy, channel_id)
+    ):
         thread_id = await _sealed_thread_under(
             session, policy, tenant_id=tenant_id, channel_id=channel_id
         )
@@ -412,7 +417,7 @@ async def authorize_environment_pick(
     gate = decide(open_network=False)
     if not gate:
         return EnvironmentPick(decision=gate)
-    sealed = channel_id is not None and holds_seal(policy, channel_id, place)
+    sealed = channel_id is not None and holds_limited_readers(policy, channel_id, place)
     if environment_name is not None:
         environment = await find_environment_by_daimon_tag(
             client, tenant_id=tenant_id, name=environment_name
@@ -485,8 +490,8 @@ def _workspace(environment_name: str | None) -> Callable[[_Picks], _Picks]:
 
 
 def _thread_of(seal: str, channels: Iterable[str]) -> str | None:
-    """The channel a Slack (``channel:ts``) or Teams (``channel;messageid=``) thread names."""
-    return next((c for c in channels if seal.startswith((f"{c}:", f"{c};"))), None)
+    """The channel a Slack thread (``channel:ts``) names; a Teams thread keeps no rule."""
+    return next((c for c in channels if seal.startswith(f"{c}:")), None)
 
 
 async def _seal_parents(
@@ -511,8 +516,8 @@ async def _seal_parents(
 async def _sealed_thread_under(
     session: AsyncSession, policy: TenantAccessPolicy, *, tenant_id: uuid.UUID, channel_id: str
 ) -> str | None:
-    """A sealed thread under `channel_id`, if a Teams one names it or a session placed one."""
-    seals = sealed_ids(policy)
+    """A sealed Discord thread a session ran in under `channel_id`, if any."""
+    seals = limited_ids(policy)
     places = await _seal_parents(session, tenant_id=tenant_id, seals=seals, channels=(channel_id,))
     return next((seal for seal in sorted(places) if channel_id in places[seal]), None)
 
@@ -534,7 +539,7 @@ async def _sealed_moves(
     change: Callable[[_Picks], _Picks],
 ) -> frozenset[str]:
     """The environments `change` moves sealed channels or threads onto."""
-    seals = sealed_ids(policy)
+    seals = limited_ids(policy)
     if not seals:
         return frozenset()
     before = await _load_picks(session, tenant_id=tenant_id)
@@ -586,7 +591,7 @@ async def update_needs_confirm(
     name = environment.metadata.get(MA_METADATA_KEY_NAME)
     if config is None or name is None or not opens_network(environment, config):
         return False
-    seals = sealed_ids(await load_access_policy(session, tenant_id=tenant_id))
+    seals = limited_ids(await load_access_policy(session, tenant_id=tenant_id))
     picks = await _load_picks(session, tenant_id=tenant_id)
     places = await _seal_parents(session, tenant_id=tenant_id, seals=seals, channels=picks.channels)
     return any(
@@ -618,20 +623,20 @@ async def archive_needs_confirm(
     return await _any_open(client, tenant_id=tenant_id, names=moves)
 
 
-SEALED_OPEN_NETWORK_WARNING: Final = (
+LIMITED_OPEN_NETWORK_WARNING: Final = (
     "This channel runs an environment with open network; a server admin should confirm "
     "or change it."
 )
 """Sealing a channel whose own pick may predate the seal's network rule."""
 
-SEALED_NETWORK_UNCHECKED_WARNING: Final = (
+LIMITED_NETWORK_UNCHECKED_WARNING: Final = (
     "This channel's environment could not be checked for an open network; a server "
     "admin should confirm it."
 )
 """Sealing a channel whose own pick could not be looked up."""
 
 
-async def sealed_network_warning(
+async def limited_readers_network_warning(
     session: AsyncSession,
     client: AsyncAnthropic,
     *,
@@ -656,10 +661,10 @@ async def sealed_network_warning(
             client, tenant_id=tenant_id, name=resolved.environment_name
         )
     except anthropic.APIError:  # the seal is saved already; a lookup must not undo its reply
-        return SEALED_NETWORK_UNCHECKED_WARNING
+        return LIMITED_NETWORK_UNCHECKED_WARNING
     if environment is None or not has_open_network(environment):
         return None
-    return SEALED_OPEN_NETWORK_WARNING
+    return LIMITED_OPEN_NETWORK_WARNING
 
 
 async def save_scope_environment(
@@ -700,8 +705,8 @@ async def save_scope_environment(
 __all__ = [
     "ENVIRONMENT_OPTION_INHERIT",
     "NOT_OFFERED_NOTE",
-    "SEALED_NETWORK_UNCHECKED_WARNING",
-    "SEALED_OPEN_NETWORK_WARNING",
+    "LIMITED_NETWORK_UNCHECKED_WARNING",
+    "LIMITED_OPEN_NETWORK_WARNING",
     "EnvironmentPick",
     "EnvironmentPicker",
     "archive_needs_confirm",
@@ -710,9 +715,9 @@ __all__ = [
     "build_clear_environment_note",
     "build_environment_resolution_note",
     "build_missing_environment_note",
-    "build_sealed_channels_confirm",
-    "build_sealed_network_confirm",
-    "build_sealed_network_refusal",
+    "build_limited_channels_confirm",
+    "build_limited_network_confirm",
+    "build_limited_network_refusal",
     "build_set_environment_note",
     "environment_choices",
     "environment_option_value",
@@ -726,6 +731,6 @@ __all__ = [
     "parse_environment_option",
     "plan_environment_picker",
     "save_scope_environment",
-    "sealed_network_warning",
+    "limited_readers_network_warning",
     "update_needs_confirm",
 ]

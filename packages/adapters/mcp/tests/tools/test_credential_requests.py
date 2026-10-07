@@ -2923,7 +2923,7 @@ async def test_requests_for_a_pinned_agent_need_its_channel_or_an_admin(
         await request()
         assert await _row_count(db_session) == 1
     else:
-        with pytest.raises(ToolError, match="pinned this agent to its own channels"):
+        with pytest.raises(ToolError, match="rule runs it only in certain channels"):
             await request()
         assert await _row_count(db_session) == 0, "a refused request posts no card"
 

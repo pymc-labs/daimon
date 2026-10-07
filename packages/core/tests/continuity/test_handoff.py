@@ -149,24 +149,24 @@ def test_decide_handoff_refuses_an_agent_pinned_to_other_channels() -> None:
         destination_reachable=True,
         existing_binding_kind=None,
         origin_responder_ma_agent_id="agt_daimon",
-        access=Decision(False, "agent_pinned_elsewhere"),
+        access=Decision(False, "runs_elsewhere"),
     )
 
     assert decision == HandoffRefused(
-        reason="pinned_elsewhere",
+        reason="runs_elsewhere",
         destination_name="daimon-rx",
-        authz_reason="agent_pinned_elsewhere",
-    ), "a pinned agent is reachable in its own channels, which must not carry it here"
+        authz_reason="runs_elsewhere",
+    ), "an agent with a rule is reachable in its own channels, which must not carry it here"
 
 
-def test_decide_handoff_setup_thread_refusal_wins_over_the_pin() -> None:
+def test_decide_handoff_setup_thread_refusal_wins_over_the_agent_rule() -> None:
     decision = decide_handoff(
         destination_ma_agent_id="agt_rx",
         destination_name="daimon-rx",
         destination_reachable=True,
         existing_binding_kind="setup",
         origin_responder_ma_agent_id="agt_daimon",
-        access=Decision(False, "agent_pinned_elsewhere"),
+        access=Decision(False, "runs_elsewhere"),
     )
 
     assert isinstance(decision, HandoffRefused)
@@ -176,12 +176,12 @@ def test_decide_handoff_setup_thread_refusal_wins_over_the_pin() -> None:
 @pytest.mark.parametrize(
     ("denied", "reason"),
     [
-        ("channel_protected", "channel_protected"),
+        ("writers_none", "writers_none"),
         ("invoker_not_allowed", "invoker_not_allowed"),
-        ("channel_isolated", "channel_isolated"),
-        ("agent_pinned_elsewhere", "pinned_elsewhere"),
+        ("own_agents_only", "own_agents_only"),
+        ("runs_elsewhere", "runs_elsewhere"),
         ("admin_required", "admin_required"),
-        ("sealed", "sealed"),
+        ("not_a_reader", "not_a_reader"),
     ],
 )
 def test_decide_handoff_refuses_what_authorize_denied(denied: str, reason: str) -> None:
@@ -215,14 +215,14 @@ def test_decide_handoff_says_same_agent_before_who_may_bring_it_in() -> None:
     assert isinstance(decision, HandoffRefused) and decision.reason == "same_agent"
 
 
-def test_decide_handoff_says_pinned_before_unreachable_or_same_agent() -> None:
+def test_decide_handoff_says_runs_elsewhere_before_unreachable_or_same_agent() -> None:
     decision = decide_handoff(
         destination_ma_agent_id="agt_acme",
         destination_name="acme-project",
         destination_reachable=False,
         existing_binding_kind=None,
         origin_responder_ma_agent_id="agt_acme",
-        access=Decision(False, "agent_pinned_elsewhere"),
+        access=Decision(False, "runs_elsewhere"),
     )
 
-    assert isinstance(decision, HandoffRefused) and decision.reason == "pinned_elsewhere"
+    assert isinstance(decision, HandoffRefused) and decision.reason == "runs_elsewhere"

@@ -126,14 +126,16 @@ def is_enabled(*, channel_id: str | None, allowance: int) -> bool:
 # Person-facing copy, shared so Discord and Slack say the same thing. Each
 # adapter renders its own markup around it; none of these carry markup.
 
+#: The button, the form and its notices, on every platform.
+ASK_THE_TEAM: Final[str] = "Ask the team"
+
 OUT_OF_CREDITS: Final[str] = (
-    "You've used all your human-support requests. "
-    "Contact us if you'd like more added to your account."
+    "You've used all your support requests. Contact us if you'd like more added to your account."
 )
 UNAVAILABLE: Final[str] = "This support request is no longer available."
 EMPTY_NOTE: Final[str] = "Please describe what you need help with."
 ALREADY_REQUESTED: Final[str] = (
-    "You've already asked for a human on this answer -- someone will follow up. "
+    "You've already asked the team about this answer -- someone will follow up. "
     "That request didn't use another credit."
 )
 RECORDED_UNDELIVERED: Final[str] = (
@@ -144,7 +146,7 @@ RECEIVED: Final[str] = (
     "You have {remaining} left."
 )
 _OFFER: Final[str] = (
-    "You asked for a human on that answer. "
+    "You asked the team for help with that answer. "
     "You have {remaining} support request(s) left -- "
     "tell us what you need and we'll pick it up."
 )

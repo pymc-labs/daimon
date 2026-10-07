@@ -249,7 +249,7 @@ async def test_a_protected_teams_channel_refuses_tidying(
             policy=TenantAccessPolicy(protected_channel_ids=(_CHANNEL,)),
         )
 
-    with pytest.raises(ToolError, match="this channel is protected"):
+    with pytest.raises(ToolError, match="writers to none"):
         await _teams_edit_message_impl(
             world.runtime,
             auth,

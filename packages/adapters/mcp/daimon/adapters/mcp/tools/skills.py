@@ -23,7 +23,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._isolation import load_caller_isolation, load_skill_owners
+from daimon.adapters.mcp.tools._rule_view import load_caller_view, load_skill_owners
 from daimon.adapters.mcp.tools.agents import (
     _reject_system_agent,  # pyright: ignore[reportPrivateUsage]
 )
@@ -424,7 +424,7 @@ async def _sync_impl(
 
 async def _hidden(runtime: McpRuntime, auth: AuthIdentity, skill: SkillListResponse) -> bool:
     """Whether `skill` belongs, or may belong, to an agent across an isolated channel's line."""
-    caller = await load_caller_isolation(runtime, auth)
+    caller = await load_caller_view(runtime, auth)
     owners = await load_skill_owners(runtime, caller, auth.tenant_id)
     body = strip_tenant_prefix(tenant_id=auth.tenant_id, display_title=skill.display_title or "")
     return caller.hides_skill(owners, skill_id=skill.id, body=body or "")
@@ -435,7 +435,7 @@ async def _list_impl(
     auth: AuthIdentity,
 ) -> list[SkillInfo]:
     rows, _truncated = await list_skills_lenient(runtime.client)
-    caller = await load_caller_isolation(runtime, auth)
+    caller = await load_caller_view(runtime, auth)
     owners = await load_skill_owners(runtime, caller, auth.tenant_id)
     result: list[SkillInfo] = []
     for row in rows:

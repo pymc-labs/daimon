@@ -21,10 +21,10 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._isolation import (
-    CallerIsolation,
-    load_caller_isolation,
-    load_isolation,
+from daimon.adapters.mcp.tools._rule_view import (
+    CallerView,
+    load_caller_view,
+    load_policy_or_refuse,
     refuse,
     require_bindable,
 )
@@ -35,15 +35,15 @@ from daimon.adapters.mcp.tools.reachability import (
 )
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core.channel_environments import build_environment_resolution_note
-from daimon.core.channel_isolation import clear_refusal
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.permissions import any_pinned
+from daimon.core.permissions import any_agent_rules
 from daimon.core.routing_facts import (
     build_clear_default_note,
     build_resolution_note,
     build_set_default_note,
 )
+from daimon.core.rule_views import clear_refusal
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -129,8 +129,8 @@ async def _set_agent_default_impl(
         )
     else:
         # The workspace default answers everywhere, so no pinned agent can be it.
-        policy = await load_isolation(runtime, auth.tenant_id)
-        if any_pinned(policy):
+        policy = await load_policy_or_refuse(runtime, auth.tenant_id)
+        if any_agent_rules(policy):
             if agent is None:
                 agent = await find_agent_by_daimon_tag(
                     runtime.client, tenant_id=auth.tenant_id, name=agent_name
@@ -177,7 +177,7 @@ async def _clear_agent_default_impl(
     require_scope(auth, "channels:write")
     await _require_scope_admin(runtime, auth, channel_id)
     if channel_id is not None:
-        policy = await load_isolation(runtime, auth.tenant_id)
+        policy = await load_policy_or_refuse(runtime, auth.tenant_id)
         refuse(clear_refusal(policy, channel_id=channel_id), agent_name=None)
 
     tenant_id: uuid.UUID = auth.tenant_id
@@ -267,18 +267,18 @@ def _thread_explanation(binding: ThreadAgentBindingRow) -> str:
 
 
 _ACROSS_LINE_MSG = (
-    "{place} is across a confidential channel's line from this conversation, so its "
-    "routing can't be shown here."
+    "{place} is on the other side of a channel kept to its own agents from this "
+    "conversation, so its routing can't be shown here."
 )
 
 
 _NO_OWN_AGENT_NOTE = (
-    "None of this confidential channel's own agents answers here, so a mention is refused "
-    "until an admin sets the channel's agent."
+    "None of this channel's own agents answers here, so a mention is refused until an "
+    "admin sets the channel's agent."
 )
 
 
-def _visible(caller: CallerIsolation, agent_name: str | None) -> str | None:
+def _visible(caller: CallerView, agent_name: str | None) -> str | None:
     return agent_name if agent_name is not None and caller.sees(agent_name) else None
 
 
@@ -299,8 +299,8 @@ async def _explain_agent_resolution_impl(
     the caller is refused, and agents the caller can't see are left out.
     """
     tenant_id: uuid.UUID = auth.tenant_id
-    caller = await load_caller_isolation(runtime, auth)
-    if caller.isolated_place(channel_id) != caller.inside_channel_id:
+    caller = await load_caller_view(runtime, auth)
+    if caller.home_place(channel_id) != caller.inside_channel_id:
         raise ToolError(_ACROSS_LINE_MSG.format(place=f"channel '{channel_id}'"))
 
     async with runtime.session_factory() as session:
@@ -371,7 +371,7 @@ async def _explain_agent_resolution_impl(
         effective_environment_name=resolved.environment_name,
         environment_winning_tier=resolved.environment_name_tier,
         channel_environment=channel_cfg.environment_name if channel_cfg is not None else None,
-        # An isolated channel's insiders see no workspace picks (`hide_across_isolation`).
+        # An isolated channel's insiders see no workspace picks (`hide_across_homes`).
         tenant_environment=tenant_cfg.environment_name
         if tenant_cfg is not None and caller.inside_channel_id is None
         else None,

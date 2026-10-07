@@ -7,6 +7,7 @@ from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     OPEN_TOOL_SAFETY,
+    PUBLISH_TOOLS,
     ToolAnnotations,
     ToolCall,
     ToolSafetyPolicy,
@@ -312,3 +313,30 @@ def test_a_disabled_daimon_toolset_keeps_add_skill_disabled() -> None:
     assert out[0]["configs"] == [
         {"name": "add_skill", "enabled": False, "permission_policy": {"type": "always_ask"}}
     ], "add_skill is not switched on"
+
+
+def test_publish_tools_ask_only_in_a_session_that_asks_before_publishing() -> None:
+    """With tool safety off or on, a session whose agent may not publish freely holds
+    daimon's publish tools for the requester's Approve; other sessions keep them open."""
+    trusted = frozenset({DAIMON_SERVER_NAME})
+    assert session_tools_for_policy(OPEN_TOOL_SAFETY, _tools(), trusted_servers=trusted) is None
+    asking = session_tools_for_policy(
+        OPEN_TOOL_SAFETY, _tools(), trusted_servers=trusted, asks_before_publishing=True
+    )
+    assert asking is not None
+    assert [c["name"] for c in asking[1]["configs"]] == sorted(PUBLISH_TOOLS)
+    assert all(has_confirmation_gate(asking, tool_name=name) for name in PUBLISH_TOOLS)
+    assert not has_confirmation_gate(asking, tool_name="add_skill"), "tool safety is still off"
+    assert asking[2] == _tools()[2], "and third-party toolsets are untouched"
+    gated = session_tools_for_policy(_ON, _tools(), trusted_servers=trusted)
+    assert gated is not None and not has_confirmation_gate(gated, tool_name="publish_report")
+
+
+def test_a_publish_call_asks_in_chat_and_is_denied_unattended_with_safety_off_or_on() -> None:
+    trusted = trusted_servers_for("https://mcp.example.com/mcp")
+    call = _call(DAIMON_SERVER_NAME, "publish_report")
+    for policy in (OPEN_TOOL_SAFETY, _ON):
+        asked = decide_tool_call(policy, call, attended=True, trusted_servers=trusted)
+        assert (asked.outcome, asked.reason) == ("ask", "publish_needs_confirmation")
+        denied = decide_tool_call(policy, call, attended=False, trusted_servers=trusted)
+        assert (denied.outcome, denied.reason) == ("deny", "unattended_publish")

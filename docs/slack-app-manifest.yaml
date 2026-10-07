@@ -34,6 +34,9 @@ features:
     - command: /help
       description: List commands and the @mention entrypoint
       should_escape: false
+    - command: /here
+      description: Who answers here, what it can read and holds
+      should_escape: false
     - command: /agent-setup
       description: See your agents, who answers where, and make changes
       should_escape: false
@@ -57,6 +60,7 @@ oauth_config:
     bot:
       - app_mentions:read
       - chat:write
+      - chat:write.customize
       - im:write
       - commands
       - im:history

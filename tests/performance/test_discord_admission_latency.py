@@ -1,8 +1,12 @@
-"""Opt-in local reproduction of warm Discord mention admission latency.
+"""Opt-in local reproduction of 100/200 Discord mention admission latency.
 
 Run with ``DAIMON_BENCH_ADMISSION=1 uv run pytest -s
 tests/performance/test_discord_admission_latency.py`` against a test Postgres.
-The normal test suite skips this load benchmark.
+The normal test suite skips this load benchmark. The output reports phase
+latencies, per-admission database checkouts and statements, pool wait,
+loop lag, and Managed Agents request counts with a 200 ms fake API.
+Set ``DAIMON_BENCH_PHASE_LAG=1`` to attribute loop-lag samples to active
+phases; this diagnostic adds overhead and phases may overlap.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
@@ -44,7 +48,7 @@ from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 pytest_plugins = ["daimon.testing.db"]
@@ -53,11 +57,15 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("DAIMON_BENCH_ADMISSION") != "1", reason="opt-in load benchmark"
 )
 
-_N = 100
+_SIZES = (100, 200)
+_MEASURE_PHASE_LAG = os.environ.get("DAIMON_BENCH_PHASE_LAG") == "1"
 _CHANNELS = 65
 _NOW = datetime.now(UTC)
 _TIMINGS: contextvars.ContextVar[dict[str, float] | None] = contextvars.ContextVar(
     "admission_benchmark_timings", default=None
+)
+_PHASE_HOOK: contextvars.ContextVar[Callable[[str, int], None] | None] = contextvars.ContextVar(
+    "admission_benchmark_phase_hook", default=None
 )
 
 
@@ -66,12 +74,22 @@ def _timed(
 ) -> Callable[..., Coroutine[Any, Any, Any]]:
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         begin = time.perf_counter()
+        timings = _TIMINGS.get()
+        wait_before = timings.get("db_pool_wait", 0.0) if timings is not None else 0.0
+        hook = _PHASE_HOOK.get()
+        if hook is not None:
+            hook(name, 1)
         try:
             return await function(*args, **kwargs)
         finally:
+            if hook is not None:
+                hook(name, -1)
             timings = _TIMINGS.get()
             if timings is not None:
                 timings[name] = timings.get(name, 0.0) + time.perf_counter() - begin
+                timings[f"db_wait_{name}"] = timings.get(f"db_wait_{name}", 0.0) + max(
+                    0.0, timings.get("db_pool_wait", 0.0) - wait_before
+                )
 
     return wrapper
 
@@ -127,10 +145,13 @@ async def _seed(
             session,
             tenant_id=tenant.id,
             policy=TenantAccessPolicy(
-                sealed_channel_ids=tuple(channel_ids),
-                isolated_channel_ids=tuple(channel_ids),
-                agent_channel_pins={
-                    f"agent-{n}": (channel_id,) for n, channel_id in enumerate(channel_ids)
+                channel_rules={
+                    channel_id: ChannelRule(readers="own", writers="own")
+                    for channel_id in channel_ids
+                },
+                agent_rules={
+                    f"agent-{n}": AgentRule(runs_in=(channel_id,))
+                    for n, channel_id in enumerate(channel_ids)
                 },
             ),
         )
@@ -146,7 +167,7 @@ async def _run_batch(
     defaults_root: Path,
     observer: AsyncEngine,
     resolver_cache: ResolverCache,
-) -> tuple[list[float], Counter[str], dict[str, list[float]]]:
+) -> tuple[list[float], Counter[str], dict[str, list[float]], dict[str, list[float]]]:
     deps = TurnDeps(
         anthropic=anthropic,
         sessionmaker=factory,
@@ -166,6 +187,50 @@ async def _run_batch(
     finished = asyncio.Event()
     waits: Counter[str] = Counter()
     stage_times: dict[str, list[float]] = {}
+    db_counts: dict[str, list[float]] = {}
+    loop_lag: list[float] = []
+    active_phases: Counter[str] = Counter()
+    phase_lag: dict[str, list[float]] = {}
+
+    def phase_hook(name: str, delta: int) -> None:
+        active_phases[name] += delta
+
+    def checkout(*_args: Any) -> None:
+        timings = _TIMINGS.get()
+        if timings is not None:
+            timings["db_checkouts"] = timings.get("db_checkouts", 0) + 1
+
+    def statement(*_args: Any) -> None:
+        timings = _TIMINGS.get()
+        if timings is not None:
+            timings["db_statements"] = timings.get("db_statements", 0) + 1
+
+    pool = factory.kw["bind"].sync_engine.pool
+    original_get = pool._do_get
+
+    def measured_get() -> Any:
+        began = time.perf_counter()
+        try:
+            return original_get()
+        finally:
+            timings = _TIMINGS.get()
+            if timings is not None:
+                timings["db_pool_wait"] = timings.get("db_pool_wait", 0.0) + (
+                    time.perf_counter() - began
+                )
+
+    async def sample_loop() -> None:
+        await started.wait()
+        while not finished.is_set():
+            began = time.perf_counter()
+            await asyncio.sleep(0.01)
+            lag = max(0, time.perf_counter() - began - 0.01)
+            loop_lag.append(lag)
+            # Phases overlap across tasks. These samples show the loop lag a
+            # phase was exposed to, not exclusive CPU spent in that phase.
+            for name, active in active_phases.items():
+                if active:
+                    phase_lag.setdefault(name, []).append(lag)
 
     async def sample_waits() -> None:
         await started.wait()
@@ -201,6 +266,7 @@ async def _run_batch(
         await started.wait()
         timings: dict[str, float] = {}
         token = _TIMINGS.set(timings)
+        phase_token = _PHASE_HOOK.set(phase_hook if _MEASURE_PHASE_LAG else None)
         begin = time.perf_counter()
         try:
             await admit(
@@ -215,6 +281,8 @@ async def _run_batch(
                 now=_NOW,
             )
             timings["admit_total"] = time.perf_counter() - begin
+            for metric in ("db_checkouts", "db_statements", "db_pool_wait"):
+                timings[f"{metric}_admission"] = timings.get(metric, 0.0)
             async with factory() as session:
                 await create_turn_card_intent(
                     session,
@@ -227,9 +295,12 @@ async def _run_batch(
             total = time.perf_counter() - begin
             timings["intent_total"] = total - timings["admit_total"]
             for name, duration in timings.items():
-                stage_times.setdefault(name, []).append(duration)
+                (db_counts if name.startswith("db_") else stage_times).setdefault(name, []).append(
+                    duration
+                )
             return total
         finally:
+            _PHASE_HOOK.reset(phase_token)
             _TIMINGS.reset(token)
 
     timed_names = (
@@ -246,11 +317,19 @@ async def _run_batch(
         "is_over_channel_budget",
     )
     with ExitStack() as stack:
+        stack.enter_context(patch.object(pool, "_do_get", measured_get))
+        stack.callback(event.remove, factory.kw["bind"].sync_engine, "checkout", checkout)
+        event.listen(factory.kw["bind"].sync_engine, "checkout", checkout)
+        stack.callback(
+            event.remove, factory.kw["bind"].sync_engine, "before_cursor_execute", statement
+        )
+        event.listen(factory.kw["bind"].sync_engine, "before_cursor_execute", statement)
         for name in timed_names:
             stack.enter_context(
                 patch.object(admission_module, name, _timed(name, getattr(admission_module, name)))
             )
         sampler = asyncio.create_task(sample_waits())
+        loop_sampler = asyncio.create_task(sample_loop())
         tasks = [
             asyncio.create_task(one(i, tenant_id, channel_id))
             for i, (tenant_id, channel_id) in enumerate(targets)
@@ -261,10 +340,13 @@ async def _run_batch(
         finally:
             finished.set()
             await sampler
-    return elapsed, waits, stage_times
+            await loop_sampler
+    db_counts["loop_lag"] = loop_lag
+    db_counts.update({f"loop_lag_{name}": values for name, values in phase_lag.items()})
+    return elapsed, waits, stage_times, db_counts
 
 
-async def test_discord_admission_100_one_tenant_vs_100_tenants(
+async def test_discord_admission_100_and_200_one_tenant(
     db_engine: AsyncEngine,
     db_schema: str,
     tmp_path: Path,
@@ -288,7 +370,7 @@ async def test_discord_admission_100_one_tenant_vs_100_tenants(
                 isolated=True,
             )
             many: list[tuple[uuid.UUID, str]] = []
-            for _ in range(_N):
+            for _ in range(max(_SIZES)):
                 tenant_id, tenant_channels = await _seed(
                     session,
                     router,
@@ -311,26 +393,34 @@ async def test_discord_admission_100_one_tenant_vs_100_tenants(
             api_key="test",
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(delayed_ma)),
         )
-        cold_resolver_cache = new_resolver_cache()
-        warm_resolver_cache = new_resolver_cache()
-        for agent in all_agents:
-            warm_resolver_cache[
-                (uuid.UUID(agent.metadata["daimon_tenant"]), "agent", agent.metadata["daimon_name"])
-            ] = agent.id
-        for environment in all_environments:
-            warm_resolver_cache[
-                (
-                    uuid.UUID(environment.metadata["daimon_tenant"]),
-                    "environment",
-                    environment.metadata["daimon_name"],
-                )
-            ] = environment.id
+
+        def warm_cache() -> ResolverCache:
+            cache = new_resolver_cache()
+            for agent in all_agents:
+                cache[
+                    (
+                        uuid.UUID(agent.metadata["daimon_tenant"]),
+                        "agent",
+                        agent.metadata["daimon_name"],
+                    )
+                ] = agent.id
+            for environment in all_environments:
+                cache[
+                    (
+                        uuid.UUID(environment.metadata["daimon_tenant"]),
+                        "environment",
+                        environment.metadata["daimon_name"],
+                    )
+                ] = environment.id
+            return cache
+
         cases = {
-            "one tenant, 65 isolated channels": [
-                (one_tenant, channels[n % _CHANNELS]) for n in range(_N)
-            ],
-            "100 tenants, one channel each": many,
+            f"one tenant, 65 isolated channels, N={n}": [
+                (one_tenant, channels[i % _CHANNELS]) for i in range(n)
+            ]
+            for n in _SIZES
         }
+        cases["200 tenants, one channel each"] = many
         # Warm threads already have a platform principal from their first turn.
         async with factory() as session:
             for tenant_id in {tenant_id for targets in cases.values() for tenant_id, _ in targets}:
@@ -346,15 +436,15 @@ async def test_discord_admission_100_one_tenant_vs_100_tenants(
         await asyncio.gather(*(connection.close() for connection in connections))
         runs = [
             (
-                "one tenant, cold resolver",
-                cases["one tenant, 65 isolated channels"],
-                cold_resolver_cache,
+                "one tenant, cold resolver, N=100",
+                cases["one tenant, 65 isolated channels, N=100"],
+                new_resolver_cache(),
             ),
-            *[(label, targets, warm_resolver_cache) for label, targets in cases.items()],
+            *[(label, targets, warm_cache()) for label, targets in cases.items()],
         ]
         for label, targets, resolver_cache in runs:
             calls_before = api_calls.copy()
-            values, waits, stages = await _run_batch(
+            values, waits, stages, db_counts = await _run_batch(
                 factory, anthropic, targets, tmp_path, observer, resolver_cache
             )
             calls = api_calls - calls_before
@@ -381,10 +471,20 @@ async def test_discord_admission_100_one_tenant_vs_100_tenants(
                 f"waits={waits.most_common(10)}"
             )
             print(
-                "stage p95:",
+                "stage p50/p95:",
                 {
-                    name: round(_percentile(durations, 0.95), 3)
+                    name: (
+                        round(statistics.median(durations), 3),
+                        round(_percentile(durations, 0.95), 3),
+                    )
                     for name, durations in stages.items()
+                },
+            )
+            print(
+                "db/loop:",
+                {
+                    name: (round(statistics.mean(values), 2), round(_percentile(values, 0.95), 3))
+                    for name, values in db_counts.items()
                 },
             )
     finally:

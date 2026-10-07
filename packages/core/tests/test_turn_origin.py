@@ -5,16 +5,19 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.turn_origins import get_active_origin, update_origin_target
 from daimon.core.turn_origin import (
     MAX_REQUESTED_WORK_CHARS,
     HandoffNotice,
+    ResponderAccount,
     SessionState,
+    holds_current_channel_admin_grant,
     render_turn_origin,
     turn_origin,
 )
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -158,6 +161,61 @@ def _controls(rendered: str) -> dict[str, object]:
     return parsed
 
 
+async def test_channel_admin_status_uses_only_the_current_channels_stored_grant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session,
+        platform="discord",
+        external_id="444444444444444444",
+        tenant=tenant,
+        account=account,
+    )
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="111111111111111111",
+        role_ids=[],
+        user_ids=["444444444444444444"],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+
+    async def holds(channel: str, role: Role) -> bool:
+        return await holds_current_channel_admin_grant(
+            db_session_factory,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="discord",
+            parent_channel_id=channel,
+            role=role,
+        )
+
+    assert await holds("111111111111111111", Role.USER)
+    assert not await holds("222222222222222222", Role.USER)
+    assert not await holds("111111111111111111", Role.ADMIN)
+
+
+def test_controls_distinguish_channel_admin_member_and_server_admin() -> None:
+    member = _controls(render_turn_origin(_origin()))
+    channel_admin_text = render_turn_origin(_origin(), is_channel_admin=True)
+    channel_admin = _controls(channel_admin_text)
+    server_admin = _controls(render_turn_origin(_origin(role=Role.ADMIN)))
+
+    assert member["current_role"] == "user"
+    assert "channel_admin_scope" not in member
+    assert channel_admin["current_role"] == "channel_admin"
+    assert channel_admin["channel_admin_scope"] == {"channel_id": "C_PARENT"}
+    assert "instructions, skills and keys" in channel_admin_text
+    assert "Channel budgets, channel rules and channel-admin grants" in channel_admin_text
+    assert server_admin["current_role"] == "admin"
+    assert "channel_admin_scope" not in server_admin
+
+
 def test_controls_omit_continuity_blocks_and_their_instructions_on_an_ordinary_turn() -> None:
     rendered = render_turn_origin(_origin())
 
@@ -290,4 +348,44 @@ def test_controls_omit_the_handle_and_its_instruction_when_no_handle_is_supplied
     )
     assert "never ask whether they are the same" not in rendered, (
         "the identity sentence points at a field that is not rendered"
+    )
+
+
+def test_responder_account_ties_the_native_mention_to_a_custom_agent() -> None:
+    """A custom agent named unlike the bot is still who `<@U…>` addresses.
+
+    The person's message carries only the native mention, so without the
+    account the ID matches neither the agent name nor the display handle.
+    """
+    rendered = render_turn_origin(
+        _origin(),
+        responder_handle="@daimon",
+        responder_account=ResponderAccount(user_id="U0WS1BOT", mention="<@U0WS1BOT>"),
+    )
+
+    assert _controls(rendered)["responder"] == {
+        "name": "stats-bot",
+        "ma_agent_id": "agt_stats",
+        "handle": "@daimon",
+        "platform_user_id": "U0WS1BOT",
+        "mention": "<@U0WS1BOT>",
+    }, "the mention must sit inside the responder it addresses, beside the custom name"
+    assert "A message that mentions it is addressed to you" in rendered, (
+        "the controls must say a native mention of the account addresses this responder"
+    )
+    assert "&lt;" in rendered, "the model must be told how the mention appears once XML-escaped"
+    assert "may have come from a different agent" in rendered, (
+        "the account is shared across agents, so its earlier posts must not be claimed"
+    )
+
+
+def test_controls_omit_the_account_and_its_instruction_when_none_is_supplied() -> None:
+    rendered = render_turn_origin(_origin(), responder_handle="@daimon")
+
+    responder = _controls(rendered)["responder"]
+    assert "platform_user_id" not in responder and "mention" not in responder, (
+        "a caller with no verified bot account must not invent one"
+    )
+    assert "responder.mention" not in rendered, (
+        "the account sentence points at fields that are not rendered"
     )

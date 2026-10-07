@@ -24,7 +24,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._isolation import CallerIsolation, load_caller_isolation
+from daimon.adapters.mcp.tools._rule_view import CallerView, load_caller_view
 from daimon.adapters.mcp.tools.channel_budgets import origin_budget_channel
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -53,12 +53,12 @@ from daimon.adapters.mcp.tools.teams._directory import (
 )
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
-from daimon.core.channel_isolation import routine_destination_channel
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.permissions import any_confidential, any_pinned, confidential_channel_of
+from daimon.core.permissions import any_agent_rules, any_own_readers, home_of
 from daimon.core.routine_delivery import destination_shape_error
+from daimon.core.rule_views import routine_destination_channel
 from daimon.core.scope import ScopeContext
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores import routines as routines_store
@@ -331,15 +331,15 @@ async def _check_destination(
         ),
     ):
         raise ToolError(
-            f"{channel_id} is a protected channel: daimon does not post there, so a routine "
+            f"{channel_id}'s rule lets nobody write there, so a routine "
             "cannot deliver to it. Pick another channel. Nothing was saved."
         )
     return parent_channel_id or channel_id
 
 
-def _sees_routine(caller: CallerIsolation, row: RoutineRow) -> bool:
-    """An isolated channel's routines, and its own agents', show only inside it."""
-    place = caller.isolated_place(row.channel_id)
+def _sees_routine(caller: CallerView, row: RoutineRow) -> bool:
+    """Routines of a channel kept to its own agents, and of those agents, show only inside it."""
+    place = caller.home_place(row.channel_id)
     return caller.sees(row.agent_name) and place in (None, caller.inside_channel_id)
 
 
@@ -394,20 +394,18 @@ def _check_agent_pin(
     )
     if not decision:
         record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
-    if decision.reason == "channel_isolated":
-        if origin is not None and confidential_channel_of(
-            policy, origin.channel_id, origin.parent_channel_id
-        ):
+    if decision.reason == "own_agents_only":
+        if origin is not None and home_of(policy, origin.channel_id, origin.parent_channel_id):
             raise ToolError(
-                "This conversation is in a confidential channel, so its routines post only "
-                "into that channel. Nothing was saved."
+                "This conversation is in a channel kept to its own agents, so its routines "
+                "post only into that channel. Nothing was saved."
             )
         raise ToolError(
-            "That channel is confidential, so only its own agents post there. Nothing was saved."
+            "That channel is kept to its own agents, so only they post there. Nothing was saved."
         )
     if not decision:
         raise ToolError(
-            f"{agent_name} is pinned to specific channels by an operator, so its routines "
+            f"{agent_name}'s rule runs it only in certain channels, so its routines "
             "must post straight into one of them (a channel destination, not a thread "
             "or none). Nothing was saved."
         )
@@ -500,9 +498,7 @@ async def _create_routine_impl(
         )
 
     origin = await get_verified_origin(runtime, auth, origin_context_id)
-    caller = await load_caller_isolation(
-        runtime, auth, location_channel_id=origin_channel_id(origin)
-    )
+    caller = await load_caller_view(runtime, auth, location_channel_id=origin_channel_id(origin))
     match = await find_agent_by_daimon_tag(
         runtime.client,
         tenant_id=tenant_id,
@@ -553,7 +549,7 @@ async def _list_routines_impl(
     auth: AuthIdentity,
 ) -> list[RoutineRow]:
     tenant_id = auth.tenant_id
-    caller = await load_caller_isolation(runtime, auth)
+    caller = await load_caller_view(runtime, auth)
     async with runtime.session_factory() as session:
         rows = await routines_store.list_routines_for_tenant(session, tenant_id=tenant_id)
     return [row for row in rows if _may_read(auth, row) and _sees_routine(caller, row)]
@@ -571,7 +567,7 @@ async def _get_routine_impl(
     if (
         row is None
         or not _may_read(auth, row)
-        or not _sees_routine(await load_caller_isolation(runtime, auth), row)
+        or not _sees_routine(await load_caller_view(runtime, auth), row)
     ):
         raise ToolError("routine not found")
     return row
@@ -598,7 +594,7 @@ async def _update_routine_impl(
     new_destination_channel_id = await _check_destination(
         runtime, auth, kind=destination_kind, destination_id=destination_id
     )
-    caller = await load_caller_isolation(runtime, auth)
+    caller = await load_caller_view(runtime, auth)
     async with runtime.session_factory() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
         if row is None or not _sees_routine(caller, row):
@@ -642,7 +638,7 @@ async def _update_routine_impl(
             if match is None:
                 raise ToolError(f"no agent named {agent_name!r} found for this tenant")
             new_agent_id = match.id
-        if any_pinned(update_policy) or any_confidential(update_policy):
+        if any_agent_rules(update_policy) or any_own_readers(update_policy):
             # Check the agent the routine will run, by all its names.
             effective_id_ma = new_agent_id or row.agent_id
             effective_agent = next(
@@ -710,7 +706,7 @@ async def _delete_routine_impl(
     routine_id: UUID,
 ) -> DeleteResult:
     tenant_id = auth.tenant_id
-    caller = await load_caller_isolation(runtime, auth)
+    caller = await load_caller_view(runtime, auth)
     async with runtime.session_factory() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
         if row is None or not _sees_routine(caller, row):

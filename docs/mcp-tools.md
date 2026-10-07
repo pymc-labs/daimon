@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 114 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 116 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -101,6 +101,14 @@ Channel budget tools: read a channel's spending budget; admins set, clear and li
 | `list_channel_budgets` | admin only, operator tokens with tenant:read | List every channel budget in this server or workspace with its spend. |
 | `set_channel_budget` | admin only, operator tokens with channels:write | Set or replace a channel's spending budget. |
 
+## `channel_copies`
+
+Channel copy tool: retire the copy a closing channel was given as its own agent.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `archive_channel_copy` | admin only, operator tokens with agents:archive | Archive the agent copied as a channel's own, when that channel closes. |
+
 ## `channel_environments`
 
 Channel environment tools: which environment a channel's turns run in.
@@ -110,21 +118,14 @@ Channel environment tools: which environment a channel's turns run in.
 | `clear_channel_environment` | admin only, channel admins too, operator tokens with channels:write | Stop a channel picking its own environment, so it uses the workspace default. |
 | `set_channel_environment` | admin only, channel admins too, operator tokens with channels:write | Choose the environment a channel's turns run in, or the workspace default. |
 
-## `channel_isolation`
+## `channel_rules`
 
-Confidential channel tool: keep a channel's own agents inside it.
-
-| Tool | Who can call it | Purpose |
-| --- | --- | --- |
-| `set_channel_isolation` | admin only, operator tokens with channels:write | Mark one channel confidential, or unmark it. |
-
-## `channel_protection`
-
-Channel protection tool: protect or seal one channel, or lift either.
+Rule tools: who reads a channel and who posts there, and where an agent runs.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `set_channel_protection` | admin only, operator tokens with channels:write | Protect or seal one channel, or lift either. |
+| `set_agent_rule` | admin only, operator tokens with channels:write | Set where an agent runs: only in the ``runs_in`` channels and their threads, or, with null, wherever it is set to answer; an empty list runs it nowhere. |
+| `set_channel_rule` | admin only, operator tokens with channels:write | Set who can read a channel and who can post there. |
 
 ## `channel_skills`
 
@@ -175,6 +176,14 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 | `request_repo_binding` | Discord callers, Slack callers, Teams callers | Let an agent read a GitHub working repo or repository, public or private. |
 | `request_skill_repo_token` | Discord callers, Slack callers, Teams callers | The skills repo is private: collect a GitHub token to import its skills. |
 
+## `enable_files`
+
+`enable_channel_files`: the agent asks for the Teams Enable files card.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `enable_channel_files` | Teams callers | Post the Enable files card in this Teams channel, right after your reply. |
+
 ## `environments`
 
 Environment tools: list / get / create / update / archive.
@@ -195,13 +204,13 @@ GitHub App install-link tool: post_github_app_install_link.
 | --- | --- | --- |
 | `post_github_app_install_link` | Discord callers, Slack callers, Teams callers | Install the GitHub App: post a link inviting the user to grant repository access. |
 
-## `isolation_copies`
+## `here`
 
-Confidential copy tool: retire a closing confidential channel's copy.
+Current-place status tool, sharing the slash commands' fixed card.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `archive_isolation_copy` | admin only, operator tokens with agents:archive | Archive the agent copied for a confidential channel, when that channel closes. |
+| `where_am_i` | all callers | Return the fixed /here card with structured facts and rendered text. |
 
 ## `media`
 
@@ -220,7 +229,7 @@ Notebook MCP tools.
 | --- | --- | --- |
 | `create_attachment_upload_url` | all callers | Mint a one-time upload URL for a raw data file in a notebook/blog workspace. |
 | `create_notebook_upload_url` | all callers | Mint a one-time upload URL for a marimo notebook. |
-| `delete_notebook` | all callers | Un-publish a notebook or blog you published (frees its host port). |
+| `delete_notebook` | all callers | Un-publish a notebook or blog you published (deletes it from the host). |
 | `list_notebooks` | all callers | List what you've published — scratch notebooks and permanent blogs alike. |
 
 ## `promo_codes`
@@ -364,10 +373,10 @@ Channel tidy tools: edit_message, delete_message, archive_thread, delete_thread.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `archive_thread` | Discord callers | Archive a Discord thread you opened with create_thread. |
-| `delete_message` | Discord callers, Slack callers, Teams callers | Delete one message you posted with send_message or create_thread. |
-| `delete_thread` | Discord callers, Slack callers | Remove your own messages from a thread you opened with create_thread. |
-| `edit_message` | Discord callers, Slack callers, Teams callers | Replace the text of a message you posted with send_message or create_thread. |
+| `archive_thread` | Discord callers | Archive a Discord thread you opened, with create_thread or from a mention. |
+| `delete_message` | Discord callers, Slack callers, Teams callers | Delete one message you posted, or on Discord one of your replies or status cards. |
+| `delete_thread` | Discord callers, Slack callers | Remove your own messages from a thread you opened. |
+| `edit_message` | Discord callers, Slack callers, Teams callers | Replace the text of a message you posted. |
 
 ## `time`
 

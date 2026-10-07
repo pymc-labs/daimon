@@ -24,11 +24,11 @@ from daimon.adapters.discord.agent_setup.state import PanelState, ThreadContext
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.answering_map import AnsweringMap, load_answering_map
-from daimon.core.channel_isolation import IsolationViewer, load_isolation_viewer
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.roster import RosterAgent, load_roster
+from daimon.core.rule_views import RuleViewer, load_rule_viewer
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_agent_bindings import get_binding
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -132,7 +132,7 @@ async def load_roster_state(
             channel_id=channel_id,
             thread_id=thread_id,
             default=runtime.deployment_default,
-            viewer=await load_isolation_viewer(
+            viewer=await load_rule_viewer(
                 session,
                 runtime.anthropic,
                 tenant_id=tenant_id,
@@ -233,9 +233,9 @@ async def load_answering_map_for(runtime: DiscordRuntime, *, state: PanelState) 
 
 async def panel_viewer(
     session: AsyncSession, runtime: DiscordRuntime, *, state: PanelState
-) -> IsolationViewer | None:
+) -> RuleViewer | None:
     """What this panel's reader sees of isolated channels; None for admins."""
-    return await load_isolation_viewer(
+    return await load_rule_viewer(
         session,
         runtime.anthropic,
         tenant_id=_tenant_id(state),

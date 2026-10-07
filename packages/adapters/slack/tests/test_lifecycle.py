@@ -65,6 +65,7 @@ import yarl
 from anthropic import BadRequestError, RateLimitError
 from daimon.adapters.slack import lifecycle as lifecycle_mod
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
+from daimon.core.agent_identity import AgentIdentity
 from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
@@ -212,6 +213,9 @@ def _make_lifecycle(
     tenant_id: uuid.UUID | None = None,
     budget_channel_id: str | None = None,
     ask_human: bool = False,
+    identity: AgentIdentity | None = None,
+    ma_agent_id: str | None = None,
+    intent_id: uuid.UUID | None = None,
 ) -> tuple[SlackTurnLifecycle, asyncio.Event, dict[str, tuple[asyncio.Event, str]], list[str]]:
     """Create a SlackTurnLifecycle with recorder callables for registry operations.
 
@@ -248,8 +252,46 @@ def _make_lifecycle(
         sessionmaker=sessionmaker,
         tenant_id=tenant_id,
         budget_channel_id=budget_channel_id,
+        identity=identity,
+        ma_agent_id=ma_agent_id,
+        intent_id=intent_id,
     )
     return lc, cancel, registered, deregistered
+
+
+@pytest.mark.asyncio
+async def test_turn_posts_use_agent_header_and_record_intent(
+    fake_slack_web_client: Any,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: list[dict[str, object]] = []
+
+    async def fake_record(_sessionmaker: object, **kwargs: object) -> None:
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(lifecycle_module, "record_turn_post", fake_record)
+    intent = uuid.uuid4()
+    tenant = uuid.uuid4()
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client,
+        sessionmaker=db_session_factory,
+        tenant_id=tenant,
+        identity=AgentIdentity("Ada", "https://example.test/ada.png", False),
+        ma_agent_id="agent_ada",
+        intent_id=intent,
+    )
+    await lc.post_initial()
+    await lc.post_notice("continued")
+    bodies = [
+        call.kwargs["json"] for call in fake_slack_web_client.mock.requests[("POST", _POST_URL)]
+    ]
+    assert [body["username"] for body in bodies] == ["Ada", "Ada"]
+    assert [body["icon_url"] for body in bodies] == ["https://example.test/ada.png"] * 2
+    assert len(recorded) == 2
+    assert all(row["turn_card_intent_id"] == intent for row in recorded)
+    assert all(row["channel_id"] == "C_TEST" for row in recorded)
+    assert all(row["thread_ts"] == "1700000000.000000" for row in recorded)
 
 
 @pytest.mark.parametrize("status", [400, 429])
@@ -776,6 +818,32 @@ async def test_terminal_success_bounds_notification_text_on_long_answers(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("partial_text", ["", "Partial analysis before cancellation."])
+async def test_interrupted_tool_turn_shows_cancelled_and_preserves_partial_answer(
+    fake_slack_web_client: Any, partial_text: str
+) -> None:
+    lc, _, _, deregistered = _make_lifecycle(fake_slack_web_client, notify_on_completion=True)
+    await lc.post_initial()
+    content = [
+        ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
+    ]
+    if partial_text:
+        content.append(TextBlock(kind="text", text=partial_text))
+
+    await lc.on_terminal_success(
+        TurnState(content=content, termination=TerminationReason.INTERRUPTED)
+    )
+
+    rendered = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "Turn cancelled." in rendered
+    if partial_text:
+        assert partial_text in rendered
+    assert "cancel_turn" not in _action_ids(_last_update_blocks(fake_slack_web_client))
+    assert _post_count(fake_slack_web_client) == 1, "cancellation must not send a completion ping"
+    assert lc.final_ts == lc.status_ts
+    assert lc.status_ts in deregistered
+
+
 async def test_terminal_success_tool_only_leaves_collapsed_done(
     fake_slack_web_client: Any,
 ) -> None:
@@ -799,7 +867,7 @@ async def test_terminal_success_tool_only_leaves_collapsed_done(
     assert lc.final_ts == "1000000000.000001", "final_ts must equal status_ts for tool-only turn"
 
     blocks = _last_update_blocks(fake_slack_web_client)
-    assert not _has_actions_block(blocks), (
+    assert "cancel_turn" not in _action_ids(blocks), (
         "tool-only terminal must collapse to the done footer with no cancel button"
     )
     assert any(b["type"] == "context" for b in blocks), (
@@ -1437,8 +1505,9 @@ async def test_no_ask_human_button_when_support_is_off(fake_slack_web_client: An
     )
 
 
-async def test_tool_only_turn_gets_no_feedback_buttons(fake_slack_web_client: Any) -> None:
-    """A turn with no final answer text must not invite feedback on it."""
+async def test_tool_only_turn_gets_feedback_buttons_on_its_card(fake_slack_web_client: Any) -> None:
+    """A tool-only turn's product is its work (a file, a chart), so its card is
+    votable, as a tool-only Discord turn is."""
     lc, *_ = _make_lifecycle(fake_slack_web_client)
     await lc.post_initial()
     await lc.on_sse_event(_thinking_event())
@@ -1450,9 +1519,34 @@ async def test_tool_only_turn_gets_no_feedback_buttons(fake_slack_web_client: An
     )
     await lc.on_terminal_success(state)
 
-    assert "feedback_vote:up" not in _action_ids(_last_update_blocks(fake_slack_web_client)), (
-        "tool-only turn has no answer to vote on"
+    ids = _action_ids(_last_update_blocks(fake_slack_web_client))
+    assert "feedback_vote:up" in ids and "feedback_vote:down" in ids
+    assert "cancel_turn" not in ids
+
+
+async def test_tool_only_card_offers_ask_a_human_when_enabled(fake_slack_web_client: Any) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client, ask_human=True)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    state = TurnState(
+        content=[
+            ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}),
+        ]
     )
+    await lc.on_terminal_success(state)
+
+    assert "support_escalate" in _action_ids(_last_update_blocks(fake_slack_web_client))
+
+
+async def test_cancelled_turn_gets_no_feedback_buttons(fake_slack_web_client: Any) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    await lc.on_terminal_success(TurnState(termination=TerminationReason.INTERRUPTED))
+
+    assert "feedback_vote:up" not in _action_ids(_last_update_blocks(fake_slack_web_client))
 
 
 async def test_terminal_success_names_the_failed_mcp_server_under_the_reply(
@@ -1695,3 +1789,20 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
         assert footers[channel].endswith("· $11.25 left"), (
             f"{channel}: an inactive or missing budget shows the tenant balance"
         )
+
+
+async def test_code_is_raw_in_the_block_and_escaped_in_the_notification_text(
+    fake_slack_web_client: Any,
+) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    await lc.on_terminal_success(
+        TurnState(content=[TextBlock(kind="text", text="Try `<!channel> <@U2> a<b`")])
+    )
+    body = fake_slack_web_client.mock.requests[("POST", _UPDATE_URL)][-1].kwargs["json"]
+    assert body["blocks"][0]["text"] == "Try `<!channel> <@U2> a<b`", (
+        "the markdown block shows code verbatim"
+    )
+    assert body["text"] == "Try `&lt;!channel&gt; &lt;@U2&gt; a&lt;b`", (
+        "the mrkdwn fallback parses code too, so nothing in it may ping"
+    )

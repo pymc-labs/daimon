@@ -32,6 +32,7 @@ async def _create_notebook_upload_impl(
     permanent: bool,
     principal_key: str,
     editable: bool = False,
+    ttl_days: int | None = None,
     tenant: str | None = None,
 ) -> dict[str, str]:
     if permanent and editable:
@@ -41,6 +42,7 @@ async def _create_notebook_upload_impl(
             slug=slug,
             permanent=permanent,
             editable=editable,
+            ttl_days=ttl_days,
             notebook_settings=runtime.settings.notebook,
             principal_key=principal_key,
             now=datetime.now(UTC),
@@ -51,7 +53,7 @@ async def _create_notebook_upload_impl(
         raise ToolError("notebook host not configured") from err
     except (InvalidSlugError, NotebookRateLimitError) as err:
         raise ToolError(str(err)) from err
-    except ValueError as err:  # editable refused by the operator setting
+    except ValueError as err:  # editable refused by the operator setting, or a bad ttl_days
         raise ToolError(str(err)) from err
 
 
@@ -143,6 +145,7 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         slug: str | None = None,
         permanent: bool = False,
         editable: bool = False,
+        ttl_days: int | None = None,
         origin_context_id: str | None = None,
     ) -> dict[str, str]:
         """Mint a one-time upload URL for a marimo notebook.
@@ -152,10 +155,17 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         returned upload_url — the source never goes through a tool argument (which
         truncates large notebooks).
 
-        permanent=False (default) publishes a scratch notebook that the host reaps
-        after its TTL. permanent=True publishes it as a blog that survives host
-        restarts and is never reaped. Prefer the default; re-upload the same slug
-        with permanent=True once the notebook is worth keeping.
+        permanent=False (default) publishes a scratch notebook that the host deletes
+        after ttl_days: 1 by default, up to 365. Pick a longer ttl_days when the
+        person needs the link for longer, such as a client review or a report that
+        links to it. permanent=True publishes it as a blog, kept until you delete it.
+        Prefer the default; re-upload the same slug with permanent=True once the
+        notebook is worth keeping. Re-uploading a scratch notebook restarts its
+        ttl_days from now; re-uploading a blog keeps it a blog.
+
+        Either survives host restarts. The host stops a notebook nobody has opened
+        for a couple of hours, so opening a quiet link can take a few seconds while
+        it starts again.
 
         Both are read-only apps by default: code hidden, interactive widgets live.
         editable=True (scratch only, and only where the operator has turned it on)
@@ -164,25 +174,32 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         are sharing with asked to edit the notebook.
 
         Returns {upload_url, slug, upload_expires_at}. upload_expires_at is when the
-        URL stops working (~5 min); use it promptly. Pass slug to reuse a stable URL
-        across iterations, or omit it for a fresh random one.
+        upload URL stops working (~5 min), not the notebook; use it promptly. Pass
+        slug to reuse a stable URL across iterations, or omit it for a fresh random
+        one.
 
         Then upload with: curl -sS -X PUT --data-binary @<file> "<upload_url>". The
-        curl response JSON carries the live url (and expires_at for scratch
-        notebooks); share that whole url. Its access_token is the notebook's only
-        key, so share it only where the notebook belongs. Never paste large file
-        contents into a tool argument.
+        curl response JSON carries the live url and expires_at (null for a blog);
+        share that whole url and say when it expires. Its access_token is the
+        notebook's only key, so share it only where the notebook belongs. Never
+        paste large file contents into a tool argument.
 
-        Pass this turn's origin_context_id. A pinned agent, or a turn in a
-        confidential channel, publishes nothing.
+        Pass this turn's origin_context_id. An agent with a rule (where it runs)
+        publishes only once the requester approves the call on a card.
         """
         auth = await _auth(ctx)
-        await require_publishable(runtime, auth, origin_context_id=origin_context_id)
+        await require_publishable(
+            runtime,
+            auth,
+            tool_name="create_notebook_upload_url",
+            origin_context_id=origin_context_id,
+        )
         return await _create_notebook_upload_impl(
             runtime,
             slug=slug,
             permanent=permanent,
             editable=editable,
+            ttl_days=ttl_days,
             principal_key=str(auth.account_id),
             tenant=str(auth.tenant_id),
         )
@@ -204,7 +221,12 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Pass this turn's origin_context_id, as for create_notebook_upload_url.
         """
         auth = await _auth(ctx)
-        await require_publishable(runtime, auth, origin_context_id=origin_context_id)
+        await require_publishable(
+            runtime,
+            auth,
+            tool_name="create_attachment_upload_url",
+            origin_context_id=origin_context_id,
+        )
         return await _create_attachment_upload_impl(
             runtime,
             slug=slug,
@@ -215,7 +237,7 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def delete_notebook(ctx: Context, slug: str) -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
-        """Un-publish a notebook or blog you published (frees its host port).
+        """Un-publish a notebook or blog you published (deletes it from the host).
 
         slug is the bare name — the same one you passed to
         create_notebook_upload_url, and the same one list_notebooks reports.
@@ -230,8 +252,9 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def list_notebooks(ctx: Context) -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
         """List what you've published — scratch notebooks and permanent blogs alike.
 
-        Each entry carries slug, url, alive, and permanent (true = a blog that
-        survives restarts, false = a scratch notebook the host will reap). The slug
+        Each entry carries slug, url, alive, permanent (true = a blog, kept until
+        deleted) and, for a scratch notebook, expires_at. url is null while a
+        notebook is stopped; its published link still works. The slug
         is the bare name: pass it straight to delete_notebook to reclaim a host
         port, or to create_notebook_upload_url to re-upload over it.
         """

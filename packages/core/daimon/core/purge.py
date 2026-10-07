@@ -101,10 +101,13 @@ from anthropic import APIError, AsyncAnthropic
 from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
+from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import channel_admins as channel_admins_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import github_credentials as github_credentials_store
+from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
+from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
@@ -139,6 +142,7 @@ class PurgeReport(BaseModel):
     accounts: int = 0
     user_skills: int = 0
     github_credentials: int = 0
+    github_user_links: int = 0
     github_oauth_states: int = 0
     mcp_tokens: int = 0
     agent_github_binding: int = 0
@@ -150,6 +154,7 @@ class PurgeReport(BaseModel):
     message_feedback: int = 0
     support_escalations: int = 0
     channel_admins: int = 0
+    agent_post_requesters: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
@@ -161,6 +166,7 @@ class PurgeReport(BaseModel):
             accounts=self.accounts + other.accounts,
             user_skills=self.user_skills + other.user_skills,
             github_credentials=self.github_credentials + other.github_credentials,
+            github_user_links=self.github_user_links + other.github_user_links,
             github_oauth_states=self.github_oauth_states + other.github_oauth_states,
             mcp_tokens=self.mcp_tokens + other.mcp_tokens,
             agent_github_binding=self.agent_github_binding + other.agent_github_binding,
@@ -174,6 +180,7 @@ class PurgeReport(BaseModel):
             message_feedback=self.message_feedback + other.message_feedback,
             support_escalations=self.support_escalations + other.support_escalations,
             channel_admins=self.channel_admins + other.channel_admins,
+            agent_post_requesters=self.agent_post_requesters + other.agent_post_requesters,
         )
 
 
@@ -197,6 +204,7 @@ async def _purge_principal_in_session(
     Does NOT open a transaction — caller owns the begin() block. Failures
     propagate so the caller's transaction rolls back.
     """
+    agent_post_requesters_count = 0
     if isinstance(principal, PlatformPrincipalRow):
         routines_count = await routines_store.delete_for_principal(
             session,
@@ -264,6 +272,14 @@ async def _purge_principal_in_session(
         # A channel admin grant names the person by platform user id; the row
         # itself is the tenant's, so only their id leaves it.
         channel_admins_count = await channel_admins_store.remove_user_from_channel_admins(
+            session,
+            tenant_id=principal.tenant_id,
+            platform=principal.platform,
+            platform_user_id=principal.external_id,
+        )
+        # A turn's posts and an auto-opened thread name who asked; the posts
+        # are the agent's, so only the person's id leaves them.
+        agent_post_requesters_count = await agent_posts_store.clear_requester(
             session,
             tenant_id=principal.tenant_id,
             platform=principal.platform,
@@ -364,6 +380,7 @@ async def _purge_principal_in_session(
         message_feedback=message_feedback_count,
         support_escalations=support_escalations_count,
         channel_admins=channel_admins_count,
+        agent_post_requesters=agent_post_requesters_count,
     )
 
 
@@ -458,6 +475,9 @@ async def purge_account(
         tenant_ids: set[uuid.UUID] = {principal.tenant_id for principal in (*cli_list, *pp_list)}
 
         report = PurgeReport()
+        github_account_link = await github_links_store.get_account_link(
+            session, account_id=account_id
+        )
         for principal in (*cli_list, *pp_list):
             sub = await _purge_principal_in_session(session, principal=principal)
             report = report.merge(sub)
@@ -502,7 +522,15 @@ async def purge_account(
         direct_message_count = await direct_messages_store.delete_conversations_for_account(
             session, account_id=account_id
         )
+        await github_issued_tokens_store.erase_requester_identity(session, account_id=account_id)
         account_count = await accounts_store.delete_account(session, account_id=account_id)
+        github_user_links_count = (
+            await github_links_store.delete_unlinked_user(
+                session, github_user_id=github_account_link.github_user_id
+            )
+            if github_account_link is not None and account_count
+            else 0
+        )
         db_report = report.merge(
             PurgeReport(
                 mcp_tokens=mcp_tokens_count,
@@ -510,6 +538,7 @@ async def purge_account(
                 support_escalations=support_escalations_count,
                 user_configs=user_cfg_count,
                 accounts=account_count,
+                github_user_links=github_user_links_count,
                 slack_turn_contexts=slack_turn_contexts_count,
                 direct_message_conversations=direct_message_count,
             )

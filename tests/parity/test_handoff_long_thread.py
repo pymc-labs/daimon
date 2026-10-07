@@ -4,7 +4,7 @@ Slack-only (W4c): a thread whose history is far longer than one
 `conversations.replies` page must still replace cleanly when the
 responder's model changes underneath it -- and the replay that decides what
 to tell the successor must never read more of that history than an ordinary
-turn ever would (`THREAD_PAGE_LIMIT`). The transfer itself is exercised
+turn ever would (`history_page_limit`). The transfer itself is exercised
 through the real `daimon.core.workspace_transfer` path (no adapter code
 reimplements it): the old session's event log carries one `user.message`
 with no `agent.message`, so `is_worth_checkpointing` is False and the
@@ -29,7 +29,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import
 )
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.app import SlackApp
-from daimon.adapters.slack.context import THREAD_PAGE_LIMIT
+from daimon.adapters.slack.context import DEFAULT_PAGE_LIMIT
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.config import SlackSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
@@ -137,9 +137,9 @@ def _register_slack_defaults(
             repeat=True,
         )
     mock.post(reactions_add_pattern, payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
-    # The thread "conceptually" has 40 messages; Slack itself would never
+    # The thread "conceptually" runs past one page; Slack itself would never
     # hand back more than one page -- this is that truncated page, exactly
-    # what the real API would return for `limit=THREAD_PAGE_LIMIT`.
+    # what the real API would return for `limit=DEFAULT_PAGE_LIMIT`.
     mock.get(  # pyright: ignore[reportUnknownMemberType]
         conversations_replies_pattern,
         payload={"ok": True, "messages": thread_messages, "has_more": True},
@@ -250,16 +250,16 @@ async def test_slack_long_thread_replacement_stays_within_thread_page_limit_and_
     runtime = _make_runtime(db_session_factory, router, fernet_key=fernet_key)
     app = SlackApp(runtime=runtime)
 
-    # The thread "conceptually" holds 40 human messages; one truncated page
-    # (THREAD_PAGE_LIMIT) is what a real Slack workspace would ever hand back
-    # for a single `conversations.replies` call.
+    # The thread "conceptually" holds more human messages than one page; one
+    # truncated page (DEFAULT_PAGE_LIMIT) is what a real Slack workspace would
+    # ever hand back for a single `conversations.replies` call.
     thread_messages = [
         {
             "user": f"U_OTHER_{i}",
             "text": f"message number {i}",
             "ts": f"9000007000.{i:06d}",
         }
-        for i in range(THREAD_PAGE_LIMIT)
+        for i in range(DEFAULT_PAGE_LIMIT)
     ]
 
     event_ts = f"{time.time():.6f}"
@@ -290,8 +290,8 @@ async def test_slack_long_thread_replacement_stays_within_thread_page_limit_and_
     )
     replies_kwargs = cast(dict[str, Any], replies_requests[0].kwargs)  # pyright: ignore[reportUnknownMemberType]
     replies_params = cast(dict[str, Any], replies_kwargs.get("params") or {})
-    assert int(replies_params["limit"]) == THREAD_PAGE_LIMIT, (
-        "the request must ask for at most THREAD_PAGE_LIMIT messages regardless of how long "
+    assert int(replies_params["limit"]) == DEFAULT_PAGE_LIMIT, (
+        "the request must ask for at most history_page_limit messages regardless of how long "
         "the real thread is"
     )
 

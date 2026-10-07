@@ -8,7 +8,9 @@ the same state. Busy arrivals append before the wait response.
 
 Discord drains after a dispatch exception and keeps the first carrier message.
 Slack drains after success, skips authorless events, isolates expected errors
-per author and apologises to leftover mentions. Teams keeps the last carrier,
+per author and apologises to leftover mentions. It removes the ⌛ from each
+queued message when its batch settles, and from messages taken from the queue
+but not run, or left in it, when the drain or owning turn exits. Teams keeps the last carrier,
 routes each drained turn at execution time, and caps wakes only. Its deferred
 requests retain saved-input URLs and combine the capped flags with AND.
 Cancellation retains each adapter's existing cleanup.

@@ -11,7 +11,7 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
 from daimon.core.authz import Action, AgentRef, Surface, authorize, build_subject
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.permissions import agent_permissions, any_confidential, any_pinned
+from daimon.core.permissions import agent_permissions, any_agent_rules, any_own_readers
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
@@ -90,8 +90,8 @@ async def _policy_gate(
 
     Reads the policy fresh on every call, so ``_admission_recheck`` can run it
     again right before a turn's session is created or its message is sent.
-    Returns the isolated channel the agent is one of the own agents of
-    (`isolation_owner`), when ``agent_names`` is given, else None.
+    Returns the agent's home, the channel it is one of the own agents of
+    (`AgentPermissions.home`), when ``agent_names`` is given, else None.
     """
 
     def refused(reason: TerminationReason) -> None:
@@ -116,10 +116,10 @@ async def _policy_gate(
         and account.role is Role.ADMIN
     )
     names: tuple[str | None, ...] = ()
-    gated = any_pinned(policy) or any_confidential(policy)
+    gated = any_agent_rules(policy) or any_own_readers(policy)
     # An isolated channel's own agent is charged to that channel, so the
     # names are read for a hub admin too while anything is isolated.
-    if agent_names is not None and gated and (not hub_admin or any_confidential(policy)):
+    if agent_names is not None and gated and (not hub_admin or any_own_readers(policy)):
         # Resolving the agent's names may await the network (an MA lookup);
         # read the policy again after it, so the pin is decided on the policy
         # as it is once every await is done, not as it was before the lookup.
@@ -137,7 +137,7 @@ async def _policy_gate(
             and account is not None
             and account.role is Role.ADMIN
         )
-        gated = any_pinned(policy) or any_confidential(policy)
+        gated = any_agent_rules(policy) or any_own_readers(policy)
     decision = (
         authorize(
             policy,
@@ -169,21 +169,21 @@ async def _policy_gate(
             tenant_id=str(auth.tenant_id),
             platform_user_id=auth.platform_user_id,
             tool=tool_name,
-            gate="channel_isolation" if decision.reason == "channel_isolated" else "agent_pin",
+            gate="channel_rule" if decision.reason == "own_agents_only" else "agent_rule",
         )
         refused(denial_termination_reason(decision.reason))
-        if decision.reason == "channel_isolated":
+        if decision.reason == "own_agents_only":
             raise ToolError(
-                "TERMINAL ERROR: This agent's key is bound to a confidential channel that "
-                "only that channel's own agents answer in, so it can't run here."
+                "TERMINAL ERROR: This agent's key is bound to a channel kept to its own "
+                "agents, and this agent isn't one of them, so it can't run here."
             )
         raise ToolError(
-            "TERMINAL ERROR: An operator pinned this agent to specific channels, so it "
+            "TERMINAL ERROR: This agent's rule runs it only in certain channels, so it "
             "only runs in a conversation inside them, not from here. Ask it in one of "
             "those channels; a question about a shared report can't be answered here."
         )
 
-    owner = agent_permissions(policy, names).own_channel if names else None
+    owner = agent_permissions(policy, names).home if names else None
     if auth.platform_user_id is None:
         return owner
     is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)

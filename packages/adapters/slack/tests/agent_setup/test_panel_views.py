@@ -21,18 +21,18 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_CHANNEL_ADMINS,
     ACTION_CHANNEL_SKILLS,
     ACTION_CODING_TOOLS,
-    ACTION_END_ISOLATION,
     ACTION_EXPAND_CONNECTIONS,
     ACTION_EXPAND_KEYS,
     ACTION_EXPAND_SKILLS,
-    ACTION_ISOLATE,
-    ACTION_ISOLATE_COPY,
-    ACTION_LIFT_ISOLATION,
     ACTION_NEW,
     ACTION_OPERATOR_MINT,
     ACTION_OPERATOR_REVOKE,
     ACTION_PAGE_NEXT,
     ACTION_ROUTING,
+    ACTION_RULE_COPY,
+    ACTION_RULE_READERS,
+    ACTION_RULE_RELEASE,
+    ACTION_RULE_WRITERS,
     CALLBACK_CHANNEL_ADMINS,
     CALLBACK_NEW_AGENT,
     CHANNEL_ADMINS_GROUPS_INPUT_ID,
@@ -51,9 +51,10 @@ from daimon.adapters.slack.modal_limits import (
     MAX_PRIVATE_METADATA_CHARS,
     MAX_TITLE_CHARS,
 )
+from daimon.core.access_policy import ChannelRule
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, build_agent_details
 from daimon.core.answering_map import AnsweringMap, build_answering_map
-from daimon.core.channel_isolation import ChannelIsolationStatus
+from daimon.core.channel_rules import ChannelRuleStatus
 from daimon.core.github_repo_auth import RepoAccessKind
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.roster import Page, Roster, RosterAgent, paginate
@@ -1110,17 +1111,15 @@ def test_new_agent_form_metadata_carries_the_page_the_reader_was_on() -> None:
     )
 
 
-_OPEN = ChannelIsolationStatus(is_private=False, dedicated_agent_names=(), is_hidden=False)
-_ISOLATED = ChannelIsolationStatus(
-    is_private=True, dedicated_agent_names=("alpha",), is_hidden=True
-)
-_ENDED = ChannelIsolationStatus(is_private=True, dedicated_agent_names=("alpha",), is_hidden=False)
+_OPEN = ChannelRuleStatus(rule=ChannelRule(), agents=())
+_OWN = ChannelRuleStatus(rule=ChannelRule(readers="own", writers="own"), agents=("alpha",))
+_OPENED = ChannelRuleStatus(rule=ChannelRule(), agents=("alpha",))
 
 
 def _routing(
     *,
     channel_admins: list[ChannelAdminsRow] | None,
-    isolation: ChannelIsolationStatus | None = None,
+    rule_status: ChannelRuleStatus | None = None,
     channel_id: str = _CHANNEL_ID,
     operator_tokens: list[McpTokenRow] | None = None,
     channel_skills: list[ChannelSkillRow] | None = None,
@@ -1135,7 +1134,7 @@ def _routing(
         channel_id=channel_id,
         unrouted_agent_name=None,
         channel_admins=channel_admins,
-        isolation=isolation,
+        rule_status=rule_status,
         operator_tokens=operator_tokens,
         channel_skills=channel_skills,
     )
@@ -1189,25 +1188,22 @@ def test_routing_view_lists_operator_tokens_with_mint_and_revoke_without_secrets
     )
 
 
-def test_routing_view_offers_isolation_to_admins_by_state() -> None:
-    open_ids = set(_action_ids(_routing(channel_admins=[], isolation=_OPEN)))
-    assert {ACTION_ISOLATE, ACTION_ISOLATE_COPY} <= open_ids, "an open channel can be isolated"
-    assert not open_ids & {ACTION_END_ISOLATION, ACTION_LIFT_ISOLATION}, "nothing to end or lift"
-    isolated = _routing(channel_admins=[], isolation=_ISOLATED)
-    assert {ACTION_END_ISOLATION, ACTION_LIFT_ISOLATION} <= set(_action_ids(isolated))
-    assert any(
-        "Private: yes · Dedicated agent: *alpha* · Confidential: yes" in t for t in _texts(isolated)
-    ), "the panel shows each of isolation's controls"
-    ended = set(_action_ids(_routing(channel_admins=[], isolation=_ENDED)))
-    assert ACTION_LIFT_ISOLATION in ended and ACTION_END_ISOLATION not in ended, (
-        "after ending, the seal and pin can still be lifted"
-    )
+def test_routing_view_offers_permissions_to_admins_by_state() -> None:
+    selects = {ACTION_RULE_READERS, ACTION_RULE_WRITERS}
+    open_ids = set(_action_ids(_routing(channel_admins=[], rule_status=_OPEN)))
+    assert selects | {ACTION_RULE_COPY} <= open_ids, "an open channel can be kept to a copy"
+    assert ACTION_RULE_RELEASE not in open_ids, "no agents to release"
+    own = _routing(channel_admins=[], rule_status=_OWN)
+    assert selects <= set(_action_ids(own)) and ACTION_RULE_COPY not in set(_action_ids(own))
+    assert any("Agents kept here: alpha" in t for t in _texts(own)), "the panel shows the rule"
+    opened = set(_action_ids(_routing(channel_admins=[], rule_status=_OPENED)))
+    assert ACTION_RULE_RELEASE in opened, "once opened, its agents can still be released"
     member = set(_action_ids(_routing(channel_admins=None)))
-    assert not member & {ACTION_ISOLATE, ACTION_ISOLATE_COPY, ACTION_END_ISOLATION}, (
-        "members get no isolation buttons"
+    assert not member & (selects | {ACTION_RULE_COPY, ACTION_RULE_RELEASE}), (
+        "members get no permission controls"
     )
-    dm = set(_action_ids(_routing(channel_admins=[], isolation=_OPEN, channel_id="D0123456")))
-    assert not dm & {ACTION_ISOLATE, ACTION_ISOLATE_COPY}, "a DM can't be isolated"
+    dm = set(_action_ids(_routing(channel_admins=[], rule_status=_OPEN, channel_id="D0123456")))
+    assert not dm & selects, "a DM has no channel rule"
 
 
 def test_routing_view_lists_channel_admins_and_offers_edit_to_admins_only() -> None:

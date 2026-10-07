@@ -26,7 +26,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Final, Literal
 
-from daimon.core.tool_safety import ToolCall
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, PUBLISH_TOOLS, ToolCall
 from pydantic import BaseModel, ConfigDict, model_validator
 
 __all__ = [
@@ -94,9 +94,14 @@ def prompt_for_tool_call(
 ) -> ConfirmationPrompt:
     """The card for one gated tool write: server, tool, and the exact input."""
     server = call.server_name or "a tool"
+    publishing = call.tool_name in PUBLISH_TOOLS and server == DAIMON_SERVER_NAME
     return ConfirmationPrompt(
-        title=f"Approve a write to {server}?",
-        fields=(("Tool", call.tool_name), ("Server", server)),
+        title="Approve publishing?" if publishing else f"Approve a write to {server}?",
+        fields=(
+            ("Tool", call.tool_name),
+            ("Server", server),
+            *((("Reach", "Anyone with the link, outside this channel"),) if publishing else ()),
+        ),
         detail=_render_input(call.input),
         requester_platform_user_id=requester_platform_user_id,
         expires_at=now + CONFIRMATION_TIMEOUT,

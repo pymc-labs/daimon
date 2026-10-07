@@ -1,11 +1,11 @@
 """The channel settings dialog, opened from Who answers where: environment,
-isolation and channel admins of one channel the caller picks.
+permissions and channel admins of one channel the caller picks.
 
 The panel lives in the 1:1 chat, so the caller names the channel. The rights
 mirror Discord and Slack: a channel admin sets only their own channels'
-environment, through `authorize_environment_pick`; isolation and channel admin
-grants stay with server admins, and isolation goes through core
-`set_channel_isolation`. Every submit re-verifies the clicker and re-reads
+environment, through `authorize_environment_pick`; permissions and channel
+admin grants stay with server admins, and permissions go through core
+`set_channel_rule`. Every submit re-verifies the clicker and re-reads
 their grants, so a stale or forged card grants nothing, and every write,
 allowed or not, is audited with `record_panel_write`.
 """
@@ -44,9 +44,9 @@ from daimon.core.channel_environments import (
     NOT_OFFERED_NOTE,
     authorize_environment_pick,
     build_clear_environment_note,
+    build_limited_network_confirm,
+    build_limited_network_refusal,
     build_missing_environment_note,
-    build_sealed_network_confirm,
-    build_sealed_network_refusal,
     build_set_environment_note,
     list_environment_names,
     load_panel_hidden_environment_names,
@@ -55,11 +55,16 @@ from daimon.core.channel_environments import (
     plan_environment_picker,
     save_scope_environment,
 )
-from daimon.core.channel_isolation import channel_isolation_status
-from daimon.core.channel_isolation_setup import ChannelIsolationRefused, set_channel_isolation
+from daimon.core.channel_rules import (
+    ChannelRuleRefused,
+    as_readers,
+    as_writers,
+    channel_rule_status,
+    set_channel_rule,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
-from daimon.core.permissions import confidential_channels
+from daimon.core.permissions import channel_rule, own_reader_channels
 from daimon.core.routine_delivery import teams_channel_of
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import (
@@ -85,12 +90,12 @@ CHANNELS_NEED_ADMIN: Final = (
     "Changing a channel's settings needs a server admin or an admin of that channel."
 )
 SERVER_ADMIN_ONLY: Final = (
-    "Only a server admin can mark a channel confidential or name its admins. Nothing changed."
+    "Only a server admin can change a channel's permissions or name its admins. Nothing changed."
 )
 UNKNOWN_CHANNEL: Final = "That isn't a Teams channel id. Nothing changed."
 _AUDIT_OPS: Final[Mapping[cards.ChannelOp, PanelOp]] = {
     "environment": "environment",
-    "isolation": "isolation",
+    "rule": "channel_rule",
     "admins": "channel_admins",
 }
 _MAX_ENVIRONMENT_OPTIONS: Final = 99
@@ -162,7 +167,7 @@ class ChannelSettingsDialog:
                     session, tenant_id=actor.tenant_id, platform="teams"
                 )
             # Channels already set up stay reachable when their team can't be listed.
-            extra = [*confidential_channels(policy), *(grant.channel_id for grant in grants)]
+            extra = [*own_reader_channels(policy), *(grant.channel_id for grant in grants)]
             channels = cards.visible_channels(listed, extra)
         else:
             mine = sorted(subject.administered_channel_ids)
@@ -228,7 +233,7 @@ class ChannelSettingsDialog:
             channel_id=channel_id,
             label=cards.channel_label(channel_id, name),
             picker=picker,
-            isolation=channel_isolation_status(policy, channel_id) if actor.is_admin else None,
+            rule=channel_rule_status(policy, channel_id) if actor.is_admin else None,
             admin_user_ids=(grant.user_ids if grant else ()) if actor.is_admin else None,
         )
         return dialog("Channel settings", cards.channel_settings_form(settings, notice=notice))
@@ -272,8 +277,8 @@ class ChannelSettingsDialog:
             return dialog_message(SERVER_ADMIN_ONLY)
         if audit_op == "environment":
             notice = await self._save_environment(actor, subject, channel_id, data)
-        elif audit_op == "isolation":
-            notice = await self._change_isolation(actor, channel_id, data)
+        elif audit_op == "channel_rule":
+            notice = await self._change_rule(actor, channel_id, data)
         else:
             notice = await self._save_admins(actor, channel_id, data)
         return await self._settings(actor, subject, channel_id, notice)
@@ -304,14 +309,14 @@ class ChannelSettingsDialog:
             await self._audit(
                 actor, "environment", outcome="denied", reason=f"authz:{pick.decision.reason}"
             )
-            if pick.decision.reason == "sealed":
-                return build_sealed_network_refusal(environment_name=name)
+            if pick.decision.reason == "not_a_reader":
+                return build_limited_network_refusal(environment_name=name)
             return CHANNELS_NEED_ADMIN
         if name is not None and pick.missing:
             return build_missing_environment_note(name)
         if pick.needs_confirm:
             await self._audit(actor, "environment", outcome="denied", reason="needs_confirm")
-            return build_sealed_network_confirm(environment_name=name, panel=True)
+            return build_limited_network_confirm(environment_name=name, panel=True)
         name = pick.environment_name or name
         account_id = await get_or_create_account(self._runtime, actor)
         async with self._runtime.sessionmaker.begin() as session:
@@ -333,55 +338,52 @@ class ChannelSettingsDialog:
             return build_clear_environment_note(channel=channel_id, cleared=previous is not None)
         return build_set_environment_note(environment_name=name, channel=channel_id)
 
-    async def _change_isolation(
+    async def _change_rule(
         self,
         actor: Actor,
         channel_id: str,
         data: Mapping[str, object],
     ) -> str:
-        """A server admin's isolation change, as Slack's buttons make it."""
-        choice = str(data.get("isolation") or "")
-        if choice not in cards.ISOLATION_CHOICES:
-            return "Pick a change under Confidential. Nothing changed."
-        copy = choice == "copy"
+        """A server admin's permissions change, as Slack's and Discord's controls make it."""
+        readers, writers = as_readers(data.get("readers")), as_writers(data.get("writers"))
+        extra = data.get("extra") or "none"
+        if readers is None or writers is None or extra not in cards.RULE_EXTRAS:
+            return "Pick who can read it and who can post. Nothing changed."
+        copy = extra == "copy"
+        if copy:
+            readers = "own"
+        async with self._runtime.sessionmaker() as session:
+            policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+        # A side left as it was follows the other to and from own (`resolve_rule`).
+        current = channel_rule(policy, channel_id)
         public_url = self._runtime.settings.mcp.public_url
         label = (await self._listed(actor.tenant_id)).get(channel_id) if copy else None
         try:
-            change = await set_channel_isolation(
+            change = await set_channel_rule(
                 self._runtime.anthropic,
                 self._runtime.sessionmaker,
                 tenant_id=actor.tenant_id,
                 platform="teams",
                 channel_id=channel_id,
-                isolated=choice in ("isolate", "copy"),
-                default=self._runtime.deployment_default,
-                actor_account_id=await get_or_create_account(self._runtime, actor),
-                channel_label=label,
-                fork=copy,
-                public_url=str(public_url) if public_url is not None else None,
-                drop_seal_and_pins=choice == "lift",
+                readers=None if readers == current.readers else readers,
+                writers=None if writers == current.writers else writers,
                 # Only a server admin reaches this, re-checked by the caller.
                 subject=build_subject(is_admin=True, platform_user_id=actor.user_id),
+                default=self._runtime.deployment_default,
+                actor_account_id=await get_or_create_account(self._runtime, actor),
+                copy=copy,
+                channel_label=label,
+                public_url=str(public_url) if public_url is not None else None,
+                release_agents=extra == "release",
             )
-        except ChannelIsolationRefused as exc:
-            await self._audit(
-                actor, "isolation", outcome="denied", reason=f"isolation:{exc.reason}"
-            )
+        except ChannelRuleRefused as exc:
+            await self._audit(actor, "channel_rule", outcome="denied", reason=f"rule:{exc.reason}")
             return f"{exc} Nothing changed."
         except DaimonError as exc:  # a copy that can't be made
-            await self._audit(actor, "isolation", outcome="error", reason="failed")
+            await self._audit(actor, "channel_rule", outcome="error", reason="failed")
             return f"{exc} Nothing changed."
-        await self._audit(actor, "isolation", outcome="allowed", reason="completed")
-        if not change.isolated:
-            return f"The channel is no longer confidential. {change.end_warning}"
-        said = f"The channel is now confidential. {change.agent_name} answers only there."
-        if change.forked_from is not None:
-            said = (
-                f"The channel is now confidential. {change.agent_name}, a copy of "
-                f"{change.forked_from}, answers only there."
-            )
-        notes = (change.dropped_skills_note if change.forked_from else None, change.network_warning)
-        return " ".join([said, *(note for note in notes if note)])
+        await self._audit(actor, "channel_rule", outcome="allowed", reason="completed")
+        return " ".join(change.notes)
 
     async def _save_admins(
         self,

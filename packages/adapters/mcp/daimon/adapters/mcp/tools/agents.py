@@ -34,8 +34,8 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._isolation import load_caller_isolation, load_skill_owners
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
+from daimon.adapters.mcp.tools._rule_view import load_caller_view, load_skill_owners
 from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
     origin_channel_id,
@@ -345,7 +345,7 @@ async def _list_agents_impl(
     del page
     rows = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     origin = await get_chat_origin(runtime, auth, origin_context_id)
-    caller = await load_caller_isolation(
+    caller = await load_caller_view(
         runtime, auth, agents=rows, location_channel_id=origin_channel_id(origin)
     )
     rows = [row for row in rows if caller.sees_agent(row)]
@@ -647,7 +647,7 @@ async def _update_agent_impl(
     resolved_skills: list[BetaManagedAgentsSkillParams] | None = None
     if skills is not None:
         try:
-            caller = await load_caller_isolation(
+            caller = await load_caller_view(
                 runtime, auth, location_channel_id=origin_channel_id(origin)
             )
             owners = await load_skill_owners(runtime, caller, auth.tenant_id)

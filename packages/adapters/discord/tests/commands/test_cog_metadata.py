@@ -15,6 +15,7 @@ import pytest
 from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
 from daimon.adapters.discord.commands.billing import BillingCog
 from daimon.adapters.discord.commands.help import HelpCog
+from daimon.adapters.discord.commands.here import HereCog
 from daimon.adapters.discord.commands.privacy import PrivacyCog
 from daimon.adapters.discord.commands.routines import RoutinesCog
 from discord import app_commands
@@ -84,6 +85,11 @@ def test_routines_cog_registers_routines_slash() -> None:
     """RoutinesCog must own /routines (DUX-03)."""
     names = _all_app_command_names(RoutinesCog)
     assert "routines" in names, f"/routines must be registered on RoutinesCog; got {names!r}"
+
+
+def test_here_cog_registers_guild_only_slash() -> None:
+    assert getattr(HereCog, "__discord_app_commands_guild_only__", False) is True
+    assert "here" in _all_app_command_names(HereCog)
 
 
 def test_routines_slash_is_admin_gated() -> None:

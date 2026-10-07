@@ -211,9 +211,11 @@ async def copy_agent(
         action=Action.FORK,
         agent=build_agent_ref(source.name, source.metadata),
     )
-    if decision.reason == "agent_pinned":
-        # The copy would be an unpinned agent with the pinned one's prompt and skills.
-        raise DaimonError(f"{source_name} is pinned to specific channels, so it can't be copied.")
+    if decision.reason == "agent_has_rule":
+        # The copy would run anywhere with the prompt and skills of one that may not.
+        raise DaimonError(
+            f"{source_name} has an agent rule limiting where it runs, so it can't be copied."
+        )
     if not decision:
         raise DaimonError("Only a workspace or server admin can copy an agent.")
     source_ma = await anthropic.beta.agents.retrieve(source.id)

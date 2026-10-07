@@ -26,10 +26,12 @@ from daimon.adapters.mcp.tools.discord._client import (
 )
 from daimon.adapters.mcp.tools.discord._models import AttachmentRow, MessageRow, SearchResult
 from daimon.adapters.mcp.tools.discord._visibility import (
+    _bot_lacks_read_permission,  # pyright: ignore[reportPrivateUsage]
+    _bot_read_error,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.permissions import any_sealed
+from daimon.core.permissions import any_readers_limited
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -87,7 +89,7 @@ def _names_a_withheld_thread(hit: _SearchHit, read_policy: ChannelReadPolicy) ->
         return False
     thread_id = hit.message_reference.channel_id if hit.message_reference else None
     if thread_id is None:
-        return any_sealed(read_policy.policy)
+        return any_readers_limited(read_policy.policy)
     return not read_policy.allows(thread_id, hit.channel_id)
 
 
@@ -164,7 +166,12 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         #    channel belonging to another tenant's guild.
         if channel_ids:
             for ch_id in channel_ids:
-                raw_ch = await _resolve_channel(c, ch_id)
+                try:
+                    raw_ch = await _resolve_channel(c, ch_id)
+                except discord.Forbidden as exc:
+                    if exc.code == 50001:
+                        raise _bot_read_error(ch_id) from exc
+                    raise
                 guild_ch = _require_guild_channel(raw_ch, guild_id)
                 if isinstance(guild_ch, discord.Thread):
                     await _check_thread_view(c, guild_ch, member, user_id)
@@ -207,7 +214,17 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
             "/guilds/{guild_id}/messages/search",
             guild_id=int(guild_id),
         )
-        body: dict[str, object] = await c.http.request(route, params=params)  # type: ignore[assignment]  # discord.py http.request returns Any
+        try:
+            body: dict[str, object] = await c.http.request(route, params=params)  # type: ignore[assignment]  # discord.py http.request returns Any
+        except discord.Forbidden as exc:
+            if exc.code == 50001:
+                if channel_ids:
+                    raise _bot_read_error(channel_ids[0]) from exc
+                raise ToolError(
+                    "daimon's Discord role can't search this server; a server admin can grant "
+                    "View Channel and Read Message History"
+                ) from exc
+            raise
 
         # 7. Parse strictly — fail loudly on unexpected shapes
         try:
@@ -350,10 +367,10 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         # existence/volume of messages in channels the caller cannot view.
         # Once anything is sealed, a scoped count could include hits in a sealed
         # thread under a scoped parent, so it reports only what is shown too.
-        exact_count = bool(channel_ids) and not any_sealed(read_policy.policy)
+        exact_count = bool(channel_ids) and not any_readers_limited(read_policy.policy)
         effective_total = parsed.total_results if exact_count else showing
         hint: str | None = None
-        if any_sealed(read_policy.policy):
+        if any_readers_limited(read_policy.policy):
             # With anything sealed, the raw total (and a page's raw size) could
             # count withheld hits, so the hint rests on what is shown: a full
             # page of visible rows may have more behind it.
@@ -376,6 +393,17 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
             # would reveal that hidden matches exist — the same count oracle
             # the suppressed total closes.
 
+        if not rows and channel_ids:
+            for ch_id in channel_ids:
+                try:
+                    raw_ch = await _resolve_channel(c, ch_id)
+                except discord.Forbidden as exc:
+                    if exc.code == 50001:
+                        raise _bot_read_error(ch_id) from exc
+                    raise
+                guild_ch = _require_guild_channel(raw_ch, guild_id)
+                if missing := await _bot_lacks_read_permission(guild, guild_ch):
+                    raise _bot_read_error(guild_ch, missing_history=missing == "history")
         return SearchResult(
             total_results=effective_total,
             showing=showing,

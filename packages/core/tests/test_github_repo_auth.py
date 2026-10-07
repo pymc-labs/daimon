@@ -160,6 +160,41 @@ async def test_resolve_clone_token_pat_short_circuits_with_zero_github_calls() -
 
 
 @pytest.mark.asyncio
+async def test_configured_app_does_not_mint_for_legacy_clone_or_skill_sync() -> None:
+    """Installing the new App leaves a legacy agent's PAT paths unchanged."""
+
+    def no_github_calls(request: httpx.Request) -> httpx.Response:
+        pytest.fail(f"legacy agent unexpectedly called GitHub: {request.url}")
+
+    async def no_installation_lookup(owner: str, repo: str) -> int | None:
+        pytest.fail(f"legacy skill sync unexpectedly looked up {owner}/{repo}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(no_github_calls)) as client:
+        key = SecretStr(_generate_rsa_keypair())
+        clone = await resolve_clone_token(
+            client,
+            binding=_make_binding(repo_url="acme/private-repo", ma_secret_ref="inline-pat:agent-1"),
+            per_agent_pat="ghp_legacy",
+            fallback_pat=None,
+            app_id="12345",
+            app_private_key=key,
+            now=1_000_000,
+        )
+        skill = await resolve_skill_sync_token(
+            client,
+            repo_url="acme/private-repo",
+            per_agent_pat="ghp_legacy",
+            proof_kind=None,
+            fallback_pat=None,
+            app_id="12345",
+            app_private_key=key,
+            installation_lookup=no_installation_lookup,
+            now=1_000_000,
+        )
+    assert clone == skill == "ghp_legacy"
+
+
+@pytest.mark.asyncio
 async def test_resolve_clone_token_app_installed_mints_installation_token() -> None:
     """No PAT + App installed -> mints and returns the installation token."""
     captured: list[httpx.Request] = []

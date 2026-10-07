@@ -53,18 +53,30 @@ from typing import Any, Final, cast
 
 import structlog
 from daimon.adapters.slack.channel_admin_groups import user_group_members
+from daimon.adapters.slack.click_replies import (
+    CLICK_REPLY_ERRORS,
+    error_name,
+    notice_modal,
+    open_modal,
+    post_ephemeral,
+    update_modal,
+)
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
+from daimon.adapters.slack.modal_limits import MAX_PLAIN_TEXT_INPUT_CHARS
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.adapters.slack.place_access import (
+    check_place_access,
+    may_start_turn_at,
+    stored_clicker,
+)
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import Action, Place, Subject, authorize, build_turn_place
-from daimon.core.channel_admins import StoredAdmin, confirm_stored_subject, read_stored_admin
+from daimon.core.authz import Action, Place, Subject, authorize
+from daimon.core.channel_admins import confirm_stored_subject
 from daimon.core.config import DirectMessagePolicy, SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.permissions import sealed_at
+from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
-from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import (
     count_escalations_for_user,
     find_escalation_for_message,
@@ -75,6 +87,8 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_latest_thread_session
 from daimon.core.support_escalation import (
     ALREADY_REQUESTED,
+    ASK_THE_TEAM,
+    ESCALATE,
     OUT_OF_CREDITS,
     RECORDED_UNDELIVERED,
     UNAVAILABLE,
@@ -85,8 +99,8 @@ from daimon.core.support_escalation import (
     remaining_credits,
 )
 from daimon.core.support_routing import support_recipient_tiers
-from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
@@ -110,13 +124,17 @@ SUPPORT_CALLBACK_ID: Final = "support_escalation"
 _NOTE_BLOCK_ID: Final = "support_note_block"
 _NOTE_INPUT_ID: Final = "support_note_input"
 
-NOT_ALLOWED: Final = "Human support isn't available to you here."
+NOT_ALLOWED: Final = "Asking the team isn't available to you here."
 POLICY_UNREADABLE: Final = (
     "This workspace's access policy could not be read, so nothing was sent. "
     "Ask an admin to check it."
 )
+CHECK_FAILED: Final = "Something went wrong checking that. Nothing was spent; try again."
+FORM_DID_NOT_OPEN: Final = (
+    "Slack didn't open the form in time. Click *Ask the team* again; nothing was spent."
+)
 SEALED_NOTE_HINT: Final = (
-    "This channel is sealed. Your note goes to the support team outside it, so "
+    "Only turns inside this channel read it. Your note goes to the support team outside it, so "
     "don't paste anything that has to stay here. They get a link to this answer, "
     "not its content."
 )
@@ -136,16 +154,21 @@ def slack_support_enabled(support: SupportSettings) -> bool:
 
 
 def build_ask_human_button() -> dict[str, Any]:
-    """The Ask a human button, appended to the answer's feedback actions block.
+    """The Ask the team button, appended to the answer's feedback actions block.
 
     Unstyled and unchanging after a click, for the reason the vote buttons
     are: the answer message is shared, so a per-click state would tell the
-    channel who asked for help.
+    channel who asked for help. The 🙋 sits beside the words, as the vote
+    buttons carry theirs.
     """
     return {
         "type": "button",
         "action_id": ASK_HUMAN_ACTION_ID,
-        "text": {"type": "plain_text", "text": "Ask a human"},
+        "text": {
+            "type": "plain_text",
+            "text": f"{ESCALATE} {ASK_THE_TEAM}",
+            "emoji": True,
+        },
     }
 
 
@@ -169,12 +192,15 @@ def build_support_modal(
         {
             "type": "input",
             "block_id": _NOTE_BLOCK_ID,
-            "label": {"type": "plain_text", "text": "What do you need help with?"},
+            "label": {
+                "type": "plain_text",
+                "text": "What do you need help with? Someone from the team will reply.",
+            },
             "element": {
                 "type": "plain_text_input",
                 "action_id": _NOTE_INPUT_ID,
                 "multiline": True,
-                "max_length": 4000,
+                "max_length": MAX_PLAIN_TEXT_INPUT_CHARS,
             },
         }
     )
@@ -185,7 +211,7 @@ def build_support_modal(
             {"channel_id": channel_id, "message_ts": message_ts, "thread_ts": thread_ts},
             separators=(",", ":"),
         ),
-        "title": {"type": "plain_text", "text": "Ask a human"},
+        "title": {"type": "plain_text", "text": ASK_THE_TEAM},
         "submit": {"type": "plain_text", "text": "Send"},
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": blocks,
@@ -260,65 +286,72 @@ def evaluate_support_submission(payload: dict[str, Any]) -> SupportSubmission:
     return dataclasses.replace(base, proceed=True, note=note)
 
 
-async def _stored_admin(
-    session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str
-) -> tuple[StoredAdmin, uuid.UUID | None]:
-    """The clicker as their stored role describes them, and their account id.
-
-    Read-only, like the feedback vote: asking for help must not mint an
-    identity record. Someone who never ran a turn has no stored role and is a
-    plain member.
-    """
-    principal = await find_platform_principal(
-        session, tenant_id=tenant_id, platform="slack", external_id=user_id
-    )
-    account_id = principal.account_id if principal is not None else None
-    if account_id is None:
-        return StoredAdmin(is_admin=False, platform="slack", platform_user_id=user_id), None
-    stored = await read_stored_admin(
-        session,
+async def _decide_click(
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    *,
+    team_id: str,
+    user_id: str,
+    channel_id: str,
+    message_ts: str,
+    thread_ts: str,
+) -> dict[str, Any] | str:
+    """The note form for this click, or the text saying why there is none."""
+    support = runtime.settings.support
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    async with runtime.sessionmaker() as session:
+        tenant = await get_tenant(session, tenant_id)
+    if tenant is None or tenant.archived_at is not None:
+        log.info("support.tenant_missing", tenant_id=str(tenant_id))
+        return UNAVAILABLE
+    access = await check_place_access(
+        runtime,
+        client,
         tenant_id=tenant_id,
-        platform="slack",
-        account_id=account_id,
-        platform_user_id=user_id,
+        user_id=user_id,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
     )
-    return stored, account_id
-
-
-def _may_ask(
-    policy: TenantAccessPolicy, subject: Subject, *, channel_id: str, thread_ts: str
-) -> bool:
-    """START_TURN at the answer's place: protection and the invoker allowlist.
-
-    Asking for a human is using daimon there, so it is open to exactly the
-    people who could have asked the agent in that thread.
-    """
-    return bool(
-        authorize(
-            policy,
-            subject=subject,
-            action=Action.START_TURN,
-            place=build_turn_place(channel_id=channel_id, thread_id=thread_ts),
+    if access.decision == "unreadable" or access.policy is None:
+        return POLICY_UNREADABLE
+    if access.decision == "refused":
+        log.info("support.refused", tenant_id=str(tenant_id))
+        return NOT_ALLOWED
+    async with runtime.sessionmaker() as session:
+        already = await find_escalation_for_message(
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            platform_user_id=user_id,
+            channel_id=channel_id,
+            message_id=message_ts,
         )
+        used = await count_escalations_for_user(
+            session, tenant_id=tenant_id, platform_user_id=user_id
+        )
+
+    if already is not None:
+        return ALREADY_REQUESTED
+    allowance = support.credits_per_user
+    if not has_credit(allowance=allowance, used=used):
+        return OUT_OF_CREDITS
+    return build_support_modal(
+        channel_id=channel_id,
+        message_ts=message_ts,
+        thread_ts=thread_ts,
+        remaining=remaining_credits(allowance=allowance, used=used),
+        sealed=readers_limited_at(access.policy, channel_id=channel_id, thread_id=thread_ts),
     )
-
-
-async def _ephemeral(
-    client: AsyncWebClient, *, channel_id: str, user_id: str, thread_ts: str, text: str
-) -> None:
-    try:
-        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel_id, user=user_id, thread_ts=thread_ts or None, text=text
-        )
-    except SlackApiError as err:
-        log.info(
-            "support.ephemeral_failed",
-            error=str(err.response.get("error", "slack_api_error")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
-        )
 
 
 async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     """Open the note form, or say why not. Spends nothing.
+
+    The modal opens first, as "Checking…", and is then replaced by the form
+    or by the reason there is none: the checks below include a live Slack
+    user-group lookup, and running them before ``views.open`` could outlive
+    the click's 3-second ``trigger_id`` and leave the button looking dead.
+    When the modal could not open at all, the answer comes as an ephemeral.
 
     The credit read here is UX only — someone can open the form, spend their
     last credit elsewhere, and submit — the write transaction decides.
@@ -344,66 +377,68 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
     if client is None:
         return
 
-    async def reply(text: str) -> None:
-        await _ephemeral(
-            client, channel_id=channel_id, user_id=user_id, thread_ts=thread_ts, text=text
-        )
-
     support = runtime.settings.support
     if not slack_support_enabled(support):
         log.info("support.disabled", platform="slack")
-        await reply(UNAVAILABLE)
-        return
-
-    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    async with runtime.sessionmaker() as session:
-        tenant = await get_tenant(session, tenant_id)
-        if tenant is None or tenant.archived_at is not None:
-            log.info("support.tenant_missing", tenant_id=str(tenant_id))
-            return
-        try:
-            policy = await load_access_policy(session, tenant_id=tenant_id)
-        except AccessPolicyUnreadable:
-            await reply(POLICY_UNREADABLE)
-            return
-        stored, _account_id = await _stored_admin(session, tenant_id=tenant_id, user_id=user_id)
-    # Looked up with no session open: a slow Slack must not hold a connection.
-    subject = await confirm_stored_subject(
-        stored, user_group_members(runtime, client, tenant_id=tenant_id)
-    )
-    if not _may_ask(policy, subject, channel_id=channel_id, thread_ts=thread_ts):
-        log.info("support.refused", tenant_id=str(tenant_id))
-        await reply(NOT_ALLOWED)
-        return
-    async with runtime.sessionmaker() as session:
-        already = await find_escalation_for_message(
-            session,
-            tenant_id=tenant_id,
-            platform="slack",
-            platform_user_id=user_id,
+        await post_ephemeral(
+            client,
             channel_id=channel_id,
-            message_id=message_ts,
+            user_id=user_id,
+            thread_ts=thread_ts,
+            message_ts=message_ts,
+            text=UNAVAILABLE,
         )
-        used = await count_escalations_for_user(
-            session, tenant_id=tenant_id, platform_user_id=user_id
+        return
+
+    view_id = await open_modal(
+        client,
+        trigger_id=trigger_id,
+        view=notice_modal(title=ASK_THE_TEAM, text="Checking\N{HORIZONTAL ELLIPSIS}"),
+    )
+
+    async def reply(text: str) -> None:
+        if view_id is not None and await update_modal(
+            client, view_id=view_id, view=notice_modal(title=ASK_THE_TEAM, text=text)
+        ):
+            return
+        await post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            thread_ts=thread_ts,
+            message_ts=message_ts,
+            text=text,
         )
 
-    if already is not None:
-        await reply(ALREADY_REQUESTED)
-        return
-    allowance = support.credits_per_user
-    if not has_credit(allowance=allowance, used=used):
-        await reply(OUT_OF_CREDITS)
-        return
-    await client.views_open(  # pyright: ignore[reportUnknownMemberType]
-        trigger_id=trigger_id,
-        view=build_support_modal(
+    try:
+        decided = await _decide_click(
+            runtime,
+            client,
+            team_id=team_id,
+            user_id=user_id,
             channel_id=channel_id,
             message_ts=message_ts,
             thread_ts=thread_ts,
-            remaining=remaining_credits(allowance=allowance, used=used),
-            sealed=sealed_at(policy, channel_id=channel_id, thread_id=thread_ts),
-        ),
+        )
+    except (SQLAlchemyError, OSError, *CLICK_REPLY_ERRORS) as err:
+        # OSError: asyncpg raises a refused connection raw, outside SQLAlchemy's.
+        # Never leave the Checking… notice standing: say so, then let it be seen.
+        log.warning("support.click_check_failed", error=error_name(err))
+        await reply(CHECK_FAILED)
+        return
+    if isinstance(decided, str):
+        await reply(decided)
+        return
+    form = decided
+    if view_id is not None and await update_modal(client, view_id=view_id, view=form):
+        return
+    await post_ephemeral(
+        client,
+        channel_id=channel_id,
+        user_id=user_id,
+        thread_ts=thread_ts,
+        message_ts=message_ts,
+        text=FORM_DID_NOT_OPEN,
     )
 
 
@@ -420,8 +455,13 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
         return
 
     async def reply(text: str) -> None:
-        await _ephemeral(
-            client, channel_id=s.channel_id, user_id=s.user_id, thread_ts=s.thread_ts, text=text
+        await post_ephemeral(
+            client,
+            channel_id=s.channel_id,
+            user_id=s.user_id,
+            thread_ts=s.thread_ts,
+            message_ts=s.message_ts,
+            text=text,
         )
 
     support = runtime.settings.support
@@ -435,7 +475,7 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
     # What the authoritative source check saw, for the reply and the post.
     decided: dict[str, Any] = {}
     async with runtime.sessionmaker() as session:
-        stored, account_id = await _stored_admin(session, tenant_id=tenant_id, user_id=s.user_id)
+        stored, account_id = await stored_clicker(session, tenant_id=tenant_id, user_id=s.user_id)
     # Looked up with no session open: a slow Slack must not hold a connection.
     subject = await confirm_stored_subject(
         stored, user_group_members(runtime, client, tenant_id=tenant_id)
@@ -457,8 +497,12 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
             except AccessPolicyUnreadable:
                 decided["refusal"] = POLICY_UNREADABLE
                 return False
-            decided["sealed"] = sealed_at(policy, channel_id=s.channel_id, thread_id=s.thread_ts)
-            if not _may_ask(policy, subject, channel_id=s.channel_id, thread_ts=s.thread_ts):
+            decided["sealed"] = readers_limited_at(
+                policy, channel_id=s.channel_id, thread_id=s.thread_ts
+            )
+            if not may_start_turn_at(
+                policy, subject, channel_id=s.channel_id, thread_ts=s.thread_ts
+            ):
                 decided["refusal"] = NOT_ALLOWED
                 return False
             return True
@@ -491,19 +535,30 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
         await reply(OUT_OF_CREDITS)
         return
 
-    # The row is committed; everything below is best-effort delivery.
-    delivered = await _dm_channel_admins(
-        runtime, client, submission=s, tenant_id=tenant_id, sealed=sealed
-    ) or await _post_to_escalation_channel(
-        runtime,
-        source_client=client,
-        submission=s,
-        dest_channel=dest_channel,
-        sealed=sealed,
-    )
-    if delivered:
-        async with runtime.sessionmaker() as session, session.begin():
-            await mark_delivered(session, escalation_id=outcome.row.id)
+    # The row is committed and the credit spent; everything below is
+    # best-effort delivery, and the person hears the outcome whatever fails.
+    delivered = False
+    try:
+        delivered = await _dm_channel_admins(
+            runtime, client, submission=s, tenant_id=tenant_id, sealed=sealed
+        ) or await _post_to_escalation_channel(
+            runtime,
+            source_client=client,
+            submission=s,
+            dest_channel=dest_channel,
+            sealed=sealed,
+        )
+        if delivered:
+            async with runtime.sessionmaker() as session, session.begin():
+                await mark_delivered(session, escalation_id=outcome.row.id)
+    except (SQLAlchemyError, OSError, *CLICK_REPLY_ERRORS) as err:
+        # Delivered but not stamped still reads as received: it landed.
+        log.warning(
+            "support.delivery_failed",
+            escalation_id=str(outcome.row.id),
+            delivered=delivered,
+            error=error_name(err),
+        )
     log.info(
         "support.escalation_recorded",
         escalation_id=str(outcome.row.id),
@@ -518,7 +573,7 @@ async def _permalink(client: AsyncWebClient, *, channel_id: str, message_ts: str
         resp = await client.chat_getPermalink(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id, message_ts=message_ts
         )
-    except SlackApiError:
+    except CLICK_REPLY_ERRORS:
         return None
     link: Any = resp.get("permalink")  # pyright: ignore[reportUnknownMemberType]
     return link if isinstance(link, str) and link else None
@@ -540,7 +595,9 @@ def render_escalation_post(*, submission: SupportSubmission, link: str | None, s
     where = link if link is not None else f"message {s.message_ts} in channel {s.channel_id}"
     lines = [f"*Human support requested* by {who}", where]
     if sealed:
-        lines.append("_From a sealed channel: answer there, the conversation stays in it._")
+        lines.append(
+            "_From a channel read only from inside: answer there, the conversation stays in it._"
+        )
     return "\n".join(lines) + "\n\n" + escape_mrkdwn(s.note)
 
 
@@ -581,11 +638,11 @@ async def _dm_channel_admins(
                     channel=channel, text=text, unfurl_links=False, unfurl_media=False
                 )
                 landed += 1
-            except SlackApiError as err:
-                log.info(
-                    "support.admin_dm_undelivered",
-                    error=str(err.response.get("error", "slack_api_error")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
-                )
+            except CLICK_REPLY_ERRORS as err:
+                # A timeout is ambiguous (the DM may have landed); it counts as
+                # undelivered and daimon does not resend it. (slack_sdk's own
+                # connection-error retry handler still applies, app-wide.)
+                log.info("support.admin_dm_undelivered", error=error_name(err))
         if landed:
             log.info("support.sent_to_admins", recipients=landed)
             return True
@@ -643,11 +700,8 @@ async def _post_to_escalation_channel(
         await dest_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=dest_channel, text=text, unfurl_links=False, unfurl_media=False
         )
-    except SlackApiError as err:
-        log.warning(
-            "support.channel_undeliverable",
-            channel_id=dest_channel,
-            error=str(err.response.get("error", "slack_api_error")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
-        )
+    except CLICK_REPLY_ERRORS as err:
+        # As with the DMs: an ambiguous timeout stays undelivered; daimon does not re-post.
+        log.warning("support.channel_undeliverable", channel_id=dest_channel, error=error_name(err))
         return False
     return True

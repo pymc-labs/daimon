@@ -9,6 +9,14 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Literal
+
+type GitHubTokenAuditKind = Literal[
+    "github_token_mint", "github_token_deliver", "github_token_revoke"
+]
+GITHUB_TOKEN_MINT: GitHubTokenAuditKind = "github_token_mint"
+GITHUB_TOKEN_DELIVER: GitHubTokenAuditKind = "github_token_deliver"
+GITHUB_TOKEN_REVOKE: GitHubTokenAuditKind = "github_token_revoke"
 
 
 @dataclass

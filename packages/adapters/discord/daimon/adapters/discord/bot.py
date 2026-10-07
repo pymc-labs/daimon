@@ -32,6 +32,7 @@ from daimon.adapters.discord.gating import is_participation_candidate, should_pr
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
+from daimon.adapters.discord.post_transport import DiscordPostTransport, known_webhook_ids
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
@@ -43,6 +44,7 @@ from daimon.adapters.discord.turn_card_recovery import (
     reconcile_turn_card_intent,
     retire_terminal_turn_card,
 )
+from daimon.adapters.discord.turn_posts import TurnPostRecorder, archive_thread_quietly
 from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.vision import (
     build_image_url_prefix,
@@ -50,6 +52,7 @@ from daimon.adapters.discord.vision import (
     download_as_image_blocks,
     is_vision_image_attachment,
 )
+from daimon.core.agent_identity import AgentIdentity, resolve_agent_identity
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import DirectMessagePolicy, Settings
@@ -77,6 +80,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.routine_delivery import run_delivery_poller
+from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenants import (
@@ -95,7 +99,7 @@ from daimon.core.stores.thread_sessions import (
     update_watermark,
 )
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
-from daimon.core.stores.turn_origins import get_active_origin
+from daimon.core.stores.turn_origins import get_active_origin, thread_archive_requested
 from daimon.core.thread_naming import strip_mentions
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
@@ -123,7 +127,13 @@ from daimon.core.turn.thread_queue import (
     release_thread,
 )
 from daimon.core.turn_keys import list_mounted_key_names
-from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
+from daimon.core.turn_origin import (
+    HandoffNotice,
+    SessionState,
+    holds_current_channel_admin_grant,
+    render_turn_origin,
+    turn_origin,
+)
 from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -557,6 +567,63 @@ class DaimonBot(commands.Bot):
                 error=str(exc)[:300],
             )
 
+    async def _archive_requested(self, origin_id: uuid.UUID) -> bool:
+        """Whether the agent asked, during this turn, to archive its own thread.
+
+        Read when the run has ended; a failed read leaves the thread open
+        rather than failing a turn that already answered.
+        """
+        try:
+            async with self.runtime.sessionmaker() as session:
+                return await thread_archive_requested(session, origin_id=origin_id)
+        except Exception as exc:
+            log.warning("turn.archive_request_read_failed", error_type=type(exc).__name__)
+            return False
+
+    async def _archive_after_outputs(self, outcome: RunOutcome, thread: discord.Thread) -> None:
+        """Archive the turn's thread once nothing more will be posted for the turn.
+
+        Runs after the turn's last edit and reaction. A session-output sweep may
+        still post files (a post reopens a thread), so the archive waits for it,
+        and by then a newer turn may own the thread: `_archive_when_idle`.
+        """
+        sweep = self._output_sweeps.get(outcome.ma_session_id)
+        if sweep is None:
+            await archive_thread_quietly(thread)
+            return
+
+        async def after_sweep() -> None:
+            with contextlib.suppress(Exception):
+                await sweep
+            await self._archive_when_idle(thread)
+
+        self._spawn(after_sweep())
+
+    async def _archive_when_idle(self, thread: discord.Thread) -> None:
+        """Archive unless a newer turn has the thread; hold the thread meanwhile.
+
+        A newer turn in flight or queued wins: archiving under it would fail its
+        card edits, the bug the deferral exists to avoid, and the agent can be
+        asked again. The check and the claim have no await between them, so a
+        mention arriving during the archive queues; it is handed back to
+        `on_message` afterwards, which gates and counts it like any mention.
+        """
+        if (
+            thread.id in self._processing
+            or self._pending.get(thread.id)
+            or thread.id in self._deferred_dispatch
+        ):
+            log.info("turn.thread_archive_skipped_busy", thread_id=thread.id)
+            return
+        self._processing.add(thread.id)
+        try:
+            await archive_thread_quietly(thread)
+        finally:
+            # Resumes a continuation deferred behind the claim, like any release.
+            self._release_thread(thread.id)
+            for queued in self._pending.pop(thread.id, []):
+                self._spawn(self.on_message(queued))
+
     def _schedule_output_sweep(
         self, outcome: RunOutcome, *, thread: discord.Thread, tenant_id: uuid.UUID
     ) -> None:
@@ -627,12 +694,14 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.billing import BillingCog
         from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
         from daimon.adapters.discord.commands.help import HelpCog
+        from daimon.adapters.discord.commands.here import HereCog
         from daimon.adapters.discord.commands.memory import MemoryCog
         from daimon.adapters.discord.commands.privacy import PrivacyCog
         from daimon.adapters.discord.commands.routines import RoutinesCog
         from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
 
         await self.add_cog(HelpCog(self))
+        await self.add_cog(HereCog(self))
         await self.add_cog(DirectMessageCog(self))
         await self.add_cog(AgentSetupCog(self))
         await self.add_cog(RoutinesCog(self))
@@ -979,17 +1048,21 @@ class DaimonBot(commands.Bot):
                 )
                 if isinstance(channel, discord.abc.Messageable):
                     message = await channel.fetch_message(int(row.active_turn_message_id))
-                    await message.edit(
-                        embed=discord.Embed(
-                            color=theme.COLOR_RED,
-                            description=(
-                                "❌ This turn was interrupted by a restart and cannot be "
-                                "resumed. Nothing was lost on your side — mention me again "
-                                "to retry."
-                            ),
-                        ),
-                        view=None,
+                    transport = DiscordPostTransport(
+                        self, channel, name="Daimon", avatar_url=None, builtin=False
                     )
+                    embed = discord.Embed(
+                        color=theme.COLOR_RED,
+                        description=(
+                            "❌ This turn was interrupted by a restart and cannot be "
+                            "resumed. Nothing was lost on your side — mention me again "
+                            "to retry."
+                        ),
+                    )
+                    if transport._destination() is not None:  # pyright: ignore[reportPrivateUsage]
+                        await transport.edit(message, embed=embed, view=None)
+                    elif not isinstance(message.webhook_id, int):
+                        await message.edit(embed=embed, view=None)
                     log.info(
                         "turn.orphan_retired",
                         thread_id=row.thread_id,
@@ -1076,6 +1149,7 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker,
                     intent=intent,
                     thread=channel,
+                    client=self,
                 )
                 return
             except (discord.HTTPException, discord.ClientException, ValueError) as err:
@@ -1248,6 +1322,7 @@ class DaimonBot(commands.Bot):
                 sessionmaker=self.runtime.sessionmaker,
                 anthropic=self.runtime.anthropic,
                 bot_user_id=bot_user_id,
+                application_id=self.application_id,
                 bot_display_name=bot_display_name,
                 billing_config=self.runtime.billing_config,
                 markup=self.runtime.settings.billing.markup,
@@ -1381,7 +1456,7 @@ class DaimonBot(commands.Bot):
         if not post_state.may_post:
             log.info(
                 "thread_participation.skipped",
-                reason="channel_protected",
+                reason="writers_none",
                 state=post_state.value,
                 thread_id=str(thread_id),
             )
@@ -1452,10 +1527,56 @@ class DaimonBot(commands.Bot):
         bot_mentioned = self.user is not None and any(
             user.id == self.user.id for user in message.mentions
         )
+        if self.draining:
+            return
+        is_webhook_post = isinstance(message.webhook_id, int)
+        reply_to_recorded_post = False
+        reference = message.reference
+        resolved = reference.resolved if isinstance(reference, discord.MessageReference) else None
+        resolved_is_ours = isinstance(resolved, discord.Message) and (
+            (self.user is not None and resolved.author.id == self.user.id)
+            or (
+                isinstance(resolved.webhook_id, int)
+                and (
+                    (
+                        self.application_id is not None
+                        and resolved.application_id == self.application_id
+                    )
+                    or resolved.webhook_id in known_webhook_ids()
+                )
+            )
+        )
+        if (
+            not bot_mentioned
+            and isinstance(reference, discord.MessageReference)
+            and reference.type is discord.MessageReferenceType.reply
+            and reference.message_id is not None
+            and resolved_is_ours
+            and message.guild is not None
+            and not message.author.bot
+            and not is_webhook_post
+        ):
+            reply_tenant = derive_tenant_uuid(
+                platform="discord", workspace_id=str(message.guild.id)
+            )
+            try:
+                async with self.runtime.sessionmaker() as session:
+                    post = await get_post(
+                        session,
+                        tenant_id=reply_tenant,
+                        platform="discord",
+                        channel_id=str(message.channel.id),
+                        message_id=str(reference.message_id),
+                    )
+                reply_to_recorded_post = post is not None and post.source != "auto_thread"
+            except Exception as exc:
+                log.warning("reply_gate.lookup_failed", error_type=type(exc).__name__)
         if not should_process_message(
             author_is_bot=message.author.bot,
             author_id=str(message.author.id),
             bot_mentioned=bot_mentioned,
+            reply_to_recorded_post=reply_to_recorded_post,
+            author_is_webhook=is_webhook_post,
             guild_id=str(message.guild.id) if message.guild else None,
             self_user_id=str(self.user.id) if self.user is not None else None,
             qa_bot_user_ids=discord_settings.qa_bot_user_ids if discord_settings else (),
@@ -1476,8 +1597,6 @@ class DaimonBot(commands.Bot):
             ):
                 await self._maybe_participate(message)
             return
-        if self.draining:
-            return  # stop admitting new mentions during drain
         assert message.guild is not None
         guild = message.guild
         guild_id = str(guild.id)
@@ -1500,7 +1619,7 @@ class DaimonBot(commands.Bot):
         )
         if not post_state.may_post:
             log.info(
-                "turn.skipped.channel_protected",
+                "turn.skipped.writers_none",
                 guild_id=guild_id,
                 channel_id=str(message.channel.id),
                 user_id=str(message.author.id),
@@ -1811,10 +1930,17 @@ class DaimonBot(commands.Bot):
             sentry_sdk.capture_exception(exc)
         error_text = render_error(exc, request_id=rid)
         target = message.channel
+        transport = DiscordPostTransport(
+            self,
+            target,
+            name="Daimon",
+            avatar_url=None,
+            builtin=True,
+        )
         if isinstance(target, discord.Thread):
-            await safe_thread_send(target, error_text)
+            await safe_thread_send(target, error_text, transport=transport)
         else:
-            await target.send(error_text)
+            await transport.send(error_text)
 
     async def _dispatch_continuations(
         self, *, tenant_id: uuid.UUID, thread: discord.Thread, guild_id: str
@@ -1837,6 +1963,8 @@ class DaimonBot(commands.Bot):
                 row, decision, thread=thread, tenant_id=tenant_id, guild_id=guild_id
             ),
             may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
+            client=self,
+            public_base_url=self.runtime.settings.mcp.app_root_url,
         )
 
     async def _may_post_in(self, *, tenant_id: uuid.UUID, channel: object) -> bool:
@@ -2023,7 +2151,7 @@ class DaimonBot(commands.Bot):
             self.runtime.sessionmaker, tenant_id=tenant_id, channel=thread
         )
         if not post_state.may_post:
-            raise AdmissionDenied(reason="channel_protected")
+            raise AdmissionDenied(reason="writers_none")
         category_id, category_unresolved = await _resolve_category(thread, fetch=False)
         admission = await admit(
             self.runtime.turn_deps,
@@ -2050,16 +2178,42 @@ class DaimonBot(commands.Bot):
         )
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
         agent = admission.agent
+        try:
+            async with self.runtime.sessionmaker.begin() as identity_session:
+                identity = await resolve_agent_identity(
+                    identity_session,
+                    tenant_id=tenant_id,
+                    agent_name=agent.name,
+                    is_builtin=agent.name.casefold() == "daimon",
+                    public_base_url=self.runtime.settings.mcp.app_root_url,
+                )
+        except Exception as exc:
+            log.warning("discord.identity_resolution_failed", error_type=type(exc).__name__)
+            identity = AgentIdentity(name=agent.name, avatar_url=None, builtin=True)
 
         # kwargs are forwarded verbatim to discord.py's overloaded send()/edit().
-        async def _send_embed(**kwargs: Any) -> discord.Message:  # noqa: ANN401
-            return await thread.send(**kwargs)
+        recorder = TurnPostRecorder(
+            sessionmaker=self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            ma_agent_id=agent.id,
+            requester_id=int(row.requester_external_user_id),
+        )
+        transport = DiscordPostTransport(
+            self,
+            thread,
+            name=identity.name,
+            avatar_url=identity.avatar_url,
+            builtin=identity.builtin,
+        )
 
-        async def _edit_message(msg: discord.Message, **kwargs: Any) -> None:  # noqa: ANN401
-            await msg.edit(**kwargs)
+        async def _edit_message(
+            msg: discord.Message,
+            **kwargs: Any,  # noqa: ANN401
+        ) -> discord.Message | None:
+            return await transport.edit(msg, **kwargs)
 
         async def _delete_message(msg: discord.Message) -> None:
-            await msg.delete()
+            await transport.delete(msg)
 
         cancel = asyncio.Event()
 
@@ -2075,10 +2229,11 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
-                send=_send_embed,
+                send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
+                fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
                 cancel_view=CancelView(
                     allowed_user_id=int(row.requester_external_user_id),
@@ -2087,6 +2242,9 @@ class DaimonBot(commands.Bot):
                 ),
                 unprompted=False,
                 on_first_post=on_first_post,
+                on_replacement=lambda msg: recorder.message(
+                    thread, msg, turn_card_intent_id=turn_id
+                ),
             )
 
         turn_card_intent, lifecycle = await post_initial_turn_card(
@@ -2173,6 +2331,7 @@ class DaimonBot(commands.Bot):
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
                     handoff=handoff_notice,
+                    is_channel_admin=is_channel_admin,
                 )
                 + "\n"
                 + seed_message
@@ -2188,10 +2347,13 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
-                send=_send_embed,
+                send=recorder.sender(
+                    thread, turn_card_intent_id=turn_card_intent.id, transport=transport
+                ),
                 edit=_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
+                fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
                 cancel_view=CancelView(
                     allowed_user_id=int(row.requester_external_user_id),
@@ -2200,11 +2362,23 @@ class DaimonBot(commands.Bot):
                 ),
                 adopt_message_ref=lifecycle.message_ref,
                 unprompted=False,
+                on_replacement=lambda msg: recorder.message(
+                    thread, msg, turn_card_intent_id=turn_card_intent.id
+                ),
             )
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
 
+        is_channel_admin = await holds_current_channel_admin_grant(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=admission.account_id,
+            platform="discord",
+            parent_channel_id=row.parent_channel_id,
+            role=role,
+        )
         outcome: RunOutcome | None = None
+        archive_after = False
         try:
             async with turn_origin(
                 self.runtime.sessionmaker,
@@ -2234,6 +2408,7 @@ class DaimonBot(commands.Bot):
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
                             handoff=handoff_notice,
+                            is_channel_admin=is_channel_admin,
                         )
                         + "\n"
                         + seed_message
@@ -2246,6 +2421,7 @@ class DaimonBot(commands.Bot):
                     deadline=turn_deadline_at,
                     confirm_write=discord_confirmation_hook(thread),
                 )
+                archive_after = await self._archive_requested(origin.id)
         finally:
             done_ids = {prepared.mapping_id}
             if outcome is not None:
@@ -2284,6 +2460,8 @@ class DaimonBot(commands.Bot):
             if final_lifecycle.was_answered and final_lifecycle.final_message_id is not None:
                 await seed_feedback_reactions(thread, message_id=final_lifecycle.final_message_id)
         self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)
+        if archive_after:
+            await self._archive_after_outputs(outcome, thread)
 
     async def on_raw_thread_update(self, payload: discord.RawThreadUpdateEvent) -> None:
         metadata = payload.data["thread_metadata"]
@@ -2462,11 +2640,11 @@ class DaimonBot(commands.Bot):
                 )
                 return
             target = thread or message.channel
-            if err.reason == "channel_protected":
+            if err.reason == "writers_none":
                 # Nothing may be posted into a protected channel, a refusal
                 # included; the log is the only trace.
                 log.info(
-                    "turn.skipped.channel_protected",
+                    "turn.skipped.writers_none",
                     guild_id=guild_id,
                     channel_id=parent_channel_id,
                     user_id=str(message.author.id),
@@ -2477,16 +2655,16 @@ class DaimonBot(commands.Bot):
                     guild_id=guild_id,
                     user_id=str(message.author.id),
                 )
-            elif err.reason == "agent_pinned_elsewhere":
+            elif err.reason == "runs_elsewhere":
                 log.info(
-                    "turn.skipped.agent_pinned_elsewhere",
+                    "turn.skipped.runs_elsewhere",
                     guild_id=guild_id,
                     channel_id=parent_channel_id,
                     user_id=str(message.author.id),
                 )
-            elif err.reason == "channel_isolated":
+            elif err.reason == "own_agents_only":
                 log.info(
-                    "turn.skipped.channel_isolated",
+                    "turn.skipped.own_agents_only",
                     guild_id=guild_id,
                     channel_id=parent_channel_id,
                     user_id=str(message.author.id),
@@ -2505,7 +2683,7 @@ class DaimonBot(commands.Bot):
                     guild_id=guild_id,
                     user_id=str(message.author.id),
                 )
-            if err.reason != "channel_protected":
+            if err.reason != "writers_none":
                 await target.send(admission_refusal_message(err.reason, self.runtime.settings))
             return
 
@@ -2524,6 +2702,12 @@ class DaimonBot(commands.Bot):
         # first, behind only the short naming call, so the user gets early
         # feedback; the lifecycle adopts the embed and edits it in place once
         # SSE events flow.
+        recorder = TurnPostRecorder(
+            sessionmaker=self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            ma_agent_id=agent.id,
+            requester_id=message.author.id,
+        )
         is_thread_mention = thread is not None
         if thread is None:
 
@@ -2553,6 +2737,7 @@ class DaimonBot(commands.Bot):
                 self._processing.add(opened.id)
                 if created_thread_ids is not None:
                     created_thread_ids.append(opened.id)
+                await recorder.opened_thread(opened)
                 return opened
 
             discord_settings = self.runtime.settings.discord
@@ -2566,14 +2751,36 @@ class DaimonBot(commands.Bot):
 
         # --- Wire lifecycle with send/edit callables ---
         # kwargs are forwarded verbatim to discord.py's overloaded send()/edit().
-        async def _send_embed(**kwargs: Any) -> discord.Message:  # noqa: ANN401
-            return await thread.send(**kwargs)
 
-        async def _edit_message(msg: discord.Message, **kwargs: Any) -> None:  # noqa: ANN401
-            await msg.edit(**kwargs)
+        try:
+            async with self.runtime.sessionmaker.begin() as identity_session:
+                identity = await resolve_agent_identity(
+                    identity_session,
+                    tenant_id=tenant_id,
+                    agent_name=agent.name,
+                    is_builtin=agent.name.casefold() == "daimon",
+                    public_base_url=self.runtime.settings.mcp.app_root_url,
+                )
+        except Exception as exc:
+            log.warning("discord.identity_resolution_failed", error_type=type(exc).__name__)
+            identity = AgentIdentity(name=agent.name, avatar_url=None, builtin=True)
+
+        transport = DiscordPostTransport(
+            self,
+            thread,
+            name=identity.name,
+            avatar_url=identity.avatar_url,
+            builtin=identity.builtin,
+        )
+
+        async def _edit_message(
+            msg: discord.Message,
+            **kwargs: Any,  # noqa: ANN401
+        ) -> discord.Message | None:
+            return await transport.edit(msg, **kwargs)
 
         async def _delete_message(msg: discord.Message) -> None:
-            await msg.delete()
+            await transport.delete(msg)
 
         cancel = asyncio.Event()
 
@@ -2590,16 +2797,20 @@ class DaimonBot(commands.Bot):
                 is True,
                 trigger_message=message,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
-                send=_send_embed,
+                send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
+                fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
                 cancel_view=CancelView(
                     allowed_user_id=message.author.id, cancel=cancel, turn_id=turn_id
                 ),
                 unprompted=unprompted,
                 on_first_post=on_first_post,
+                on_replacement=lambda msg: recorder.message(
+                    thread, msg, turn_card_intent_id=turn_id
+                ),
             )
 
         turn_card_intent, lifecycle = await post_initial_turn_card(
@@ -2607,6 +2818,9 @@ class DaimonBot(commands.Bot):
             tenant_id=tenant_id,
             thread_id=str(thread.id),
             make_lifecycle=_make_lifecycle,
+        )
+        turn_send = recorder.sender(
+            thread, turn_card_intent_id=turn_card_intent.id, transport=transport
         )
 
         discord_settings = self.runtime.settings.discord
@@ -2657,7 +2871,7 @@ class DaimonBot(commands.Bot):
                     lifecycle.message_ref, content=error_text, embed=None, view=view
                 )
             else:
-                await thread.send(error_text, view=view)
+                await turn_send(error_text, view=view)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -2675,7 +2889,7 @@ class DaimonBot(commands.Bot):
                     lifecycle.message_ref, content=failure_text, embed=None, view=None
                 )
             else:
-                await thread.send(failure_text)
+                await turn_send(failure_text)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -2700,7 +2914,7 @@ class DaimonBot(commands.Bot):
             if lifecycle.message_ref is not None:
                 await _edit_message(lifecycle.message_ref, content=busy_text, embed=None, view=None)
             else:
-                await thread.send(busy_text)
+                await turn_send(busy_text)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -2881,7 +3095,7 @@ class DaimonBot(commands.Bot):
             user_message = synthetic_prefix + "\n" + user_message
 
         if images_skipped:
-            await target.send(
+            await turn_send(
                 "Some images couldn't be inlined — I've linked them for the agent to "
                 "fetch instead: "
                 + ", ".join(f"`{att.filename}` ({r})" for att, r in images_skipped)
@@ -2941,6 +3155,7 @@ class DaimonBot(commands.Bot):
                     recovery_origin,
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
+                    is_channel_admin=is_channel_admin,
                 )
                 + "\n"
                 + full_message
@@ -2957,10 +3172,11 @@ class DaimonBot(commands.Bot):
                 is True,
                 trigger_message=message,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
-                send=_send_embed,
+                send=turn_send,
                 edit=_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
+                fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
                 cancel_view=CancelView(
                     allowed_user_id=message.author.id,
@@ -2972,6 +3188,9 @@ class DaimonBot(commands.Bot):
                 # standing next to a second, successful message.
                 adopt_message_ref=lifecycle.message_ref,
                 unprompted=unprompted,
+                on_replacement=lambda msg: recorder.message(
+                    thread, msg, turn_card_intent_id=turn_card_intent.id
+                ),
             )
             # The replacement summary belongs to the turn, not to the lifecycle
             # object that happens to render it -- a recovery cycle swaps the
@@ -2987,7 +3206,16 @@ class DaimonBot(commands.Bot):
             thread_id=thread.id,
             session_id=prepared.ma_session_id,
         )
+        is_channel_admin = await holds_current_channel_admin_grant(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=admission.account_id,
+            platform="discord",
+            parent_channel_id=parent_channel_id,
+            role=role,
+        )
         outcome: RunOutcome | None = None
+        archive_after = False
         try:
             async with turn_origin(
                 self.runtime.sessionmaker,
@@ -3015,6 +3243,7 @@ class DaimonBot(commands.Bot):
                             origin,
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
+                            is_channel_admin=is_channel_admin,
                         )
                         + "\n"
                         + user_message
@@ -3028,6 +3257,7 @@ class DaimonBot(commands.Bot):
                     deadline=turn_deadline_at,
                     confirm_write=discord_confirmation_hook(thread),
                 )
+                archive_after = await self._archive_requested(origin.id)
         finally:
             # Runs on any exception, not just the happy path: whatever else
             # went wrong, the thread must not be left holding its active_turn
@@ -3083,12 +3313,12 @@ class DaimonBot(commands.Bot):
             # a message when there is no answer to sit above (a tool-only or
             # failed turn) or it will not fit.
             if not await final_lifecycle.prepend_revealed_answer(loss_notice):
-                await thread.send(loss_notice)
+                await turn_send(loss_notice)
         if replacement_summary is not None and not final_lifecycle.answer_prefix_applied:
             # The turn produced no answer to carry the summary (tool-only,
             # cancelled, or failed). The person still has to be told what the
             # replacement carried across, so it goes out on its own.
-            await thread.send(replacement_summary)
+            await turn_send(replacement_summary)
 
         if state.error is not None:
             log.warning(
@@ -3120,7 +3350,7 @@ class DaimonBot(commands.Bot):
             # -- said only after the answer, so it never reads as a caveat on
             # work that already finished.
             if prepared.continuity.pending:
-                await target.send(render_current_work_must_finish(agent.name, handoff=False))
+                await turn_send(render_current_work_must_finish(agent.name, handoff=False))
             # Any task handed to another agent in THIS thread, with work to
             # continue, gets its first turn dispatched now -- still inside this
             # turn's concurrency guard, so nothing else can land in the thread
@@ -3129,3 +3359,5 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id, thread=thread, guild_id=guild_id
             )
         self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)
+        if archive_after:
+            await self._archive_after_outputs(outcome, thread)

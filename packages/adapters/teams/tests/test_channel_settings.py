@@ -16,7 +16,7 @@ import pytest
 from daimon.adapters.teams import channel_settings
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
 from daimon.adapters.teams.http_service import TeamsHttpService
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
@@ -129,8 +129,9 @@ async def test_a_server_admin_picks_a_channel_and_changes_all_three(
         saved = await post_activity(
             service, _submit(ADMIN, "environment", channel=LEGAL, environment="env:science")
         )
-        isolated = await post_activity(
-            service, _submit(ADMIN, "isolation", channel=LEGAL, isolation="copy")
+        kept = await post_activity(
+            service,
+            _submit(ADMIN, "rule", channel=LEGAL, readers="any", writers="any", extra="copy"),
         )
         granted = await post_activity(
             service, _submit(ADMIN, "admins", channel=f"{LEGAL};messageid=1", admins=NEW_ADMIN)
@@ -139,9 +140,9 @@ async def test_a_server_admin_picks_a_channel_and_changes_all_three(
     assert "Growth" in picker and "Legal" in picker, "a server admin picks any listed channel"
     assert_card_renders(opened["task"]["value"]["card"]["content"])
     form = json.dumps(opened)
-    assert "Confidential" in form and "Entra object ids" in form, "and sees every control"
+    assert "Who can read it" in form and "Entra object ids" in form, "and sees every control"
     assert "science environment" in json.dumps(saved)
-    assert "a copy of analyst, answers only there" in json.dumps(isolated)
+    assert "legal, a copy of analyst, is its own agent" in json.dumps(kept)
     assert "Channel admins saved." in json.dumps(granted), "a thread id names its channel"
     async with db_session_factory() as session:
         scope = await get_scope(session, scope=ChannelScopeRef(tenant_id=TENANT, channel_id=LEGAL))
@@ -150,12 +151,12 @@ async def test_a_server_admin_picks_a_channel_and_changes_all_three(
             session, tenant_id=TENANT, platform="teams", channel_id=LEGAL
         )
     assert scope is not None and scope.environment_name == "science"
-    assert policy.isolated_channel_ids == (LEGAL,), "isolated through set_channel_isolation"
-    assert policy.agent_channel_pins == {"legal": (LEGAL,)}, "a copy named after it, pinned there"
+    assert policy.channel_rules == {LEGAL: ChannelRule(readers="own", writers="own")}
+    assert policy.agent_rules == {"legal": AgentRule(runs_in=(LEGAL,))}, "a copy named after it"
     assert grant is not None and grant.user_ids == (NEW_ADMIN,)
     assert await _events(db_session_factory) == [
         ("panel:environment", "allowed", "completed"),
-        ("panel:isolation", "allowed", "completed"),
+        ("panel:channel_rule", "allowed", "completed"),
         ("panel:channel_admins", "allowed", "completed"),
     ], "every write is audited"
 
@@ -173,8 +174,8 @@ async def test_a_channel_admin_sets_only_their_own_channels_environment(
             service, _submit(LEAD, "environment", channel=LEGAL, environment="env:science")
         )
         typed = await post_activity(service, _submit(LEAD, "pick", channel_id=LEGAL))
-        isolate = await post_activity(
-            service, _submit(LEAD, "isolation", channel=GROWTH, isolation="isolate")
+        rule = await post_activity(
+            service, _submit(LEAD, "rule", channel=GROWTH, readers="own", writers="own")
         )
         grant = await post_activity(
             service, _submit(LEAD, "admins", channel=GROWTH, admins=NEW_ADMIN)
@@ -182,11 +183,11 @@ async def test_a_channel_admin_sets_only_their_own_channels_environment(
 
     assert "Growth" in picker and "Legal" not in picker, "only the channels they run"
     assert "Or a channel id" not in picker, "and no free entry"
-    assert "Environment" in form and "Confidential" not in form and "Entra" not in form
+    assert "Environment" in form and "Who can read it" not in form and "Entra" not in form
     assert "science environment" in json.dumps(saved), "their own channel's environment is theirs"
     assert elsewhere["task"]["value"] == channel_settings.CHANNELS_NEED_ADMIN
-    assert "Confidential" not in json.dumps(typed), "a typed id is a server admin's only"
-    assert isolate["task"]["value"] == channel_settings.SERVER_ADMIN_ONLY
+    assert "Who can read it" not in json.dumps(typed), "a typed id is a server admin's only"
+    assert rule["task"]["value"] == channel_settings.SERVER_ADMIN_ONLY
     assert grant["task"]["value"] == channel_settings.SERVER_ADMIN_ONLY
     async with db_session_factory() as session:
         legal = await get_scope(session, scope=ChannelScopeRef(tenant_id=TENANT, channel_id=LEGAL))
@@ -195,23 +196,25 @@ async def test_a_channel_admin_sets_only_their_own_channels_environment(
             session, tenant_id=TENANT, platform="teams", channel_id=GROWTH
         )
     assert legal is not None and legal.environment_name is None, "the other channel is untouched"
-    assert policy == TenantAccessPolicy(), "a forged isolation writes nothing"
+    assert policy == TenantAccessPolicy(), "a forged rule writes nothing"
     assert admins is not None and admins.user_ids == (LEAD,), "nor a forged grant"
     assert await _events(db_session_factory) == [
         ("panel:environment", "allowed", "completed"),
         ("panel:environment", "denied", "needs_admin"),
-        ("panel:isolation", "denied", "needs_admin"),
+        ("panel:channel_rule", "denied", "needs_admin"),
         ("panel:channel_admins", "denied", "needs_admin"),
     ]
 
 
-async def test_a_channel_admin_puts_no_open_network_in_their_sealed_channel(
+async def test_a_channel_admin_puts_no_open_network_where_only_turns_inside_read(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     """The same `authorize_environment_pick` rule as Discord and Slack."""
     async with db_session_factory.begin() as session:
         await set_access_policy(
-            session, tenant_id=TENANT, policy=TenantAccessPolicy(sealed_channel_ids=(GROWTH,))
+            session,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(channel_rules={GROWTH: ChannelRule(readers="inside")}),
         )
     async with _running(db_session_factory, teams_api_fake) as service:
         refused = await post_activity(
@@ -219,7 +222,9 @@ async def test_a_channel_admin_puts_no_open_network_in_their_sealed_channel(
         )
 
     assert "unrestricted" in json.dumps(refused).lower(), json.dumps(refused)
-    assert await _events(db_session_factory) == [("panel:environment", "denied", "authz:sealed")]
+    assert await _events(db_session_factory) == [
+        ("panel:environment", "denied", "authz:not_a_reader")
+    ]
 
 
 async def test_a_server_admin_is_sent_to_chat_to_confirm_an_open_network(
@@ -228,7 +233,9 @@ async def test_a_server_admin_is_sent_to_chat_to_confirm_an_open_network(
     """The form has no confirm step, so it writes nothing and points at chat, which asks."""
     async with db_session_factory.begin() as session:
         await set_access_policy(
-            session, tenant_id=TENANT, policy=TenantAccessPolicy(sealed_channel_ids=(GROWTH,))
+            session,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(channel_rules={GROWTH: ChannelRule(readers="inside")}),
         )
     async with _running(db_session_factory, teams_api_fake) as service:
         held = await post_activity(
