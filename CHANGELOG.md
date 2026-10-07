@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Teams files in private and shared channels, turned on by asking.** The
+  Enable files sign-in now starts from a channel and grants daimon that
+  channel's own SharePoint site: the team's for a standard channel, a site of
+  its own for a private or shared one. The admin's sign-in finds the channel's
+  Files folder, which daimon's `Sites.Selected` permission cannot, and daimon
+  stores it (`teams_channel_sites`). The admin must be a member of the channel
+  and a SharePoint or global admin; the sign-in now also asks for the
+  delegated `Files.Read.All`. Asked to turn files on, or for a file where they
+  are off, the agent calls the new `enable_channel_files` tool and the bot
+  posts the card after its answer, instead of offering an artifact or notebook.
+
 - **Agents choose how long a notebook link lasts.** `create_notebook_upload_url` takes `ttl_days`, 1 to 365, default 1, for a read-only scratch notebook; the upload response and `list_notebooks` report `expires_at`. A blog is still kept until it is deleted, and the editor still lasts the host's `subprocess_ttl_seconds`. Read-only notebooks and blogs now survive notebook-host restarts and deploys. The host starts one when someone opens its link and stops it after two hours without a visit (`DAIMON_NOTEBOOK__WARM_WINDOW_SECONDS`), so a link that has been quiet takes a few seconds to load. The host caps lifetimes with `DAIMON_NOTEBOOK__MAX_NOTEBOOK_TTL_SECONDS` (365 days). Re-uploading a blog without `permanent` keeps it a blog.
 - **Slack 👎 asks what went wrong, every time.** The form opens as soon as 👎 is clicked, with optional reasons (wrong or inaccurate, didn't do what I asked, incomplete or cut off, too slow, something else) and optional text. A repeat 👎 opens it again so details can be added later. If Slack doesn't open the form, the person gets a private button that does. Reasons are stored on the feedback row (`message_feedback.feedback_reasons`), next to the text. Only people who could start a turn there can vote.
 - `/here` on Discord and Slack shows a fixed, caller-filtered card for channel access, stored channel and agent rules, their effective limits here, and credential names. It points to the answering agent and routing tier in one line. The `where_am_i` MCP tool returns the same card for conversational questions. Discord read and scoped search tools explain when the bot lacks channel view or message history access.
