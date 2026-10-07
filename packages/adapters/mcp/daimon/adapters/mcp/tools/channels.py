@@ -504,8 +504,8 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``19:…@thread.tacv2;messageid=…``. Markdown, capped at 6,000
         characters, and you must be a member of that conversation. In a
         channel, files are saved to its Files tab and the message links
-        them; that needs the team's SharePoint site granted to daimon, and
-        a private or shared channel takes none. In a 1:1 chat each file
+        them; that needs the channel's SharePoint site granted to daimon
+        (``enable_channel_files`` offers the sign-in). In a 1:1 chat each file
         is a card the person accepts to save it to their OneDrive; content
         may be empty when sending files. A group chat takes no files.
         Channels the workspace marked protected, and threads under them,

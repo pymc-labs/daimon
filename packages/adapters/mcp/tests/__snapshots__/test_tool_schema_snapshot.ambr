@@ -2450,6 +2450,24 @@
         'type': 'object',
       }),
     }),
+    'enable_channel_files': dict({
+      'description': '''
+        Post the Enable files card in this Teams channel, right after your reply.
+        
+        Call it in a Teams channel whose ``<channel>`` element says
+        ``files="unavailable"`` when an admin asks for a file there, or asks to
+        turn files on, before offering anything else (an artifact, report or
+        notebook). A Microsoft 365 admin who is a member of the channel signs
+        in with the card once; daimon can then save and read files in that
+        channel, private and shared channels included. Admins only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'explain_agent_resolution': dict({
       'description': '''
         Who answers in this channel, for example #growth? Report who answers, the
@@ -4809,8 +4827,8 @@
         ``19:…@thread.tacv2;messageid=…``. Markdown, capped at 6,000
         characters, and you must be a member of that conversation. In a
         channel, files are saved to its Files tab and the message links
-        them; that needs the team's SharePoint site granted to daimon, and
-        a private or shared channel takes none. In a 1:1 chat each file
+        them; that needs the channel's SharePoint site granted to daimon
+        (``enable_channel_files`` offers the sign-in). In a 1:1 chat each file
         is a card the person accepts to save it to their OneDrive; content
         may be empty when sending files. A group chat takes no files.
         Channels the workspace marked protected, and threads under them,
