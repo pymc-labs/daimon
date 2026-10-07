@@ -1217,7 +1217,7 @@ def test_should_reap_false_for_run_mode_even_when_dead() -> None:
         host_port=8001,
         started_at=time.time() - 10_000_000.0,
         mode="run",
-        permanent=True,
+        registered=True,
     )
     assert should_reap(dead_blog, 7200) is False, (
         "a blog must never be reaped by should_reap, dead or alive"

@@ -1226,6 +1226,14 @@ shared env file would set both.
 
 `int` · optional · default `86400`
 
+### `DAIMON_NOTEBOOK__MAX_NOTEBOOK_TTL_SECONDS`
+
+`int` · optional · default `31536000`
+
+### `DAIMON_NOTEBOOK__WARM_WINDOW_SECONDS`
+
+`int` · optional · default `7200`
+
 ### `DAIMON_NOTEBOOK__SWEEP_INTERVAL_SECONDS`
 
 `int` · optional · default `300`

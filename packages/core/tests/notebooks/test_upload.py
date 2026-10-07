@@ -226,3 +226,49 @@ def test_upload_tokens_carry_the_tenant() -> None:
         tenant="t-1",
     )
     assert _payload(att["upload_url"])["tenant"] == "t-1"
+
+
+def test_a_scratch_notebook_is_kept_one_day_by_default() -> None:
+    out = create_notebook_upload(notebook_settings=_settings(), now=_NOW)
+    assert _payload(out["upload_url"])["notebook_ttl_seconds"] == 86400, (
+        "the agent's default lifetime is one day, whatever the host's own TTL"
+    )
+
+
+def test_a_scratch_notebook_is_kept_for_the_days_asked() -> None:
+    out = create_notebook_upload(notebook_settings=_settings(), now=_NOW, ttl_days=365)
+    assert _payload(out["upload_url"])["notebook_ttl_seconds"] == 365 * 86400
+
+
+@pytest.mark.parametrize("ttl_days", [0, -1, 366])
+def test_a_lifetime_outside_one_to_365_days_is_refused(ttl_days: int) -> None:
+    with pytest.raises(ValueError, match="ttl_days"):
+        create_notebook_upload(notebook_settings=_settings(), now=_NOW, ttl_days=ttl_days)
+
+
+def test_a_blog_takes_no_lifetime() -> None:
+    out = create_notebook_upload(
+        permanent=True, notebook_settings=_settings(), principal_key="acct-1", now=_NOW
+    )
+    assert "notebook_ttl_seconds" not in _payload(out["upload_url"]), "a blog never expires"
+    with pytest.raises(ValueError, match="ttl_days"):
+        create_notebook_upload(
+            permanent=True,
+            notebook_settings=_settings(),
+            principal_key="acct-1",
+            now=_NOW,
+            ttl_days=7,
+        )
+
+
+def test_the_editor_takes_no_lifetime() -> None:
+    out = create_notebook_upload(
+        editable=True, notebook_settings=_settings(allow_editable=True), now=_NOW
+    )
+    assert "notebook_ttl_seconds" not in _payload(out["upload_url"]), (
+        "the editor runs code for whoever holds the link, so the host's TTL bounds it"
+    )
+    with pytest.raises(ValueError, match="ttl_days"):
+        create_notebook_upload(
+            editable=True, notebook_settings=_settings(allow_editable=True), now=_NOW, ttl_days=7
+        )

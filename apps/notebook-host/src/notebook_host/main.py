@@ -3,6 +3,7 @@
 `create_app(settings)` wires:
   - AdminState (injected settings + lifecycle.spawn_marimo as default spawner)
   - Admin router (PUT/DELETE/list/sweep/health)
+  - Proxy router, which starts a registered notebook on its first visit
   - Lifespan context that starts the background sweep task and kills all
     subprocesses on shutdown
 """
@@ -13,36 +14,24 @@ import asyncio
 import contextlib
 import logging
 import subprocess
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 
 from notebook_host.admin import AdminState, create_admin_router
-from notebook_host.blogs_store import load_blogs, register_blog
 from notebook_host.config import Settings
-from notebook_host.jail import (
-    JailUnavailableError,
-    SlugPaths,
-    UidPoolExhaustedError,
-    UidStillInUseError,
-    can_apply_jail,
-    ensure_slug_jail,
-    kill_uid_processes,
-    remove_slug_tree,
-    resolve_jail_uid,
-)
+from notebook_host.jail import JailUnavailableError, SlugPaths, can_apply_jail
+from notebook_host.lazy_spawn import sweep_once
 from notebook_host.lifecycle import (
     NotebookProcess,
     ValidationResult,
-    allocate_port,
     has_inline_script_metadata,
     kill,
-    should_reap,
     spawn_marimo,
     validate_notebook,
-    wait_for_port,
 )
 from notebook_host.migration import migrate_flat_layout
 from notebook_host.pids_store import reap_orphans
@@ -204,9 +193,9 @@ def create_app(settings: Settings) -> FastAPI:
                 len(reaped),
                 [r.slug for r in reaped],
             )
-        respawned = await _respawn_registered_blogs(state)
-        if respawned:
-            _log.info("respawned %d persistent blog(s): %s", len(respawned), respawned)
+        # Registered notebooks are not started here: each one starts on its
+        # first visit (lazy_spawn.ensure_running), so a restart costs nothing
+        # for the notebooks nobody opens.
         sweep_task = asyncio.create_task(_sweep_loop(state))
         try:
             yield
@@ -226,140 +215,13 @@ def create_app(settings: Settings) -> FastAPI:
     return app
 
 
-async def _spawn_blog_process(state: AdminState, slug: str) -> bool:
-    """Spawn a registered blog in run mode and track it. Returns True on success.
-
-    Source must already exist on the persistent volume at
-    ``data_dir/<slug>/notebook.py``. Used by boot respawn and the sweep's
-    self-heal. A failure (missing source, pool exhausted, spawn timeout, or the
-    jail being unavailable) logs and returns False — callers must not let one
-    bad blog abort their loop. A blog that cannot be jailed stays down; it must
-    not respawn unisolated. The caller is responsible for popping any stale
-    entry for ``slug`` before calling (so its port frees up for reuse).
-    """
-    try:
-        uid = resolve_jail_uid(
-            state.settings.resolved_uids_file,
-            slug,
-            start=state.settings.jail_uid_start,
-            end=state.settings.jail_uid_end,
-            allow_unjailed=state.settings.allow_unjailed_spawn,
-        )
-    except (JailUnavailableError, UidPoolExhaustedError) as err:
-        _log.error("blog %r respawn could not be jailed: %s", slug, err)
-        return False
-    paths = ensure_slug_jail(state.settings.data_dir, slug, uid=uid)
-    if not paths.notebook.exists():
-        _log.warning("blog %r has no source at %s; skipping respawn", slug, paths.notebook)
-        return False
-    if uid is not None:
-        # A dead blog's detached children would otherwise live alongside the
-        # new process and its token.
-        try:
-            kill_uid_processes(uid)
-        except UidStillInUseError as err:
-            _log.error("blog %r uid still in use, not respawning: %s", slug, err)
-            return False
-    access_token = state.access_token_for(slug, "run")
-    record = load_blogs(state.settings.resolved_blogs_file).get(slug)
-    if record is not None and record.access_token != access_token:
-        # A blog registered before tokens existed: record the one it is about
-        # to be served under, so its link survives the next restart.
-        register_blog(
-            state.settings.resolved_blogs_file,
-            record.model_copy(update={"access_token": access_token}),
-        )
-    try:
-        port = allocate_port(
-            state.processes, state.settings.marimo_port_start, state.settings.marimo_port_end
-        )
-        proc = state.spawner(slug, paths, port, access_token=access_token, mode="run", jail_uid=uid)
-    except HTTPException as err:
-        _log.warning("blog %r respawn could not start: %s", slug, err.detail)
-        return False
-    np = state.make_process(slug, port, proc, access_token=access_token, mode="run", permanent=True)
-    state.processes[slug] = np
-    ready = await wait_for_port(
-        port, slug, state.settings.spawn_timeout_seconds, access_token=access_token
-    )
-    if not ready:
-        kill(np)
-        state.processes.pop(slug, None)
-        _log.warning("blog %r did not become ready on :%d; will retry next sweep", slug, port)
-        return False
-    return True
-
-
-async def _respawn_registered_blogs(state: AdminState) -> list[str]:
-    """At boot, respawn every blog in the registry. Returns the slugs respawned.
-
-    Called from the lifespan after orphan reaping. One blog failing to respawn
-    never aborts the others.
-    """
-    respawned: list[str] = []
-    for slug in load_blogs(state.settings.resolved_blogs_file):
-        if await _spawn_blog_process(state, slug):
-            respawned.append(slug)
-    if respawned:
-        state.snapshot_pids()
-    return respawned
-
-
-async def _sweep_once(state: AdminState) -> bool:
-    """One sweep pass. Returns True if it mutated state.processes.
-
-    Blogs (permanent): never age-reaped; a dead one is respawned from disk
-    (self-heal). Scratch notebooks (read-only or editor): reaped + their whole slug
-    tree (source, attachments, workspace, log) removed when should_reap is
-    true — the background sweep and the two delete endpoints share identical
-    cleanup semantics by construction.
-    """
-    mutated = False
-    for slug in list(state.processes.keys()):
-        np = state.processes[slug]
-        if np.permanent:
-            if not np.is_alive():
-                _log.warning("blog %r kernel died; respawning from disk", slug)
-                state.processes.pop(slug, None)
-                await _spawn_blog_process(state, slug)
-                mutated = True
-            continue
-        if not should_reap(np, state.settings.subprocess_ttl_seconds):
-            continue
-        kill(np)
-        state.processes.pop(slug, None)
-        remove_slug_tree(state.settings.data_dir, slug, uids_file=state.settings.resolved_uids_file)
-        mutated = True
-    # Self-heal any registered blog that isn't currently running. This covers a
-    # respawn that failed earlier (popped from state.processes but still in the
-    # registry) — without this, such a blog would stay down until the next host
-    # boot. Boot does the same via _respawn_registered_blogs; doing it every
-    # sweep makes "retry next sweep" actually true.
-    #
-    # The outer load_blogs is a cheap candidate scan taken outside any lock, so
-    # it can race delete_blog: a slug it names may already be mid-delete (or
-    # finish deleting) before we get here. Re-reading load_blogs a second time
-    # *inside* the same per-slug lock delete_blog holds is what closes that
-    # window — a candidate that was unregistered under the lock is dropped
-    # instead of respawned. The double read looks redundant; it is not.
-    for slug in load_blogs(state.settings.resolved_blogs_file):
-        async with state.lock_for(slug):
-            if slug not in load_blogs(state.settings.resolved_blogs_file):
-                continue
-            if slug in state.processes:
-                continue
-            if await _spawn_blog_process(state, slug):
-                mutated = True
-    return mutated
-
-
 async def _sweep_loop(state: AdminState) -> None:
-    """Background task: sweep every sweep_interval_seconds (reap notebooks, heal blogs)."""
+    """Background task: sweep every sweep_interval_seconds (see ``lazy_spawn.sweep_once``)."""
     while True:
         await asyncio.sleep(state.settings.sweep_interval_seconds)
         try:
-            mutated = await _sweep_once(state)
-            if mutated:
+            result = await sweep_once(state, now=time.time())
+            if result.mutated:
                 state.snapshot_pids()
         except Exception:
             _log.exception("sweep iteration failed; will retry next cycle")

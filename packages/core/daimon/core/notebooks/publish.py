@@ -113,9 +113,12 @@ async def list_notebooks(
     into ``delete_notebook`` and ``create_notebook_upload``. ``url`` keeps the
     namespaced slug, because that is the real address.
 
-    Each entry carries ``permanent``: True for a run-mode blog (survives
-    restarts, never reaped), False for an edit-mode scratch notebook (TTL). Both
-    kinds appear because both are things the caller published and may want back.
+    Each entry carries ``permanent``: True for a blog (kept until deleted),
+    False for a scratch notebook, which also carries ``expires_at``. Both kinds
+    appear because both are things the caller published and may want back. The
+    host's registry lists every read-only notebook, running or stopped, with
+    ``expires_at`` None for a blog; an older host lists only blogs there, which
+    reads the same way.
 
     Parses the host JSON via local ``Any``/``cast`` (same shape as host_client's
     ``_parse_cell_errors``) so strict pyright stays clean without nested-Unknown
@@ -136,7 +139,9 @@ async def list_notebooks(
     prefix = _principal_prefix(principal_key)
     blog_entries = _own_entries(blogs_body.get("blogs", []), prefix)
     process_entries = _own_entries(notebooks_body.get("notebooks", []), prefix)
-    blog_slugs = {cast("str", entry["slug"]) for entry in blog_entries}
+    blog_slugs = {
+        cast("str", entry["slug"]) for entry in blog_entries if entry.get("expires_at") is None
+    }
     own: list[dict[str, object]] = []
     seen: set[str] = set()
     # Blogs first so a live blog's richer record (created_at, title) wins over

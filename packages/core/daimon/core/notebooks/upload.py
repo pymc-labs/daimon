@@ -29,6 +29,11 @@ from daimon.core.notebooks.publish import (
 # 5 min: long enough for an agent to curl a sandbox file to the host, short
 # enough to bound the replay window on the single-use token.
 _UPLOAD_TTL_SECONDS = 300
+# How long a read-only scratch notebook is kept when the agent asks for
+# nothing, and the longest it may ask for. The host clamps to its own maximum.
+_DEFAULT_TTL_DAYS = 1
+_MAX_TTL_DAYS = 365
+_SECONDS_PER_DAY = 86400
 # 72-bit url-safe nonce for single-use jti dedup (host burns it after one
 # upload). This is dedup entropy, NOT access-secret strength; notebook access
 # is the host's per-notebook token in the returned link.
@@ -45,6 +50,7 @@ def _mint_url(
     now: datetime,
     name: str | None,
     tenant: str | None = None,
+    notebook_ttl_seconds: int | None = None,
 ) -> dict[str, str]:
     """Mint a token for ``slug``/``op`` and wrap it in the host upload URL."""
     token = mint_token(
@@ -57,6 +63,7 @@ def _mint_url(
         ttl_seconds=_UPLOAD_TTL_SECONDS,
         name=name,
         tenant=tenant,
+        notebook_ttl_seconds=notebook_ttl_seconds,
     )
     return {
         "upload_url": f"{host.rstrip('/')}/upload/{token}",
@@ -70,6 +77,7 @@ def create_notebook_upload(
     slug: str | None = None,
     permanent: bool = False,
     editable: bool = False,
+    ttl_days: int | None = None,
     notebook_settings: NotebookSettings,
     principal_key: str | None = None,
     tenant: str | None = None,
@@ -90,10 +98,21 @@ def create_notebook_upload(
     marimo editor. The editor runs arbitrary code on the shared notebook host
     for anyone holding the link, so it is opt-in and never for a blog.
 
+    ``ttl_days`` (1 to 365, default 1) is how long the host keeps a read-only
+    scratch notebook. A blog is kept until deleted, and the editor for the
+    host's own TTL, so neither takes one.
+
     ``slug`` None → a fresh random slug; otherwise principal-namespaced.
     """
     if permanent and editable:
         raise ValueError("a permanent blog cannot be editable; publish it read-only")
+    if ttl_days is not None and (permanent or editable):
+        raise ValueError(
+            "ttl_days is only for a read-only scratch notebook; a blog is kept until "
+            "deleted and the editor lasts the host's own TTL"
+        )
+    if ttl_days is not None and not _DEFAULT_TTL_DAYS <= ttl_days <= _MAX_TTL_DAYS:
+        raise ValueError(f"ttl_days must be between 1 and {_MAX_TTL_DAYS}, got {ttl_days}")
     if editable and not notebook_settings.allow_editable:
         raise ValueError(
             "editable notebooks are off on this deployment (notebook.allow_editable); "
@@ -123,6 +142,9 @@ def create_notebook_upload(
         now=now,
         name=None,
         tenant=tenant,
+        notebook_ttl_seconds=(
+            None if permanent or editable else (ttl_days or _DEFAULT_TTL_DAYS) * _SECONDS_PER_DAY
+        ),
     )
 
 
