@@ -1,6 +1,7 @@
 # Agent identity on every message
 
-Status: design, 2026-10-07. Owner: the agent-identity effort.
+Status: design, 2026-10-07, revised after review the same day. Owner: the
+agent-identity effort.
 
 ## Problem
 
@@ -11,14 +12,15 @@ whichever agent the channel cascade picks, not to the agent they answered.
 
 Goal: each message shows its agent's name and avatar in the platform's own
 message header, on every chunk of a multi-message answer, without a header or
-embed in the body; and a reply to an agent's message reaches that agent.
+embed in the body; and a reply to an agent's message reaches that agent where
+the platform tells us which message was answered.
 
 ## What each platform allows
 
 | Platform | Mechanism | Granularity | Limits |
 | --- | --- | --- | --- |
-| Slack | `chat.postMessage` with `username` and `icon_url` (scope `chat:write.customize`) | per message | `chat.update` keeps the identity the message was posted with; `files_upload_v2` posts as the bot; the `APP` tag stays |
-| Discord | application-owned channel webhook, `username` + `avatar_url` per message, `thread` for threads | per message | needs Manage Webhooks; no webhooks in DMs; `APP` badge stays; replies to a webhook message do not mention the bot; 15 webhooks per channel |
+| Slack | `chat.postMessage` with `username` and `icon_url` (scope `chat:write.customize`) | per message | `chat.update` has no identity fields; we expect the posted identity to survive an edit and verify that on staging; `files_upload_v2` posts as the bot; replies carry only the thread root, not the answered message |
+| Discord | application-owned channel webhook, `username` + `avatar_url` per message, `thread` for threads | per message | needs Manage Webhooks; no webhooks in DMs; a reply's automatic author ping targets the webhook, not the bot; a recreated webhook cannot edit the old one's messages; rate limits are per webhook and dynamic |
 | Teams | Bot Framework sends as the bot's registered identity; no per-message name or avatar | per bot registration | per-message identity needs an Adaptive Card header (an embed), so out |
 
 ## Mechanism
@@ -43,13 +45,20 @@ default) posts with no override, so it keeps the app's own name and icon.
   carries the agent; we do not post an extra message per file.
 - Ephemerals (`chat.postEphemeral` accepts the same fields) are panel and
   error replies from Daimon itself: unchanged.
-- Without the scope Slack rejects the call with `missing_scope`. The adapter
-  retries once without the two fields and marks the install as lacking the
-  scope for an hour, so an install that has not re-consented degrades to
-  today's look instead of failing.
+- Without the scope Slack rejects the call with `missing_scope`. When the
+  error's `needed` names `chat:write.customize`, the adapter retries once
+  without the two fields and remembers that for the installation's token, so
+  an install that has not re-consented degrades to today's look instead of
+  failing. A reinstall (new token) clears it.
 - Turn posts are recorded in `agent_posted_messages` (today Discord only),
   with `channel_id` the Slack channel and `thread_ts` the thread, so the
   message → agent map covers both platforms.
+- The tidy tools' delete and edit of a customized message are checked on
+  staging; Slack documents limits on deleting impersonated messages.
+- Slack starts turns only on a mention or a DM; an unmentioned thread reply is
+  dropped (`app.py:1300`). That stays: answering unmentioned replies is a
+  participation change, not identity. Routing on Slack therefore uses the
+  thread root and the thread's binding, never "the chunk you answered".
 
 ### Discord
 
@@ -58,22 +67,36 @@ default) posts with no override, so it keeps the app's own name and icon.
   it can carry buttons and select menus, and their interactions come to the
   bot as today. Messages in threads use `thread=`.
 - Webhooks are found by listing the channel's webhooks and keeping the one
-  whose `user` is the bot; the token stays in process memory, never in the
-  database or logs. A 404 on send drops the cache entry and retries once.
-- A small `TurnSender` replaces `thread.send` / `message.edit` /
-  `message.delete` for turn posts: webhook when available, else `thread.send`
-  with `**Agent name**` prefixed to the first chunk of each answer only (DMs,
-  missing Manage Webhooks, webhook limit reached). Reactions are added by the
-  bot user, which works on webhook messages.
-- Persistent views keep working: their `custom_id`s are unchanged and
-  interactions on webhook messages from an application-owned webhook reach
-  the application.
-- Gating: a message that replies to (`message.reference`) a recorded agent
-  post is treated as addressed to Daimon even without a mention, because a
-  reply to a webhook message cannot ping the bot. Our own webhook messages
-  are already dropped (`author.bot`).
-- Rate limit: webhooks allow 5 requests per 2 s per webhook; the status card's
-  edit debounce already sits under that.
+  whose `application_id` is ours and whose channel matches; creation is
+  serialized per channel. The token stays in process memory, never in the
+  database or logs. Every process that edits posts (bot, MCP tidy tools,
+  restart recovery) resolves the webhook the same way.
+- One transport, `DiscordPostTransport`, owns send, edit and delete for agent
+  posts: webhook (`wait=True`, so the sent message is returned and recorded)
+  when available, else `thread.send` with `**Agent name**` prefixed to the
+  first chunk of each answer only. Fallback cases: DMs, missing Manage
+  Webhooks, the webhook limit, voice and stage text chats, locked threads.
+  Edits and deletes go through the webhook when the message's `webhook_id` is
+  ours (with the thread), through the bot otherwise. If our webhook was
+  deleted, its old messages can no longer be edited: an edit that fails that
+  way posts the update as a new message.
+- Callers that assume the bot authored the message move onto the transport
+  or accept our webhook as an author: status-card edits, turn-card recovery
+  (`turn_card_recovery.py:379`), posted controls (`posted_controls/edit.py:75`),
+  the tidy tools (`mcp/tools/discord/_tidy.py:129`, which today rejects webhook
+  messages), and feedback and support reactions
+  (`feedback_reactions.py:139`). Per-agent ownership checks stay as they are.
+- Views: application-owned webhooks can carry interactive components. Views
+  are sent with the client's state so they dispatch, and persistent handlers
+  are re-registered after a restart as today.
+- Gating: the gate's bot and guild checks stay as they are; only "addressed"
+  widens. A message is addressed if it mentions the bot (as today) or is a
+  genuine reply (`message.reference`) to a post recorded for this tenant and
+  channel. Our own webhook messages are rejected explicitly. Admission,
+  budget, concurrency and the participation batch run unchanged.
+- Rate limits: discord.py's per-webhook buckets and 429 delays are honoured;
+  one channel webhook carries concurrent turns and MCP posts, so staging
+  checks two concurrent turns in one channel.
 
 ### Teams
 
@@ -82,30 +105,34 @@ Nothing else.
 
 ### Multi-message answers
 
-Slack and Discord carry identity in the header of every chunk, and both
-platforms collapse consecutive messages from the same name and avatar into
-one block, so a long answer reads as one message. The fallback prefix appears
-only on the first chunk.
+Slack and Discord carry identity in the header of every chunk. Both clients
+currently group consecutive messages with the same name and avatar under one
+header; that is client rendering, not an API guarantee, and is checked on
+staging. The fallback prefix appears only on the first chunk.
 
 ## Reply routing
 
-The map is `agent_posted_messages` (exists, migration 0041/0050): every turn
-post, tool post and turn-opened thread, with its agent.
+The map is `agent_posted_messages` (migrations 0041 and 0050): turn posts,
+tool posts and turn-opened threads, each with its agent. It is incomplete
+(error notices, setup turns and files are not recorded) and not permanent
+(`daimon audit prune` removes old rows); a reply to an unrecorded or pruned
+message routes as today.
 
-Proposed selection order, to be agreed with the operator-model effort, whose
-named-agent routing (#409) owns the rules:
+The authored candidate, most specific first:
 
-1. An explicit name (`@Daimon name:` or a Discord agent role, #409).
-2. A bound thread (setup or handoff binding).
-3. **Authored:** the message replies to, or sits in a thread whose root is, a
-   post recorded for agent A. A is the requested agent.
-4. The channel cascade, as today.
+1. Discord: the message `message.reference` points at, if recorded.
+2. Either platform: the thread's root post, if recorded (a Discord thread is
+   recorded as `auto_thread` when a turn opens it; a Slack thread's root is
+   `thread_ts`).
 
-Tier 3 feeds the same "requested agent" input that #409's name form feeds, so
-the permission, home and `readers: own` checks are #409's, not a copy: an
-agent that may not run here falls through to tier 4 with no notice. A Discord
-thread opened by a turn is recorded as `auto_thread`, so its later mentions
-stay with the agent that opened it.
+The candidate goes into #409's shared admission as a requested agent with
+selection source `authored`, so authorization, homes, `readers: own` and the
+binding and live-session conflict rules are #409's, not a copy. The one
+difference to agree with the operator-model effort: an authored candidate is
+implicit, so where #409 would refuse an explicit name (a bound thread, another
+agent's live session, an agent unavailable here), the authored candidate is
+dropped and the turn routes as it does today, with no notice. An explicit name
+still beats it.
 
 Where nothing is derivable (a bare channel message), the cascade answers as
 today, and the answer now shows who answered.
@@ -115,20 +142,27 @@ This lands after #409 merges (after Oct 11) and is built on its code.
 ## Avatars
 
 - Table `agent_avatars (tenant_id, agent_name, token, sha256, png, source,
-  updated_by_account_id, updated_at)`, keyed by tenant and agent name, so an
-  agent the resolver recreates keeps its avatar. PNG, 256×256, at most 256 KB.
+  updated_by_account_id, updated_at)`, keyed by tenant and the agent's daimon
+  name normalized as #409 normalizes names (NFKC, casefolded), so an agent the
+  resolver recreates keeps its avatar. A rename moves the row; archiving or
+  deleting the agent, and tenant purge, delete it, so a later agent reusing
+  the name starts from a fresh default. PNG, 256×256, at most 256 KB.
 - Default: generated once on first use, the agent's initials on a colour
   picked from a fixed palette by a hash of the name (Pillow,
   `ImageFont.load_default(size=…)`, no font file shipped). `source='default'`.
 - Served publicly by the MCP service at `/avatars/{token}/{sha256[:12]}.png`
-  (`token` random, so the URL names no tenant or agent; the hash in the path
-  busts Slack's and Discord's caches on change; `Cache-Control: immutable`).
-  The avatar of a deleted agent stops resolving when its row is purged.
-- Setup panel (Slack `agent_setup`, Discord `agent_setup`): an Avatar row on
-  the agent's detail screen with **Change** (an https image URL, fetched once
-  server-side with a size cap, decoded, center-cropped and resized) and
-  **Reset** (back to the generated one). Admin only, recorded in the panel
-  audit.
+  (`token` random and replaced on every change, so the URL names no tenant or
+  agent; the hash busts Slack's and Discord's caches; `Cache-Control:
+  immutable`). Avatars are public by nature: anyone who sees a message can
+  open its image, and platform and browser caches keep it after we delete it.
+  The panel says so.
+- Setup panel: an Avatar row on the agent's detail screen with **Change** and
+  **Reset** (back to the generated one). Change takes an uploaded image, never
+  a URL we fetch: a Slack modal `file_input` (downloaded from Slack's file API
+  with the bot token) and on Discord an attachment option on the agent setup
+  command (downloaded from Discord's CDN). The download is bounded in time and
+  bytes, decoded with a pixel cap, center-cropped, resized and re-encoded as
+  PNG without metadata. Admin only, recorded in the panel audit.
 
 ## Permissions and app changes
 
@@ -148,10 +182,16 @@ This lands after #409 merges (after Oct 11) and is built on its code.
 4. Authored reply routing (after #409).
 
 Each PR merges to main and is checked on staging; screenshots come from a
-human click-through, since no bot can see the rendering.
+human click-through, since no bot can see the rendering. Staging cases beyond
+the screenshots: Slack post then edit keeps the identity; tidy delete of a
+customized Slack message; two concurrent turns in one Discord channel; a forum
+post, a locked thread and a voice-channel text chat; restart recovery of a
+webhook card; feedback reactions on a webhook answer.
 
 ## Not doing
 
 - Embeds or a name line in the body on Slack or Discord.
 - Separate Slack apps or Discord bots per agent.
 - Teams Adaptive Card headers.
+- Answering unmentioned Slack thread replies.
+- Fetching avatars from arbitrary URLs.
