@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
-from daimon.adapters.discord.support_escalation import SupportModal
+from daimon.adapters.discord.support_escalation import SupportEscalateButton, SupportModal
 from daimon.core.config import SupportSettings
 from daimon.core.stores import accounts
 from daimon.core.stores.channel_admins import set_channel_admins
@@ -121,3 +121,15 @@ async def test_unreachable_channel_admins_fall_back_to_the_server_admins(
 
     assert opened == [40, 50], "the channel's admin first, then the server admin"
     escalation.send.assert_not_awaited()
+
+
+def test_the_dm_button_and_form_say_ask_the_team_like_slack() -> None:
+    button = SupportEscalateButton(guild_id=_GUILD, channel_id=_THREAD, message_id="444").item
+    assert (button.label, str(button.emoji)) == ("Ask the team", "🙋")
+    modal = SupportModal(
+        runtime=cast(Any, None), guild_id=_GUILD, channel_id=_THREAD, message_id="444"
+    )
+    assert modal.title == "Ask the team"
+    assert modal.note_input.label == "What do you need help with?"
+    assert modal.note_input.placeholder == "Someone from the team will reply."
+    assert len(modal.note_input.label) <= 45, "Discord rejects a longer text-input label"

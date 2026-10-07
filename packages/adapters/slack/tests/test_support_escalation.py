@@ -781,3 +781,23 @@ async def test_a_failure_stamping_a_delivered_request_still_says_it_was_received
 
     assert len(_posts(permalink)) == 1, "it landed"
     assert _ephemeral_texts(permalink) == [received_text(remaining=19)]
+
+
+def test_support_modal_note_input_stays_within_slack_input_limit() -> None:
+    """Slack refuses the whole view (`invalid_arguments`) when an input's
+    `max_length` is above 3,000, so the note form would never open."""
+    view = slack_support.build_support_modal(
+        channel_id="C1", message_ts="1.2", thread_ts="1.0", remaining=3, sealed=True
+    )
+    lengths = [
+        b["element"]["max_length"]
+        for b in view["blocks"]
+        if b["type"] == "input" and b["element"]["type"] == "plain_text_input"
+    ]
+    assert lengths and all(1 <= n <= 3000 for n in lengths)
+
+
+def test_ask_the_team_button_shows_the_raised_hand_beside_the_words_and_stays_unstyled() -> None:
+    button = slack_support.build_ask_human_button()
+    assert button["text"] == {"type": "plain_text", "text": "🙋 Ask the team", "emoji": True}
+    assert "style" not in button, "a styled button would tell the channel who asked"

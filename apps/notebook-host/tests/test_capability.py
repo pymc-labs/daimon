@@ -105,3 +105,14 @@ def test_verify_token_rejects_validly_signed_non_claims_payload() -> None:
     with pytest.raises(HTTPException) as exc:
         verify_token(_SECRETS, token, now=_NOW)
     assert exc.value.status_code == 403, "signed-but-non-claims payload → 403"
+
+
+def test_verify_token_reads_notebook_ttl_seconds_claim() -> None:
+    token = _mint(_SECRETS[0], _payload(op="notebook", notebook_ttl_seconds=7 * 86400))
+    claims = verify_token(_SECRETS, token, now=_NOW)
+    assert claims.notebook_ttl_seconds == 7 * 86400, "the requested lifetime reaches the host"
+
+
+def test_verify_token_defaults_notebook_ttl_seconds_to_none() -> None:
+    claims = verify_token(_SECRETS, _mint(_SECRETS[0], _payload()), now=_NOW)
+    assert claims.notebook_ttl_seconds is None, "a token from an older bot asks for no lifetime"

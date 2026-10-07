@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Agents choose how long a notebook link lasts.** `create_notebook_upload_url` takes `ttl_days`, 1 to 365, default 1, for a read-only scratch notebook; the upload response and `list_notebooks` report `expires_at`. A blog is still kept until it is deleted, and the editor still lasts the host's `subprocess_ttl_seconds`. Read-only notebooks and blogs now survive notebook-host restarts and deploys. The host starts one when someone opens its link and stops it after two hours without a visit (`DAIMON_NOTEBOOK__WARM_WINDOW_SECONDS`), so a link that has been quiet takes a few seconds to load. The host caps lifetimes with `DAIMON_NOTEBOOK__MAX_NOTEBOOK_TTL_SECONDS` (365 days). Re-uploading a blog without `permanent` keeps it a blog.
 - **Slack 👎 asks what went wrong, every time.** The form opens as soon as 👎 is clicked, with optional reasons (wrong or inaccurate, didn't do what I asked, incomplete or cut off, too slow, something else) and optional text. A repeat 👎 opens it again so details can be added later. If Slack doesn't open the form, the person gets a private button that does. Reasons are stored on the feedback row (`message_feedback.feedback_reasons`), next to the text. Only people who could start a turn there can vote.
 - GitHub App grants can be staged and activated per agent. App sessions use per-turn repository tokens and a session-owned vault; legacy agents retain their existing GitHub path. The GitHub connection page offers Select all for repos the confirmer administers, and the default environment includes `gh`.
 
@@ -25,7 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `daimon github connect-link` requires `--requester` with a tenant admin platform user ID; the invitation is minted on that admin’s behalf.
-
+- **Notebook names work for every account.** Each notebook slug starts with a 12-character tag derived from the account, and about 1 account in 64 has a tag beginning with `-`. The notebook host refuses slugs that start with `-`, so every named notebook from those accounts failed at upload with a 400. One in 64 unnamed notebooks failed the same way. Those tags and random slugs now get an `x` in front; every other account keeps its tag, so existing notebooks stay where they are.
+- **Discord's help button says "🙋 Ask the team" too.** The button in the direct message after a 🙋 reaction, and its form, use the same name as Slack; the form's text box says "Someone from the team will reply."
+- **Slack's Ask a human button is now "🙋 Ask the team"**, with an emoji like the 👍/👎 beside it. Its form, notices and refusal say "the team" too ("What do you need help with? Someone from the team will reply."), and the support wording shared with Discord no longer says "a human".
+- **Slack's "What went wrong?" and Ask a human forms open again.** Both declared a 4,000-character text box; Slack caps a text input at 3,000 and refuses the whole form when it is larger, so every 👎 form and every Ask a human note form failed with `invalid_arguments` and nothing opened.
 - **Slack turns that only ran tools can be rated and can ask a human.** Their finished status card now carries 👍/👎 (and Ask a human when it is enabled), as Discord's tool-only turns already did.
 - **Slack's Ask a human button no longer looks dead on a slow check.** The click opens a "Checking…" form at once and replaces it with the note form or the reason there is none. Before, the checks (including a live user-group lookup) ran first and could outlast Slack's 3-second window, so nothing opened.
 - **Slack feedback acknowledgements land in the answer's thread** instead of the channel.

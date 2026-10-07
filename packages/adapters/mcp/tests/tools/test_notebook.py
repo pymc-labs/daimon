@@ -94,6 +94,22 @@ async def test_create_notebook_upload_impl_permanent_mints_blog_op() -> None:
     )
 
 
+async def test_create_notebook_upload_impl_signs_the_days_to_keep_it() -> None:
+    runtime = _make_runtime(_make_settings(host_url="http://nb:8001", admin_secret="s"))
+    out = await _create_notebook_upload_impl(
+        runtime, slug="radar", permanent=False, ttl_days=30, principal_key="acct-1"
+    )
+    assert _token_payload(out["upload_url"])["notebook_ttl_seconds"] == 30 * 86400
+
+
+async def test_create_notebook_upload_impl_refuses_a_lifetime_past_a_year() -> None:
+    runtime = _make_runtime(_make_settings(host_url="http://nb:8001", admin_secret="s"))
+    with pytest.raises(ToolError, match="ttl_days"):
+        await _create_notebook_upload_impl(
+            runtime, slug="radar", permanent=False, ttl_days=400, principal_key="acct-1"
+        )
+
+
 async def test_create_notebook_upload_impl_random_slug() -> None:
     runtime = _make_runtime(_make_settings(host_url="http://nb:8001", admin_secret="s"))
     out = await _create_notebook_upload_impl(

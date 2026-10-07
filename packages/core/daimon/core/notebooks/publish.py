@@ -36,12 +36,24 @@ class InvalidSlugError(DaimonError):
 _PRINCIPAL_PREFIX_BYTES = 9  # 9 bytes → 12 chars urlsafe-b64, no padding
 
 
+def _no_leading_dash(value: str) -> str:
+    """``value``, or ``x`` + ``value`` when it starts with ``-``.
+
+    urlsafe base64 can start with ``-``, and the host refuses such a slug
+    because marimo would read it as a command-line flag. Prepending rather
+    than replacing the dash keeps every other value unchanged, so namespaces
+    already in use don't move, and a 13-character tag can't equal any
+    12-character one.
+    """
+    return f"x{value}" if value.startswith("-") else value
+
+
 def _principal_prefix(principal_key: str) -> str:
     digest = hashlib.blake2b(
         principal_key.encode("utf-8"),
         digest_size=_PRINCIPAL_PREFIX_BYTES,
     ).digest()
-    return base64.urlsafe_b64encode(digest).decode("ascii")
+    return _no_leading_dash(base64.urlsafe_b64encode(digest).decode("ascii"))
 
 
 def _resolve_slug(*, agent_slug: str | None, principal_key: str | None) -> str:
@@ -50,7 +62,7 @@ def _resolve_slug(*, agent_slug: str | None, principal_key: str | None) -> str:
     # other notebooks' code on the host), but a random slug still keeps
     # links from colliding or being guessed into a 409.
     if agent_slug is None:
-        return secrets.token_urlsafe(16)
+        return _no_leading_dash(secrets.token_urlsafe(16))
     if principal_key is None:
         raise InvalidSlugError("principal_key is required when slug is provided")
     sanitized = sanitize_slug(agent_slug)
@@ -101,9 +113,12 @@ async def list_notebooks(
     into ``delete_notebook`` and ``create_notebook_upload``. ``url`` keeps the
     namespaced slug, because that is the real address.
 
-    Each entry carries ``permanent``: True for a run-mode blog (survives
-    restarts, never reaped), False for an edit-mode scratch notebook (TTL). Both
-    kinds appear because both are things the caller published and may want back.
+    Each entry carries ``permanent``: True for a blog (kept until deleted),
+    False for a scratch notebook, which also carries ``expires_at``. Both kinds
+    appear because both are things the caller published and may want back. The
+    host's registry lists every read-only notebook, running or stopped, with
+    ``expires_at`` None for a blog; an older host lists only blogs there, which
+    reads the same way.
 
     Parses the host JSON via local ``Any``/``cast`` (same shape as host_client's
     ``_parse_cell_errors``) so strict pyright stays clean without nested-Unknown
@@ -124,7 +139,9 @@ async def list_notebooks(
     prefix = _principal_prefix(principal_key)
     blog_entries = _own_entries(blogs_body.get("blogs", []), prefix)
     process_entries = _own_entries(notebooks_body.get("notebooks", []), prefix)
-    blog_slugs = {cast("str", entry["slug"]) for entry in blog_entries}
+    blog_slugs = {
+        cast("str", entry["slug"]) for entry in blog_entries if entry.get("expires_at") is None
+    }
     own: list[dict[str, object]] = []
     seen: set[str] = set()
     # Blogs first so a live blog's richer record (created_at, title) wins over
