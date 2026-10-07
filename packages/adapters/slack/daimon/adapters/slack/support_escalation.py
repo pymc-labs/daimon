@@ -409,7 +409,8 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
             message_ts=message_ts,
             thread_ts=thread_ts,
         )
-    except (SQLAlchemyError, *CLICK_REPLY_ERRORS) as err:
+    except (SQLAlchemyError, OSError, *CLICK_REPLY_ERRORS) as err:
+        # OSError: asyncpg raises a refused connection raw, outside SQLAlchemy's.
         # Never leave the Checking… notice standing: say so, then let it be seen.
         log.warning("support.click_check_failed", error=error_name(err))
         await reply(CHECK_FAILED)
@@ -523,19 +524,30 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
         await reply(OUT_OF_CREDITS)
         return
 
-    # The row is committed; everything below is best-effort delivery.
-    delivered = await _dm_channel_admins(
-        runtime, client, submission=s, tenant_id=tenant_id, sealed=sealed
-    ) or await _post_to_escalation_channel(
-        runtime,
-        source_client=client,
-        submission=s,
-        dest_channel=dest_channel,
-        sealed=sealed,
-    )
-    if delivered:
-        async with runtime.sessionmaker() as session, session.begin():
-            await mark_delivered(session, escalation_id=outcome.row.id)
+    # The row is committed and the credit spent; everything below is
+    # best-effort delivery, and the person hears the outcome whatever fails.
+    delivered = False
+    try:
+        delivered = await _dm_channel_admins(
+            runtime, client, submission=s, tenant_id=tenant_id, sealed=sealed
+        ) or await _post_to_escalation_channel(
+            runtime,
+            source_client=client,
+            submission=s,
+            dest_channel=dest_channel,
+            sealed=sealed,
+        )
+        if delivered:
+            async with runtime.sessionmaker() as session, session.begin():
+                await mark_delivered(session, escalation_id=outcome.row.id)
+    except (SQLAlchemyError, OSError, *CLICK_REPLY_ERRORS) as err:
+        # Delivered but not stamped still reads as received: it landed.
+        log.warning(
+            "support.delivery_failed",
+            escalation_id=str(outcome.row.id),
+            delivered=delivered,
+            error=error_name(err),
+        )
     log.info(
         "support.escalation_recorded",
         escalation_id=str(outcome.row.id),
@@ -617,7 +629,8 @@ async def _dm_channel_admins(
                 landed += 1
             except CLICK_REPLY_ERRORS as err:
                 # A timeout is ambiguous (the DM may have landed); it counts as
-                # undelivered and is never retried, so nobody is DMed twice.
+                # undelivered and daimon does not resend it. (slack_sdk's own
+                # connection-error retry handler still applies, app-wide.)
                 log.info("support.admin_dm_undelivered", error=error_name(err))
         if landed:
             log.info("support.sent_to_admins", recipients=landed)
@@ -677,7 +690,7 @@ async def _post_to_escalation_channel(
             channel=dest_channel, text=text, unfurl_links=False, unfurl_media=False
         )
     except CLICK_REPLY_ERRORS as err:
-        # As with the DMs: an ambiguous timeout stays undelivered, never re-posted.
+        # As with the DMs: an ambiguous timeout stays undelivered; daimon does not re-post.
         log.warning("support.channel_undeliverable", channel_id=dest_channel, error=error_name(err))
         return False
     return True

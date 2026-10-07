@@ -706,16 +706,26 @@ async def test_a_top_level_answer_in_a_dm_offers_the_form_for_that_answer(
     }
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        OperationalError("SELECT 1", {}, Exception("connection reset")),
+        ConnectionRefusedError(111, "Connection refused"),
+        TimeoutError(),
+    ],
+    ids=["sqlalchemy", "raw-connection-refused", "timeout"],
+)
 async def test_a_database_failure_during_the_checks_replaces_the_checking_notice(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
+    error: BaseException,
 ) -> None:
     _tenant, key = await _seed(db_session)
     runtime = _runtime(key, db_session_factory, _support())
 
     async def failing(*args: Any, **kwargs: Any) -> Any:
-        raise OperationalError("SELECT 1", {}, Exception("connection reset"))
+        raise error
 
     with patch.object(slack_support, "check_place_access", new=failing):
         await handle_ask_human_click(runtime, _click())
@@ -753,3 +763,21 @@ async def test_a_transport_timeout_while_delivering_keeps_the_row_and_says_so(
         assert rows[0]["delivered_at"] is not None, "a missing permalink still posts the ids"
         (body,) = _posts(permalink)
         assert f"message {_ANSWER_TS} in channel {_CHANNEL}" in body["text"]
+
+
+async def test_a_failure_stamping_a_delivered_request_still_says_it_was_received(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    permalink: Any,
+) -> None:
+    _tenant, key = await _seed(db_session)
+    runtime = _runtime(key, db_session_factory, _support())
+
+    async def failing(*args: Any, **kwargs: Any) -> Any:
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    with patch.object(slack_support, "mark_delivered", new=failing):
+        await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
+
+    assert len(_posts(permalink)) == 1, "it landed"
+    assert _ephemeral_texts(permalink) == [received_text(remaining=19)]
