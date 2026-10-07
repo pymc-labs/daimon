@@ -31,7 +31,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Final, Literal, cast
+from typing import Final, Literal
 
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
@@ -42,7 +42,7 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import claim_routine_deliveries, settle_routine_delivery
-from daimon.core.turn.state import ToolUseBlock, TurnState
+from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -74,12 +74,9 @@ log = structlog.get_logger(__name__)
 DELIVERY_LEASE: Final[timedelta] = timedelta(minutes=2)
 DELIVERY_POLL_INTERVAL_S: Final[float] = 15.0
 
-#: daimon's own MCP server and its posting tool: a call to it naming the
-#: destination is the agent delivering the result itself.
-_DAIMON_SERVER: Final[str] = "daimon-mcp"
+#: daimon's own posting tool: a call to it naming the destination is the
+#: agent delivering the result itself.
 _POST_TOOL: Final[str] = "send_message"
-#: The MCP search interface's proxy: `call_tool(name=..., arguments=...)`.
-_CALL_TOOL: Final[str] = "call_tool"
 
 _SLACK_CHANNEL: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}")
 _SLACK_THREAD: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}:[0-9]+\.[0-9]+")
@@ -214,24 +211,9 @@ def render_routine_controls(
 
 
 def _posted_channel(block: ToolUseBlock) -> str | None:
-    """The `channel_id` a successful daimon `send_message` posted to, or None.
-
-    Recognises the direct call and the same call made through the MCP search
-    interface (`call_tool(name="send_message", arguments={...})`), which is
-    how a large daimon catalog is reached.
-    """
-    if block.mcp_server_name != _DAIMON_SERVER or block.status != "complete" or block.is_error:
-        return None
-    arguments: object = block.input
-    if block.name == _CALL_TOOL:
-        if block.input.get("name") != _POST_TOOL:
-            return None
-        arguments = block.input.get("arguments")
-    elif block.name != _POST_TOOL:
-        return None
-    if not isinstance(arguments, dict):
-        return None
-    channel_id = cast("dict[str, object]", arguments).get("channel_id")
+    """The `channel_id` a successful daimon `send_message` posted to, or None."""
+    arguments = daimon_tool_arguments(block, _POST_TOOL)
+    channel_id = None if arguments is None else arguments.get("channel_id")
     return channel_id if isinstance(channel_id, str) else None
 
 
