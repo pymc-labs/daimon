@@ -2206,6 +2206,9 @@ class TurnOrigin(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Set by `archive_thread` on this turn's own thread; the adapter archives
+    # the thread after the turn's last post.
+    archive_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SessionPreparation(Base):

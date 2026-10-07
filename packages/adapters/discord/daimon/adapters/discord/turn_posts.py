@@ -13,13 +13,11 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 import structlog
 from daimon.adapters.discord.lifecycle import SendFn
 from daimon.core.channel_tidy import record_turn_post
-from daimon.core.stores.security_audit import thread_archive_requested
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -77,28 +75,17 @@ class TurnPostRecorder:
         return send
 
 
-async def archive_if_requested(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    thread: discord.Thread,
-    *,
-    tenant_id: uuid.UUID,
-    since: datetime,
-) -> None:
-    """Archive the thread once its turn is over, if the agent asked during the turn.
+async def archive_thread_quietly(thread: discord.Thread) -> None:
+    """Archive a thread the agent asked to archive during its turn, after the turn.
 
-    `archive_thread` on the thread a turn runs in only records the request
-    (an edit in an archived thread fails, so the turn could not finish its
-    card). Called after the turn's last edit and reaction. A failure is logged:
-    the turn already answered, and the thread simply stays open.
+    `archive_thread` on the thread a turn runs in only records the request on
+    the turn's origin (an edit in an archived thread fails, so the turn could
+    not finish its card). A failure is logged: the turn already answered, and
+    the thread simply stays open.
     """
     try:
-        async with sessionmaker.begin() as session:
-            requested = await thread_archive_requested(
-                session, tenant_id=tenant_id, thread_id=str(thread.id), since=since
-            )
-        if requested and not thread.archived:
-            await thread.edit(archived=True)
-            log.info("turn.thread_archived_on_request", thread_id=thread.id)
+        await thread.edit(archived=True)
+        log.info("turn.thread_archived_on_request", thread_id=thread.id)
     except Exception as exc:  # the turn is done; never fail it over the archive
         log.warning(
             "turn.thread_archive_failed", thread_id=thread.id, error_type=type(exc).__name__

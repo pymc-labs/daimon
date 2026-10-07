@@ -227,32 +227,6 @@ async def count_tidy_events(
     return int(await session.scalar(stmt) or 0)
 
 
-async def thread_archive_requested(
-    session: AsyncSession, *, tenant_id: uuid.UUID, thread_id: str, since: datetime
-) -> bool:
-    """Whether an agent's `archive_thread` on this thread was allowed since a time.
-
-    The tidy tools defer archiving the thread a turn is running in until that
-    turn ends (an edit in an archived Discord thread fails); the committed
-    `allowed` row is the request the chat adapter carries out.
-    """
-    if since.utcoffset() is None:
-        raise ValueError("since must include a timezone")
-    found = await session.scalar(
-        select(SecurityAuditEvent.id)
-        .where(
-            SecurityAuditEvent.tenant_id == tenant_id,
-            SecurityAuditEvent.turn_ref.is_not(None),
-            SecurityAuditEvent.operation == "thread.archive",
-            SecurityAuditEvent.outcome == "allowed",
-            SecurityAuditEvent.target_message_id == thread_id,
-            SecurityAuditEvent.occurred_at >= since,
-        )
-        .limit(1)
-    )
-    return found is not None
-
-
 @asynccontextmanager
 async def _maintenance(session: AsyncSession) -> AsyncIterator[None]:
     # A savepoint restores the GUC even if the operation fails and PostgreSQL

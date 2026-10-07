@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from daimon.adapters.mcp.tools import _tidy as tidy_module
 from daimon.adapters.mcp.tools.discord._tidy import (
     _archive_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _delete_message_impl,  # pyright: ignore[reportPrivateUsage]
@@ -29,6 +30,7 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_message,
     retire_turn_card_intent,
 )
+from daimon.core.stores.turn_origins import thread_archive_requested
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -233,9 +235,38 @@ async def test_archiving_the_thread_the_turn_runs_in_waits_for_the_turn_to_end(
 
     assert result.action == "archive_scheduled", "the caller learns it happens at turn end"
     assert not fake.thread_archived, "the thread stays open while the turn finishes"
+    async with committing_sessionmaker() as session:
+        requested = await thread_archive_requested(session, origin_id=uuid.UUID(origin))
+    assert requested, "the request is on this turn's origin, for the adapter to carry out"
     rows = [r for r in await world.audit() if r.target_message_id == _THREAD]
     assert [(r.operation, r.outcome) for r in rows] == [("thread.archive", "allowed")], (
-        "the allowed row is the request the Discord adapter carries out"
+        "the archive is audited like any tidy action"
+    )
+
+
+async def test_an_archive_refused_after_its_audit_row_schedules_nothing(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The policy re-check under lock runs after the allowed row is committed."""
+    world = await _world(committing_sessionmaker)
+    await _auto_thread(world, opener=_CALLER)
+    auth, origin = await world.turn(thread=_THREAD)
+
+    async def protected(*_args: object, **_kwargs: object) -> None:
+        raise ToolError("this channel is protected")
+
+    monkeypatch.setattr(tidy_module, "require_channel_writable", protected)
+    with pytest.raises(ToolError, match="protected"):
+        await _archive_thread_impl(world.runtime, auth, thread_id=_THREAD, origin_context_id=origin)
+
+    async with committing_sessionmaker() as session:
+        requested = await thread_archive_requested(session, origin_id=uuid.UUID(origin))
+    assert not requested, "a refused archive leaves no request behind"
+    rows = [r for r in await world.audit() if r.target_message_id == _THREAD]
+    assert [r.outcome for r in rows] == ["allowed", "denied"], (
+        "this is the case the allowed row alone would have archived"
     )
 
 

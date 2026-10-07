@@ -1486,11 +1486,13 @@ turn, the user who opened the auto-thread it is in with the same agent, or a ser
 admin; a turn row must name its turn (a CHECK enforces it) and erasure clears
 the requester id;
 archiving or clearing an auto-opened thread takes its opener or a server
-admin. `archive_thread` on the thread the caller's own turn runs in only
-writes its `allowed` audit row (Discord refuses edits in an archived thread);
-the Discord adapter archives the thread after the turn's last edit and
-reaction when it finds such a row since the turn started
-(`thread_archive_requested`). `daimon audit prune` also removes those
+admin. `archive_thread` on the thread the caller's own turn runs in does not archive
+it at once (Discord refuses edits in an archived thread): once every check,
+including the locked policy re-check, has passed, it sets
+`turn_origins.archive_requested_at` on that turn's origin. The Discord adapter
+reads it when the run ends and archives the thread after the turn's last edit
+and reaction, and after any session-output files are posted. A turn that
+raises leaves the thread open. `daimon audit prune` also removes those
 records past the retention, and account erasure clears `content_hmac`.
 The policy remains synchronous and does no I/O outside an MCP audit scope; the
 separate hub OAuth applications (`/discord/mcp` and `/slack/mcp`, which use
