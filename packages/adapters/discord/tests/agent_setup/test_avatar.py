@@ -101,6 +101,29 @@ async def test_upload_rejects_oversize_and_wrong_type_before_read(
     assert audit.await_args.kwargs["outcome"] == "error"
 
 
+async def test_upload_rechecks_agent_after_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(avatar_module, "is_guild_admin", lambda _interaction: True)
+    lookup = AsyncMock(side_effect=[SimpleNamespace(name="analyst", metadata={}), None])
+    monkeypatch.setattr(avatar_module, "find_agent_by_daimon_tag", lookup)
+    audit = AsyncMock()
+    monkeypatch.setattr(avatar_module, "_audit", audit)
+    attachment = _attachment()
+    runtime = _runtime()
+
+    message, result = await upload_agent_avatar(
+        _interaction(),
+        runtime,
+        tenant_id=uuid.uuid4(),
+        agent_name="analyst",
+        attachment=attachment,
+    )
+
+    assert result is None and "no longer available" in message
+    attachment.read.assert_awaited_once()
+    assert lookup.await_count == 2
+    assert audit.await_args.kwargs["outcome"] == "denied"
+
+
 async def test_upload_and_reset_rotate_tokens_and_sources(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -137,6 +160,7 @@ async def test_upload_and_reset_rotate_tokens_and_sources(
     assert restored.token not in {original.token, uploaded.token}
     async with db_session_factory() as session:
         current = await get_or_create_avatar(session, tenant_id=tenant.id, agent_name="analyst")
-        audit_ops = [event.operation for event in await list_events(session, tenant_id=tenant.id)]
+        events = await list_events(session, tenant_id=tenant.id)
     assert current.token == restored.token
-    assert set(audit_ops) == {"agent_avatar_change", "agent_avatar_reset"}
+    assert {event.operation for event in events} == {"agent_avatar_change", "agent_avatar_reset"}
+    assert all(event.agent_name == "analyst" for event in events)

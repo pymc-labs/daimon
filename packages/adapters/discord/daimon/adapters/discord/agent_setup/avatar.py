@@ -33,6 +33,7 @@ async def _audit(
     change: bool,
     outcome: PanelOutcome,
     reason: str,
+    agent_name: str,
 ) -> None:
     await record_panel_write(
         runtime.sessionmaker,
@@ -42,6 +43,7 @@ async def _audit(
         op="agent_avatar_change" if change else "agent_avatar_reset",
         outcome=outcome,
         reason=reason,
+        agent_name=agent_name,
     )
 
 
@@ -70,6 +72,7 @@ async def _may_edit(
         change=change,
         outcome="denied",
         reason="needs_admin_or_agent_gone",
+        agent_name=agent_name,
     )
     return False
 
@@ -97,6 +100,7 @@ async def upload_agent_avatar(
             change=True,
             outcome="error",
             reason="invalid_image",
+            agent_name=agent_name,
         )
         return "Attach one PNG, JPG, GIF, or WebP image of at most 2 MB.", None
     try:
@@ -113,8 +117,13 @@ async def upload_agent_avatar(
             change=True,
             outcome="error",
             reason="invalid_image",
+            agent_name=agent_name,
         )
         return "I could not use that image. Attach one PNG, JPG, GIF, or WebP under 2 MB.", None
+    if not await _may_edit(
+        interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=True
+    ):
+        return "That agent is no longer available.", None
     async with runtime.sessionmaker.begin() as session:
         actor = await get_or_create_platform_principal(
             session,
@@ -137,6 +146,7 @@ async def upload_agent_avatar(
         change=True,
         outcome="allowed",
         reason="completed",
+        agent_name=agent_name,
     )
     return "Avatar changed. Platform caches can keep the previous image.", avatar
 
@@ -173,5 +183,6 @@ async def reset_agent_avatar(
         change=False,
         outcome="allowed",
         reason="completed",
+        agent_name=agent_name,
     )
     return "Generated avatar restored. Platform caches can keep the previous image.", avatar
