@@ -25,12 +25,13 @@ def register_enable_files_tools(mcp: FastMCP) -> None:
     async def enable_channel_files(ctx: Context) -> str:  # pyright: ignore[reportUnusedFunction]
         """Post the Enable files card in this Teams channel, right after your reply.
 
-        Call it in a Teams channel whose ``<channel>`` element says
-        ``files="unavailable"`` when an admin asks for a file there, or asks to
-        turn files on, before offering anything else (an artifact, report or
-        notebook). A Microsoft 365 admin who is a member of the channel signs
-        in with the card once; daimon can then save and read files in that
-        channel, private and shared channels included. Admins only.
+        Call it only in a Teams channel whose ``<channel>`` element has a
+        ``files_hint`` naming this tool, when an admin asks for a file there or
+        to turn files on, before offering anything else (an artifact, report
+        or notebook). Elsewhere no card can follow. A Microsoft 365 admin who
+        is a member of the channel signs in with the card once; daimon can then
+        save and read files in that channel, private and shared channels
+        included. Admins only.
         """
         return enable_channel_files_impl(await _auth(ctx))
 
