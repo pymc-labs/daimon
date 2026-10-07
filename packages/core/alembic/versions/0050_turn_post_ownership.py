@@ -33,15 +33,26 @@ def upgrade() -> None:
         "agent_posted_messages",
         sa.Column("turn_card_intent_id", postgresql.UUID(as_uuid=True)),
     )
-    op.create_check_constraint(
-        "ck_agent_posted_messages_source",
-        "agent_posted_messages",
-        "source IN ('tool', 'turn', 'auto_thread')",
-    )
+    # NOT VALID then VALIDATE: the scan runs without blocking writes.
+    for name, condition in _CHECKS:
+        op.execute(
+            f"ALTER TABLE agent_posted_messages ADD CONSTRAINT {name} CHECK ({condition}) NOT VALID"
+        )
+        op.execute(f"ALTER TABLE agent_posted_messages VALIDATE CONSTRAINT {name}")
+
+
+_CHECKS = (
+    ("ck_agent_posted_messages_source", "source IN ('tool', 'turn', 'auto_thread')"),
+    (
+        "ck_agent_posted_messages_turn_intent",
+        "source <> 'turn' OR turn_card_intent_id IS NOT NULL",
+    ),
+)
 
 
 def downgrade() -> None:
-    op.drop_constraint("ck_agent_posted_messages_source", "agent_posted_messages", type_="check")
+    for name, _ in _CHECKS:
+        op.drop_constraint(name, "agent_posted_messages", type_="check")
     op.drop_column("agent_posted_messages", "turn_card_intent_id")
     op.drop_column("agent_posted_messages", "requester_platform_user_id")
     op.drop_column("agent_posted_messages", "source")

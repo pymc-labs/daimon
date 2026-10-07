@@ -2639,6 +2639,10 @@ class AgentPostedMessage(Base):
         CheckConstraint(
             "source IN ('tool', 'turn', 'auto_thread')", name="ck_agent_posted_messages_source"
         ),
+        CheckConstraint(
+            "source <> 'turn' OR turn_card_intent_id IS NOT NULL",
+            name="ck_agent_posted_messages_turn_intent",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

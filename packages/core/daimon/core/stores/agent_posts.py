@@ -20,7 +20,7 @@ from typing import Any, Literal, cast
 
 from daimon.core._models import AgentPostedMessage
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import CursorResult, delete, select, update
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -152,6 +152,43 @@ async def mark_deleted(session: AsyncSession, *, post_ids: list[uuid.UUID], now:
         update(AgentPostedMessage).where(AgentPostedMessage.id.in_(post_ids)).values(deleted_at=now)
     )
     await session.flush()
+
+
+def _requester_rows(tenant_id: uuid.UUID, platform: str, platform_user_id: str) -> Any:  # noqa: ANN401
+    return (
+        AgentPostedMessage.tenant_id == tenant_id,
+        AgentPostedMessage.platform == platform,
+        AgentPostedMessage.requester_platform_user_id == platform_user_id,
+    )
+
+
+async def count_requester(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, platform_user_id: str
+) -> int:
+    """How many recorded posts name this person as who asked (erasure preview)."""
+    count = await session.scalar(
+        select(func.count())
+        .select_from(AgentPostedMessage)
+        .where(*_requester_rows(tenant_id, platform, platform_user_id))
+    )
+    return count or 0
+
+
+async def clear_requester(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, platform_user_id: str
+) -> int:
+    """Erasure: drop a person's id from the posts recorded for their turns and threads.
+
+    The posts stay owned by their agent; with no requester, only a server admin
+    (or the opener of the thread they are in) can have them tidied.
+    """
+    result = await session.execute(
+        update(AgentPostedMessage)
+        .where(*_requester_rows(tenant_id, platform, platform_user_id))
+        .values(requester_platform_user_id=None)
+    )
+    await session.flush()
+    return cast(CursorResult[Any], result).rowcount
 
 
 async def prune_posts(session: AsyncSession, *, tenant_id: uuid.UUID, older_than: datetime) -> int:

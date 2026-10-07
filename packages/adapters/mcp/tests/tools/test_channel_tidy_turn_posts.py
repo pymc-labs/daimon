@@ -424,3 +424,55 @@ async def test_a_turn_row_names_the_turns_agent_and_requester(
     assert post.agent_id == auth.chat_agent_id, "keyed by the agent the turn's MCP token carries"
     assert (post.source, post.kind, post.requester_platform_user_id) == ("turn", "message", _CALLER)
     assert post.content_hmac is None, "a turn row keeps no content hash"
+
+
+async def test_an_edit_of_someone_elses_turn_is_refused(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    world = await _world(committing_sessionmaker)
+    await _auto_thread(world, opener=_SOMEONE_ELSE)
+    reply = await _turn_post(world, fake, requester=_SOMEONE_ELSE, content="their answer")
+    auth, origin = await world.turn(thread=_THREAD)
+
+    with pytest.raises(ToolError, match="only the person who started this conversation"):
+        await _edit_message_impl(
+            world.runtime,
+            auth,
+            channel_id=_THREAD,
+            message_id=reply,
+            content="rewritten",
+            origin_context_id=origin,
+        )
+    assert fake.messages[reply]["content"] == "their answer", "the answer is unedited"
+    rows = [r for r in await world.audit() if r.target_message_id == reply]
+    assert {(r.outcome, r.reason) for r in rows} == {("denied", "not_conversation_owner")}
+
+
+async def test_a_person_may_tidy_their_own_turn_in_someone_elses_thread(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    world = await _world(committing_sessionmaker)
+    await _auto_thread(world, opener=_SOMEONE_ELSE)
+    mine = await _turn_post(world, fake, requester=_CALLER)
+    auth, origin = await world.turn(thread=_THREAD)
+
+    await _delete_message_impl(
+        world.runtime, auth, channel_id=_THREAD, message_id=mine, origin_context_id=origin
+    )
+    assert mine not in fake.messages, "the answer to the caller's own question is theirs to tidy"
+
+
+async def test_opening_a_thread_with_one_agent_gives_no_say_over_another_agents_replies(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    """The caller opened the thread with the other agent; this agent answered someone else."""
+    world = await _world(committing_sessionmaker)
+    await _auto_thread(world, agent=_OTHER_AGENT, opener=_CALLER)
+    reply = await _turn_post(world, fake, requester=_SOMEONE_ELSE)
+    auth, origin = await world.turn(thread=_THREAD)
+
+    with pytest.raises(ToolError, match="only the person who started this conversation"):
+        await _delete_message_impl(
+            world.runtime, auth, channel_id=_THREAD, message_id=reply, origin_context_id=origin
+        )
+    assert reply in fake.messages, "the other person's answer stays"

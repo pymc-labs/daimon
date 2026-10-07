@@ -337,7 +337,10 @@ async def conversation_refusal(
     """
     if post.source == "tool":
         return None
-    if post.source == "turn" and post.turn_card_intent_id is not None:
+    if post.source == "turn":
+        # A turn row without its turn cannot prove the turn is over: refuse.
+        if post.turn_card_intent_id is None:
+            return "turn_in_progress"
         async with runtime.session_factory() as session:
             running = await turn_card_intent_is_active(session, id=post.turn_card_intent_id)
         if running:

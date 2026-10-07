@@ -142,7 +142,11 @@ def _message_id(message_id: str) -> str:
 
 
 async def _auto_thread_opener(runtime: McpRuntime, ctx: TidyContext, target: _Target) -> str | None:
-    """Who opened the auto-opened thread the target channel is, if it is one."""
+    """Who opened the target channel, if it is a thread this agent auto-opened.
+
+    Only the caller's own agent's thread counts: opening a conversation with
+    one agent gives no say over another agent's replies in it.
+    """
     if target.parent_id is None:
         return None
     async with runtime.session_factory() as session:
@@ -153,7 +157,11 @@ async def _auto_thread_opener(runtime: McpRuntime, ctx: TidyContext, target: _Ta
             channel_id=target.parent_id,
             message_id=str(target.channel.id),
         )
-    if thread_post is None or thread_post.source != "auto_thread":
+    if (
+        thread_post is None
+        or thread_post.source != "auto_thread"
+        or thread_post.agent_id != ctx.actor.agent_id
+    ):
         return None
     return thread_post.requester_platform_user_id
 
@@ -220,9 +228,10 @@ async def _edit_message_impl(  # pyright: ignore[reportUnusedFunction]
 
         async def act() -> None:
             if post.source == "turn":
-                # A status card is an embed with buttons: replacing only the
-                # text would leave the stale card showing under it.
-                await message.edit(content=content, embeds=[], view=None)
+                # A status card is an embed with buttons, and an answer may
+                # carry rendered table images: replacing only the text would
+                # leave the stale card or tables showing under it.
+                await message.edit(content=content, embeds=[], attachments=[], view=None)
             else:
                 await message.edit(content=content)
 

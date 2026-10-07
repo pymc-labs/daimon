@@ -27,6 +27,7 @@ import uuid
 
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
+from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import channel_admins as channel_admins_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
@@ -88,6 +89,7 @@ class PurgePreview(BaseModel):
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow
     channel_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    agent_post_requesters: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
 def summary_line(preview: PurgePreview) -> str:
@@ -106,6 +108,7 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.slack_turn_contexts, "Slack turn context(s)"),
         (preview.direct_message_conversations, "private conversation(s)"),
         (preview.channel_admins, "channel admin grant(s)"),
+        (preview.agent_post_requesters, "record(s) of you asking an agent in a thread"),
     )
     parts = [f"{row.count} {label}" for row, label in categories if row.count > 0]
     return ", ".join(parts) if parts else "nothing visible to you yet"
@@ -392,6 +395,16 @@ async def collect_purge_preview(
                 platform=pp.platform,
                 platform_user_id=pp.external_id,
             )
+        # 17. agent_posted_messages — posts and auto-opened threads naming this
+        # person as who asked; erasure clears the id and keeps the post's owner.
+        agent_post_requesters_total = 0
+        for pp in pp_list:
+            agent_post_requesters_total += await agent_posts_store.count_requester(
+                session,
+                tenant_id=pp.tenant_id,
+                platform=pp.platform,
+                platform_user_id=pp.external_id,
+            )
         direct_message_count = await direct_messages_store.count_conversations_for_account(
             session, account_id=account_id
         )
@@ -415,5 +428,6 @@ async def collect_purge_preview(
         message_feedback=message_feedback,
         support_escalations=support_escalations,
         channel_admins=PurgePreviewRow(count=channel_admins_total, example=None),
+        agent_post_requesters=PurgePreviewRow(count=agent_post_requesters_total, example=None),
         direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),
     )

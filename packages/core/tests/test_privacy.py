@@ -816,6 +816,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "message_feedback": "message_feedback",
         "support_escalations": "support_escalations",
         "channel_admins": "channel_admins",
+        "agent_post_requesters": "agent_post_requesters",
     }
 
     uncovered = report_fields - set(mapping.keys())

@@ -138,7 +138,8 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Discord: a thread from create_thread or from a mention (the latter
         only when the person who mentioned you or a server admin asks); your
-        posts, replies and status cards go, except the running turn's.
+        posts, replies and status cards go, except the running turn's and
+        replies to someone the person asking cannot speak for.
         Discord keeps the thread and everyone else's messages. Slack refuses
         a thread with other people's replies. Reads at most 50 messages.
         Each deletion is checked, audited and counted against the 10 per turn

@@ -288,4 +288,23 @@ async def test_a_turn_post_that_cannot_be_recorded_does_not_fail_the_turn(
         message_id="1000",
         requester_platform_user_id="42",
         source="turn",
+        turn_card_intent_id=uuid.uuid4(),
     )
+
+
+async def test_a_turn_post_must_name_its_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.channel_tidy import record_turn_post
+
+    with pytest.raises(ValueError, match="must name its turn"):
+        await record_turn_post(
+            db_session_factory,
+            tenant_id=uuid.uuid4(),
+            platform="discord",
+            ma_agent_id="ag_x",
+            channel_id="444",
+            message_id="1000",
+            requester_platform_user_id="42",
+            source="turn",
+        )

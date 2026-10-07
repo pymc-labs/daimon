@@ -18,6 +18,7 @@ cannot both slip under a limit.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import uuid
@@ -44,6 +45,7 @@ TURN_WINDOW = timedelta(hours=24)
 TidyOperation = Literal["message.edit", "message.delete", "thread.archive", "thread.delete"]
 
 _LOCK_NAMESPACE = "daimon:channel_tidy:"
+RECORD_TIMEOUT_S = 5.0
 
 
 class TidyLimitReached(Exception):
@@ -238,11 +240,15 @@ async def record_turn_post(
     The agent is the turn's own (`derive_agent_uuid`, the `chat_agent_id` its
     MCP token carries), so only that agent can tidy it. An `auto_thread` row
     is `kind='thread'` with the parent channel as `channel_id` and the thread
-    id as `message_id`. The post has already gone out, so a failure is logged
-    and swallowed; the cost is that this one post cannot be tidied.
+    id as `message_id`. The post has already gone out, so a failure, or a write
+    slower than `RECORD_TIMEOUT_S` (it sits between a send and the turn using
+    its message), is logged and swallowed; the cost is that this one post
+    cannot be tidied.
     """
+    if source == "turn" and turn_card_intent_id is None:
+        raise ValueError("a turn post must name its turn (turn_card_intent_id)")
     try:
-        async with sessionmaker.begin() as session:
+        async with asyncio.timeout(RECORD_TIMEOUT_S), sessionmaker.begin() as session:
             await record_post(
                 session,
                 tenant_id=tenant_id,
