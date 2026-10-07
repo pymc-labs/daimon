@@ -9,8 +9,10 @@ audit rules live in tools/_tidy.py.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -44,6 +46,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
 )
 from daimon.core.channel_tidy import TidyOperation, TidyTarget
 from daimon.core.stores.agent_posts import AgentPostRow, get_post, list_posts_in
+from daimon.core.stores.turn_origins import request_thread_archive
 from fastmcp.exceptions import ToolError
 
 _PLATFORM = "discord"
@@ -369,7 +372,15 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
     origin_context_id: str | None,
 ) -> TidyResult:
     """Archive a thread this agent opened. Its messages stay readable; anyone
-    posting in it reopens it."""
+    posting in it reopens it.
+
+    The thread this turn is running in is archived when the turn ends, not
+    now: Discord refuses edits in an archived thread, so the turn could not
+    finish its own status card. The call is checked, counted and audited as
+    usual, and only once every check has passed is the request written on the
+    turn's origin (`request_thread_archive`), which the Discord adapter reads
+    when the turn's run ends. A turn that fails leaves the thread open.
+    """
     ctx = await resolve_tidy_context(
         runtime, auth, platform=_PLATFORM, origin_context_id=origin_context_id
     )
@@ -381,8 +392,11 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
             c, runtime, ctx, auth, thread_id=thread_id, tool_name=tool, operation=operation
         )
 
+        scheduled = ctx.origin is not None and ctx.origin.channel_id == str(thread.id)
+
         async def act() -> None:
-            await thread.edit(archived=True)
+            if not scheduled:
+                await thread.edit(archived=True)
 
         await run_action(
             runtime,
@@ -395,12 +409,23 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
             describe_error=_describe("archive"),
             post=thread_post,
         )
-    return TidyResult(
+    result = TidyResult(
         platform=_PLATFORM,
         channel_id=target.parent_id or "",
         message_id=str(thread.id),
-        action="archived",
+        action="archive_scheduled" if scheduled else "archived",
     )
+    if scheduled and ctx.origin_context_id is not None:
+        async with runtime.session_factory.begin() as session:
+            recorded = await request_thread_archive(
+                session,
+                origin_id=uuid.UUID(ctx.origin_context_id),
+                thread_id=str(thread.id),
+                now=datetime.now(UTC),
+            )
+        if not recorded:
+            raise ToolError("this turn has ended, so the thread was not archived. Do not retry.")
+    return result
 
 
 async def _delete_thread_impl(  # pyright: ignore[reportUnusedFunction]

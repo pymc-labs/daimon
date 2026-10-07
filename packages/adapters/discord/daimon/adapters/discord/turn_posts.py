@@ -1,4 +1,5 @@
-"""Record what a turn posts, so its agent can tidy it later with the tidy tools.
+"""Record what a turn posts, so its agent can tidy it later with the tidy tools,
+and carry out an archive of the turn's own thread once the turn is over.
 
 The status card, answer chunks and in-thread notices a mention or continuation
 turn sends through `sender`, and the thread opened from a mention, get an
@@ -14,11 +15,14 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
 from daimon.adapters.discord.lifecycle import SendFn
 from daimon.core.channel_tidy import record_turn_post
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
+
+log = structlog.get_logger(__name__)
 
 _PLATFORM = "discord"
 
@@ -69,3 +73,20 @@ class TurnPostRecorder:
             return sent
 
         return send
+
+
+async def archive_thread_quietly(thread: discord.Thread) -> None:
+    """Archive a thread the agent asked to archive during its turn, after the turn.
+
+    `archive_thread` on the thread a turn runs in only records the request on
+    the turn's origin (an edit in an archived thread fails, so the turn could
+    not finish its card). A failure is logged: the turn already answered, and
+    the thread simply stays open.
+    """
+    try:
+        await thread.edit(archived=True)
+        log.info("turn.thread_archived_on_request", thread_id=thread.id)
+    except Exception as exc:  # the turn is done; never fail it over the archive
+        log.warning(
+            "turn.thread_archive_failed", thread_id=thread.id, error_type=type(exc).__name__
+        )
