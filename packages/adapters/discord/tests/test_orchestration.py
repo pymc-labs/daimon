@@ -431,6 +431,88 @@ class TestNewThreadCreation:
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_mention_records_its_thread_card_and_overflow_for_tidying(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Everything the turn posts names the turn's agent and the person who asked."""
+        from daimon.core.ma_identity import derive_agent_uuid
+        from daimon.core.stores.agent_posts import get_post, list_posts_in
+        from daimon.core.stores.turn_card_intents import turn_card_intent_is_active
+
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_create_session.return_value = ma_session(id="sess-tidy")
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        runtime = _make_runtime(tenant.id, db_session_factory)
+        bot = make_bot(runtime)
+        message = _make_channel_message(channel_id=789, author_id=111)
+        mock_thread = MagicMock(spec=discord.Thread)
+        mock_thread.id = 9999
+        mock_thread.parent_id = 789
+        mock_thread.send = AsyncMock(
+            side_effect=[
+                types.SimpleNamespace(id=1000, edit=AsyncMock()),
+                types.SimpleNamespace(id=1001, edit=AsyncMock()),
+            ]
+        )
+        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
+
+        from daimon.core.turn.state import TextBlock, TurnState
+
+        async def finish_turn(*, lifecycle, **kwargs):
+            # Long enough to overflow the card into a second message.
+            state = TurnState(content=[TextBlock(kind="text", text="word " * 500)])
+            await lifecycle.on_terminal_success(state)
+            return state
+
+        mock_run_turn.side_effect = finish_turn
+        await bot.on_message(message)
+
+        async with db_session_factory() as session:
+            thread_row = await get_post(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                channel_id="789",
+                message_id="9999",
+            )
+            turn_rows = await list_posts_in(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                channel_id="9999",
+                message_ids=["1000", "1001"],
+            )
+            assert thread_row is not None, "the auto-opened thread is recorded under its parent"
+            by_id = {r.message_id: r for r in turn_rows}
+            assert set(by_id) == {"1000", "1001"}, "the status card and the overflow are recorded"
+            rows = [thread_row, *turn_rows]
+            agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_test")
+            assert {r.agent_id for r in rows} == {agent_uuid}, "keyed by the turn's agent"
+            assert {r.requester_platform_user_id for r in rows} == {"111"}, "and who asked"
+            assert (thread_row.source, thread_row.kind) == ("auto_thread", "thread")
+            for message_id in ("1000", "1001"):
+                row = by_id[message_id]
+                assert (row.source, row.kind, row.channel_id) == ("turn", "message", "9999")
+                assert row.turn_card_intent_id is not None, "each names its turn"
+                assert not await turn_card_intent_is_active(session, id=row.turn_card_intent_id), (
+                    "and that turn is over once the mention is handled"
+                )
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_thread_and_status_embed_posted_before_session_create(
         self,
         mock_resolve: AsyncMock,

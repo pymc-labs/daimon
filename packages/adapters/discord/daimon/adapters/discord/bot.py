@@ -43,6 +43,7 @@ from daimon.adapters.discord.turn_card_recovery import (
     reconcile_turn_card_intent,
     retire_terminal_turn_card,
 )
+from daimon.adapters.discord.turn_posts import TurnPostRecorder
 from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.vision import (
     build_image_url_prefix,
@@ -2058,8 +2059,12 @@ class DaimonBot(commands.Bot):
         agent = admission.agent
 
         # kwargs are forwarded verbatim to discord.py's overloaded send()/edit().
-        async def _send_embed(**kwargs: Any) -> discord.Message:  # noqa: ANN401
-            return await thread.send(**kwargs)
+        recorder = TurnPostRecorder(
+            sessionmaker=self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            ma_agent_id=agent.id,
+            requester_id=int(row.requester_external_user_id),
+        )
 
         async def _edit_message(msg: discord.Message, **kwargs: Any) -> None:  # noqa: ANN401
             await msg.edit(**kwargs)
@@ -2081,7 +2086,7 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
-                send=_send_embed,
+                send=recorder.sender(thread, turn_card_intent_id=turn_id),
                 edit=_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
@@ -2195,7 +2200,7 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
-                send=_send_embed,
+                send=recorder.sender(thread, turn_card_intent_id=turn_card_intent.id),
                 edit=_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
@@ -2540,6 +2545,12 @@ class DaimonBot(commands.Bot):
         # first, behind only the short naming call, so the user gets early
         # feedback; the lifecycle adopts the embed and edits it in place once
         # SSE events flow.
+        recorder = TurnPostRecorder(
+            sessionmaker=self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            ma_agent_id=agent.id,
+            requester_id=message.author.id,
+        )
         is_thread_mention = thread is not None
         if thread is None:
 
@@ -2569,6 +2580,7 @@ class DaimonBot(commands.Bot):
                 self._processing.add(opened.id)
                 if created_thread_ids is not None:
                     created_thread_ids.append(opened.id)
+                await recorder.opened_thread(opened)
                 return opened
 
             discord_settings = self.runtime.settings.discord
@@ -2582,8 +2594,6 @@ class DaimonBot(commands.Bot):
 
         # --- Wire lifecycle with send/edit callables ---
         # kwargs are forwarded verbatim to discord.py's overloaded send()/edit().
-        async def _send_embed(**kwargs: Any) -> discord.Message:  # noqa: ANN401
-            return await thread.send(**kwargs)
 
         async def _edit_message(msg: discord.Message, **kwargs: Any) -> None:  # noqa: ANN401
             await msg.edit(**kwargs)
@@ -2606,7 +2616,7 @@ class DaimonBot(commands.Bot):
                 is True,
                 trigger_message=message,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
-                send=_send_embed,
+                send=recorder.sender(thread, turn_card_intent_id=turn_id),
                 edit=_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
@@ -2624,6 +2634,7 @@ class DaimonBot(commands.Bot):
             thread_id=str(thread.id),
             make_lifecycle=_make_lifecycle,
         )
+        turn_send = recorder.sender(thread, turn_card_intent_id=turn_card_intent.id)
 
         discord_settings = self.runtime.settings.discord
         assert discord_settings is not None, (
@@ -2673,7 +2684,7 @@ class DaimonBot(commands.Bot):
                     lifecycle.message_ref, content=error_text, embed=None, view=view
                 )
             else:
-                await thread.send(error_text, view=view)
+                await turn_send(error_text, view=view)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -2691,7 +2702,7 @@ class DaimonBot(commands.Bot):
                     lifecycle.message_ref, content=failure_text, embed=None, view=None
                 )
             else:
-                await thread.send(failure_text)
+                await turn_send(failure_text)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -2716,7 +2727,7 @@ class DaimonBot(commands.Bot):
             if lifecycle.message_ref is not None:
                 await _edit_message(lifecycle.message_ref, content=busy_text, embed=None, view=None)
             else:
-                await thread.send(busy_text)
+                await turn_send(busy_text)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -2897,7 +2908,7 @@ class DaimonBot(commands.Bot):
             user_message = synthetic_prefix + "\n" + user_message
 
         if images_skipped:
-            await target.send(
+            await turn_send(
                 "Some images couldn't be inlined — I've linked them for the agent to "
                 "fetch instead: "
                 + ", ".join(f"`{att.filename}` ({r})" for att, r in images_skipped)
@@ -2974,7 +2985,7 @@ class DaimonBot(commands.Bot):
                 is True,
                 trigger_message=message,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
-                send=_send_embed,
+                send=turn_send,
                 edit=_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
@@ -3109,12 +3120,12 @@ class DaimonBot(commands.Bot):
             # a message when there is no answer to sit above (a tool-only or
             # failed turn) or it will not fit.
             if not await final_lifecycle.prepend_revealed_answer(loss_notice):
-                await thread.send(loss_notice)
+                await turn_send(loss_notice)
         if replacement_summary is not None and not final_lifecycle.answer_prefix_applied:
             # The turn produced no answer to carry the summary (tool-only,
             # cancelled, or failed). The person still has to be told what the
             # replacement carried across, so it goes out on its own.
-            await thread.send(replacement_summary)
+            await turn_send(replacement_summary)
 
         if state.error is not None:
             log.warning(
@@ -3146,7 +3157,7 @@ class DaimonBot(commands.Bot):
             # -- said only after the answer, so it never reads as a caveat on
             # work that already finished.
             if prepared.continuity.pending:
-                await target.send(render_current_work_must_finish(agent.name, handoff=False))
+                await turn_send(render_current_work_must_finish(agent.name, handoff=False))
             # Any task handed to another agent in THIS thread, with work to
             # continue, gets its first turn dispatched now -- still inside this
             # turn's concurrency guard, so nothing else can land in the thread

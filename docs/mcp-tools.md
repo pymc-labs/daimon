@@ -365,10 +365,10 @@ Channel tidy tools: edit_message, delete_message, archive_thread, delete_thread.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `archive_thread` | Discord callers | Archive a Discord thread you opened with create_thread. |
-| `delete_message` | Discord callers, Slack callers | Delete one message you posted with send_message or create_thread. |
-| `delete_thread` | Discord callers, Slack callers | Remove your own messages from a thread you opened with create_thread. |
-| `edit_message` | Discord callers, Slack callers | Replace the text of a message you posted with send_message or create_thread. |
+| `archive_thread` | Discord callers | Archive a Discord thread you opened, with create_thread or from a mention. |
+| `delete_message` | Discord callers, Slack callers | Delete one message you posted, or on Discord one of your replies or status cards. |
+| `delete_thread` | Discord callers, Slack callers | Remove your own messages from a thread you opened. |
+| `edit_message` | Discord callers, Slack callers | Replace the text of a message you posted. |
 
 ## `time`
 
