@@ -227,6 +227,16 @@ def test_alembic_has_one_head() -> None:
     assert len(script.get_heads()) == 1
 
 
+def test_github_migrations_follow_agent_avatars() -> None:
+    config = Config(str(_REPO_ROOT / "alembic.ini"))
+    script = ScriptDirectory.from_config(config)
+    notices = script.get_revision("0054_github_new_repo_notices")
+    audit = script.get_revision("0055_github_token_audit_versions")
+    assert notices is not None and notices.down_revision == "0053_agent_avatars"
+    assert audit is not None and audit.down_revision == "0054_github_new_repo_notices"
+    assert script.get_heads() == ["0055_github_token_audit_versions"]
+
+
 def test_main_returns_zero_for_clean_real_tree(capsys: pytest.CaptureFixture[str]) -> None:
     versions_dir = _REPO_ROOT / "packages" / "core" / "alembic" / "versions"
 
