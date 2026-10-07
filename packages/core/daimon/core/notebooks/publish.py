@@ -36,12 +36,24 @@ class InvalidSlugError(DaimonError):
 _PRINCIPAL_PREFIX_BYTES = 9  # 9 bytes → 12 chars urlsafe-b64, no padding
 
 
+def _no_leading_dash(value: str) -> str:
+    """``value``, or ``x`` + ``value`` when it starts with ``-``.
+
+    urlsafe base64 can start with ``-``, and the host refuses such a slug
+    because marimo would read it as a command-line flag. Prepending rather
+    than replacing the dash keeps every other value unchanged, so namespaces
+    already in use don't move, and a 13-character tag can't equal any
+    12-character one.
+    """
+    return f"x{value}" if value.startswith("-") else value
+
+
 def _principal_prefix(principal_key: str) -> str:
     digest = hashlib.blake2b(
         principal_key.encode("utf-8"),
         digest_size=_PRINCIPAL_PREFIX_BYTES,
     ).digest()
-    return base64.urlsafe_b64encode(digest).decode("ascii")
+    return _no_leading_dash(base64.urlsafe_b64encode(digest).decode("ascii"))
 
 
 def _resolve_slug(*, agent_slug: str | None, principal_key: str | None) -> str:
@@ -50,7 +62,7 @@ def _resolve_slug(*, agent_slug: str | None, principal_key: str | None) -> str:
     # other notebooks' code on the host), but a random slug still keeps
     # links from colliding or being guessed into a 409.
     if agent_slug is None:
-        return secrets.token_urlsafe(16)
+        return _no_leading_dash(secrets.token_urlsafe(16))
     if principal_key is None:
         raise InvalidSlugError("principal_key is required when slug is provided")
     sanitized = sanitize_slug(agent_slug)
