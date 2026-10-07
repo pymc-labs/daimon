@@ -7,8 +7,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision: str = "0052_github_token_audit_versions"
-down_revision: str | None = "0051_github_new_repo_notices"
+revision: str = "0053_github_token_audit_versions"
+down_revision: str | None = "0052_github_new_repo_notices"
 branch_labels: str | None = None
 depends_on: str | None = None
 
