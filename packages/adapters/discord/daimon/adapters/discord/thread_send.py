@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import structlog
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 
 import discord
 
@@ -14,9 +15,12 @@ async def safe_thread_send(
     content: str,
     *,
     view: discord.ui.View | None = None,
+    transport: DiscordPostTransport | None = None,
 ) -> discord.Message:
     """Send to thread; un-archive and retry if thread is archived."""
     try:
+        if transport is not None:
+            return await transport.send(content, **({"view": view} if view is not None else {}))
         if view is not None:
             return await thread.send(content, view=view)
         return await thread.send(content)

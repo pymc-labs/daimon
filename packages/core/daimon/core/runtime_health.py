@@ -46,6 +46,10 @@ class DiscordRateLimitFilter(logging.Filter):
     """Observe discord.py's retry warning without changing its log delivery."""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "discord.webhook.async_" and "is rate limited" in record.getMessage():
+            entry = _discord_ratelimits.setdefault("webhook", {"count": 0, "max_retry_s": 0.0})
+            entry["count"] += 1
+            return True
         if (
             record.name == "discord.http"
             and isinstance(record.msg, str)
@@ -209,10 +213,15 @@ async def runtime_health(
     turns: Callable[[], tuple[int, int | None]] | None = None,
 ) -> AsyncIterator[None]:
     """Start the process health heartbeat; interval zero disables it."""
-    discord_logger = logging.getLogger("discord.http") if process == "discord" else None
-    rate_limit_filter = DiscordRateLimitFilter() if discord_logger is not None else None
-    if discord_logger is not None and rate_limit_filter is not None:
-        discord_logger.addFilter(rate_limit_filter)
+    discord_loggers = (
+        [logging.getLogger("discord.http"), logging.getLogger("discord.webhook.async_")]
+        if process == "discord"
+        else []
+    )
+    rate_limit_filter = DiscordRateLimitFilter() if discord_loggers else None
+    if rate_limit_filter is not None:
+        for discord_logger in discord_loggers:
+            discord_logger.addFilter(rate_limit_filter)
     task = (
         asyncio.create_task(_run_health(process, engine, interval_s, turns or (lambda: (0, None))))
         if interval_s > 0
@@ -221,8 +230,9 @@ async def runtime_health(
     try:
         yield
     finally:
-        if discord_logger is not None and rate_limit_filter is not None:
-            discord_logger.removeFilter(rate_limit_filter)
+        if rate_limit_filter is not None:
+            for discord_logger in discord_loggers:
+                discord_logger.removeFilter(rate_limit_filter)
         if task is not None:
             task.cancel()
             with suppress(asyncio.CancelledError):

@@ -1,7 +1,7 @@
 """Async store for agent_posted_messages: what each agent posted.
 
-Rows come from the channel tools (`source='tool'`) and from the Discord
-adapter for what a turn posted (`source='turn'`, `'auto_thread'`).
+Rows come from the channel tools (`source='tool'`) and from the chat
+adapters for what a turn posted (`source='turn'`, `'auto_thread'`).
 
 The channel tidy tools read this to decide whether a message is the calling
 agent's own. Rows hold ids and a keyed HMAC of the text, never the text.

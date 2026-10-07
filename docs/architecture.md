@@ -168,6 +168,21 @@ who never addressed the bot gets no notice. A dropped event is logged as
 `slack.event_dropped.no_explicit_mention`; a failed `auth.test` drops the event
 without an error reply.
 
+After admission, Slack resolves the answering agent's message name and avatar
+once for the turn. The status card and each answer or continuation post carry
+that identity in Slack's message header. The built-in Daimon agent uses the
+app header. Slack is expected to keep the header when the status card is edited into an
+answer; each new turn post is recorded under the turn's agent and card intent.
+
+Discord starts a turn on a direct bot mention or a reply to a recorded bot or
+application-owned webhook post in the same tenant and channel. The usual
+admission path follows either trigger. Agent turn posts use a pool of up to
+three application-owned webhooks per text or forum channel, with each thread
+assigned by its ID; built-in Daimon posts use the bot. If a webhook is
+unavailable, the first answer chunk carries a bold agent name. The bot and MCP
+Discord tools resolve the webhook matching a message's webhook ID to edit or
+delete that agent's recorded post.
+
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
 `thread_participation_scopes`. In a followed thread it joins a quiet-timer
 batch; once the thread goes quiet the shared gates in
@@ -714,6 +729,15 @@ Whether an existing session may be reused, refreshed in place, or must be
 replaced is decided in `packages/core/daimon/core/session_preparation.py`
 against the fingerprints stored on the mapping row; the outcome rides back on
 `PreparedTurn.continuity` so the adapter can say what happened.
+
+GitHub App mode uses the agent's live grants and the current asker's linked
+GitHub permissions when assembling a turn. External askers get no App token.
+Each effective installation and permission profile gets an ID-scoped token,
+recorded before minting and checked again after delivery. The session mounts
+one repository resource per effective repo and its own vault for `GH_TOKEN`
+and Copilot. A changed repository set replaces the session; unchanged mounts
+receive refreshed tokens through resource updates. Legacy sessions continue to
+use their existing binding and credential path.
 
 **Stage three, `run_prepared_turn()` —
 `packages/core/daimon/core/turn/run.py`.** Calls the driver, and on a
@@ -1474,13 +1498,13 @@ only individually recorded own messages and keeps the thread, including human
 replies arriving mid-call. Slack also checks, audits and counts each deletion,
 and stops with partial progress on refusal. An agent may tidy only posts in
 `agent_posted_messages` under its own agent id, which `send_message` and
-`create_thread` write at send time (`source='tool'`). On Discord the adapter
-also records the status card, answer chunks and in-thread notices of mention and
-continuation turns (not turn error notices, setup-wizard turns or session-output
-files)
-(`source='turn'`, with the turn's card intent and the requesting user) and the
-thread it opens from a mention (`source='auto_thread'`, with the user who
-mentioned it), under the turn agent's derived id. A turn post may be tidied
+`create_thread` write at send time (`source='tool'`). Discord and Slack also
+record the status card, answer chunks and in-thread notices of mention and
+continuation turns (`source='turn'`, with the turn's card intent and the
+requesting user). Discord records the thread it opens from a mention
+(`source='auto_thread'`, with the user who mentioned it). Turn error notices,
+setup-wizard turns, Slack DM answers (which have no card intent), and session-output files are not recorded. Each post belongs
+to the turn agent's derived id. A turn post may be tidied
 only once its card intent is retired, and only for the user who started that
 turn, the user who opened the auto-thread it is in with the same agent, or a server
 admin; a turn row must name its turn (a CHECK enforces it) and erasure clears

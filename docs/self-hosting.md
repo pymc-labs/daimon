@@ -53,8 +53,18 @@ Leave it unset to disable operator alerts.
 4. Under **OAuth2 → URL Generator**, select the `bot` and
    `applications.commands` scopes, then under **Bot Permissions** select at
    least `Send Messages`, `Send Messages in Threads`,
-   `Create Public Threads`, `Manage Threads` and `Read Message History`.
+   `Create Public Threads`, `Manage Threads`, `Read Message History` and
+   `Embed Links`. Select `View Channels` and `Manage Webhooks` too. With
+   exactly these eight permissions, the invite permissions integer is
+   `326954470400`.
 5. Open the generated URL and invite the bot to a test server you control.
+
+For a server where the bot is already installed, open **Server Settings → Roles**,
+select the bot's role, enable **Manage Webhooks**, and save. Check each channel
+where agents answer: **Edit Channel → Permissions** must also allow the bot role
+to manage webhooks. Discord's channel overrides can deny a permission granted
+at server level. Without it, agent replies still post through the bot with a
+bold agent name on the first answer chunk.
 
 Setup and routines commands require Discord's `Manage Server` permission.
 
@@ -172,10 +182,21 @@ are mounted only when these values and `DAIMON_MCP__PUBLIC_URL` are present.
 The scheduler removes expired connection flows, including their encrypted
 tokens. Run it alongside the MCP service.
 
-A server admin can print a seven-day, single-use invitation with
-`daimon github connect-link --tenant <workspace-uuid>`. The recipient signs in
+A deployment operator can print a seven-day, single-use invitation with
+`daimon github connect-link --tenant <workspace-uuid> --requester <platform-user-id>`.
+The invitation is minted on that workspace admin's behalf. The recipient signs in
 to GitHub and confirms the repositories they administer. No repository is
 preselected.
+The confirmation page has **Select all repos you administer** for bulk selection;
+each selected repository still requires a fresh GitHub admin check at confirmation.
+
+Agents remain in legacy GitHub mode until a server admin stages grants with
+`daimon github grants stage --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id> --baseline read --ceiling read`
+and runs `daimon github grants activate --tenant <workspace-uuid> --agent <agent-uuid>`.
+Use `grants list`, `remove`, and `deactivate` with the same tenant and agent options.
+While app mode is active, `grants stage` updates access immediately. Existing
+sessions rotate tokens in place when the repository set is unchanged; a changed
+repository set closes the sessions so the next turn mounts the new checkouts.
 
 ## Microsoft Teams (optional)
 

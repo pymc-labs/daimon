@@ -38,7 +38,7 @@ from daimon.core.agent_mcp_credentials import (
     resolve_agent_mcp_credentials,
     resolve_hidden_mcp_server_names,
 )
-from daimon.core.config import McpSettings
+from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import upload_env_and_mount
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -48,10 +48,20 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_TENANT,
 )
 from daimon.core.errors import StoreError
+from daimon.core.github_app_session import (
+    REQUESTER_CACHE,
+    AppSessionAccess,
+    add_app_credentials,
+    create_session_vault,
+    finish_app_delivery,
+    prepare_app_access,
+    revoke_app_access,
+)
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import resolve_clone_token
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.mcp_vault import (
+    GITHUB_COPILOT_MCP_URL,
     add_github_copilot_credential,
     ensure_agent_mcp_vault,
     hold_agent_vault_lock,
@@ -61,6 +71,8 @@ from daimon.core.repo_resource import build_repo_resource
 from daimon.core.session_seal import origin_stamp
 from daimon.core.session_snapshot import session_mcp_servers, session_skills, session_tools
 from daimon.core.stores.agent_repo_binding import get_binding
+from daimon.core.stores.github_access import get_agent_mode
+from daimon.core.stores.github_issued_tokens import register_app_session_vault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -116,6 +128,10 @@ async def create_session(
     github_fallback_pat: str | None = None,
     github_app_id: str | None = None,
     github_app_private_key: str | None = None,
+    agent_github_app: GithubAppSettings | None = None,
+    is_external: bool = False,
+    requester_is_headless: bool = False,
+    app_session_unmapped: bool = False,
     http_client: httpx.AsyncClient | None = None,
     extra_resources: Sequence[Resource] = (),
     billing_exempt: ExemptReason | None = None,
@@ -226,138 +242,196 @@ async def create_session(
 
     On MA failure: ``anthropic.APIError`` propagates uncaught.
     """
+    app_mode = False
+    if tenant_id is not None and agent_uuid is not None and session_factory is not None:
+        async with session_factory() as session:
+            app_mode = (
+                await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid) == "app"
+            )
     vault_id: str | None = None
-    if (
-        mcp_settings is not None
-        and mcp_settings.public_url is not None
-        and mcp_settings.jwt_secret is not None
-    ):
-        if account_id is None:
-            raise ValueError(
-                "account_id is required when mcp_settings has public_url and jwt_secret"
+    caller_vault_id: str | None = None
+    try:
+        if app_mode:
+            assert tenant_id is not None and agent_uuid is not None
+            vault_id = await create_session_vault(
+                anthropic,
+                tenant_id=tenant_id,
+                agent_id=agent_uuid,
+                account_id=account_id,
+                public_url=(
+                    str(mcp_settings.public_url)
+                    if mcp_settings is not None and mcp_settings.public_url is not None
+                    else None
+                ),
+                jwt_secret=(
+                    mcp_settings.jwt_secret.get_secret_value().encode()
+                    if mcp_settings is not None and mcp_settings.jwt_secret is not None
+                    else None
+                ),
             )
-        if agent_uuid is None:
-            raise ValueError(
-                "agent_uuid is required when mcp_settings has public_url and jwt_secret"
+            if (
+                account_id is not None
+                and mcp_settings is not None
+                and mcp_settings.public_url is not None
+                and mcp_settings.jwt_secret is not None
+                and session_factory is not None
+            ):
+                caller_vault_id = await ensure_agent_mcp_vault(
+                    anthropic,
+                    account_id=account_id,
+                    agent_id=agent_uuid,
+                    jwt_secret=mcp_settings.jwt_secret.get_secret_value().encode(),
+                    public_url=str(mcp_settings.public_url),
+                    now=dt.datetime.now(dt.UTC),
+                    session_factory=session_factory,
+                    slack_turn_context_id=slack_turn_context_id,
+                )
+        elif (
+            mcp_settings is not None
+            and mcp_settings.public_url is not None
+            and mcp_settings.jwt_secret is not None
+        ):
+            if account_id is None:
+                raise ValueError(
+                    "account_id is required when mcp_settings has public_url and jwt_secret"
+                )
+            if agent_uuid is None:
+                raise ValueError(
+                    "agent_uuid is required when mcp_settings has public_url and jwt_secret"
+                )
+            if session_factory is None:
+                raise ValueError(
+                    "session_factory is required when mcp_settings has public_url and jwt_secret"
+                )
+            vault_id = await ensure_agent_mcp_vault(
+                anthropic,
+                account_id=account_id,
+                agent_id=agent_uuid,
+                jwt_secret=mcp_settings.jwt_secret.get_secret_value().encode(),
+                public_url=str(mcp_settings.public_url),
+                now=dt.datetime.now(dt.UTC),
+                session_factory=session_factory,
+                slack_turn_context_id=slack_turn_context_id,
             )
-        if session_factory is None:
-            raise ValueError(
-                "session_factory is required when mcp_settings has public_url and jwt_secret"
-            )
-        vault_id = await ensure_agent_mcp_vault(
-            anthropic,
-            account_id=account_id,
-            agent_id=agent_uuid,
-            jwt_secret=mcp_settings.jwt_secret.get_secret_value().encode(),
-            public_url=str(mcp_settings.public_url),
-            now=dt.datetime.now(dt.UTC),
-            session_factory=session_factory,
-            slack_turn_context_id=slack_turn_context_id,
-        )
 
-    # Dev-agent port: resolve the per-agent GitHub PAT once. It feeds BOTH the
-    # github_repository clone resource (below) and the Copilot MCP credential
-    # (above the session create). Requires fernet to decrypt it; None when no
-    # fernet, no overlay binding, or no stored PAT — all mean "no GitHub".
-    per_agent_pat: str | None = None
-    if agent_uuid is not None and session_factory is not None and fernet is not None:
-        per_agent_pat = await get_pat(
-            principal_id=agent_uuid,
-            agent_id=agent_uuid,
-            sessionmaker=session_factory,
-            fernet=fernet,
-        )
+        # Dev-agent port: resolve the per-agent GitHub PAT once. It feeds BOTH the
+        # github_repository clone resource (below) and the Copilot MCP credential
+        # (above the session create). Requires fernet to decrypt it; None when no
+        # fernet, no overlay binding, or no stored PAT — all mean "no GitHub".
+        per_agent_pat: str | None = None
+        if (
+            not app_mode
+            and agent_uuid is not None
+            and session_factory is not None
+            and fernet is not None
+        ):
+            per_agent_pat = await get_pat(
+                principal_id=agent_uuid,
+                agent_id=agent_uuid,
+                sessionmaker=session_factory,
+                fernet=fernet,
+            )
 
-    # Copilot: mirror the resolved PAT into a static_bearer credential at the
-    # GitHub Copilot MCP URL on the agent's vault, so the agent can author PRs
-    # via the github MCP toolset. Rides the same
-    # vault already attached to the session via vault_ids. Bound to the REAL
-    # per-agent identity only — the operator fallback PAT is never mirrored here.
-    if (
-        vault_id is not None
-        and per_agent_pat is not None
-        and account_id is not None
-        and agent_uuid is not None
-        and session_factory is not None
-    ):
-        # Degrade-not-block: a transient MA failure on this optional credential
-        # must not kill the turn. Mirrors the memory-store mount pattern below.
-        try:
+        # Copilot: mirror the resolved PAT into a static_bearer credential at the
+        # GitHub Copilot MCP URL on the agent's vault, so the agent can author PRs
+        # via the github MCP toolset. Rides the same
+        # vault already attached to the session via vault_ids. Bound to the REAL
+        # per-agent identity only — the operator fallback PAT is never mirrored here.
+        if (
+            vault_id is not None
+            and per_agent_pat is not None
+            and account_id is not None
+            and agent_uuid is not None
+            and session_factory is not None
+        ):
+            # Degrade-not-block: a transient MA failure on this optional credential
+            # must not kill the turn. Mirrors the memory-store mount pattern below.
+            try:
+                async with hold_agent_vault_lock(
+                    session_factory, account_id=account_id, agent_id=agent_uuid
+                ):
+                    await add_github_copilot_credential(
+                        anthropic, vault_id=vault_id, token=per_agent_pat
+                    )
+            except anthropic_pkg.APIError as exc:
+                _log.warning(
+                    "copilot_credential.mount_failed",
+                    vault_id=vault_id,
+                    agent_uuid=str(agent_uuid),
+                    error=str(exc),
+                )
+
+        # External MCP servers are attached to the AGENT, so every caller who
+        # mentions it gets the toolset — but MA resolves each server's credential
+        # from the vault mounted here, which is the CALLER's. Mirror the agent's
+        # stored credentials in on every session create (same shape as the Copilot
+        # mirror above) or callers who did not personally attach a server fail the
+        # whole turn at MCP init. Not degrade-not-block: see
+        # mirror_credentials_into_vault.
+        credential_vault_id = caller_vault_id if app_mode else vault_id
+        if (
+            credential_vault_id is not None
+            and account_id is not None
+            and tenant_id is not None
+            and agent_uuid is not None
+            and session_factory is not None
+            and fernet is not None
+        ):
+            credentials = await resolve_agent_mcp_credentials(
+                sessionmaker=session_factory,
+                fernet=fernet,
+                tenant_id=tenant_id,
+                agent_id=agent_uuid,
+            )
+            if app_mode:
+                credentials = tuple(
+                    credential
+                    for credential in credentials
+                    if credential.mcp_server_url != GITHUB_COPILOT_MCP_URL
+                )
+            # Locked so a person's OAuth grant replacing a shared token at the same
+            # URL never sees this recreate it between its delete and its create.
             async with hold_agent_vault_lock(
                 session_factory, account_id=account_id, agent_id=agent_uuid
             ):
-                await add_github_copilot_credential(
-                    anthropic, vault_id=vault_id, token=per_agent_pat
+                await mirror_credentials_into_vault(
+                    anthropic,
+                    vault_id=credential_vault_id,
+                    credentials=credentials,
                 )
-        except anthropic_pkg.APIError as exc:
-            _log.warning(
-                "copilot_credential.mount_failed",
-                vault_id=vault_id,
-                agent_uuid=str(agent_uuid),
-                error=str(exc),
-            )
 
-    # External MCP servers are attached to the AGENT, so every caller who
-    # mentions it gets the toolset — but MA resolves each server's credential
-    # from the vault mounted here, which is the CALLER's. Mirror the agent's
-    # stored credentials in on every session create (same shape as the Copilot
-    # mirror above) or callers who did not personally attach a server fail the
-    # whole turn at MCP init. Not degrade-not-block: see
-    # mirror_credentials_into_vault.
-    if (
-        vault_id is not None
-        and account_id is not None
-        and tenant_id is not None
-        and agent_uuid is not None
-        and session_factory is not None
-        and fernet is not None
-    ):
-        credentials = await resolve_agent_mcp_credentials(
-            sessionmaker=session_factory,
-            fernet=fernet,
-            tenant_id=tenant_id,
-            agent_id=agent_uuid,
-        )
-        # Locked so a person's OAuth grant replacing a shared token at the same
-        # URL never sees this recreate it between its delete and its create.
-        async with hold_agent_vault_lock(
-            session_factory, account_id=account_id, agent_id=agent_uuid
-        ):
-            await mirror_credentials_into_vault(
-                anthropic, vault_id=vault_id, credentials=credentials
+        resources: list[Resource] = list(extra_resources)
+        app_access: AppSessionAccess | None = None
+        provisional_session_id = f"pending:{uuid.uuid4()}"
+        if tenant_id is not None and agent_uuid is not None and session_factory is not None:
+            mount = await upload_env_and_mount(
+                anthropic,
+                session_factory,
+                tenant_id=tenant_id,
+                agent_id=agent_uuid,
+                exclude_github=app_mode,
             )
+            if mount is not None:
+                resources.append(mount)
 
-    resources: list[Resource] = list(extra_resources)
-    if tenant_id is not None and agent_uuid is not None and session_factory is not None:
-        mount = await upload_env_and_mount(
-            anthropic, session_factory, tenant_id=tenant_id, agent_id=agent_uuid
-        )
-        if mount is not None:
-            resources.append(mount)
-
-        # Fetch the binding unconditionally — the resolver needs it even when
-        # there is no per-agent PAT (App/fallback branches).
-        async with session_factory() as session:
-            binding = await get_binding(session, tenant_id=tenant_id, agent_id=agent_uuid)
-        if binding is not None:
-            app_private_key_secret = (
-                SecretStr(github_app_private_key) if github_app_private_key is not None else None
-            )
-            now = int(time.time())
-            if http_client is not None:
-                clone_token = await resolve_clone_token(
-                    http_client,
-                    binding=binding,
-                    per_agent_pat=per_agent_pat,
-                    fallback_pat=github_fallback_pat,
-                    app_id=github_app_id,
-                    app_private_key=app_private_key_secret,
-                    now=now,
+            # Fetch the binding unconditionally — the resolver needs it even when
+            # there is no per-agent PAT (App/fallback branches).
+            async with session_factory() as session:
+                binding = (
+                    None
+                    if app_mode
+                    else await get_binding(session, tenant_id=tenant_id, agent_id=agent_uuid)
                 )
-            else:
-                async with httpx.AsyncClient() as client:
+            if binding is not None:
+                app_private_key_secret = (
+                    SecretStr(github_app_private_key)
+                    if github_app_private_key is not None
+                    else None
+                )
+                now = int(time.time())
+                if http_client is not None:
                     clone_token = await resolve_clone_token(
-                        client,
+                        http_client,
                         binding=binding,
                         per_agent_pat=per_agent_pat,
                         fallback_pat=github_fallback_pat,
@@ -365,137 +439,211 @@ async def create_session(
                         app_private_key=app_private_key_secret,
                         now=now,
                     )
-            repo_resource = build_repo_resource(binding, clone_token)
-            if repo_resource is not None:
-                resources.append(repo_resource)
+                else:
+                    async with httpx.AsyncClient() as client:
+                        clone_token = await resolve_clone_token(
+                            client,
+                            binding=binding,
+                            per_agent_pat=per_agent_pat,
+                            fallback_pat=github_fallback_pat,
+                            app_id=github_app_id,
+                            app_private_key=app_private_key_secret,
+                            now=now,
+                        )
+                repo_resource = build_repo_resource(binding, clone_token)
+                if repo_resource is not None:
+                    resources.append(repo_resource)
 
-        # Memory store (agent memory feature): degrade-not-block. A memory
-        # outage must never take down chat — the session just runs without
-        # persistent memory this turn.
-        try:
-            memory_mount = await ensure_memory_store_and_mount(
-                anthropic,
+            # Memory store (agent memory feature): degrade-not-block. A memory
+            # outage must never take down chat — the session just runs without
+            # persistent memory this turn.
+            try:
+                memory_mount = await ensure_memory_store_and_mount(
+                    anthropic,
+                    session_factory,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    agent_name=agent.name,
+                    read_only=memory_read_only,
+                )
+                resources.append(memory_mount)
+            except (anthropic_pkg.APIError, StoreError) as exc:
+                _log.warning(
+                    "memory_store.mount_failed",
+                    tenant_id=str(tenant_id),
+                    agent_uuid=str(agent_uuid),
+                    agent_name=agent.name,
+                    error=str(exc),
+                )
+
+        # A server somebody connected through OAuth authenticates from the
+        # connecting person's vault alone, so mounting it on anyone else's session
+        # only buys them a failed MCP init and a degraded-turn notice every turn.
+        # Overrides keep it off THIS session without touching the agent spec the
+        # people who did connect it still answer from.
+        #
+        # The same override carries the deployment's tool-safety policy: gated
+        # third-party toolsets are sent as `always_ask` whatever the agent itself
+        # stores, so every new session is gated however the agent was written.
+        agent_argument: Agent = agent.id
+        hidden: frozenset[str] = frozenset()
+        if (
+            account_id is not None
+            and tenant_id is not None
+            and agent_uuid is not None
+            and session_factory is not None
+        ):
+            hidden = await resolve_hidden_mcp_server_names(
                 session_factory,
                 tenant_id=tenant_id,
                 agent_id=agent_uuid,
-                agent_name=agent.name,
-                read_only=memory_read_only,
+                account_id=account_id,
+                server_urls={server.name: server.url for server in agent.mcp_servers},
             )
-            resources.append(memory_mount)
-        except (anthropic_pkg.APIError, StoreError) as exc:
-            _log.warning(
-                "memory_store.mount_failed",
-                tenant_id=str(tenant_id),
-                agent_uuid=str(agent_uuid),
-                agent_name=agent.name,
-                error=str(exc),
-            )
+            if hidden:
+                _log.info(
+                    "session.personal_mcp_servers_hidden",
+                    agent_uuid=str(agent_uuid),
+                    account_id=str(account_id),
+                    server_names=sorted(hidden),
+                )
+        public_url = (
+            str(mcp_settings.public_url)
+            if mcp_settings is not None and mcp_settings.public_url is not None
+            else None
+        )
+        tools = session_tools(
+            agent,
+            hidden,
+            tool_safety=tool_safety,
+            public_url=public_url,
+            asks_before_publishing=asks_before_publishing,
+        )
+        servers = session_mcp_servers(agent, hidden, tool_safety=tool_safety, public_url=public_url)
+        gated = list(tools) != list(visible_tools(agent, hidden))
+        healed = list(servers) != list(visible_mcp_servers(agent, hidden))
+        if hidden or gated or healed or channel_skills:
+            overrides: BetaManagedAgentsAgentWithOverridesParams = {
+                "type": "agent_with_overrides",
+                "id": agent.id,
+                # No `version`: a bare id pins the latest, which is what every
+                # other session gets, and both arrays below are full
+                # replacements — there is nothing left for a version to pin.
+                "mcp_servers": [
+                    BetaManagedAgentsURLMCPServerParams(
+                        name=server.name, type="url", url=server.url
+                    )
+                    for server in servers
+                ],
+                "tools": [
+                    cast(Tool, tool.model_dump(mode="json", exclude_none=True)) for tool in tools
+                ],
+            }
+            if channel_skills:
+                # A full replacement too: the agent's own at the versions it pins.
+                overrides["skills"] = [
+                    cast(BetaManagedAgentsSkillParams, skill.model_dump(mode="json"))
+                    for skill in session_skills(agent, channel_skills)
+                ]
+                _log.info("session.channel_skills_applied", agent_id=agent.id)
+            agent_argument = overrides
+            if healed:
+                # The reserved name on a server daimon does not run: the tool-safety
+                # exemption is for the real endpoint only, so this session gets it.
+                _log.warning("session.reserved_mcp_server_healed", agent_id=agent.id)
+            if gated:
+                _log.info("session.tool_safety_applied", agent_id=agent.id)
 
-    # A server somebody connected through OAuth authenticates from the
-    # connecting person's vault alone, so mounting it on anyone else's session
-    # only buys them a failed MCP init and a degraded-turn notice every turn.
-    # Overrides keep it off THIS session without touching the agent spec the
-    # people who did connect it still answer from.
-    #
-    # The same override carries the deployment's tool-safety policy: gated
-    # third-party toolsets are sent as `always_ask` whatever the agent itself
-    # stores, so every new session is gated however the agent was written.
-    agent_argument: Agent = agent.id
-    hidden: frozenset[str] = frozenset()
-    if (
-        account_id is not None
-        and tenant_id is not None
-        and agent_uuid is not None
-        and session_factory is not None
-    ):
-        hidden = await resolve_hidden_mcp_server_names(
-            session_factory,
-            tenant_id=tenant_id,
-            agent_id=agent_uuid,
+        metadata = _session_metadata(
             account_id=account_id,
-            server_urls={server.name: server.url for server in agent.mcp_servers},
+            tenant_id=tenant_id,
+            billing_exempt=billing_exempt,
+            budget_channel_id=budget_channel_id,
         )
-        if hidden:
-            _log.info(
-                "session.personal_mcp_servers_hidden",
-                agent_uuid=str(agent_uuid),
-                account_id=str(account_id),
-                server_names=sorted(hidden),
+        if slack_turn_context_id is not None:
+            metadata[MA_METADATA_KEY_PRIVATE_DM] = str(slack_turn_context_id)
+        elif private_dm_id is not None:
+            metadata[MA_METADATA_KEY_PRIVATE_DM] = private_dm_id
+        if origin_channel_id is not None:
+            metadata.update(
+                origin_stamp(
+                    channel_id=origin_channel_id,
+                    thread_id=origin_thread_id,
+                    seal=origin_seal_ids,
+                )
             )
-    public_url = (
-        str(mcp_settings.public_url)
-        if mcp_settings is not None and mcp_settings.public_url is not None
-        else None
-    )
-    tools = session_tools(
-        agent,
-        hidden,
-        tool_safety=tool_safety,
-        public_url=public_url,
-        asks_before_publishing=asks_before_publishing,
-    )
-    servers = session_mcp_servers(agent, hidden, tool_safety=tool_safety, public_url=public_url)
-    gated = list(tools) != list(visible_tools(agent, hidden))
-    healed = list(servers) != list(visible_mcp_servers(agent, hidden))
-    if hidden or gated or healed or channel_skills:
-        overrides: BetaManagedAgentsAgentWithOverridesParams = {
-            "type": "agent_with_overrides",
-            "id": agent.id,
-            # No `version`: a bare id pins the latest, which is what every
-            # other session gets, and both arrays below are full
-            # replacements — there is nothing left for a version to pin.
-            "mcp_servers": [
-                BetaManagedAgentsURLMCPServerParams(name=server.name, type="url", url=server.url)
-                for server in servers
-            ],
-            "tools": [
-                cast(Tool, tool.model_dump(mode="json", exclude_none=True)) for tool in tools
-            ],
-        }
-        if channel_skills:
-            # A full replacement too: the agent's own at the versions it pins.
-            overrides["skills"] = [
-                cast(BetaManagedAgentsSkillParams, skill.model_dump(mode="json"))
-                for skill in session_skills(agent, channel_skills)
-            ]
-            _log.info("session.channel_skills_applied", agent_id=agent.id)
-        agent_argument = overrides
-        if healed:
-            # The reserved name on a server daimon does not run: the tool-safety
-            # exemption is for the real endpoint only, so this session gets it.
-            _log.warning("session.reserved_mcp_server_healed", agent_id=agent.id)
-        if gated:
-            _log.info("session.tool_safety_applied", agent_id=agent.id)
 
-    metadata = _session_metadata(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        billing_exempt=billing_exempt,
-        budget_channel_id=budget_channel_id,
-    )
-    if slack_turn_context_id is not None:
-        metadata[MA_METADATA_KEY_PRIVATE_DM] = str(slack_turn_context_id)
-    elif private_dm_id is not None:
-        metadata[MA_METADATA_KEY_PRIVATE_DM] = private_dm_id
-    if origin_channel_id is not None:
-        metadata.update(
-            origin_stamp(
-                channel_id=origin_channel_id,
-                thread_id=origin_thread_id,
-                seal=origin_seal_ids,
+        created: BetaManagedAgentsSession | None = None
+        try:
+            if app_mode:
+                assert (
+                    tenant_id is not None and agent_uuid is not None and session_factory is not None
+                )
+                async with httpx.AsyncClient() as app_client:
+                    app_access = await prepare_app_access(
+                        session_factory,
+                        app_client,
+                        tenant_id=tenant_id,
+                        agent_id=agent_uuid,
+                        account_id=None if requester_is_headless else account_id,
+                        is_external=is_external,
+                        provisional_session_id=provisional_session_id,
+                        config=agent_github_app or GithubAppSettings(),
+                        fernet=fernet,
+                        cache=REQUESTER_CACHE,
+                    )
+                resources.extend(app_access.resources)
+                if vault_id is not None:
+                    await add_app_credentials(anthropic, vault_id=vault_id, access=app_access)
+            if before_create is not None:
+                # The caller's last access decision, after every await above.
+                await before_create()
+            created = await anthropic.beta.sessions.create(
+                agent=agent_argument,
+                environment_id=environment.id,
+                metadata=metadata if metadata else omit,
+                vault_ids=(
+                    [caller_vault_id, vault_id]
+                    if caller_vault_id is not None and vault_id is not None
+                    else [vault_id]
+                    if vault_id is not None
+                    else omit
+                ),
+                resources=resources if resources else omit,
             )
-        )
-
-    if before_create is not None:
-        # The caller's last access decision, after every await above.
-        await before_create()
-    return await anthropic.beta.sessions.create(
-        agent=agent_argument,
-        environment_id=environment.id,
-        metadata=metadata if metadata else omit,
-        vault_ids=[vault_id] if vault_id is not None else omit,
-        resources=resources if resources else omit,
-    )
+            if app_access is not None:
+                assert (
+                    session_factory is not None and tenant_id is not None and vault_id is not None
+                )
+                async with session_factory.begin() as session:
+                    await register_app_session_vault(
+                        session,
+                        session_id=created.id,
+                        tenant_id=tenant_id,
+                        vault_id=vault_id,
+                        is_unmapped=requester_is_headless or app_session_unmapped,
+                    )
+                async with httpx.AsyncClient() as app_client:
+                    await finish_app_delivery(
+                        session_factory,
+                        app_client,
+                        access=app_access,
+                        provisional_session_id=provisional_session_id,
+                        session_id=created.id,
+                    )
+            return created
+        except BaseException:
+            if created is not None and app_mode:
+                await anthropic.beta.sessions.archive(created.id)
+            if app_access is not None:
+                assert session_factory is not None
+                async with httpx.AsyncClient() as app_client:
+                    await revoke_app_access(session_factory, app_client, app_access)
+            raise
+    except BaseException:
+        if app_mode and vault_id is not None:
+            await anthropic.beta.vaults.archive(vault_id)
+        raise
 
 
 async def create_isolated_session(

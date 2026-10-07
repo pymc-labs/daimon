@@ -65,6 +65,7 @@ import yarl
 from anthropic import BadRequestError, RateLimitError
 from daimon.adapters.slack import lifecycle as lifecycle_mod
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
+from daimon.core.agent_identity import AgentIdentity
 from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
@@ -212,6 +213,9 @@ def _make_lifecycle(
     tenant_id: uuid.UUID | None = None,
     budget_channel_id: str | None = None,
     ask_human: bool = False,
+    identity: AgentIdentity | None = None,
+    ma_agent_id: str | None = None,
+    intent_id: uuid.UUID | None = None,
 ) -> tuple[SlackTurnLifecycle, asyncio.Event, dict[str, tuple[asyncio.Event, str]], list[str]]:
     """Create a SlackTurnLifecycle with recorder callables for registry operations.
 
@@ -248,8 +252,46 @@ def _make_lifecycle(
         sessionmaker=sessionmaker,
         tenant_id=tenant_id,
         budget_channel_id=budget_channel_id,
+        identity=identity,
+        ma_agent_id=ma_agent_id,
+        intent_id=intent_id,
     )
     return lc, cancel, registered, deregistered
+
+
+@pytest.mark.asyncio
+async def test_turn_posts_use_agent_header_and_record_intent(
+    fake_slack_web_client: Any,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: list[dict[str, object]] = []
+
+    async def fake_record(_sessionmaker: object, **kwargs: object) -> None:
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(lifecycle_module, "record_turn_post", fake_record)
+    intent = uuid.uuid4()
+    tenant = uuid.uuid4()
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client,
+        sessionmaker=db_session_factory,
+        tenant_id=tenant,
+        identity=AgentIdentity("Ada", "https://example.test/ada.png", False),
+        ma_agent_id="agent_ada",
+        intent_id=intent,
+    )
+    await lc.post_initial()
+    await lc.post_notice("continued")
+    bodies = [
+        call.kwargs["json"] for call in fake_slack_web_client.mock.requests[("POST", _POST_URL)]
+    ]
+    assert [body["username"] for body in bodies] == ["Ada", "Ada"]
+    assert [body["icon_url"] for body in bodies] == ["https://example.test/ada.png"] * 2
+    assert len(recorded) == 2
+    assert all(row["turn_card_intent_id"] == intent for row in recorded)
+    assert all(row["channel_id"] == "C_TEST" for row in recorded)
+    assert all(row["thread_ts"] == "1700000000.000000" for row in recorded)
 
 
 @pytest.mark.parametrize("status", [400, 429])

@@ -12,7 +12,9 @@ from uuid import UUID
 
 import discord
 import pytest
+from daimon.adapters.discord import turn_card_recovery
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.turn_card_recovery import (
     TurnCardSearchState,
     find_turn_card_message,
@@ -32,6 +34,33 @@ from sqlalchemy.exc import SQLAlchemyError
 _TURN_ID = UUID("12345678-1234-5678-1234-567812345678")
 _CREATED_AFTER = datetime(2026, 9, 25, tzinfo=UTC)
 _SEARCH_BEFORE = _CREATED_AFTER + timedelta(minutes=5)
+
+
+async def test_recovery_edits_webhook_card_via_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _fetched_message(123, _TURN_ID)
+    message.webhook_id = 900
+    message.author.name = "Research"
+    message.channel = MagicMock(spec=discord.Thread)
+    message.channel.parent = MagicMock(spec=discord.TextChannel)
+    edit = AsyncMock()
+    monkeypatch.setattr(DiscordPostTransport, "edit", edit)
+    client = MagicMock(spec=discord.Client)
+    assert await turn_card_recovery._mark_card_interrupted(  # pyright: ignore[reportPrivateUsage]
+        message, intent_id=_TURN_ID, client=client
+    )
+    edit.assert_awaited_once()
+
+
+async def test_recovery_defers_webhook_card_without_resolved_parent() -> None:
+    message = _fetched_message(123, _TURN_ID)
+    message.webhook_id = 900
+    message.author.name = "Research"
+    client = MagicMock(spec=discord.Client)
+    assert not await turn_card_recovery._mark_card_interrupted(  # pyright: ignore[reportPrivateUsage]
+        message, intent_id=_TURN_ID, client=client
+    )
 
 
 def _fetched_message(message_id: int, *turn_ids: UUID) -> discord.Message:

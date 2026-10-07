@@ -311,7 +311,11 @@ class TestNewThreadCreation:
         message = _make_channel_message()
         thread = MagicMock(spec=discord.Thread)
         thread.id = 9999
-        thread.send = AsyncMock(return_value=types.SimpleNamespace(id=1000, edit=AsyncMock()))
+        thread.send = AsyncMock(
+            return_value=types.SimpleNamespace(
+                id=1000, edit=AsyncMock(), webhook_id=None, application_id=None
+            )
+        )
         message.create_thread.return_value = thread  # pyright: ignore[reportAttributeAccessIssue]
 
         from daimon.core.turn.lifecycle import acknowledge

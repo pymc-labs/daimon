@@ -22,6 +22,7 @@ from daimon.core.scope import (
     TenantScopeRef,
     UserScopeRef,
 )
+from daimon.core.stores.agent_avatars import delete_avatar
 from daimon.core.stores.scoped_config_read import get_scope
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -190,6 +191,7 @@ async def clear_agent_references(
 
     Returns the number of scope rows cleared. The caller owns the transaction.
     """
+    await delete_avatar(session, tenant_id=tenant_id, agent_name=agent_name)
     return await _clear_references(
         session, tenant_id=tenant_id, field="agent_name", value=agent_name
     )

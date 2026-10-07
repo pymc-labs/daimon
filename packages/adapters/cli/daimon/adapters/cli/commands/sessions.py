@@ -103,6 +103,8 @@ async def sessions_create(
             if rt.settings.github.app_private_key is not None
             else None
         ),
+        agent_github_app=getattr(rt.settings, "github_app", None),
+        requester_is_headless=True,
         tool_safety=rt.settings.tool_safety,
     )
 

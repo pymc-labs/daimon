@@ -100,6 +100,7 @@ async def upload_env_and_mount(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     ttl_hours: int = 1,
+    exclude_github: bool = False,
 ) -> BetaManagedAgentsFileResourceParams | None:
     """Fetch the agent's tenant-scoped secrets, upload them as a `.env`, mount it.
 
@@ -115,6 +116,8 @@ async def upload_env_and_mount(
     """
     async with session_factory() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_id)
+    if exclude_github:
+        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
     if not rows:
         return None
 

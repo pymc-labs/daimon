@@ -98,6 +98,7 @@ from daimon.core.observability import init_sentry
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
+from daimon.core.stores.agent_avatars import get_avatar_by_token
 from fastmcp import FastMCP
 from fastmcp.server.auth.auth import TokenVerifier
 from fastmcp.server.transforms import Visibility
@@ -110,7 +111,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse
+from starlette.responses import PlainTextResponse, Response
 
 if TYPE_CHECKING:
     from stripe._http_client import HTTPClient as StripeHTTPClient
@@ -158,6 +159,25 @@ def _build_readyz(
         return PlainTextResponse("ready")
 
     return readyz
+
+
+def _build_avatar_route(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> Callable[[Request], Awaitable[Response]]:
+    async def avatar(req: Request) -> Response:
+        token = req.path_params["token"]
+        sha12 = req.path_params["sha12"]
+        async with sessionmaker() as session:
+            row = await get_avatar_by_token(session, token=token)
+        if row is None or row.sha256[:12] != sha12:
+            return Response(status_code=404)
+        return Response(
+            row.png,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
+    return avatar
 
 
 def create_mcp_app(
@@ -455,6 +475,11 @@ def create_mcp_app(
     )
     app.add_route("/healthz", _healthz, methods=["GET"])
     app.add_route("/readyz", _build_readyz(effective_sessionmaker), methods=["GET"])
+    app.add_route(
+        "/avatars/{token}/{sha12}.png",
+        _build_avatar_route(effective_sessionmaker),
+        methods=["GET"],
+    )
     if effective_billing_config is not None:
         app.add_route(
             "/webhooks/stripe",

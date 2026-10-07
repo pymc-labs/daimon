@@ -320,6 +320,7 @@ def test_snapshot_from_created_session_captures_every_resource_handle() -> None:
     assert snapshot.repo_url == "https://github.com/pymc-labs/example", (
         "repo url comes off the resource"
     )
+    assert snapshot.repo_urls == (), "legacy snapshots keep the predeploy repo-set default"
     assert snapshot.repo_branch == "feat/thing", "a branch checkout must be read off the resource"
     assert snapshot.repo_mount_path == "/mnt/session/repo", "the repo mount path must be recorded"
     assert snapshot.memory_store_id == "memstore_7", "the mounted memory store must be recorded"

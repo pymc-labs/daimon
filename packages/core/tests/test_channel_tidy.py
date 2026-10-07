@@ -292,6 +292,40 @@ async def test_a_turn_post_that_cannot_be_recorded_does_not_fail_the_turn(
     )
 
 
+async def test_slack_turn_post_records_channel_and_thread_root(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.channel_tidy import record_turn_post
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    intent_id = uuid.uuid4()
+    await record_turn_post(
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="slack",
+        ma_agent_id="ag_ada",
+        channel_id="C123",
+        message_id="1700000001.000001",
+        thread_ts="1700000000.000000",
+        requester_platform_user_id="U123",
+        source="turn",
+        turn_card_intent_id=intent_id,
+    )
+    async with db_session_factory() as session:
+        post = await get_post(
+            session,
+            tenant_id=tenant.id,
+            platform="slack",
+            channel_id="C123",
+            message_id="1700000001.000001",
+        )
+    assert post is not None
+    assert post.thread_ts == "1700000000.000000"
+    assert post.parent_channel_id is None
+    assert post.turn_card_intent_id == intent_id
+
+
 async def test_a_turn_post_must_name_its_turn(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

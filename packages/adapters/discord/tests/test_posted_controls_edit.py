@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 import structlog
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.credential_requests import build_skill_repo_target
@@ -55,6 +56,9 @@ def _row(**overrides: Any) -> CredentialRequestRow:
 def _client() -> MagicMock:
     client = MagicMock(spec=discord.Client)
     client.get_partial_messageable.return_value.get_partial_message.return_value.edit = AsyncMock()
+    client.get_partial_messageable.return_value.get_partial_message.return_value.fetch = AsyncMock(
+        return_value=None
+    )
     return client
 
 
@@ -80,6 +84,39 @@ async def test_edit_targets_the_rows_own_message_with_a_layout_view() -> None:
         "every edit must pass a LayoutView — a components-v2 message rejects a classic view"
     )
     assert RECEIVED_FOOTER in _text(kwargs["view"]), "the received card says the value arrived"
+
+
+async def test_webhook_card_uses_resolved_channel_not_partial_messageable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client()
+    fetched = MagicMock(spec=discord.Message)
+    fetched.webhook_id = 30
+    fetched.author.name = "Research"
+    partial = MagicMock(spec=discord.PartialMessage)
+    partial.fetch = AsyncMock(return_value=fetched)
+    client.get_partial_messageable.return_value.get_partial_message.return_value = partial
+    channel = MagicMock(spec=discord.Thread)
+    client.get_channel.return_value = channel
+    used_channels: list[discord.abc.Messageable] = []
+    original_init = DiscordPostTransport.__init__
+
+    def capture_init(
+        self: DiscordPostTransport,
+        client_arg: discord.Client,
+        channel_arg: discord.abc.Messageable,
+        **kwargs: Any,
+    ) -> None:
+        used_channels.append(channel_arg)
+        original_init(self, client_arg, channel_arg, **kwargs)
+
+    monkeypatch.setattr(DiscordPostTransport, "__init__", capture_init)
+    edit = AsyncMock()
+    monkeypatch.setattr(DiscordPostTransport, "edit", edit)
+    await edit_posted_card(client, row=_row(), state="received")
+    edit.assert_awaited_once()
+    assert used_channels == [channel]
+    assert edit.call_args.args[0] is fetched
 
 
 async def test_edit_suppresses_every_mention() -> None:

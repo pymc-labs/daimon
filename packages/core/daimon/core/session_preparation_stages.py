@@ -29,8 +29,11 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
     BetaManagedAgentsSystemContentBlockParam,
 )
 from anthropic.types.beta.session_create_params import Resource
+from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
+from daimon.core.config import GithubAppSettings
 from daimon.core.credential_env import assemble_env_bytes
+from daimon.core.github_app_session import effective_repo_urls
 from daimon.core.session_fence_retry import try_fence
 from daimon.core.session_snapshot import (
     SessionSnapshot,
@@ -49,6 +52,7 @@ from daimon.core.stores.domain import (
     TransferKind,
     UnsavedWorkChoice,
 )
+from daimon.core.stores.github_access import get_agent_mode
 from daimon.core.stores.thread_sessions import record_snapshot
 from daimon.core.tool_safety import ToolSafetyPolicy
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -244,6 +248,9 @@ async def desired_snapshot_for(
     tenant_id: uuid.UUID,
     agent_uuid: uuid.UUID,
     account_id: uuid.UUID,
+    github_app: GithubAppSettings | None = None,
+    fernet: MultiFernet | None = None,
+    is_external: bool = False,
     recorded: SessionSnapshot | None,
     tool_safety: ToolSafetyPolicy,
     public_url: str | None,
@@ -278,7 +285,14 @@ async def desired_snapshot_for(
     """
     async with sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
-        binding = await get_binding(session, tenant_id=tenant_id, agent_id=agent_uuid)
+        mode = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid)
+        if mode == "app":
+            rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
+        binding = (
+            None
+            if mode == "app"
+            else await get_binding(session, tenant_id=tenant_id, agent_id=agent_uuid)
+        )
         memory_store_id = await get_memory_store_id(
             session, tenant_id=tenant_id, agent_id=agent_uuid
         )
@@ -293,6 +307,20 @@ async def desired_snapshot_for(
             server_urls={server.name: server.url for server in agent.mcp_servers},
         ),
         environment_id=environment_id,
+        github_mode=mode,
+        repo_urls=(
+            await effective_repo_urls(
+                sessionmaker,
+                tenant_id=tenant_id,
+                agent_id=agent_uuid,
+                account_id=account_id,
+                is_external=is_external,
+                config=github_app or GithubAppSettings(),
+                fernet=fernet,
+            )
+            if mode == "app"
+            else ()
+        ),
         env_sha256=hash_env_bytes(assemble_env_bytes(rows)) if rows else None,
         repo_url=None if binding is None else f"https://github.com/{binding.repo_url}",
         repo_branch=None if binding is None else binding.default_branch,

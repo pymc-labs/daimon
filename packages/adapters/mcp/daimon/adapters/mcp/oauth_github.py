@@ -357,8 +357,10 @@ def build_oauth_github_routes(
             "<p>Select repositories and choose their maximum access.</p>",
             f'<form method="post" action="{html.escape(root, quote=True)}/oauth/github/confirm">',
             f'<input type="hidden" name="state" value="{html.escape(state, quote=True)}">',
-            '<button type="button" onclick="this.form.querySelectorAll(\'input[name=repo]\')'
-            '.forEach(box => box.checked = true)">Select all repos you administer</button>',
+            '<button type="button" id="select-all-repos">Select all repos you administer</button>',
+            '<script>document.getElementById("select-all-repos").addEventListener("click", '
+            '() => document.querySelectorAll("input[name=repo]").forEach(box => '
+            "{ box.checked = true; }));</script>",
         ]
         access_options = '<option value="read">Read</option><option value="write">Write</option>'
         for installation in installations:

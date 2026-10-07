@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 from daimon.adapters.discord.feedback_button import FeedbackButton
@@ -60,7 +60,7 @@ def _interaction(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: Any)
     thread.parent_id = _PARENT
     thread.send = AsyncMock()
     interaction = MagicMock()
-    interaction.client = SimpleNamespace(runtime=runtime)
+    interaction.client = SimpleNamespace(runtime=runtime, application_id=77)
     interaction.guild_id = int(_GUILD)
     interaction.channel = thread
     interaction.user = SimpleNamespace(id=42, mention="<@42>")
@@ -69,6 +69,9 @@ def _interaction(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: Any)
     interaction.response.is_done = MagicMock(return_value=True)
     interaction.followup.send = AsyncMock()
     interaction.message.edit = AsyncMock()
+    interaction.message.author.name = "Daimon"
+    interaction.message.webhook_id = None
+    interaction.message.application_id = None
     interaction.delete_original_response = AsyncMock()
     return interaction
 
@@ -131,6 +134,30 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
             thread_id=str(_THREAD),
         )
     assert binding is None
+
+
+async def test_a_click_removes_a_webhook_cards_button(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await _seed(db_session)
+    interaction = _interaction(db_session_factory, tenant.id)
+    interaction.channel.parent = MagicMock(spec=discord.TextChannel)
+    interaction.message.webhook_id = 123
+    interaction.message.application_id = 77
+    hook = MagicMock(spec=discord.Webhook)
+    hook.edit_message = AsyncMock()
+
+    with patch(
+        "daimon.adapters.discord.post_transport.DiscordPostTransport._webhook",
+        new_callable=AsyncMock,
+        return_value=hook,
+    ):
+        await HandOverButton(agent_id="ag_research").callback(interaction)
+
+    hook.edit_message.assert_awaited_once_with(
+        interaction.message.id, view=None, thread=interaction.channel
+    )
+    interaction.message.edit.assert_not_awaited()
 
 
 async def test_the_button_carries_the_agent_and_its_template_overlaps_no_other() -> None:

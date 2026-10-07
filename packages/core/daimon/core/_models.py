@@ -38,6 +38,28 @@ class Base(DeclarativeBase):
     """Declarative base for all daimon-core ORM models."""
 
 
+class AgentAvatar(Base):
+    __tablename__ = "agent_avatars"
+    __table_args__ = (
+        CheckConstraint("source IN ('default', 'upload')", name="ck_agent_avatars_source"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    token: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    png: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Tenant(Base):
     __tablename__ = "tenants"
     __table_args__ = (
@@ -2521,6 +2543,20 @@ class AgentGitHubGrant(Base):
     version: Mapped[int] = mapped_column(Integer, server_default="1")
 
 
+class GitHubNewRepoNotice(Base):
+    """A new installation repository awaiting a workspace-admin announcement."""
+
+    __tablename__ = "github_new_repo_notices"
+    __table_args__ = (PrimaryKeyConstraint("tenant_id", "installation_id", "repo_full_name"),)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    installation_id: Mapped[int] = mapped_column(BigInteger)
+    repo_full_name: Mapped[str] = mapped_column(Text)
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class AgentGitHubMode(Base):
     __tablename__ = "agent_github_mode"
     __table_args__ = (
@@ -2592,6 +2628,26 @@ class GitHubIssuedToken(Base):
     status: Mapped[str] = mapped_column(Text, server_default="pending")
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoke_attempts: Mapped[int] = mapped_column(Integer, server_default="0")
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoke_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GitHubAppSessionVault(Base):
+    __tablename__ = "github_app_session_vaults"
+
+    session_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    vault_id: Mapped[str] = mapped_column(Text)
+    is_unmapped: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SecurityAuditEvent(Base):
@@ -2635,6 +2691,8 @@ class SecurityAuditEvent(Base):
     github_installation_id: Mapped[int | None] = mapped_column(BigInteger)
     github_repo_ids: Mapped[list[int] | None] = mapped_column(ARRAY(BigInteger))
     github_permissions: Mapped[dict[str, str] | None] = mapped_column(JSONB)
+    github_grant_versions: Mapped[dict[str, int] | None] = mapped_column(JSONB)
+    github_turn_origin_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     github_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Set only by the channel tidy tools: which message an edit or delete
     # touched, a keyed HMAC of the text it replaced, and the turn it ran in.
@@ -2648,7 +2706,7 @@ class AgentPostedMessage(Base):
     """A message or thread an agent posted.
 
     Written at send time by `send_message` and `create_thread` (`source='tool'`),
-    and by the Discord adapter for a turn's status cards, answers and notices
+    and by chat adapters for a turn's status cards, answers and notices
     (`source='turn'`) and the thread it opens from a mention
     (`source='auto_thread'`). The channel tidy tools edit or delete only what
     this table says the calling agent posted. Holds ids and a keyed HMAC of

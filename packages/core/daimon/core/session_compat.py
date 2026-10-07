@@ -39,6 +39,8 @@ type ChangeReason = Literal[
     "system_prompt",
     "skills",
     "environment",
+    "github_mode",
+    "repo_set",
     "repo_url",
     "repo_branch",
     "memory_store",
@@ -96,6 +98,13 @@ class RotateRepoToken:
 
 
 @dataclass(frozen=True, slots=True)
+class RotateAppTokens:
+    """Refresh App tokens and swap every mounted repository resource in place."""
+
+    resource_ids: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
 class ReplaceEnvFile:
     """Upload the desired `.env`, delete the mounted resource, add the new one."""
 
@@ -105,7 +114,11 @@ class ReplaceEnvFile:
 
 
 type UpdateOp = (
-    ReplaceToolsAndMcpServers | RemirrorVaultCredentials | RotateRepoToken | ReplaceEnvFile
+    ReplaceToolsAndMcpServers
+    | RemirrorVaultCredentials
+    | RotateRepoToken
+    | RotateAppTokens
+    | ReplaceEnvFile
 )
 
 
@@ -142,6 +155,8 @@ def identity_change_reasons(
         (recorded.system_sha256 != desired.system_sha256, "system_prompt"),
         (recorded.skills_sha256 != desired.skills_sha256, "skills"),
         (recorded.environment_id != desired.environment_id, "environment"),
+        (recorded.github_mode != desired.github_mode, "github_mode"),
+        (recorded.repo_urls != desired.repo_urls, "repo_set"),
         (recorded.repo_url != desired.repo_url, "repo_url"),
         (recorded.repo_branch != desired.repo_branch, "repo_branch"),
         (recorded.memory_store_id != desired.memory_store_id, "memory_store"),
@@ -199,7 +214,18 @@ def decide_session_compatibility(
         else:
             must_replace = True
 
-    repo_resource_id = recorded.repo_resource_id
+    if recorded.github_mode == "app" and recorded.repo_urls:
+        issued_at = recorded.repo_token_issued_at
+        # Installation tokens are recorded with a conservative 55-minute life.
+        # Refresh at 40 minutes, leaving 15 minutes for vault propagation.
+        if issued_at is None or now.timestamp() - issued_at >= 2400:
+            reasons.append("repo_token_age")
+            if capabilities.repo_token_rotatable:
+                ops.append(RotateAppTokens(resource_ids=recorded.repo_resource_ids))
+            else:
+                must_replace = True
+
+    repo_resource_id = recorded.repo_resource_id if recorded.github_mode == "legacy" else None
     token_issued_at = recorded.repo_token_issued_at
     token_age_s = None if token_issued_at is None else now.timestamp() - token_issued_at
     token_is_stale = token_age_s is not None and token_age_s > repo_token_max_age_s
