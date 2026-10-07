@@ -66,6 +66,7 @@ class Invitation(BaseModel):
     requester_account_id: uuid.UUID
     workspace_label: str
     requester_label: str
+    preselected_repo_full_name: str | None
     expires_at: datetime
     used_at: datetime | None
 
@@ -87,6 +88,7 @@ async def mint_invitation(
     tenant_id: uuid.UUID,
     requester_account_id: uuid.UUID,
     requester_label: str | None = None,
+    preselected_repo_full_name: str | None = None,
 ) -> str:
     account = await session.get(Account, requester_account_id)
     if (
@@ -107,6 +109,7 @@ async def mint_invitation(
             requester_account_id=requester_account_id,
             workspace_label=f"{tenant.platform} workspace {tenant.external_id}",
             requester_label=requester_label or str(requester_account_id),
+            preselected_repo_full_name=preselected_repo_full_name,
             expires_at=datetime.now(UTC) + timedelta(days=7),
         )
     )

@@ -2467,6 +2467,7 @@ class GitHubConnectInvitation(Base):
     )
     workspace_label: Mapped[str] = mapped_column(Text)
     requester_label: Mapped[str] = mapped_column(Text)
+    preselected_repo_full_name: Mapped[str | None] = mapped_column(Text)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -2516,6 +2517,29 @@ class AgentGitHubGrant(Base):
     version: Mapped[int] = mapped_column(Integer, server_default="1")
 
 
+class AgentGitHubGrantDraft(Base):
+    __tablename__ = "agent_github_grant_drafts"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "repo_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "repo_id"],
+            ["tenant_github_repos.tenant_id", "tenant_github_repos.repo_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("operation IN ('upsert', 'remove')"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    repo_id: Mapped[int] = mapped_column(BigInteger)
+    operation: Mapped[str] = mapped_column(Text)
+    baseline_access: Mapped[str | None] = mapped_column(Text)
+    ceiling_access: Mapped[str | None] = mapped_column(Text)
+    is_working_repo: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    granted_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+
+
 class GitHubNewRepoNotice(Base):
     """A new installation repository awaiting a workspace-admin announcement."""
 
@@ -2528,6 +2552,8 @@ class GitHubNewRepoNotice(Base):
     repo_full_name: Mapped[str] = mapped_column(Text)
     queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AgentGitHubMode(Base):

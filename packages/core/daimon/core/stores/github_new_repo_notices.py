@@ -2,14 +2,87 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 from typing import cast
 
 from daimon.core._models import GitHubNewRepoNotice, TenantGitHubRepo
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+class NewRepoNotice(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+    tenant_id: uuid.UUID
+    installation_id: int
+    repo_full_name: str
+    claimed_at: datetime
+
+
+async def claim_next_notice(
+    session: AsyncSession, *, tenant_id: uuid.UUID, now: datetime
+) -> NewRepoNotice | None:
+    """Lease one undelivered card. A failed post can release it immediately."""
+    row = await session.scalar(
+        select(GitHubNewRepoNotice)
+        .where(
+            GitHubNewRepoNotice.tenant_id == tenant_id,
+            GitHubNewRepoNotice.delivered_at.is_(None),
+            GitHubNewRepoNotice.dismissed_at.is_(None),
+            (
+                GitHubNewRepoNotice.claimed_at.is_(None)
+                | (GitHubNewRepoNotice.claimed_at < now - timedelta(minutes=10))
+            ),
+        )
+        .order_by(GitHubNewRepoNotice.queued_at)
+        .with_for_update(skip_locked=True)
+        .limit(1)
+    )
+    if row is None:
+        return None
+    row.claimed_at = now
+    await session.flush()
+    return NewRepoNotice.model_validate(row)
+
+
+async def finish_notice(
+    session: AsyncSession, *, notice: NewRepoNotice, delivered: bool, now: datetime
+) -> bool:
+    row = await session.get(
+        GitHubNewRepoNotice,
+        (notice.tenant_id, notice.installation_id, notice.repo_full_name),
+        with_for_update=True,
+    )
+    if row is None or row.claimed_at != notice.claimed_at:
+        return False
+    row.claimed_at = None
+    if delivered:
+        row.delivered_at = now
+    await session.flush()
+    return True
+
+
+async def dismiss_notice(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    installation_id: int,
+    repo_full_name: str,
+    now: datetime,
+) -> bool:
+    row = await session.get(
+        GitHubNewRepoNotice,
+        (tenant_id, installation_id, repo_full_name),
+        with_for_update=True,
+    )
+    if row is None or row.dismissed_at is not None:
+        return False
+    row.dismissed_at = now
+    await session.flush()
+    return True
 
 
 async def queue_new_repos(

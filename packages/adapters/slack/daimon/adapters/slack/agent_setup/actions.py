@@ -67,6 +67,7 @@ from daimon.adapters.slack.agent_policy import (
     refuse_unless_allowed_for_agent_name,
     refuse_unless_pin_allows,
 )
+from daimon.adapters.slack.agent_setup import github_repos as github_repos_view
 from daimon.adapters.slack.agent_setup import panel_views
 from daimon.adapters.slack.agent_setup.channel_environment import (
     ENVIRONMENT_NEED_ADMIN_MESSAGE,
@@ -79,6 +80,8 @@ from daimon.adapters.slack.agent_setup.coding_tools import (
     handle_coding_tools_click,
     handle_revoke_token_click,
 )
+from daimon.adapters.slack.agent_setup.github_new_repo import send_pending_notice
+from daimon.adapters.slack.agent_setup.github_repos_actions import handle as handle_github_repos
 from daimon.adapters.slack.agent_setup.panel_views import (
     build_agents_view,
     build_details_view,
@@ -118,6 +121,7 @@ from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
+from daimon.core.github_panel import CONNECT_COPY, connect_link
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
@@ -236,6 +240,10 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
                 routed_agent_names=routed_agent_names(answering_map),
             ),
         )
+        if is_admin:
+            await send_pending_notice(
+                runtime, client, team_id=team_id, channel_id=channel_id, user_id=user_id
+            )
 
     except (
         DaimonError,
@@ -286,6 +294,16 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         panel_views.ACTION_EXPAND_SKILLS,
         panel_views.ACTION_EXPAND_CONNECTIONS,
         panel_views.ACTION_NEW,
+        panel_views.ACTION_GITHUB_CONNECT,
+        github_repos_view.ACTION_OPEN,
+        github_repos_view.ACTION_SELECT,
+        github_repos_view.ACTION_STAGE,
+        github_repos_view.ACTION_REMOVE,
+        github_repos_view.ACTION_SWITCH,
+        github_repos_view.ACTION_ACTIVATE,
+        github_repos_view.ACTION_DEACTIVATE,
+        github_repos_view.ACTION_PREVIOUS,
+        github_repos_view.ACTION_NEXT,
         panel_views.ACTION_CODING_TOOLS,
         panel_views.ACTION_ADD_SKILL,
         panel_views.ACTION_REVOKE_TOKEN,
@@ -632,6 +650,51 @@ async def _dispatch_panel_action(
     view_hash: str = str(view_info.get("hash") or "")
     trigger_id: str = str(payload.get("trigger_id") or "")
     is_admin = await resolve_is_admin(client, user_id=user_id)
+
+    if await handle_github_repos(
+        runtime,
+        client,
+        payload,
+        action=action,
+        meta=meta,
+        team_id=team_id,
+        user_id=user_id,
+    ):
+        return
+
+    if action_id == panel_views.ACTION_GITHUB_CONNECT:
+        if not is_admin:
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text="Only a workspace admin can connect GitHub.",
+            )
+            return
+        try:
+            async with runtime.sessionmaker.begin() as session:
+                url = await connect_link(
+                    session,
+                    settings=runtime.settings,
+                    tenant_id=tenant_id,
+                    platform="slack",
+                    platform_user_id=user_id,
+                )
+        except ValueError:
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text="GitHub connection is unavailable. Ask a workspace admin to check setup.",
+            )
+            return
+        await post_ephemeral(
+            client,
+            channel_id=meta.channel_id or user_id,
+            user_id=user_id,
+            text=f"{CONNECT_COPY}\n<{url}|Open GitHub>",
+        )
+        return
 
     if action_id == panel_views.ACTION_DETAILS:
         agent_name = str(action.get("value") or "")

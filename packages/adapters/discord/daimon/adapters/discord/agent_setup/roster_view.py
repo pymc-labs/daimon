@@ -34,6 +34,8 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
+from daimon.core.github_panel import CONNECT_COPY, connect_link, connect_root
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.roster import Page, RosterAgent, paginate
 from daimon.core.scope import ChannelConfigRow, ConfigTier, DeploymentDefault, TenantConfigRow
 from daimon.core.scope import answering_places as core_answering_places
@@ -229,6 +231,12 @@ class RosterView(PanelViewBase):
         )
         routing_button.callback = self._on_routing  # type: ignore[method-assign]  # per-instance callback
         navigation.add_item(routing_button)
+        if state.is_admin and connect_root(runtime.settings) is not None:
+            connect_button: discord.ui.Button[RosterView] = discord.ui.Button(
+                label="Connect GitHub", style=discord.ButtonStyle.secondary
+            )
+            connect_button.callback = self._on_connect_github  # type: ignore[method-assign]
+            navigation.add_item(connect_button)
         navigation.add_item(self.done_button())
         container.add_item(navigation)  # pyright: ignore[reportArgumentType]  # ActionRow[Self] is the same runtime item
 
@@ -237,6 +245,36 @@ class RosterView(PanelViewBase):
             container.add_item(pager)  # pyright: ignore[reportArgumentType]  # ActionRow[Self] is the same runtime item
 
         self.add_item(container)
+
+    async def _on_connect_github(self, interaction: discord.Interaction) -> None:
+        from daimon.adapters.discord.checks import is_guild_admin
+
+        if interaction.guild_id != self.state.guild_id or not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+            await interaction.response.send_message(
+                "Only a server admin can connect GitHub.", ephemeral=True
+            )
+            return
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
+        try:
+            async with self.runtime.sessionmaker.begin() as session:
+                url = await connect_link(
+                    session,
+                    settings=self.runtime.settings,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    platform_user_id=str(interaction.user.id),
+                )
+        except ValueError:
+            await interaction.response.send_message(
+                "GitHub connection is unavailable. Ask a server admin to check setup.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            f"{CONNECT_COPY}\n{url}",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     def _attach_details_callbacks(
         self, container: discord.ui.Container[discord.ui.LayoutView], page: Page[RosterRow]

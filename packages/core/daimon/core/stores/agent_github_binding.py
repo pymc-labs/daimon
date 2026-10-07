@@ -80,6 +80,15 @@ async def delete_for_principal(
     return rowcount
 
 
+async def delete_for_agent(session: AsyncSession, *, agent_id: uuid.UUID) -> int:
+    """Retire one agent's PAT overlay without changing another agent's binding."""
+    result = await session.execute(
+        delete(AgentGithubBinding).where(AgentGithubBinding.agent_id == agent_id)
+    )
+    await session.flush()
+    return cast(CursorResult[Any], result).rowcount
+
+
 async def count_for_principal(
     session: AsyncSession,
     *,

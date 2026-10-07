@@ -120,6 +120,8 @@ ACTION_EXPAND_KEYS: Final = "agent_setup__expand:keys"
 ACTION_EXPAND_SKILLS: Final = "agent_setup__expand:skills"
 ACTION_EXPAND_CONNECTIONS: Final = "agent_setup__expand:connections"
 ACTION_NEW: Final = "agent_setup__new"
+ACTION_GITHUB_CONNECT: Final = "agent_setup__github_connect"
+ACTION_GITHUB_REPOS: Final = "agent_setup__github_repos"
 ACTION_CHANNEL_ADMINS: Final = "agent_setup__channel_admins"
 ACTION_CHANNEL_SKILLS: Final = "agent_setup__channel_skills"
 """Open the form naming this channel's admins. Workspace admins only."""
@@ -382,7 +384,7 @@ def build_agents_view(
     channel" from "answers nowhere", and the panel must not guess: without it
     a row carries no routing claim at all.
     """
-    del is_admin, attributions
+    del attributions
     blocks: list[dict[str, Any]] = [_section(f"*Agents in <#{escape_mrkdwn(channel_id)}>*")]
     answering = roster.answering
     if not roster.rows:
@@ -411,6 +413,8 @@ def build_agents_view(
     )
     elements.append(_button(action_id=ACTION_NEW, label=NEW_AGENT_LABEL))
     elements.append(_button(action_id=ACTION_ROUTING, label=ROUTING_LABEL))
+    if is_admin:
+        elements.append(_button(action_id=ACTION_GITHUB_CONNECT, label="Connect GitHub"))
     blocks.append({"type": "actions", "elements": elements})
     blocks.extend(_pager_blocks(page, meta=meta))
     return finish_modal(
@@ -487,7 +491,10 @@ def build_details_view(
     blocks.append(_section(f"*Model:* {escape_mrkdwn(details.model_display_name)}"))
     blocks.extend(_repo_blocks(details))
     blocks.extend(_detail_list_blocks(details, meta=meta))
-    actions = [_button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name)]
+    actions = [
+        _button(action_id=ACTION_GITHUB_REPOS, label="GitHub repos", value=details.name),
+        _button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name),
+    ]
     if coding_tools_available:
         actions.insert(
             0,

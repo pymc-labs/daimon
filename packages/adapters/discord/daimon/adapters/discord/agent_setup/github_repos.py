@@ -1,0 +1,366 @@
+"""GitHub repository grants inside the Discord agent setup panel."""
+
+from __future__ import annotations
+
+import uuid
+from typing import Literal, cast
+
+from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
+from daimon.adapters.discord.agent_setup.state import PanelState
+from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
+from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_reach import load_target_facts
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.github_panel import (
+    GrantsPanel,
+    activate_grants,
+    load_grants_panel,
+    remove_panel_grant,
+    stage_panel_grant,
+)
+from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
+from daimon.core.operation_policy import TargetFacts, decide_operation
+from daimon.core.roster import RosterAgent
+from daimon.core.stores.accounts import get_account
+from daimon.core.stores.github_access import deactivate_agent
+
+import discord
+
+
+class GitHubReposView(PanelViewBase):
+    """One agent's connected repos, with each write checked against live policy."""
+
+    def __init__(
+        self,
+        state: PanelState,
+        *,
+        runtime: DiscordRuntime,
+        allowed_user_id: int,
+        agent: RosterAgent,
+        panel: GrantsPanel,
+        page: int = 0,
+    ) -> None:
+        super().__init__(state, runtime=runtime, allowed_user_id=allowed_user_id)
+        self.agent = agent
+        self.panel = panel
+        self.page = page
+        start = (page // 20) * 20
+        self.repo_id = panel.repos[page].repo_id if page < len(panel.repos) else None
+        container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
+        container.add_item(discord.ui.TextDisplay(panel.text(agent.name, page=start // 20)))
+        if panel.repos:
+            options = [
+                discord.SelectOption(
+                    label=repo.full_name[:100],
+                    value=str(repo.repo_id),
+                    default=repo.repo_id == self.repo_id,
+                )
+                for repo in panel.repos[start : start + 20]
+            ]
+            select: discord.ui.Select[GitHubReposView] = discord.ui.Select(
+                placeholder="Choose a repo", options=options
+            )
+            select.callback = self._on_select  # type: ignore[method-assign]
+            container.add_item(discord.ui.ActionRow(select))
+            baseline: discord.ui.ActionRow[GitHubReposView] = discord.ui.ActionRow()
+            for level in ("none", "read", "write"):
+                button: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                    label=f"Baseline {level}", style=discord.ButtonStyle.secondary
+                )
+                button.callback = self._setter("baseline", level)  # type: ignore[method-assign]
+                baseline.add_item(button)
+            container.add_item(baseline)
+            ceiling: discord.ui.ActionRow[GitHubReposView] = discord.ui.ActionRow()
+            for level in ("read", "write"):
+                button = discord.ui.Button(
+                    label=f"Ceiling {level}", style=discord.ButtonStyle.secondary
+                )
+                button.callback = self._setter("ceiling", level)  # type: ignore[method-assign]
+                ceiling.add_item(button)
+            remove: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                label="Remove grant", style=discord.ButtonStyle.danger
+            )
+            remove.callback = self._on_remove  # type: ignore[method-assign]
+            ceiling.add_item(remove)
+            container.add_item(ceiling)
+            if len(panel.repos) > 20:
+                paging: discord.ui.ActionRow[GitHubReposView] = discord.ui.ActionRow()
+                previous: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                    label="Previous repos",
+                    style=discord.ButtonStyle.secondary,
+                    disabled=start == 0,
+                )
+                previous.callback = self._on_previous  # type: ignore[method-assign]
+                following: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                    label="Next repos",
+                    style=discord.ButtonStyle.secondary,
+                    disabled=start + 20 >= len(panel.repos),
+                )
+                following.callback = self._on_next  # type: ignore[method-assign]
+                paging.add_item(previous)
+                paging.add_item(following)
+                container.add_item(paging)
+        actions: discord.ui.ActionRow[GitHubReposView] = discord.ui.ActionRow()
+        if panel.mode == "legacy":
+            if panel.has_pat:
+                switch: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                    label="Switch to GitHub App", style=discord.ButtonStyle.primary
+                )
+                switch.callback = self._on_switch  # type: ignore[method-assign]
+                actions.add_item(switch)
+            activate: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                label="Activate", style=discord.ButtonStyle.primary
+            )
+            activate.callback = self._on_activate  # type: ignore[method-assign]
+            actions.add_item(activate)
+        else:
+            if panel.has_pending:
+                activate: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                    label="Activate", style=discord.ButtonStyle.primary
+                )
+                activate.callback = self._on_activate  # type: ignore[method-assign]
+                actions.add_item(activate)
+            deactivate: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                label="Deactivate", style=discord.ButtonStyle.danger
+            )
+            deactivate.callback = self._on_deactivate  # type: ignore[method-assign]
+            actions.add_item(deactivate)
+        back: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+            label="Back", style=discord.ButtonStyle.secondary
+        )
+        back.callback = self._on_back  # type: ignore[method-assign]
+        actions.add_item(back)
+        container.add_item(actions)
+        self.add_item(container)
+
+    def _ids(self) -> tuple[uuid.UUID, uuid.UUID]:
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(self.state.guild_id))
+        return tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=self.agent.ma_agent_id)
+
+    async def _allowed(self, interaction: discord.Interaction) -> bool:
+        await interaction.response.defer()
+        if interaction.guild_id != self.state.guild_id:
+            return False
+        tenant_id, agent_id = self._ids()
+        live_agent = await find_agent_by_derived_uuid(
+            self.runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+        )
+        if live_agent is None:
+            return False
+        managed = live_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+        admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+        async with self.runtime.sessionmaker() as session:
+            account = await get_account(session, self.state.account_id)
+            if account is None or account.is_external or account.tenant_id != tenant_id:
+                return False
+            caller = channel_admin_caller(interaction.user).model_copy(
+                update={"is_server_admin": admin}
+            )
+            facts = (
+                await load_target_facts(
+                    session,
+                    "github_grant",
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    agent_names=(self.agent.name, live_agent.name),
+                    ma_agent_id=str(live_agent.id),
+                    default=self.runtime.deployment_default,
+                    caller=caller,
+                    is_daimon_managed=managed,
+                    caller_platform_user_id=str(interaction.user.id),
+                )
+                if not admin
+                else TargetFacts(is_daimon_managed=managed, is_reachable_in_tenant=False)
+            )
+        return decide_operation("github_grant", is_admin=admin, target=facts) == "allow"
+
+    async def _refresh_panel(self, interaction: discord.Interaction) -> None:
+        tenant_id, agent_id = self._ids()
+        async with self.runtime.sessionmaker() as session:
+            panel = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
+        await self.swap_to(
+            interaction,
+            GitHubReposView(
+                self.state,
+                runtime=self.runtime,
+                allowed_user_id=self.allowed_user_id,
+                agent=self.agent,
+                panel=panel,
+                page=self.page,
+            ),
+        )
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        selected = next(
+            (item for item in self.walk_children() if isinstance(item, discord.ui.Select)), None
+        )
+        if selected is None or not selected.values:
+            return
+        repo_id = int(selected.values[0])
+        self.page = next(
+            (i for i, repo in enumerate(self.panel.repos) if repo.repo_id == repo_id), 0
+        )
+        await self._refresh_panel(interaction)
+
+    async def _on_previous(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        self.page = max(0, (self.page // 20 - 1) * 20)
+        await self._refresh_panel(interaction)
+
+    async def _on_next(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        self.page = min(len(self.panel.repos) - 1, (self.page // 20 + 1) * 20)
+        await self._refresh_panel(interaction)
+
+    def _setter(
+        self, field: Literal["baseline", "ceiling"], level: Literal["none", "read", "write"]
+    ):
+        async def callback(interaction: discord.Interaction) -> None:
+            if not await self._allowed(interaction):
+                await interaction.followup.send(
+                    "You cannot change this agent's GitHub repos.", ephemeral=True
+                )
+                return
+            if self.repo_id is None:
+                return
+            repo = self.panel.repos[self.page]
+            baseline = level if field == "baseline" else (repo.baseline or "none")
+            ceiling = level if field == "ceiling" else (repo.ceiling or repo.max_access)
+            if field == "baseline" and baseline == "write" and ceiling == "read":
+                ceiling = "write"
+            if field == "ceiling" and ceiling == "read" and baseline == "write":
+                baseline = "read"
+            tenant_id, agent_id = self._ids()
+            try:
+                async with self.runtime.sessionmaker.begin() as session:
+                    await stage_panel_grant(
+                        session,
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        repo_id=repo.repo_id,
+                        baseline_access=baseline,
+                        ceiling_access=cast(Literal["read", "write"], ceiling),
+                        account_id=self.state.account_id,
+                        is_working_repo=repo.working
+                        or (
+                            self.panel.working_repo is not None
+                            and repo.full_name.casefold() == self.panel.working_repo.casefold()
+                        ),
+                    )
+            except ValueError as error:
+                await interaction.followup.send(str(error), ephemeral=True)
+                return
+            await self._refresh_panel(interaction)
+
+        return callback
+
+    async def _on_remove(self, interaction: discord.Interaction) -> None:
+        if not await self._allowed(interaction):
+            await interaction.followup.send(
+                "You cannot change this agent's GitHub repos.", ephemeral=True
+            )
+            return
+        if self.repo_id is None:
+            return
+        tenant_id, agent_id = self._ids()
+        async with self.runtime.sessionmaker.begin() as session:
+            await remove_panel_grant(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=self.repo_id,
+                account_id=self.state.account_id,
+            )
+        await self._refresh_panel(interaction)
+
+    async def _on_switch(self, interaction: discord.Interaction) -> None:
+        if not await self._allowed(interaction):
+            await interaction.followup.send(
+                "You cannot change this agent's GitHub repos.", ephemeral=True
+            )
+            return
+        working = next(
+            (
+                r
+                for r in self.panel.repos
+                if self.panel.working_repo
+                and r.full_name.casefold() == self.panel.working_repo.casefold()
+            ),
+            None,
+        )
+        if working is None:
+            await interaction.followup.send("Connect the working repo first.", ephemeral=True)
+            return
+        if working.max_access != "write":
+            await interaction.followup.send("The working repo needs write access.", ephemeral=True)
+            return
+        tenant_id, agent_id = self._ids()
+        async with self.runtime.sessionmaker.begin() as session:
+            await stage_panel_grant(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=working.repo_id,
+                baseline_access="write",
+                ceiling_access="write",
+                account_id=self.state.account_id,
+                is_working_repo=True,
+            )
+        await self._refresh_panel(interaction)
+
+    async def _on_activate(self, interaction: discord.Interaction) -> None:
+        if not await self._allowed(interaction):
+            await interaction.followup.send(
+                "You cannot change this agent's GitHub repos.", ephemeral=True
+            )
+            return
+        tenant_id, agent_id = self._ids()
+        try:
+            async with self.runtime.sessionmaker.begin() as session:
+                removed_pat = await activate_grants(
+                    session,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    account_id=self.state.account_id,
+                )
+        except ValueError as error:
+            await interaction.followup.send(str(error), ephemeral=True)
+            return
+        await self._refresh_panel(interaction)
+        if removed_pat:
+            await interaction.followup.send(
+                "GitHub App active. Live sessions restart on the next turn "
+                "because they held a token.",
+                ephemeral=True,
+            )
+
+    async def _on_deactivate(self, interaction: discord.Interaction) -> None:
+        if not await self._allowed(interaction):
+            await interaction.followup.send(
+                "You cannot change this agent's GitHub repos.", ephemeral=True
+            )
+            return
+        tenant_id, agent_id = self._ids()
+        async with self.runtime.sessionmaker.begin() as session:
+            await deactivate_agent(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                changed_by_account_id=self.state.account_id,
+            )
+        await self._refresh_panel(interaction)
+
+    async def _on_back(self, interaction: discord.Interaction) -> None:
+        from daimon.adapters.discord.agent_setup.details_view import DetailsView
+
+        await self.swap_to(
+            interaction,
+            DetailsView(
+                self.state,
+                runtime=self.runtime,
+                allowed_user_id=self.allowed_user_id,
+                agent=self.agent,
+            ),
+        )

@@ -45,6 +45,7 @@ PanelViewName = Literal[
     "new_agent",
     "creating",
     "add_skill",
+    "github_repos",
 ]
 """Which of the panel's screens a view is showing."""
 
@@ -62,6 +63,7 @@ _PANEL_VIEW_NAMES: Final[frozenset[str]] = frozenset(
         "new_agent",
         "creating",
         "add_skill",
+        "github_repos",
     }
 )
 _PANEL_EXPANSIONS: Final[tuple[PanelExpansion, ...]] = ("keys", "skills", "connections")
@@ -88,6 +90,7 @@ class PanelMetadata:
     root_view_id: str | None = None
     expanded: PanelExpansion | None = None
     skill_hash: str | None = None
+    repo_id: int | None = None
     """On the Add skill form, the hash of the skill it last previewed."""
 
     def with_page(self, page: int) -> PanelMetadata:
@@ -118,6 +121,7 @@ class PanelMetadata:
             root_view_id=root_view_id,
             expanded=self.expanded if agent_name == self.agent_name else None,
             skill_hash=None,
+            repo_id=None,
         )
 
     def toggled(self, expansion: PanelExpansion) -> PanelMetadata:
@@ -143,6 +147,8 @@ def encode_panel_metadata(meta: PanelMetadata) -> str:
         payload["x"] = meta.expanded
     if meta.skill_hash is not None:
         payload["h"] = meta.skill_hash
+    if meta.repo_id is not None:
+        payload["g"] = meta.repo_id
     encoded = json.dumps(payload, separators=(",", ":"))
     if len(encoded) > MAX_PRIVATE_METADATA_CHARS:
         raise ValueError(
@@ -198,6 +204,11 @@ def decode_panel_metadata(raw: str) -> PanelMetadata | None:
     skill_hash = payload.get("h")
     if skill_hash is not None and not isinstance(skill_hash, str):
         return None
+    repo_id = payload.get("g")
+    if repo_id is not None and (
+        not isinstance(repo_id, int) or isinstance(repo_id, bool) or repo_id < 1
+    ):
+        return None
     return PanelMetadata(
         team_id=team_id,
         channel_id=channel_id,
@@ -207,6 +218,7 @@ def decode_panel_metadata(raw: str) -> PanelMetadata | None:
         root_view_id=root_view_id,
         expanded=expanded,
         skill_hash=skill_hash,
+        repo_id=repo_id,
     )
 
 

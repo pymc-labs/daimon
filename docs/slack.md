@@ -137,6 +137,12 @@ Trust model notes for operators:
 
 Existing Slack apps must update **Event Subscriptions → Subscribe to bot events** to match `docs/slack-app-manifest.yaml`, including `message.channels`, `message.groups`, channel/group archive, unarchive, and deletion events. These subscriptions track setup lifecycle only; messages still trigger conversation only through `app_mention`. An `app_mention` runs a turn only when the message actually contains `@daimon`, so follow-ups in a thread need the mention too; Slack has been reported to deliver the event for un-mentioned thread replies, and those are dropped. Root deletion is delivered as the [`message_deleted` message subtype](https://docs.slack.dev/reference/events/message/message_deleted/).
 
+Workspace admins can click **Connect GitHub** in `/agent-setup`; the private
+link opens GitHub to confirm repos. Each agent's Details view has **GitHub repos**
+for staged grants and Activate or Deactivate. New installation repos appear as
+private Connect or Dismiss cards when an admin next opens setup. This uses the
+existing `/agent-setup` command, so no Slack manifest change is needed.
+
 Completion notifications can be enabled per tenant with `DAIMON_COMPLETION_PINGS`
 (see [architecture](architecture.md#completion-signals)). Enabled turns post their
 final answer as a fresh thread reply and mention only the requester. Trigger

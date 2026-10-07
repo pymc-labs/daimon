@@ -172,19 +172,28 @@ are mounted only when these values and `DAIMON_MCP__PUBLIC_URL` are present.
 The scheduler removes expired connection flows, including their encrypted
 tokens. Run it alongside the MCP service.
 
-A deployment operator can print a seven-day, single-use invitation with
-`daimon github connect-link --tenant <workspace-uuid> --requester <platform-user-id>`.
-The invitation is minted on that workspace admin's behalf. The recipient signs in
-to GitHub and confirms the repositories they administer. No repository is
-preselected.
+Open `/agent-setup` in Discord or Slack as a server or workspace admin and click
+**Connect GitHub**. Discord also offers `/github connect`. The private link
+opens GitHub; the recipient signs in and confirms the repos they administer.
+Nothing is shared with agents until that confirmation. The ordinary connection
+page preselects no repo. A private new-repo card can preselect one repo, which
+still needs explicit confirmation and GitHub admin proof.
 The confirmation page has **Select all repos you administer** for bulk selection;
 each selected repository still requires a fresh GitHub admin check at confirmation.
 
-Agents remain in legacy GitHub mode until a server admin stages grants with
+Open an agent's **GitHub repos** panel to choose connected repos, set each
+baseline and ceiling, then **Activate**. For an agent using a per-agent PAT,
+**Switch to GitHub App** stages write access to its working repo; review the
+other grants before Activate. Activation deletes that PAT and its GitHub env
+keys, and live sessions restart on their next turn.
+
+The CLI remains an operator fallback. Agents remain in legacy GitHub mode until
+an admin stages grants with
 `daimon github grants stage --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id> --baseline read --ceiling read`
 and runs `daimon github grants activate --tenant <workspace-uuid> --agent <agent-uuid>`.
 Use `grants list`, `remove`, and `deactivate` with the same tenant and agent options.
-While app mode is active, `grants stage` updates access immediately. Existing
+While app mode is active, the panel keeps grant changes staged until Activate;
+the CLI `grants stage` updates access immediately. Existing
 sessions rotate tokens in place when the repository set is unchanged; a changed
 repository set closes the sessions so the next turn mounts the new checkouts.
 

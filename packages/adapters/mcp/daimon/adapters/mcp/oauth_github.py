@@ -369,8 +369,15 @@ def build_oauth_github_routes(
                 continue
             parts.append(f"<h2>{html.escape(installation.owner_login)}</h2>")
             for repo in admin_repos:
+                selected = (
+                    " checked"
+                    if invitation.preselected_repo_full_name is not None
+                    and repo.full_name.casefold()
+                    == invitation.preselected_repo_full_name.casefold()
+                    else ""
+                )
                 parts.append(
-                    f'<label><input type="checkbox" name="repo" value="{repo.id}">'
+                    f'<label><input type="checkbox" name="repo" value="{repo.id}"{selected}>'
                     f"{html.escape(repo.full_name)}</label>"
                     f'<select name="access_{repo.id}">{access_options}</select><br>'
                 )

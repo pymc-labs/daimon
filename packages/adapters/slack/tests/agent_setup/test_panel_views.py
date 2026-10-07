@@ -333,7 +333,7 @@ def test_agents_view_when_agent_answers_here_lists_it_first_then_stable_name_ord
     )
 
 
-def test_agents_view_when_member_has_same_blocks_as_admin() -> None:
+def test_agents_view_connect_github_is_admin_only() -> None:
     answering = _roster_agent("research-bot", created_by_account_id=_MAKER)
     roster = _roster(answering, _roster_agent("churn-explorer"), answering=answering)
     shared: dict[str, Any] = {
@@ -344,9 +344,10 @@ def test_agents_view_when_member_has_same_blocks_as_admin() -> None:
     }
     admin_view = build_agents_view(roster, is_admin=True, **shared)
     member_view = build_agents_view(roster, is_admin=False, **shared)
-    assert admin_view == member_view, (
-        "the roster is orientation, not permission — both roles see the same view"
-    )
+    admin_actions = admin_view["blocks"][-1]["elements"]
+    assert admin_actions[-1]["action_id"] == "agent_setup__github_connect"
+    admin_actions.pop()
+    assert admin_view == member_view
 
 
 def test_agents_view_when_roster_empty_shows_empty_state_and_setup_action() -> None:

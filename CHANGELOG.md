@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Slack turn messages now carry the answering agent's name and avatar. Built-in Daimon retains the app identity. Existing installs without `chat:write.customize` fall back to the bot header until reinstalled. Turn posts are recorded for agent ownership checks.
 - **Agents choose how long a notebook link lasts.** `create_notebook_upload_url` takes `ttl_days`, 1 to 365, default 1, for a read-only scratch notebook; the upload response and `list_notebooks` report `expires_at`. A blog is still kept until it is deleted, and the editor still lasts the host's `subprocess_ttl_seconds`. Read-only notebooks and blogs now survive notebook-host restarts and deploys. The host starts one when someone opens its link and stops it after two hours without a visit (`DAIMON_NOTEBOOK__WARM_WINDOW_SECONDS`), so a link that has been quiet takes a few seconds to load. The host caps lifetimes with `DAIMON_NOTEBOOK__MAX_NOTEBOOK_TTL_SECONDS` (365 days). Re-uploading a blog without `permanent` keeps it a blog.
+- Discord and Slack agent setup now offer private GitHub connection links and
+  per-agent repository grants. Admins can stage grants, activate or deactivate
+  App access, and switch a PAT-backed agent after connecting its working repo.
+  New installation repos appear in a private Connect or Dismiss card.
+
 - **Slack 👎 asks what went wrong, every time.** The form opens as soon as 👎 is clicked, with optional reasons (wrong or inaccurate, didn't do what I asked, incomplete or cut off, too slow, something else) and optional text. A repeat 👎 opens it again so details can be added later. If Slack doesn't open the form, the person gets a private button that does. Reasons are stored on the feedback row (`message_feedback.feedback_reasons`), next to the text. Only people who could start a turn there can vote.
 - GitHub App grants can be staged and activated per agent. App sessions use per-turn repository tokens and a session-owned vault; legacy agents retain their existing GitHub path. The GitHub connection page offers Select all for repos the confirmer administers, and the default environment includes `gh`.
 

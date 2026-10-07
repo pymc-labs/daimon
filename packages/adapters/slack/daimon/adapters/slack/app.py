@@ -1080,6 +1080,10 @@ class SlackApp:
                     self._spawn(handle_privacy_block_action(self.runtime, payload))
                 elif action_id.startswith("agent_setup__"):
                     self._spawn(handle_agent_setup_action(self.runtime, payload))
+                elif action_id.startswith("github_new_repo__"):
+                    from daimon.adapters.slack.agent_setup.github_new_repo import handle_action
+
+                    self._spawn(handle_action(self.runtime, payload))
                 elif action_id == SLACK_CREDENTIAL_ACTION_ID:
                     self._spawn(handle_credential_request_click(self.runtime, payload))
                 elif action_id.startswith("feedback_vote:"):
