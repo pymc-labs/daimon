@@ -701,3 +701,17 @@ async def test_a_top_level_answer_in_a_dm_offers_the_form_for_that_answer(
         "message_ts": "1.5",
         "thread_ts": "1.5",
     }
+
+
+def test_support_modal_note_input_stays_within_slack_input_limit() -> None:
+    """Slack refuses the whole view (`invalid_arguments`) when an input's
+    `max_length` is above 3,000, so the note form would never open."""
+    view = slack_support.build_support_modal(
+        channel_id="C1", message_ts="1.2", thread_ts="1.0", remaining=3, sealed=True
+    )
+    lengths = [
+        b["element"]["max_length"]
+        for b in view["blocks"]
+        if b["type"] == "input" and b["element"]["type"] == "plain_text_input"
+    ]
+    assert lengths and all(1 <= n <= 3000 for n in lengths)

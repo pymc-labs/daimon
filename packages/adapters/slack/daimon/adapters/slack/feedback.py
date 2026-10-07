@@ -47,6 +47,7 @@ from daimon.adapters.slack.click_replies import (
 )
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
+from daimon.adapters.slack.modal_limits import MAX_PLAIN_TEXT_INPUT_CHARS
 from daimon.adapters.slack.place_access import check_place_access
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -196,7 +197,7 @@ def build_feedback_modal(*, channel_id: str, message_ts: str, thread_ts: str) ->
                     "type": "plain_text_input",
                     "action_id": _TEXT_INPUT_ID,
                     "multiline": True,
-                    "max_length": 4000,
+                    "max_length": MAX_PLAIN_TEXT_INPUT_CHARS,
                 },
             },
         ],

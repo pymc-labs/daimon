@@ -61,6 +61,7 @@ from daimon.adapters.slack.click_replies import (
 )
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
+from daimon.adapters.slack.modal_limits import MAX_PLAIN_TEXT_INPUT_CHARS
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.place_access import (
     check_place_access,
@@ -186,7 +187,7 @@ def build_support_modal(
                 "type": "plain_text_input",
                 "action_id": _NOTE_INPUT_ID,
                 "multiline": True,
-                "max_length": 4000,
+                "max_length": MAX_PLAIN_TEXT_INPUT_CHARS,
             },
         }
     )
