@@ -323,8 +323,8 @@ async def register_app_session_vault(
     repo_urls: tuple[str, ...] = (),
     repo_resource_ids: dict[str, str] | None = None,
 ) -> None:
-    if is_mcp and (not is_unmapped or agent_id is None):
-        raise ValueError("MCP app vault requires an unmapped session and agent")
+    if is_mcp and (not is_unmapped or agent_id is None or account_id is None):
+        raise ValueError("MCP app vault requires an unmapped session, agent and requester")
     session.add(
         GitHubAppSessionVault(
             session_id=session_id,

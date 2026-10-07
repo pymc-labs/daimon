@@ -37,7 +37,7 @@ from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import RepoAccessProof
 from daimon.core.turn.posture import ExemptReason
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
     FakeMemoryStoreState,
     NotHandled,
@@ -1395,6 +1395,7 @@ async def test_create_session_app_mode_with_zero_grants_has_no_github_access(
     app_session_unmapped: bool,
 ) -> None:
     tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant) if app_session_unmapped else None
     agent_uuid = uuid.uuid4()
     db_session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_uuid, mode="app"))
     await db_session.commit()
@@ -1422,6 +1423,7 @@ async def test_create_session_app_mode_with_zero_grants_has_no_github_access(
         agent=_make_agent(anthropic_id="ag_zero_grants"),
         environment=_make_env(anthropic_id="env_zero_grants"),
         tenant_id=tenant.id,
+        account_id=account.id if account is not None else None,
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
         app_session_unmapped=app_session_unmapped,

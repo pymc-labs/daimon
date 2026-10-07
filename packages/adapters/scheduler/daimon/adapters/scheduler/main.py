@@ -104,6 +104,7 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.github_connect import delete_expired_flows
 from daimon.core.stores.github_issued_tokens import (
+    LiveMcpAppSession,
     closed_app_session_for_id,
     decrypt_issued_token,
     finish_headless_app_session,
@@ -660,6 +661,23 @@ async def _sweep_github_app_tokens(
 _last_app_access_checks: dict[str, datetime] = {}
 
 
+async def _retire_mcp_app_session(
+    anthropic_client: AsyncAnthropic,
+    sm: async_sessionmaker[AsyncSession],
+    item: LiveMcpAppSession,
+    *,
+    fernet: MultiFernet,
+) -> None:
+    await anthropic_client.beta.sessions.archive(item.session_id)
+    async with sm.begin() as session:
+        await finish_headless_app_session(session, session_id=item.session_id)
+    async with httpx.AsyncClient() as github:
+        await revoke_session_tokens(sm, github, session_id=item.session_id, fernet=fernet)
+    await archive_app_vault(anthropic_client, vault_id=item.vault_id)
+    async with sm.begin() as session:
+        await mark_headless_app_session_closed(session, session_id=item.session_id)
+
+
 async def _refresh_github_app_sessions(
     anthropic_client: AsyncAnthropic,
     sm: async_sessionmaker[AsyncSession],
@@ -758,6 +776,9 @@ async def _refresh_github_app_sessions(
                 observed = await anthropic_client.beta.sessions.retrieve(current.session_id)
                 if observed.status != "idle":
                     continue
+                if current.account_id is None:
+                    await _retire_mcp_app_session(anthropic_client, sm, current, fernet=fernet)
+                    continue
                 due_for_expiry = (
                     current.expires_at is None or current.expires_at <= now + timedelta(minutes=15)
                 )
@@ -775,18 +796,7 @@ async def _refresh_github_app_sessions(
                     fernet=fernet,
                 )
                 if desired_urls != current.repo_urls:
-                    await anthropic_client.beta.sessions.archive(current.session_id)
-                    async with sm.begin() as session:
-                        await finish_headless_app_session(session, session_id=current.session_id)
-                    async with httpx.AsyncClient() as github:
-                        await revoke_session_tokens(
-                            sm, github, session_id=current.session_id, fernet=fernet
-                        )
-                    await archive_app_vault(anthropic_client, vault_id=current.vault_id)
-                    async with sm.begin() as session:
-                        await mark_headless_app_session_closed(
-                            session, session_id=current.session_id
-                        )
+                    await _retire_mcp_app_session(anthropic_client, sm, current, fernet=fernet)
                     continue
                 level = {"none": 0, "read": 1, "write": 2}
                 narrowed = any(

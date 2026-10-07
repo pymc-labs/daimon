@@ -45,13 +45,19 @@ from daimon.core.scheduler import run_one_tick
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores import github_issued_tokens, tenant_ledger, tenant_user_caps, usage_events
 from daimon.core.stores import promo_codes as promo_store
+from daimon.core.stores.accounts import delete_account
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.usage_recording import record_turn_usage
 from daimon.testing import ma_model_usage
-from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
+from daimon.testing.factories import (
+    make_account,
+    make_channel_budget,
+    make_ledger_entry,
+    make_tenant,
+)
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -119,6 +125,7 @@ async def test_mcp_app_session_refreshes_before_token_expiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
     agent_id = uuid.uuid4()
     await github_issued_tokens.register_app_session_vault(
         db_session,
@@ -128,6 +135,7 @@ async def test_mcp_app_session_refreshes_before_token_expiry(
         is_unmapped=True,
         is_mcp=True,
         agent_id=agent_id,
+        account_id=account.id,
         repo_urls=("https://github.com/acme/repo",),
         repo_resource_ids={"https://github.com/acme/repo": "res-1"},
     )
@@ -177,6 +185,58 @@ async def test_mcp_app_session_refreshes_before_token_expiry(
     rotate.assert_awaited_once()
     assert rotate.await_args.kwargs["session_id"] == "mcp-refresh"
     assert rotate.await_args.kwargs["resource_ids"] == {"https://github.com/acme/repo": "res-1"}
+
+
+async def test_mcp_app_session_with_erased_requester_is_retired(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await github_issued_tokens.register_app_session_vault(
+        db_session,
+        session_id="mcp-erased-requester",
+        tenant_id=tenant.id,
+        vault_id="mcp-vault",
+        is_unmapped=True,
+        is_mcp=True,
+        agent_id=uuid.uuid4(),
+        account_id=account.id,
+    )
+    await db_session.commit()
+    await delete_account(db_session, account_id=account.id)
+    await db_session.commit()
+    desired = unittest.mock.AsyncMock()
+    revoke = unittest.mock.AsyncMock()
+    monkeypatch.setattr("daimon.adapters.scheduler.main.effective_repo_state", desired)
+    monkeypatch.setattr("daimon.adapters.scheduler.main.revoke_session_tokens", revoke)
+    archive_session = unittest.mock.AsyncMock()
+    archive_vault = unittest.mock.AsyncMock()
+    anthropic = SimpleNamespace(
+        beta=SimpleNamespace(
+            sessions=SimpleNamespace(
+                retrieve=unittest.mock.AsyncMock(return_value=SimpleNamespace(status="idle")),
+                archive=archive_session,
+            ),
+            vaults=SimpleNamespace(archive=archive_vault),
+        )
+    )
+    await _refresh_github_app_sessions(
+        anthropic,
+        db_session_factory,
+        settings=Settings.model_validate(
+            {
+                "database": {"url": "postgresql+asyncpg://localhost/test"},
+                "anthropic": {"api_key": "test"},
+            }
+        ),
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+    )
+    desired.assert_not_awaited()
+    archive_session.assert_awaited_once_with("mcp-erased-requester")
+    archive_vault.assert_awaited_once_with("mcp-vault")
+    revoke.assert_awaited_once()
 
 
 async def test_close_sweep_rechecks_a_stale_unmapped_candidate(
