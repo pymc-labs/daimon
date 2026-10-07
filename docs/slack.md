@@ -200,7 +200,7 @@ Emoji reactions (a :-1: on the message) are not read: that would need the
 
 ### Ask a human
 
-Set `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` to show an **Ask a human** button
+Set `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` to show a **🙋 Ask a human** button
 next to the 👍/👎 buttons on every final answer (and on a tool-only turn's status card). It opens a short form; sending it
 spends one of the person's support requests (`DAIMON_SUPPORT__CREDITS_PER_USER`,
 default 20, counted per person per workspace and shared with Discord's ledger) and

@@ -156,12 +156,17 @@ def build_ask_human_button() -> dict[str, Any]:
 
     Unstyled and unchanging after a click, for the reason the vote buttons
     are: the answer message is shared, so a per-click state would tell the
-    channel who asked for help.
+    channel who asked for help. The 🙋 sits beside the words, as the vote
+    buttons carry theirs.
     """
     return {
         "type": "button",
         "action_id": ASK_HUMAN_ACTION_ID,
-        "text": {"type": "plain_text", "text": "Ask a human"},
+        "text": {
+            "type": "plain_text",
+            "text": "\N{HAPPY PERSON RAISING ONE HAND} Ask a human",
+            "emoji": True,
+        },
     }
 
 
