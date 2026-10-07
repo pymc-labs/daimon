@@ -115,3 +115,25 @@ async def test_list_notebooks_merges_both_kinds_without_duplicating_a_live_blog(
         "the blog record wins over its process-list twin, so title survives the merge"
     )
     assert by_slug["draft"]["permanent"] is False, "an unregistered process is a scratch notebook"
+
+
+async def test_list_notebooks_includes_a_stopped_scratch_notebook_with_its_expiry() -> None:
+    """A read-only scratch notebook is in the host's registry even while stopped."""
+    stopped = f"{_principal_prefix('acct-1')}-draft"
+    expires_at = "2026-11-06T12:00:00+00:00"
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/admin/blogs"):
+            return httpx.Response(
+                200, json={"blogs": [{"slug": stopped, "expires_at": expires_at, "url": None}]}
+            )
+        return httpx.Response(200, json={"notebooks": []})
+
+    async with _make_client(handler) as client:
+        result = await list_notebooks(
+            notebook_settings=_settings(), client=client, principal_key="acct-1"
+        )
+
+    assert [entry["slug"] for entry in result] == ["draft"], "a stopped notebook is still listed"
+    assert result[0]["permanent"] is False, "a registry entry with an expiry is not a blog"
+    assert result[0]["expires_at"] == expires_at, "the caller sees when it will be deleted"

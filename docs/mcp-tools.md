@@ -221,7 +221,7 @@ Notebook MCP tools.
 | --- | --- | --- |
 | `create_attachment_upload_url` | all callers | Mint a one-time upload URL for a raw data file in a notebook/blog workspace. |
 | `create_notebook_upload_url` | all callers | Mint a one-time upload URL for a marimo notebook. |
-| `delete_notebook` | all callers | Un-publish a notebook or blog you published (frees its host port). |
+| `delete_notebook` | all callers | Un-publish a notebook or blog you published (deletes it from the host). |
 | `list_notebooks` | all callers | List what you've published — scratch notebooks and permanent blogs alike. |
 
 ## `promo_codes`

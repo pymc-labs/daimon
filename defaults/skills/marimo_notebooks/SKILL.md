@@ -1,6 +1,6 @@
 ---
 name: marimo_notebooks
-description: Publish interactive marimo notebooks via the daimon MCP server. Mint a one-time upload URL with create_notebook_upload_url, get the .py into a sandbox file, and curl -X PUT --data-binary it to the URL — source never goes through a tool argument, which truncates. permanent=True publishes the same notebook as a read-only shareable blog instead of a scratch one. Also covers attaching data files, list_notebooks and delete_notebook. Use when someone asks for a notebook, dashboard, data explorer, or to publish an analysis as a blog post.
+description: Publish interactive marimo notebooks via the daimon MCP server. Mint a one-time upload URL with create_notebook_upload_url, get the .py into a sandbox file, and curl -X PUT --data-binary it to the URL — source never goes through a tool argument, which truncates. ttl_days (1-365, default 1) sets how long a scratch notebook is kept; permanent=True publishes the same notebook as a read-only shareable blog instead. Also covers attaching data files, list_notebooks and delete_notebook. Use when someone asks for a notebook, dashboard, data explorer, or to publish an analysis as a blog post.
 ---
 
 # marimo_notebooks
@@ -21,13 +21,23 @@ before you build anything.
 
 ## Scratch notebook or permanent blog
 
-One tool publishes both. `create_notebook_upload_url(slug=..., permanent=...)`:
+One tool publishes both. `create_notebook_upload_url(slug=..., permanent=..., ttl_days=...)`:
 
 | | `permanent=False` (default) | `permanent=True` |
 |---|---|---|
 | Shape | a read-only app, source hidden (`editable=True`: the code editor) | a read-only app, source hidden |
-| Lifetime | reaped after the host's TTL | survives host restarts, never reaped |
+| Lifetime | deleted after `ttl_days` (default 1, up to 365); the editor lasts one day | kept until you delete it |
 | Slug | optional; omit for a random one | choose a meaningful, stable name — it is part of the URL |
+
+**Set `ttl_days` to how long the person needs the link.** One day suits a quick
+look. A client review, or a link going into a report or email, needs longer:
+ask or pick a sensible span (14, 30, 90) rather than letting it break a day
+later. Say when the link expires when you share it (`expires_at` in the curl
+response). Re-uploading the same slug restarts its `ttl_days` from now.
+
+Both kinds survive host restarts. The host stops a notebook nobody has opened
+for a couple of hours and starts it again on the next visit, so a link that has
+been quiet can take a few seconds to load. That is expected, not an error.
 
 **Default to `permanent=False`.** Publish the scratch version, let the user look
 at it, and re-upload the *same slug* with `permanent=True` once it is worth
@@ -371,8 +381,8 @@ df = pd.read_csv("data/sales.csv")
 ```
 
 Attachment data lives and dies with its workspace: on a scratch notebook it goes
-when the TTL reap does. If a user expects long-term storage, tell them this isn't
-the right tool.
+when the notebook expires. If a user expects long-term storage, tell them this
+isn't the right tool.
 
 Per-attachment cap is 10 MiB (operator-configurable). Larger files: ask the user
 to subsample or aggregate before sending. Attach and publish share a single
@@ -428,9 +438,10 @@ Real MCMC there must be modest, or the kernel gets killed mid-sample:
 ## Managing what you published
 
 - `list_notebooks()` — everything you published, scratch and permanent. Each
-  entry carries `slug`, `url`, `alive`, and `permanent`.
-- `delete_notebook(slug)` — un-publish and free its host port. Each live
-  notebook holds one port from a finite pool (readers don't each consume one).
+  entry carries `slug`, `url`, `alive`, `permanent` and, for a scratch notebook,
+  `expires_at`. `url` is null while a notebook is stopped; its link still works.
+- `delete_notebook(slug)` — un-publish it and delete its files from the host.
+  Delete what nobody needs rather than leaving a long `ttl_days` to run out.
 
 The `slug` these report is the **bare** name — the same one you pass to
 `create_notebook_upload_url`. Pass it straight back to `delete_notebook`; don't
