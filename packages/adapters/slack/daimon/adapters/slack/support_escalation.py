@@ -54,6 +54,8 @@ from typing import Any, Final, cast
 import structlog
 from daimon.adapters.slack.channel_admin_groups import user_group_members
 from daimon.adapters.slack.click_replies import (
+    CLICK_REPLY_ERRORS,
+    error_name,
     notice_modal,
     open_modal,
     post_ephemeral,
@@ -94,8 +96,8 @@ from daimon.core.support_escalation import (
     remaining_credits,
 )
 from daimon.core.support_routing import support_recipient_tiers
-from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
@@ -124,6 +126,7 @@ POLICY_UNREADABLE: Final = (
     "This workspace's access policy could not be read, so nothing was sent. "
     "Ask an admin to check it."
 )
+CHECK_FAILED: Final = "Something went wrong checking that. Nothing was spent; try again."
 FORM_DID_NOT_OPEN: Final = (
     "Slack didn't open the form in time. Click *Ask a human* again; nothing was spent."
 )
@@ -272,6 +275,64 @@ def evaluate_support_submission(payload: dict[str, Any]) -> SupportSubmission:
     return dataclasses.replace(base, proceed=True, note=note)
 
 
+async def _decide_click(
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    *,
+    team_id: str,
+    user_id: str,
+    channel_id: str,
+    message_ts: str,
+    thread_ts: str,
+) -> dict[str, Any] | str:
+    """The note form for this click, or the text saying why there is none."""
+    support = runtime.settings.support
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    async with runtime.sessionmaker() as session:
+        tenant = await get_tenant(session, tenant_id)
+    if tenant is None or tenant.archived_at is not None:
+        log.info("support.tenant_missing", tenant_id=str(tenant_id))
+        return UNAVAILABLE
+    access = await check_place_access(
+        runtime,
+        client,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+    )
+    if access.decision == "unreadable" or access.policy is None:
+        return POLICY_UNREADABLE
+    if access.decision == "refused":
+        log.info("support.refused", tenant_id=str(tenant_id))
+        return NOT_ALLOWED
+    async with runtime.sessionmaker() as session:
+        already = await find_escalation_for_message(
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            platform_user_id=user_id,
+            channel_id=channel_id,
+            message_id=message_ts,
+        )
+        used = await count_escalations_for_user(
+            session, tenant_id=tenant_id, platform_user_id=user_id
+        )
+
+    if already is not None:
+        return ALREADY_REQUESTED
+    allowance = support.credits_per_user
+    if not has_credit(allowance=allowance, used=used):
+        return OUT_OF_CREDITS
+    return build_support_modal(
+        channel_id=channel_id,
+        message_ts=message_ts,
+        thread_ts=thread_ts,
+        remaining=remaining_credits(allowance=allowance, used=used),
+        sealed=readers_limited_at(access.policy, channel_id=channel_id, thread_id=thread_ts),
+    )
+
+
 async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     """Open the note form, or say why not. Spends nothing.
 
@@ -338,55 +399,25 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
             text=text,
         )
 
-    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    async with runtime.sessionmaker() as session:
-        tenant = await get_tenant(session, tenant_id)
-    if tenant is None or tenant.archived_at is not None:
-        log.info("support.tenant_missing", tenant_id=str(tenant_id))
-        await reply(UNAVAILABLE)
-        return
-    access = await check_place_access(
-        runtime,
-        client,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        channel_id=channel_id,
-        thread_ts=thread_ts,
-    )
-    if access.decision == "unreadable" or access.policy is None:
-        await reply(POLICY_UNREADABLE)
-        return
-    if access.decision == "refused":
-        log.info("support.refused", tenant_id=str(tenant_id))
-        await reply(NOT_ALLOWED)
-        return
-    async with runtime.sessionmaker() as session:
-        already = await find_escalation_for_message(
-            session,
-            tenant_id=tenant_id,
-            platform="slack",
-            platform_user_id=user_id,
+    try:
+        decided = await _decide_click(
+            runtime,
+            client,
+            team_id=team_id,
+            user_id=user_id,
             channel_id=channel_id,
-            message_id=message_ts,
+            message_ts=message_ts,
+            thread_ts=thread_ts,
         )
-        used = await count_escalations_for_user(
-            session, tenant_id=tenant_id, platform_user_id=user_id
-        )
-
-    if already is not None:
-        await reply(ALREADY_REQUESTED)
+    except (SQLAlchemyError, *CLICK_REPLY_ERRORS) as err:
+        # Never leave the Checking… notice standing: say so, then let it be seen.
+        log.warning("support.click_check_failed", error=error_name(err))
+        await reply(CHECK_FAILED)
         return
-    allowance = support.credits_per_user
-    if not has_credit(allowance=allowance, used=used):
-        await reply(OUT_OF_CREDITS)
+    if isinstance(decided, str):
+        await reply(decided)
         return
-    form = build_support_modal(
-        channel_id=channel_id,
-        message_ts=message_ts,
-        thread_ts=thread_ts,
-        remaining=remaining_credits(allowance=allowance, used=used),
-        sealed=readers_limited_at(access.policy, channel_id=channel_id, thread_id=thread_ts),
-    )
+    form = decided
     if view_id is not None and await update_modal(client, view_id=view_id, view=form):
         return
     await post_ephemeral(
@@ -519,7 +550,7 @@ async def _permalink(client: AsyncWebClient, *, channel_id: str, message_ts: str
         resp = await client.chat_getPermalink(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id, message_ts=message_ts
         )
-    except SlackApiError:
+    except CLICK_REPLY_ERRORS:
         return None
     link: Any = resp.get("permalink")  # pyright: ignore[reportUnknownMemberType]
     return link if isinstance(link, str) and link else None
@@ -584,11 +615,10 @@ async def _dm_channel_admins(
                     channel=channel, text=text, unfurl_links=False, unfurl_media=False
                 )
                 landed += 1
-            except SlackApiError as err:
-                log.info(
-                    "support.admin_dm_undelivered",
-                    error=str(err.response.get("error", "slack_api_error")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
-                )
+            except CLICK_REPLY_ERRORS as err:
+                # A timeout is ambiguous (the DM may have landed); it counts as
+                # undelivered and is never retried, so nobody is DMed twice.
+                log.info("support.admin_dm_undelivered", error=error_name(err))
         if landed:
             log.info("support.sent_to_admins", recipients=landed)
             return True
@@ -646,11 +676,8 @@ async def _post_to_escalation_channel(
         await dest_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=dest_channel, text=text, unfurl_links=False, unfurl_media=False
         )
-    except SlackApiError as err:
-        log.warning(
-            "support.channel_undeliverable",
-            channel_id=dest_channel,
-            error=str(err.response.get("error", "slack_api_error")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
-        )
+    except CLICK_REPLY_ERRORS as err:
+        # As with the DMs: an ambiguous timeout stays undelivered, never re-posted.
+        log.warning("support.channel_undeliverable", channel_id=dest_channel, error=error_name(err))
         return False
     return True

@@ -23,6 +23,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 __all__ = [
     "CLICK_REPLY_ERRORS",
+    "error_name",
     "notice_modal",
     "open_modal",
     "post_ephemeral",
@@ -53,7 +54,7 @@ async def open_modal(
     except CLICK_REPLY_ERRORS as err:
         log.info(
             "slack.views_open_failed",
-            error=_error_name(err),
+            error=error_name(err),
         )
         return None
     opened = cast("dict[str, Any]", resp.get("view") or {})  # pyright: ignore[reportUnknownMemberType]  # slack_sdk response is dict-like
@@ -67,7 +68,7 @@ async def update_modal(client: AsyncWebClient, *, view_id: str, view: dict[str, 
     except CLICK_REPLY_ERRORS as err:
         log.info(
             "slack.views_update_failed",
-            error=_error_name(err),
+            error=error_name(err),
         )
         return False
     return True
@@ -98,10 +99,11 @@ async def post_ephemeral(
             blocks=blocks,
         )
     except CLICK_REPLY_ERRORS as err:
-        log.info("slack.ephemeral_failed", error=_error_name(err))
+        log.info("slack.ephemeral_failed", error=error_name(err))
 
 
-def _error_name(err: BaseException) -> str:
+def error_name(err: BaseException) -> str:
+    """The Slack error code, or the transport failure's type name, for a log line."""
     if isinstance(err, SlackApiError):
         return str(err.response.get("error", "slack_api_error"))  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
     return type(err).__name__

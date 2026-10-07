@@ -47,10 +47,15 @@ from daimon.adapters.slack.click_replies import (
 )
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.place_access import check_place_access
+from daimon.adapters.slack.place_access import may_start_turn_at, resolve_clicker
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.message_feedback import FEEDBACK_REASONS, Vote, known_feedback_reasons
+from daimon.core.stores.access_policy import (
+    AccessPolicyUnreadable,
+    load_access_policy,
+    lock_access_policy,
+)
 from daimon.core.stores.message_feedback import (
     attach_feedback_details,
     record_vote,
@@ -308,8 +313,11 @@ async def _record(
     user_id: str,
     place: _AnswerPlace,
     vote: Vote,
+    details: tuple[str | None, tuple[str, ...]] | None = None,
 ) -> tuple[_RecordOutcome, uuid.UUID | None]:
-    """Decide access, then upsert the vote. Returns the outcome and the row id.
+    """Decide access, then upsert the vote, and the form's ``details`` (text,
+    reasons) when given, all in one transaction. Returns the outcome and the
+    row id.
 
     The thread session is a best-effort attribution hint only.
     """
@@ -319,18 +327,24 @@ async def _record(
     if tenant is None or tenant.archived_at is not None:
         log.info("feedback.tenant_missing", tenant_id=str(tenant_id))
         return "missing", None
-    access = await check_place_access(
-        runtime,
-        client,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        channel_id=place.channel_id,
-        thread_ts=place.thread_ts,
+    subject, account_id = await resolve_clicker(
+        runtime, client, tenant_id=tenant_id, user_id=user_id
     )
-    if access.decision != "allowed":
-        log.info("feedback.refused", tenant_id=str(tenant_id), decision=access.decision)
-        return access.decision, None
     async with runtime.sessionmaker() as session, session.begin():
+        # Decided under the tenant policy lock in the transaction that writes,
+        # so a protection or allowlist edit committed first refuses, and one
+        # arriving later waits for this vote.
+        await lock_access_policy(session, tenant_id=tenant_id)
+        try:
+            policy = await load_access_policy(session, tenant_id=tenant_id)
+        except AccessPolicyUnreadable:
+            log.info("feedback.refused", tenant_id=str(tenant_id), decision="unreadable")
+            return "unreadable", None
+        if not may_start_turn_at(
+            policy, subject, channel_id=place.channel_id, thread_ts=place.thread_ts
+        ):
+            log.info("feedback.refused", tenant_id=str(tenant_id), decision="refused")
+            return "refused", None
         thread_row = await get_latest_thread_session(
             session, tenant_id=tenant_id, platform="slack", thread_id=place.thread_ts
         )
@@ -341,10 +355,18 @@ async def _record(
             message_id=place.message_ts,
             channel_id=place.channel_id,
             platform_user_id=user_id,
-            account_id=access.account_id,
+            account_id=account_id,
             ma_session_id=thread_row.ma_session_id if thread_row is not None else None,
             vote=vote,
         )
+        if details is not None:
+            await attach_feedback_details(
+                session,
+                feedback_id=result.row.id,
+                platform_user_id=user_id,
+                feedback_text=details[0],
+                feedback_reasons=details[1],
+            )
     log.info(
         "feedback.vote_recorded",
         message_id=place.message_ts,
@@ -524,22 +546,16 @@ async def run_feedback_text_submission(
 
     place = _AnswerPlace(channel_id=d.channel_id, message_ts=d.message_ts, thread_ts=d.thread_ts)
     outcome, row_id = await _record(
-        runtime, client, team_id=team_id, user_id=user_id, place=place, vote="down"
+        runtime,
+        client,
+        team_id=team_id,
+        user_id=user_id,
+        place=place,
+        vote="down",
+        details=(d.text if d.text.strip() else None, d.reasons),
     )
     if outcome != "recorded" or row_id is None:
         await reply(_refusal_text(outcome))
-        return
-    async with runtime.sessionmaker() as session, session.begin():
-        updated = await attach_feedback_details(
-            session,
-            feedback_id=row_id,
-            platform_user_id=user_id,
-            feedback_text=d.text if d.text.strip() else None,
-            feedback_reasons=d.reasons,
-        )
-    if updated is None:
-        log.info("feedback.submission_no_longer_available", feedback_id=str(row_id))
-        await reply(_NO_LONGER_AVAILABLE)
         return
     log.info("feedback.submission_recorded", feedback_id=str(row_id), reasons=list(d.reasons))
     await reply(_THANKS_TEXT)
