@@ -106,7 +106,10 @@ from daimon.adapters.slack.direct_messages import (
 )
 from daimon.adapters.slack.errors import generate_request_id, render_error
 from daimon.adapters.slack.feedback import (
+    FEEDBACK_DETAILS_ACTION_ID,
+    FeedbackTextDecision,
     evaluate_feedback_text_submission,
+    handle_feedback_details_click,
     handle_feedback_vote,
     run_feedback_text_submission,
 )
@@ -944,17 +947,10 @@ class SlackApp:
                         *,
                         _t: str = str(_fb_team_info.get("id") or ""),
                         _u: str = str(_fb_user_info.get("id") or ""),
-                        _c: str = _fb_decision.channel_id,
-                        _f: str = _fb_decision.feedback_id,
-                        _x: str = _fb_decision.text,
+                        _d: FeedbackTextDecision = _fb_decision,
                     ) -> None:
                         await run_feedback_text_submission(
-                            self.runtime,
-                            team_id=_t,
-                            user_id=_u,
-                            channel_id=_c,
-                            feedback_id=_f,
-                            text=_x,
+                            self.runtime, team_id=_t, user_id=_u, decision=_d
                         )
 
                     self._spawn(_run_feedback_text())
@@ -1087,6 +1083,8 @@ class SlackApp:
                     self._spawn(handle_credential_request_click(self.runtime, payload))
                 elif action_id.startswith("feedback_vote:"):
                     self._spawn(handle_feedback_vote(self.runtime, payload))
+                elif action_id == FEEDBACK_DETAILS_ACTION_ID:
+                    self._spawn(handle_feedback_details_click(self.runtime, payload))
                 elif action_id == ASK_HUMAN_ACTION_ID:
                     self._spawn(handle_ask_human_click(self.runtime, payload))
                 elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):

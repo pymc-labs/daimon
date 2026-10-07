@@ -825,7 +825,7 @@ async def test_terminal_success_tool_only_leaves_collapsed_done(
     assert lc.final_ts == "1000000000.000001", "final_ts must equal status_ts for tool-only turn"
 
     blocks = _last_update_blocks(fake_slack_web_client)
-    assert not _has_actions_block(blocks), (
+    assert "cancel_turn" not in _action_ids(blocks), (
         "tool-only terminal must collapse to the done footer with no cancel button"
     )
     assert any(b["type"] == "context" for b in blocks), (
@@ -1463,8 +1463,9 @@ async def test_no_ask_human_button_when_support_is_off(fake_slack_web_client: An
     )
 
 
-async def test_tool_only_turn_gets_no_feedback_buttons(fake_slack_web_client: Any) -> None:
-    """A turn with no final answer text must not invite feedback on it."""
+async def test_tool_only_turn_gets_feedback_buttons_on_its_card(fake_slack_web_client: Any) -> None:
+    """A tool-only turn's product is its work (a file, a chart), so its card is
+    votable, as a tool-only Discord turn is."""
     lc, *_ = _make_lifecycle(fake_slack_web_client)
     await lc.post_initial()
     await lc.on_sse_event(_thinking_event())
@@ -1476,9 +1477,34 @@ async def test_tool_only_turn_gets_no_feedback_buttons(fake_slack_web_client: An
     )
     await lc.on_terminal_success(state)
 
-    assert "feedback_vote:up" not in _action_ids(_last_update_blocks(fake_slack_web_client)), (
-        "tool-only turn has no answer to vote on"
+    ids = _action_ids(_last_update_blocks(fake_slack_web_client))
+    assert "feedback_vote:up" in ids and "feedback_vote:down" in ids
+    assert "cancel_turn" not in ids
+
+
+async def test_tool_only_card_offers_ask_a_human_when_enabled(fake_slack_web_client: Any) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client, ask_human=True)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    state = TurnState(
+        content=[
+            ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}),
+        ]
     )
+    await lc.on_terminal_success(state)
+
+    assert "support_escalate" in _action_ids(_last_update_blocks(fake_slack_web_client))
+
+
+async def test_cancelled_turn_gets_no_feedback_buttons(fake_slack_web_client: Any) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    await lc.on_terminal_success(TurnState(termination=TerminationReason.INTERRUPTED))
+
+    assert "feedback_vote:up" not in _action_ids(_last_update_blocks(fake_slack_web_client))
 
 
 async def test_terminal_success_names_the_failed_mcp_server_under_the_reply(

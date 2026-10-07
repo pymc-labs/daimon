@@ -408,7 +408,9 @@ class SlackTurnLifecycle:
             except Exception:
                 log.warning("turn.balance_footer_failed", exc_info=True)
 
-    async def _flush_terminal(self, fallback_text: str | None = None) -> None:
+    async def _flush_terminal(
+        self, fallback_text: str | None = None, *, feedback: bool = False
+    ) -> None:
         """Unconditionally flush the terminal Block Kit surface, bypassing debounce.
 
         Sets _terminal=True so subsequent _maybe_flush calls become no-ops. The
@@ -416,10 +418,21 @@ class SlackTurnLifecycle:
         (done/error) so to_blocks emits the collapsed footer with no cancel button.
         ``fallback_text`` replaces the generic top-level ``text`` that
         notifications and screen readers show instead of the blocks.
+        ``feedback`` appends the vote (and Ask a human) controls, for a turn
+        whose product is this card: a tool-only turn has no answer to carry them.
         """
         self._terminal = True
         blocks = to_blocks(self._state, now=self._clock(), cancel_key=self._cancel_key)
+        if feedback:
+            blocks.append(self._feedback_block())
         await self._post_or_update(blocks, fallback_text or f"{self._state.phase.value} …")
+
+    def _feedback_block(self) -> dict[str, Any]:
+        """👍/👎, plus Ask a human when this deployment offers it."""
+        block = build_feedback_actions_block()
+        if self._ask_human:
+            block["elements"].append(build_ask_human_button())
+        return block
 
     async def _flush_cancelled(self) -> None:
         """Replace the status message with a plain 'Turn cancelled.' notice.
@@ -509,7 +522,7 @@ class SlackTurnLifecycle:
                 # footer; a truly empty turn (cancellation) shows "Turn
                 # cancelled." — matches the Discord parity reference.
                 if any(isinstance(block, ToolUseBlock) for block in state.content):
-                    await self._flush_terminal()
+                    await self._flush_terminal(feedback=True)
                     # #79: no reply to hang the notice under on a tool-only
                     # turn, so a dropped server is named on its own line.
                     tool_only_notice = render_degraded_notice(state.mcp_failures)
@@ -577,10 +590,7 @@ class SlackTurnLifecycle:
                         notification_chunk = f"{mention}\n{chunk}"
                     blocks.extend(to_blocks(self._state, now=self._clock()))
                 if index == len(deliveries) - 1 and not cancelled:
-                    feedback_block = build_feedback_actions_block()
-                    if self._ask_human:
-                        feedback_block["elements"].append(build_ask_human_button())
-                    blocks.append(feedback_block)
+                    blocks.append(self._feedback_block())
                 try:
                     if index == 0 and not notify_on_completion:
                         await self._post_or_update(blocks, _notification_text(notification_chunk))

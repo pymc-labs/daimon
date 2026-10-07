@@ -125,6 +125,41 @@ async def attach_feedback_text(
     return MessageFeedbackRow.model_validate(orm)
 
 
+async def attach_feedback_details(
+    session: AsyncSession,
+    *,
+    feedback_id: uuid.UUID,
+    platform_user_id: str,
+    feedback_text: str | None,
+    feedback_reasons: Sequence[str],
+) -> MessageFeedbackRow | None:
+    """Store a whole "What went wrong?" form on the voter's own row.
+
+    Like `attach_feedback_text`, gated on `platform_user_id`, and `None` means
+    no such row for this person. The form is the person's complete answer, so
+    both fields are replaced: a later submission without text clears earlier
+    text, and no reasons picked stores NULL.
+    """
+    stmt = (
+        update(MessageFeedback)
+        .where(
+            MessageFeedback.id == feedback_id,
+            MessageFeedback.platform_user_id == platform_user_id,
+        )
+        .values(
+            feedback_text=feedback_text,
+            feedback_reasons=list(feedback_reasons) or None,
+            updated_at=func.now(),
+        )
+        .returning(MessageFeedback)
+    )
+    orm = (await session.execute(stmt)).scalar_one_or_none()
+    await session.flush()
+    if orm is None:
+        return None
+    return MessageFeedbackRow.model_validate(orm)
+
+
 async def delete_message_feedback_for_platform_user(
     session: AsyncSession,
     *,

@@ -14,14 +14,16 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yarl
 from aioresponses import CallbackResult
 from cryptography.fernet import Fernet
+from daimon.adapters.slack import support_escalation as slack_support
 from daimon.adapters.slack.support_escalation import (
     ASK_HUMAN_ACTION_ID,
+    FORM_DID_NOT_OPEN,
     NOT_ALLOWED,
     SEALED_NOTE_HINT,
     SUPPORT_CALLBACK_ID,
@@ -67,6 +69,7 @@ _PERMALINK = "https://sup.slack.com/archives/C_ANSWERS/p1700000001000100"
 _EPHEMERAL = ("POST", yarl.URL("https://slack.com/api/chat.postEphemeral"))
 _POST = ("POST", yarl.URL("https://slack.com/api/chat.postMessage"))
 _VIEWS_OPEN = ("POST", yarl.URL("https://slack.com/api/views.open"))
+_VIEWS_UPDATE = ("POST", yarl.URL("https://slack.com/api/views.update"))
 _PERMALINK_PATTERN = re.compile(r"https://slack\.com/api/chat\.getPermalink.*")
 
 
@@ -128,6 +131,20 @@ def _submit_payload(note: str, *, message_ts: str = _ANSWER_TS) -> dict[str, Any
 
 def _ephemeral_texts(fake: Any) -> list[str]:
     return [c.kwargs["json"]["text"] for c in fake.mock.requests.get(_EPHEMERAL, [])]
+
+
+def _shown(fake: Any) -> list[dict[str, Any]]:
+    """Every view the click put in front of the person: the open, then each update."""
+    opens = [c.kwargs["json"]["view"] for c in fake.mock.requests.get(_VIEWS_OPEN, [])]
+    updates = [c.kwargs["json"]["view"] for c in fake.mock.requests.get(_VIEWS_UPDATE, [])]
+    return opens + updates
+
+
+def _notice(fake: Any) -> str:
+    """The text of the last view shown, when it is a notice rather than a form."""
+    last = _shown(fake)[-1]
+    assert "callback_id" not in last, "expected a notice, got a form"
+    return last["blocks"][0]["text"]["text"]
 
 
 def _posts(fake: Any) -> list[dict[str, Any]]:
@@ -212,7 +229,10 @@ async def test_click_opens_the_note_form_with_the_remaining_count(
 
     opens = fake_slack_web_client.mock.requests.get(_VIEWS_OPEN, [])
     assert len(opens) == 1
-    view = opens[0].kwargs["json"]["view"]
+    assert "callback_id" not in opens[0].kwargs["json"]["view"], (
+        "the click opens a Checking notice before running any check"
+    )
+    view = _shown(fake_slack_web_client)[-1]
     assert view["callback_id"] == SUPPORT_CALLBACK_ID
     assert view["blocks"][0]["text"]["text"] == offer_text(remaining=20), (
         "the default allowance is 20"
@@ -239,8 +259,8 @@ async def test_click_with_no_credits_left_says_so(
 
     await handle_ask_human_click(runtime, _click())
 
-    assert _VIEWS_OPEN not in permalink.mock.requests
-    assert _ephemeral_texts(permalink)[-1] == OUT_OF_CREDITS
+    assert _notice(permalink) == OUT_OF_CREDITS, "the opened modal is replaced by the reason"
+    assert all("callback_id" not in v for v in _shown(permalink)), "no form is offered"
 
 
 async def test_click_by_someone_outside_the_invoker_allowlist_is_refused(
@@ -253,8 +273,9 @@ async def test_click_by_someone_outside_the_invoker_allowlist_is_refused(
 
     await handle_ask_human_click(runtime, _click())
 
-    assert _VIEWS_OPEN not in fake_slack_web_client.mock.requests
-    assert _ephemeral_texts(fake_slack_web_client) == [NOT_ALLOWED]
+    assert _notice(fake_slack_web_client) == NOT_ALLOWED
+    assert all("callback_id" not in v for v in _shown(fake_slack_web_client)), "no form"
+    assert _ephemeral_texts(fake_slack_web_client) == []
 
 
 async def test_click_in_a_protected_channel_is_refused(
@@ -269,8 +290,9 @@ async def test_click_in_a_protected_channel_is_refused(
 
     await handle_ask_human_click(runtime, _click())
 
-    assert _VIEWS_OPEN not in fake_slack_web_client.mock.requests
-    assert _ephemeral_texts(fake_slack_web_client) == [NOT_ALLOWED]
+    assert _notice(fake_slack_web_client) == NOT_ALLOWED
+    assert all("callback_id" not in v for v in _shown(fake_slack_web_client)), "no form"
+    assert _ephemeral_texts(fake_slack_web_client) == []
 
 
 async def test_external_slack_connect_click_is_ignored(
@@ -298,8 +320,8 @@ async def test_click_after_asking_on_this_answer_says_it_is_in_hand(
 
     await handle_ask_human_click(runtime, _click())
 
-    assert _VIEWS_OPEN not in permalink.mock.requests
-    assert _ephemeral_texts(permalink)[-1] == ALREADY_REQUESTED
+    assert _notice(permalink) == ALREADY_REQUESTED, "the opened modal is replaced by the reason"
+    assert all("callback_id" not in v for v in _shown(permalink)), "no form is offered"
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +439,7 @@ async def test_sealed_origin_posts_a_link_and_the_note_only(
     runtime = _runtime(key, db_session_factory, _support())
 
     await handle_ask_human_click(runtime, _click())
-    view = permalink.mock.requests[_VIEWS_OPEN][0].kwargs["json"]["view"]
+    view = _shown(permalink)[-1]
     assert SEALED_NOTE_HINT in json.dumps(view), "the person is told the note leaves the seal"
 
     await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help me")))
@@ -603,3 +625,79 @@ async def test_a_stored_group_is_looked_up_with_no_session_open(
 
     assert len(seen) >= 2, "the click and the submit each looked the group up"
     assert set(seen) == {0}, "every lookup ran after its session closed"
+
+
+# ---------------------------------------------------------------------------
+# the modal Slack would not open or replace
+# ---------------------------------------------------------------------------
+
+
+async def _refused_open(client: Any, *, trigger_id: str, view: dict[str, Any]) -> str | None:
+    return None
+
+
+async def test_a_refusal_comes_as_an_ephemeral_when_no_modal_opened(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    _tenant, key = await _seed(db_session, policy=TenantAccessPolicy(invoker_user_ids=("U_X",)))
+    runtime = _runtime(key, db_session_factory, _support())
+
+    with patch.object(slack_support, "open_modal", new=_refused_open):
+        await handle_ask_human_click(runtime, _click())
+
+    assert _ephemeral_texts(fake_slack_web_client) == [NOT_ALLOWED]
+
+
+async def test_a_form_that_could_not_be_shown_says_to_click_again_and_spends_nothing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    _tenant, key = await _seed(db_session)
+    runtime = _runtime(key, db_session_factory, _support())
+
+    with patch.object(slack_support, "open_modal", new=_refused_open):
+        await handle_ask_human_click(runtime, _click())
+
+    assert _ephemeral_texts(fake_slack_web_client) == [FORM_DID_NOT_OPEN]
+    assert await _rows(db_session_factory) == []
+
+
+async def test_a_missing_tenant_closes_the_checking_notice_with_a_reason(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    tenant_id, key = await _seed(db_session)
+    await db_session.execute(text("DELETE FROM tenants WHERE id = :id"), {"id": tenant_id})
+    await db_session.commit()
+    runtime = _runtime(key, db_session_factory, _support())
+
+    await handle_ask_human_click(runtime, _click())
+
+    assert _notice(fake_slack_web_client) == UNAVAILABLE, "no Checking… notice is left hanging"
+
+
+async def test_a_top_level_answer_in_a_dm_offers_the_form_for_that_answer(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    _tenant, key = await _seed(db_session)
+    runtime = _runtime(key, db_session_factory, _support())
+    click = _click()
+    click["channel"] = {"id": "D_DM"}
+    click["container"] = {"message_ts": "1.5", "channel_id": "D_DM"}
+    click["message"] = {"ts": "1.5"}
+
+    await handle_ask_human_click(runtime, click)
+
+    form = _shown(fake_slack_web_client)[-1]
+    assert form["callback_id"] == SUPPORT_CALLBACK_ID
+    assert json.loads(form["private_metadata"]) == {
+        "channel_id": "D_DM",
+        "message_ts": "1.5",
+        "thread_ts": "1.5",
+    }
