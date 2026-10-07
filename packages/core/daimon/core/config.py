@@ -1046,7 +1046,7 @@ class SupportSettings(BaseModel):
         default=None,
         description=(
             "Slack channel id where human-support requests from Slack are "
-            "posted. Unset (the default) disables the Ask a human button on "
+            "posted. Unset (the default) disables the Ask the team button on "
             "Slack. Slack requests never go to the Discord channel, nor Discord "
             "requests here. The bot must be a member of the channel."
         ),

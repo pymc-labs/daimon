@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Slack's Ask a human button reads "🙋 Ask a human"**, so it carries an emoji like the 👍/👎 beside it.
+- **Slack's Ask a human button is now "🙋 Ask the team"**, with an emoji like the 👍/👎 beside it. Its form, notices and refusal say "the team" too ("What do you need help with? Someone from the team will reply."), and the support wording shared with Discord no longer says "a human". Discord's button label is unchanged.
 - **Slack's "What went wrong?" and Ask a human forms open again.** Both declared a 4,000-character text box; Slack caps a text input at 3,000 and refuses the whole form when it is larger, so every 👎 form and every Ask a human note form failed with `invalid_arguments` and nothing opened.
 - **Slack turns that only ran tools can be rated and can ask a human.** Their finished status card now carries 👍/👎 (and Ask a human when it is enabled), as Discord's tool-only turns already did.
 - **Slack's Ask a human button no longer looks dead on a slow check.** The click opens a "Checking…" form at once and replaces it with the note form or the reason there is none. Before, the checks (including a live user-group lookup) ran first and could outlast Slack's 3-second window, so nothing opened.

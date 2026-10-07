@@ -978,7 +978,7 @@ The bot must be able to post there.
 `str | None` · optional · default unset
 
 Slack channel id where human-support requests from Slack are posted. Unset (the default)
-disables the Ask a human button on Slack. Slack requests never go to the Discord
+disables the Ask the team button on Slack. Slack requests never go to the Discord
 channel, nor Discord requests here. The bot must be a member of the channel.
 
 ### `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID`
