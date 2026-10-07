@@ -293,7 +293,7 @@ async def register_headless_app_session(
     session: AsyncSession, *, session_id: str, tenant_id: uuid.UUID, vault_id: str
 ) -> None:
     await register_app_session_vault(
-        session, session_id=session_id, tenant_id=tenant_id, vault_id=vault_id, is_headless=True
+        session, session_id=session_id, tenant_id=tenant_id, vault_id=vault_id, is_unmapped=True
     )
 
 
@@ -303,14 +303,14 @@ async def register_app_session_vault(
     session_id: str,
     tenant_id: uuid.UUID,
     vault_id: str,
-    is_headless: bool = False,
+    is_unmapped: bool = False,
 ) -> None:
     session.add(
         GitHubAppSessionVault(
             session_id=session_id,
             tenant_id=tenant_id,
             vault_id=vault_id,
-            is_headless=is_headless,
+            is_unmapped=is_unmapped,
         )
     )
     await session.flush()
@@ -318,12 +318,25 @@ async def register_app_session_vault(
 
 async def finish_headless_app_session(session: AsyncSession, *, session_id: str) -> str | None:
     row = await session.get(GitHubAppSessionVault, session_id, with_for_update=True)
-    if row is None:
+    if row is None or row.closed_at is not None:
         return None
     if row.finished_at is None:
         row.finished_at = datetime.now(UTC)
     await session.flush()
     return row.vault_id
+
+
+async def touch_unmapped_app_session(session: AsyncSession, *, session_id: str) -> None:
+    """Extend an MCP session's vault lifetime before its next turn starts."""
+    await session.execute(
+        update(GitHubAppSessionVault)
+        .where(
+            GitHubAppSessionVault.session_id == session_id,
+            GitHubAppSessionVault.is_unmapped.is_(True),
+            GitHubAppSessionVault.closed_at.is_(None),
+        )
+        .values(last_started_at=datetime.now(UTC))
+    )
 
 
 async def mark_headless_app_session_closed(session: AsyncSession, *, session_id: str) -> None:
@@ -396,8 +409,8 @@ async def list_closed_app_sessions(
         select(GitHubAppSessionVault).where(GitHubAppSessionVault.closed_at.is_(None))
     )
     for row in vaults:
-        if row.is_headless:
-            if row.finished_at is not None or row.created_at <= now - timedelta(minutes=46):
+        if row.is_unmapped:
+            if row.finished_at is not None or row.last_started_at <= now - timedelta(minutes=46):
                 result.append(ClosedAppSession(session_id=row.session_id, vault_id=row.vault_id))
             continue
         mapping = await session.scalar(

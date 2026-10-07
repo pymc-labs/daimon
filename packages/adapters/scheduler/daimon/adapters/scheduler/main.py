@@ -54,6 +54,7 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.github_app_session import (
+    archive_app_vault,
     effective_repo_state,
     revoke_session_tokens,
     revoke_token,
@@ -696,7 +697,7 @@ async def _refresh_github_app_sessions(
                     await revoke_session_tokens(
                         sm, github, session_id=item.mapping.ma_session_id, fernet=fernet
                     )
-                await anthropic_client.beta.vaults.archive(snapshot.vault_id)
+                await archive_app_vault(anthropic_client, vault_id=snapshot.vault_id)
                 continue
             level = {"none": 0, "read": 1, "write": 2}
             narrowed = any(
@@ -755,7 +756,7 @@ async def _close_github_app_sessions(
                         sm, github, session_id=item.session_id, fernet=fernet
                     )
                 if item.vault_id is not None:
-                    await anthropic_client.beta.vaults.archive(item.vault_id)
+                    await archive_app_vault(anthropic_client, vault_id=item.vault_id)
                 async with sm.begin() as session:
                     await mark_headless_app_session_closed(session, session_id=item.session_id)
             except Exception:

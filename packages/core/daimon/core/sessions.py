@@ -131,6 +131,7 @@ async def create_session(
     agent_github_app: GithubAppSettings | None = None,
     is_external: bool = False,
     requester_is_headless: bool = False,
+    app_session_unmapped: bool = False,
     http_client: httpx.AsyncClient | None = None,
     extra_resources: Sequence[Resource] = (),
     billing_exempt: ExemptReason | None = None,
@@ -620,7 +621,7 @@ async def create_session(
                         session_id=created.id,
                         tenant_id=tenant_id,
                         vault_id=vault_id,
-                        is_headless=requester_is_headless,
+                        is_unmapped=requester_is_headless or app_session_unmapped,
                     )
                 async with httpx.AsyncClient() as app_client:
                     await finish_app_delivery(

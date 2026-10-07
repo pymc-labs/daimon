@@ -2592,8 +2592,11 @@ class GitHubAppSessionVault(Base):
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
     )
     vault_id: Mapped[str] = mapped_column(Text)
-    is_headless: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    is_unmapped: Mapped[bool] = mapped_column(Boolean, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

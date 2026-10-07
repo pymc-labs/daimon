@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from anthropic import AsyncAnthropic
+from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta.session_create_params import Resource
 from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_response import (
     BetaManagedAgentsEnvironmentVariableAuthResponse,
@@ -573,9 +573,20 @@ async def close_headless_app_session(
                     raise ValueError("App session revocation requires encryption")
         else:
             await revoke_session_tokens(sessionmaker, client, session_id=session_id, fernet=fernet)
-    await anthropic.beta.vaults.archive(vault_id)
+    await archive_app_vault(anthropic, vault_id=vault_id)
     async with sessionmaker.begin() as session:
         await mark_headless_app_session_closed(session, session_id=session_id)
+
+
+async def archive_app_vault(anthropic: AsyncAnthropic, *, vault_id: str) -> None:
+    """A repeated cleanup may find a vault archived by an earlier attempt."""
+    try:
+        await anthropic.beta.vaults.archive(vault_id)
+    except APIStatusError as exc:
+        if exc.status_code not in (404, 409) and not (
+            exc.status_code == 400 and "already archived" in str(exc).lower()
+        ):
+            raise
 
 
 async def rotate_live_app_tokens(

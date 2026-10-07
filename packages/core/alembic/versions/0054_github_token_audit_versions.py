@@ -34,9 +34,15 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("vault_id", sa.Text(), nullable=False),
-        sa.Column("is_headless", sa.Boolean(), nullable=False),
+        sa.Column("is_unmapped", sa.Boolean(), nullable=False),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "last_started_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
         ),
         sa.Column("finished_at", sa.DateTime(timezone=True)),
         sa.Column("closed_at", sa.DateTime(timezone=True)),

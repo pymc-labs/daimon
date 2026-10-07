@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from anthropic import APIStatusError
 from cryptography.fernet import Fernet
 from daimon.core import github_app_session
 from daimon.core._models import (
@@ -26,7 +27,11 @@ from daimon.core._models import (
     ThreadSession,
 )
 from daimon.core.config import GithubAppSettings
-from daimon.core.github_app_session import AppSessionAccess, close_headless_app_session
+from daimon.core.github_app_session import (
+    AppSessionAccess,
+    archive_app_vault,
+    close_headless_app_session,
+)
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.github_requester_access import (
     PermissionCache,
@@ -955,6 +960,69 @@ async def test_mapped_app_vault_closes_without_issued_tokens(db_session: AsyncSe
     assert (
         await github_issued_tokens.list_closed_app_sessions(db_session, now=datetime.now(UTC)) == []
     )
+
+
+@pytest.mark.asyncio
+async def test_unmapped_mcp_vault_survives_followups_until_the_turn_ceiling(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="mcp-unmapped"))
+    await db_session.flush()
+    await github_issued_tokens.register_app_session_vault(
+        db_session,
+        session_id="mcp-session",
+        tenant_id=tenant_id,
+        vault_id="mcp-vault",
+        is_unmapped=True,
+    )
+    started = datetime.now(UTC)
+    await db_session.execute(
+        text(
+            "UPDATE github_app_session_vaults SET last_started_at = :old "
+            "WHERE session_id = 'mcp-session'"
+        ),
+        {"old": started - timedelta(minutes=40)},
+    )
+    assert await github_issued_tokens.list_closed_app_sessions(
+        db_session, now=started + timedelta(minutes=7)
+    )
+    await github_issued_tokens.touch_unmapped_app_session(db_session, session_id="mcp-session")
+    assert (
+        await github_issued_tokens.list_closed_app_sessions(
+            db_session, now=started + timedelta(minutes=7)
+        )
+        == []
+    )
+    assert (
+        await github_issued_tokens.list_closed_app_sessions(
+            db_session, now=started + timedelta(minutes=45)
+        )
+        == []
+    )
+    closed = await github_issued_tokens.list_closed_app_sessions(
+        db_session, now=started + timedelta(minutes=47)
+    )
+    assert [(row.session_id, row.vault_id) for row in closed] == [("mcp-session", "mcp-vault")]
+    assert (
+        await github_issued_tokens.finish_headless_app_session(db_session, session_id="mcp-session")
+        == "mcp-vault"
+    )
+    assert await github_issued_tokens.list_closed_app_sessions(db_session, now=started) == closed
+
+
+@pytest.mark.asyncio
+async def test_app_vault_archive_accepts_already_archived() -> None:
+    response = httpx.Response(
+        404,
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/vaults/archived/archive"),
+    )
+    archive = AsyncMock(
+        side_effect=APIStatusError("Vault already archived", response=response, body=None)
+    )
+    anthropic = SimpleNamespace(beta=SimpleNamespace(vaults=SimpleNamespace(archive=archive)))
+    await archive_app_vault(anthropic, vault_id="archived")
+    archive.assert_awaited_once_with("archived")
 
 
 @pytest.mark.asyncio
