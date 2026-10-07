@@ -7,11 +7,12 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import discord
 import pytest
 from daimon.adapters.discord.agent_setup import avatar as avatar_module
 from daimon.adapters.discord.agent_setup.avatar import reset_agent_avatar, upload_agent_avatar
-from daimon.core.stores.agent_avatars import get_or_create_avatar
+from daimon.core.stores.agent_avatars import AvatarRow, get_or_create_avatar
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_tenant
 from PIL import Image
@@ -24,11 +25,17 @@ def _image() -> bytes:
     return output.getvalue()
 
 
-def _attachment(*, size: int | None = None, content_type: str = "image/png") -> MagicMock:
+def _attachment(
+    *,
+    size: int | None = None,
+    content_type: str = "image/png",
+    url: str = "https://cdn.discordapp.com/attachments/123/456/avatar.png",
+) -> MagicMock:
     body = _image()
     attachment = MagicMock(spec=discord.Attachment)
     attachment.size = len(body) if size is None else size
     attachment.content_type = content_type
+    attachment.url = url
     attachment.read = AsyncMock(return_value=body)
     return attachment
 
@@ -43,8 +50,17 @@ def _runtime(factory: async_sessionmaker[AsyncSession] | None = None) -> MagicMo
     runtime = MagicMock()
     runtime.sessionmaker = factory
     runtime.deployment_default.agent_name = "daimon"
-    runtime.settings.mcp.public_url = "https://mcp.example.com"
+    runtime.settings.mcp.app_root_url = "https://mcp.example.com"
     return runtime
+
+
+def test_avatar_url_uses_app_root_not_mcp_endpoint() -> None:
+    runtime = _runtime()
+    runtime.settings.mcp.public_url = "https://mcp.example.com/mcp"
+    avatar = AvatarRow(token="token", sha256="abcdef123456more", png=b"", source="default")
+    assert avatar_module.avatar_public_url(runtime, avatar) == (
+        "https://mcp.example.com/avatars/token/abcdef123456.png"
+    )
 
 
 @pytest.mark.parametrize("is_admin", [False, True])
@@ -122,6 +138,61 @@ async def test_upload_rechecks_agent_after_download(monkeypatch: pytest.MonkeyPa
     attachment.read.assert_awaited_once()
     assert lookup.await_count == 2
     assert audit.await_args.kwargs["outcome"] == "denied"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/avatar.png",
+        "https://cdn.discordapp.com.evil.test/avatar.png",
+        "http://cdn.discordapp.com/avatar.png",
+        "https://cdn.discordapp.com:8443/avatar.png",
+    ],
+)
+async def test_upload_rejects_untrusted_attachment_url(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    monkeypatch.setattr(avatar_module, "is_guild_admin", lambda _interaction: True)
+    monkeypatch.setattr(
+        avatar_module,
+        "find_agent_by_daimon_tag",
+        AsyncMock(return_value=SimpleNamespace(name="analyst", metadata={})),
+    )
+    audit = AsyncMock()
+    monkeypatch.setattr(avatar_module, "_audit", audit)
+    attachment = _attachment(url=url)
+    message, result = await upload_agent_avatar(
+        _interaction(),
+        _runtime(),
+        tenant_id=uuid.uuid4(),
+        agent_name="analyst",
+        attachment=attachment,
+    )
+    assert result is None and "Attach" in message
+    attachment.read.assert_not_awaited()
+    assert audit.await_args.kwargs["outcome"] == "error"
+
+
+async def test_upload_handles_attachment_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(avatar_module, "is_guild_admin", lambda _interaction: True)
+    monkeypatch.setattr(
+        avatar_module,
+        "find_agent_by_daimon_tag",
+        AsyncMock(return_value=SimpleNamespace(name="analyst", metadata={})),
+    )
+    audit = AsyncMock()
+    monkeypatch.setattr(avatar_module, "_audit", audit)
+    attachment = _attachment()
+    attachment.read.side_effect = aiohttp.ClientError("connection lost")
+    message, result = await upload_agent_avatar(
+        _interaction(),
+        _runtime(),
+        tenant_id=uuid.uuid4(),
+        agent_name="analyst",
+        attachment=attachment,
+    )
+    assert result is None and "could not use" in message
+    assert audit.await_args.kwargs["outcome"] == "error"
 
 
 async def test_upload_and_reset_rotate_tokens_and_sources(

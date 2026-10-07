@@ -228,6 +228,15 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
     assert "Avatars are public" not in _container_text(built_in)
 
 
+def test_managed_agent_details_hide_avatar_controls_even_if_roster_flag_is_false(
+    account_id: uuid.UUID,
+) -> None:
+    details = _details().model_copy(update={"daimon_managed": True})
+    state = _state(details, account_id=account_id, is_admin=True)
+    view = DetailsView(state, runtime=_make_runtime(settings=_mcp_settings()), allowed_user_id=42)
+    assert "Avatars are public" not in _container_text(view.children[0])
+
+
 async def test_reset_avatar_button_updates_detail_image(
     account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -244,11 +253,17 @@ async def test_reset_avatar_button_updates_detail_image(
     view.swap_to = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
     interaction = _admin_interaction()
 
-    await _find_button(view, "Reset avatar").callback(interaction)
-
+    reset_button = _find_button(view, "Reset avatar")
+    assert reset_button.custom_id == "agent-setup:avatar-reset"
+    await reset_button.callback(interaction)
+    reset.assert_not_awaited()
+    confirmation = view.swap_to.await_args.args[1]  # pyright: ignore[reportUnknownMemberType]
+    assert "Reset **research-bot**" in _container_text(confirmation.children[0])
+    confirmation.swap_to = AsyncMock()
+    await _find_button(confirmation, "Reset avatar").callback(interaction)
     reset.assert_awaited_once()
     assert state.avatar_urls[details.name].endswith("/avatars/new-token/abcdef123456.png")  # type: ignore[union-attr]
-    view.swap_to.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType]
+    confirmation.swap_to.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from urllib.parse import urlsplit
 
+import aiohttp
 from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_avatar_image import MAX_UPLOAD_BYTES, normalize_avatar_image
@@ -17,9 +19,23 @@ from daimon.core.stores.identity import get_or_create_platform_principal
 import discord
 
 
+def _trusted_attachment_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname in {"cdn.discordapp.com", "media.discordapp.net"}
+            and parsed.port is None
+            and parsed.username is None
+            and parsed.password is None
+        )
+    except ValueError:
+        return False
+
+
 def avatar_public_url(runtime: DiscordRuntime, avatar: AvatarRow) -> str | None:
     """Use the same public image route as agent message identity."""
-    base = runtime.settings.mcp.public_url
+    base = runtime.settings.mcp.app_root_url
     if base is None:
         return None
     return f"{str(base).rstrip('/')}/avatars/{avatar.token}/{avatar.sha256[:12]}.png"
@@ -90,8 +106,10 @@ async def upload_agent_avatar(
         interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=True
     ):
         return "Only a server admin can change a live agent's avatar.", None
-    if attachment.size > MAX_UPLOAD_BYTES or not (attachment.content_type or "").startswith(
-        "image/"
+    if (
+        attachment.size > MAX_UPLOAD_BYTES
+        or not (attachment.content_type or "").startswith("image/")
+        or not _trusted_attachment_url(attachment.url)
     ):
         await _audit(
             runtime,
@@ -109,7 +127,7 @@ async def upload_agent_avatar(
         if len(body) > MAX_UPLOAD_BYTES:
             raise ValueError("attachment exceeds 2 MB")
         png = await asyncio.to_thread(normalize_avatar_image, body)
-    except (discord.HTTPException, TimeoutError, ValueError):
+    except (aiohttp.ClientError, discord.HTTPException, TimeoutError, ValueError):
         await _audit(
             runtime,
             tenant_id=tenant_id,
