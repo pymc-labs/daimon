@@ -8,9 +8,12 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import httpx
+import pytest
 from daimon.core.config import NotebookSettings
+from daimon.core.notebooks import publish
 from daimon.core.notebooks.publish import (
     _principal_prefix,  # pyright: ignore[reportPrivateUsage]
+    _resolve_slug,  # pyright: ignore[reportPrivateUsage]
     delete_notebook,
     list_notebooks,
 )
@@ -115,3 +118,47 @@ async def test_list_notebooks_merges_both_kinds_without_duplicating_a_live_blog(
         "the blog record wins over its process-list twin, so title survives the merge"
     )
     assert by_slug["draft"]["permanent"] is False, "an unregistered process is a scratch notebook"
+
+
+# An account whose 12-character tag happens to start with "-".
+_DASH_ACCOUNT = "be834354-be02-48f2-853d-b5dc5e0e3916"
+
+
+def test_a_namespaced_slug_never_starts_with_a_dash() -> None:
+    """The host refuses a leading "-" (it would read as a marimo argv flag).
+
+    About 1 account in 64 has a tag starting with "-", and the host refused
+    every name it published.
+    """
+    slug = _resolve_slug(agent_slug="churn", principal_key=_DASH_ACCOUNT)
+    assert not slug.startswith("-"), slug
+    assert slug.endswith("-churn"), "the agent's name is kept"
+
+
+def test_an_existing_namespace_does_not_move() -> None:
+    """Notebooks already published are found by their tag, so it must stay put."""
+    assert _resolve_slug(agent_slug="churn", principal_key="acct-1") == "70F2qUGX_5Fu-churn"
+
+
+def test_a_random_slug_never_starts_with_a_dash(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(publish.secrets, "token_urlsafe", lambda _n: "-AbCdEfGhIjKlMnOpQrStUv")  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+
+    assert not _resolve_slug(agent_slug=None, principal_key=None).startswith("-")
+
+
+async def test_list_notebooks_round_trips_a_slug_for_a_dash_tagged_account() -> None:
+    namespaced = _resolve_slug(agent_slug="radar", principal_key=_DASH_ACCOUNT)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/admin/blogs"):
+            return httpx.Response(200, json={"blogs": [{"slug": namespaced}]})
+        return httpx.Response(200, json={"notebooks": []})
+
+    async with _make_client(handler) as client:
+        result = await list_notebooks(
+            notebook_settings=_settings(), client=client, principal_key=_DASH_ACCOUNT
+        )
+
+    assert [entry["slug"] for entry in result] == ["radar"], (
+        "the bare name comes back, so it still round-trips into delete"
+    )

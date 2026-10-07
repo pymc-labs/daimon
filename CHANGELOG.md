@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Notebook names work for every account.** Each notebook slug starts with a 12-character tag derived from the account, and about 1 account in 64 has a tag beginning with `-`. The notebook host refuses slugs that start with `-`, so every named notebook from those accounts failed at upload with a 400. One in 64 unnamed notebooks failed the same way. Those tags and random slugs now get an `x` in front; every other account keeps its tag, so existing notebooks stay where they are.
 - **Discord's help button says "🙋 Ask the team" too.** The button in the direct message after a 🙋 reaction, and its form, use the same name as Slack; the form's text box says "Someone from the team will reply."
 - **Slack's Ask a human button is now "🙋 Ask the team"**, with an emoji like the 👍/👎 beside it. Its form, notices and refusal say "the team" too ("What do you need help with? Someone from the team will reply."), and the support wording shared with Discord no longer says "a human".
 - **Slack's "What went wrong?" and Ask a human forms open again.** Both declared a 4,000-character text box; Slack caps a text input at 3,000 and refuses the whole form when it is larger, so every 👎 form and every Ask a human note form failed with `invalid_arguments` and nothing opened.
