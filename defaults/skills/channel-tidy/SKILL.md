@@ -24,8 +24,11 @@ tools refuse them.
   the turn you are in cannot be changed until the turn ends. The thread's
   first message, an empty "thread starter" echo Discord adds, is not one of
   your posts or cards: leave it out of what you tidy and report.
-- A thread you opened that is done: `archive_thread` on Discord. The thread
-  you are answering in is archived when your turn ends, so say it will be. Use
+- A thread you opened that is done: `archive_thread` on Discord. Archive only
+  when asked to archive or close the thread, not as part of tidying it. The
+  thread you are answering in is archived when your turn ends: say it will be
+  archived only after `archive_thread` returned `archive_scheduled`, never
+  before calling it. Use
   `delete_thread` to remove your own posts. Discord keeps the thread and
   other people's messages; Slack refuses threads with other people's replies.
   Each deleted message counts against the limits; a refusal stops the batch.
