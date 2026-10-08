@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -10,13 +11,14 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from anthropic import APIStatusError
+from anthropic import APIStatusError, AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.core import github_app_session
 from daimon.core._models import (
     Account,
     AccountGitHubLink,
     AgentGitHubGrant,
+    AgentGitHubMode,
     CliPrincipal,
     GitHubConnectFlow,
     GitHubConnectInvitation,
@@ -29,6 +31,7 @@ from daimon.core._models import (
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_session import (
     AppSessionAccess,
+    AppToken,
     archive_app_vault,
     close_headless_app_session,
 )
@@ -861,18 +864,19 @@ async def test_headless_app_session_is_closed_only_after_runner_finishes(
     await github_issued_tokens.mark_session_tokens_superseded(
         db_session, session_id="headless-session", except_ids=frozenset(), now=started
     )
+    assert [
+        row.token_id
+        for row in await github_issued_tokens.select_due_superseded_tokens(db_session, now=started)
+    ] == [token.token_id]
+    await github_issued_tokens.restore_session_tokens(
+        db_session, token_ids=frozenset({token.token_id})
+    )
     assert (
         await github_issued_tokens.select_due_superseded_tokens(
-            db_session, now=started + timedelta(seconds=119)
+            db_session, now=started + timedelta(minutes=10)
         )
         == []
     )
-    assert [
-        row.token_id
-        for row in await github_issued_tokens.select_due_superseded_tokens(
-            db_session, now=started + timedelta(seconds=120)
-        )
-    ] == [token.token_id]
     await github_issued_tokens.register_headless_app_session(
         db_session, session_id="headless-session", tenant_id=tenant_id, vault_id="session-vault"
     )
@@ -1039,6 +1043,259 @@ async def test_app_vault_archive_accepts_already_archived() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("refuse_resource", [False, True])
+async def test_live_app_rotation_updates_ma_and_delays_revocation(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    refuse_resource: bool,
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    db_session.add(AgentGitHubMode(tenant_id=tenant_id, agent_id=agent_id, mode="app"))
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    old_ids: list[uuid.UUID] = []
+    for installation_id, repo_id, name in ((101, 11, "first"), (102, 12, "second")):
+        await github_app_installations.upsert(
+            db_session,
+            installation_id=installation_id,
+            account_login="acme",
+            repo_full_names=[f"acme/{name}"],
+        )
+        db_session.add(
+            TenantGitHubRepo(
+                tenant_id=tenant_id,
+                repo_id=repo_id,
+                owner_id=1,
+                installation_id=installation_id,
+                repo_full_name=f"acme/{name}",
+                max_access="read",
+                authorized_by_github_user_id=501,
+                status="active",
+                version=1,
+            )
+        )
+    await db_session.flush()
+    for _, repo_id, name in ((101, 11, "first"), (102, 12, "second")):
+        db_session.add(
+            AgentGitHubGrant(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=repo_id,
+                baseline_access="read",
+                ceiling_access="read",
+                staged=False,
+                is_working_repo=name == "first",
+                version=1,
+            )
+        )
+    await db_session.flush()
+    for installation_id, repo_id in ((101, 11), (102, 12)):
+        row = await github_issued_tokens.create_pending(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            session_id="rotating-session",
+            installation_id=installation_id,
+            repo_ids=[repo_id],
+            permissions={"contents": "read"},
+            grant_versions={f"grant:{repo_id}": 1, f"authorization:{repo_id}": 1},
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+        old_ids.append(row.token_id)
+        await github_issued_tokens.store_token(
+            db_session, token_id=row.token_id, token=f"old-{repo_id}", fernet=fernet
+        )
+        await github_issued_tokens.mark_delivered(db_session, token_id=row.token_id)
+    await db_session.commit()
+
+    monkeypatch.setattr(github_app_session, "build_app_jwt", lambda *_args, **_kwargs: "jwt")
+    mint = AsyncMock(side_effect=["new-first", "new-second"])
+    monkeypatch.setattr(github_app_session, "mint_installation_token", mint)
+    writes: list[tuple[str, str, dict[str, object]]] = []
+    credentials = [
+        {"id": f"cred-{name}", "type": "credential", "vault_id": "vault-1", "auth": auth}
+        for name, auth in (
+            ("first", {"type": "environment_variable", "secret_name": "GH_TOKEN_ACME_READ"}),
+            ("second", {"type": "environment_variable", "secret_name": "GH_TOKEN_ACME_READ_1"}),
+            ("working", {"type": "environment_variable", "secret_name": "GH_TOKEN"}),
+            (
+                "copilot",
+                {
+                    "type": "static_bearer",
+                    "mcp_server_url": "https://api.githubcopilot.com/mcp",
+                },
+            ),
+        )
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET":
+            return httpx.Response(200, json={"data": credentials, "has_more": False})
+        writes.append((req.method, req.url.path, json.loads(req.content) if req.content else {}))
+        if req.method == "DELETE":
+            return httpx.Response(204)
+        if "/resources/" in req.url.path:
+            if refuse_resource:
+                return httpx.Response(409, json={"error": {"message": "turn is running"}})
+            return httpx.Response(
+                200,
+                json={
+                    "id": req.url.path.rsplit("/", 1)[-1],
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "updated_at": datetime.now(UTC).isoformat(),
+                    "mount_path": "/workspace/acme/first",
+                    "type": "github_repository",
+                    "url": "https://github.com/acme/first",
+                },
+            )
+        return httpx.Response(
+            200,
+            json=next(item for item in credentials if req.url.path.endswith(item["id"])),
+        )
+
+    anthropic = AsyncAnthropic(
+        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    await github_app_session.rotate_live_app_tokens(
+        anthropic,
+        db_session_factory,
+        session_id="rotating-session",
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        account_id=None,
+        is_external=False,
+        vault_id="vault-1",
+        resource_ids={
+            "https://github.com/acme/first": "resource-first",
+            "https://github.com/acme/second": "resource-second",
+        },
+        config=GithubAppSettings(app_id="1", private_key="dummy"),
+        fernet=fernet,
+        active_turn=True,
+    )
+    assert mint.await_count == 2
+    assert {path for _, path, _ in writes if "/resources/" in path} == {
+        "/v1/sessions/rotating-session/resources/resource-first",
+        "/v1/sessions/rotating-session/resources/resource-second",
+    }
+    assert {path for _, path, _ in writes if "/credentials/" in path} == {
+        f"/v1/vaults/vault-1/credentials/cred-{name}"
+        for name in ("first", "second", "working", "copilot")
+    }
+    async with db_session_factory() as session:
+        issued = await github_issued_tokens.list_session_tokens(
+            session, session_id="rotating-session"
+        )
+        old = [row for row in issued if row.token_id in old_ids]
+        assert all(row.superseded_at is not None for row in old)
+        assert all(row.revoke_after == row.expires_at + timedelta(minutes=6) for row in old)
+        assert (
+            len([row for row in issued if row.status == "delivered" and row.superseded_at is None])
+            == 2
+        )
+        assert (
+            await github_issued_tokens.select_due_superseded_tokens(
+                session, now=max(row.revoke_after for row in old) - timedelta(seconds=1)
+            )
+            == []
+        )
+        assert {
+            row.token_id
+            for row in await github_issued_tokens.select_due_superseded_tokens(
+                session, now=max(row.revoke_after for row in old)
+            )
+        } == set(old_ids)
+    current = await github_app_session._current_app_access(  # pyright: ignore[reportPrivateUsage]
+        db_session_factory,
+        session_id="rotating-session",
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        fernet=fernet,
+    )
+    assert [token.credential_name for token in current.tokens] == [
+        "GH_TOKEN_ACME_READ",
+        "GH_TOKEN_ACME_READ_1",
+    ]
+    from daimon.adapters.scheduler.main import (
+        _sweep_github_app_tokens,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    revoked: list[str] = []
+
+    async def fake_revoke(_client: httpx.AsyncClient, token: str) -> None:
+        revoked.append(token)
+
+    monkeypatch.setattr("daimon.adapters.scheduler.main.revoke_token", fake_revoke)
+    await _sweep_github_app_tokens(db_session_factory, fernet=fernet)
+    assert revoked == []
+    async with db_session_factory.begin() as session:
+        await session.execute(
+            text(
+                "UPDATE github_issued_tokens SET expires_at = :expired, revoke_after = :due "
+                "WHERE token_id = ANY(:old_ids)"
+            ),
+            {
+                "expired": datetime.now(UTC) - timedelta(minutes=10),
+                "due": datetime.now(UTC) - timedelta(seconds=1),
+                "old_ids": old_ids,
+            },
+        )
+    await _sweep_github_app_tokens(db_session_factory, fernet=fernet)
+    assert revoked == []
+    async with db_session_factory() as session:
+        issued = await github_issued_tokens.list_session_tokens(
+            session, session_id="rotating-session"
+        )
+        assert all(row.status == "revoked" for row in issued if row.token_id in old_ids)
+    async with db_session_factory.begin() as session:
+        await session.execute(
+            text(
+                "UPDATE tenant_github_repos SET status = 'revoked' "
+                "WHERE tenant_id = :tenant_id AND repo_id = 12"
+            ),
+            {"tenant_id": tenant_id},
+        )
+    current = await github_app_session._current_app_access(  # pyright: ignore[reportPrivateUsage]
+        db_session_factory,
+        session_id="rotating-session",
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        fernet=fernet,
+    )
+    assert len(current.resources) == 2
+    mint.reset_mock(side_effect=True)
+    mint.side_effect = ["narrowed-first"]
+    writes.clear()
+    await github_app_session.rotate_live_app_tokens(
+        anthropic,
+        db_session_factory,
+        session_id="rotating-session",
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        account_id=None,
+        is_external=False,
+        vault_id="vault-1",
+        resource_ids={
+            "https://github.com/acme/first": "resource-first",
+            "https://github.com/acme/second": "resource-second",
+        },
+        config=GithubAppSettings(app_id="1", private_key="dummy"),
+        fernet=fernet,
+        active_turn=True,
+    )
+    mint.assert_awaited_once()
+    assert {path for _, path, _ in writes if "/resources/" in path} == {
+        "/v1/sessions/rotating-session/resources/resource-first"
+    }
+    assert ("DELETE", "/v1/vaults/vault-1/credentials/cred-second") in {
+        (method, path) for method, path, _ in writes
+    }
+    await _sweep_github_app_tokens(db_session_factory, fernet=fernet)
+    assert revoked == ["new-second"]
+
+
 async def test_app_rotation_keeps_old_session_when_first_resource_update_fails(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1079,3 +1336,74 @@ async def test_app_rotation_keeps_old_session_when_first_resource_update_fails(
         )
     archive.assert_not_awaited()
     revoke.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_active_turn_rotation_failure_restores_old_credentials_without_archiving(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://github.com/owner/repo"
+    old = AppSessionAccess(
+        resources=(
+            {
+                "type": "github_repository",
+                "url": url,
+                "authorization_token": "old-token",
+                "mount_path": "/workspace/owner/repo",
+            },
+        ),
+        tokens=(AppToken(uuid.uuid4(), "old-token", 1, (11,), "read", "GH_TOKEN_OWNER_READ"),),
+        working_token="old-token",
+    )
+    new = AppSessionAccess(
+        resources=(
+            {
+                "type": "github_repository",
+                "url": url,
+                "authorization_token": "new-token",
+                "mount_path": "/workspace/owner/repo",
+            },
+        ),
+        tokens=(AppToken(uuid.uuid4(), "new-token", 1, (11,), "read", "GH_TOKEN_OWNER_READ"),),
+        working_token="new-token",
+    )
+    monkeypatch.setattr(github_app_session, "_current_app_access", AsyncMock(return_value=old))
+    monkeypatch.setattr(github_app_session, "prepare_app_access", AsyncMock(return_value=new))
+    credentials = AsyncMock(side_effect=[RuntimeError("vault update failed"), None])
+    monkeypatch.setattr(github_app_session, "add_app_credentials", credentials)
+    revoke = AsyncMock()
+    monkeypatch.setattr(github_app_session, "revoke_app_access", revoke)
+    supersede = AsyncMock()
+    monkeypatch.setattr(github_app_session, "mark_session_tokens_superseded", supersede)
+    update = AsyncMock()
+    archive = AsyncMock()
+    anthropic = SimpleNamespace(
+        beta=SimpleNamespace(
+            sessions=SimpleNamespace(resources=SimpleNamespace(update=update), archive=archive)
+        )
+    )
+    with pytest.raises(RuntimeError, match="vault update failed"):
+        await github_app_session.rotate_live_app_tokens(
+            anthropic,
+            db_session_factory,
+            session_id="running-session",
+            tenant_id=uuid.uuid4(),
+            agent_id=uuid.uuid4(),
+            account_id=None,
+            is_external=True,
+            vault_id="running-vault",
+            resource_ids={url: "resource-1"},
+            config=GithubAppSettings(),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            active_turn=True,
+        )
+    assert [call.kwargs["authorization_token"] for call in update.await_args_list] == [
+        "new-token",
+        "old-token",
+    ]
+    assert [call.kwargs["access"] for call in credentials.await_args_list] == [new, old]
+    revoke.assert_awaited_once()
+    assert revoke.await_args.args[2] == new
+    supersede.assert_not_awaited()
+    archive.assert_not_awaited()

@@ -202,6 +202,7 @@ def _run_grant_command(
                                         resource_ids=snapshot.repo_resource_ids,
                                         config=settings.github_app,
                                         fernet=fernet,
+                                        active_turn=mapped.active_turn_message_id is not None,
                                     )
                                     async with sessionmaker.begin() as session:
                                         await record_app_token_refresh(

@@ -119,6 +119,7 @@ from daimon.core.stores.github_issued_tokens import (
     select_deactivated_tokens,
     select_due_superseded_tokens,
     select_stale_tokens,
+    touch_running_mcp_app_session,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import record_result, update_routine_agent_id
@@ -623,11 +624,23 @@ async def _sweep_github_app_tokens(
     async with sm() as session:
         stale = await select_stale_tokens(session)
         stale.extend(await select_deactivated_tokens(session))
-        stale.extend(await select_due_superseded_tokens(session))
         stale.extend(await select_abandoned_pending_tokens(session))
+        stale_ids = {row.token_id for row in stale}
+        due_superseded = await select_due_superseded_tokens(session)
+        natural_expired_ids = {
+            row.token_id
+            for row in due_superseded
+            if row.revoke_after is not None and row.revoke_after >= row.expires_at
+        }
+        stale.extend(due_superseded)
     stale = list({row.token_id: row for row in stale}.values())
     async with httpx.AsyncClient() as github:
         for row in stale:
+            if row.token_id in natural_expired_ids and row.token_id not in stale_ids:
+                # GitHub has already expired the token. No DELETE is needed.
+                async with sm.begin() as session:
+                    await mark_revoked(session, token_id=row.token_id)
+                continue
             token = decrypt_issued_token(row, fernet=fernet)
             if token is None:
                 continue
@@ -694,12 +707,13 @@ async def _refresh_github_app_sessions(
         snapshot = item.mapping.effective_config
         if snapshot is None or snapshot.vault_id is None:
             continue
-        if item.mapping.active_turn_message_id is not None:
-            continue
+        active_turn = item.mapping.active_turn_message_id is not None
         due_for_expiry = item.expires_at <= now + timedelta(minutes=15)
         last_check = _last_app_access_checks.get(item.mapping.ma_session_id)
         due_for_access = last_check is None or last_check <= now - timedelta(minutes=5)
         if not due_for_expiry and not due_for_access:
+            continue
+        if due_for_expiry and last_check is not None and last_check > now - timedelta(minutes=1):
             continue
         try:
             desired_urls, desired_permissions = await effective_repo_state(
@@ -711,7 +725,7 @@ async def _refresh_github_app_sessions(
                 config=settings.github_app,
                 fernet=fernet,
             )
-            if desired_urls != snapshot.repo_urls:
+            if desired_urls != snapshot.repo_urls and not active_turn:
                 await anthropic_client.beta.sessions.archive(item.mapping.ma_session_id)
                 async with sm.begin() as session:
                     await mark_dead(session, id=item.mapping.id)
@@ -731,33 +745,36 @@ async def _refresh_github_app_sessions(
             if not due_for_expiry and not narrowed:
                 _last_app_access_checks[item.mapping.ma_session_id] = now
                 continue
-            await rotate_live_app_tokens(
-                anthropic_client,
-                sm,
-                session_id=item.mapping.ma_session_id,
-                tenant_id=item.mapping.tenant_id,
-                agent_id=item.agent_id,
-                account_id=item.mapping.account_id,
-                is_external=False,
-                vault_id=snapshot.vault_id,
-                resource_ids=snapshot.repo_resource_ids,
-                config=settings.github_app,
-                fernet=fernet,
-            )
-            async with sm.begin() as session:
-                await record_app_token_refresh(
-                    session,
-                    ma_session_id=item.mapping.ma_session_id,
-                    issued_at=int(now.timestamp()),
+            async with session_mutation_fence(sm, item.mapping.ma_session_id, check=False):
+                await rotate_live_app_tokens(
+                    anthropic_client,
+                    sm,
+                    session_id=item.mapping.ma_session_id,
+                    tenant_id=item.mapping.tenant_id,
+                    agent_id=item.agent_id,
+                    account_id=item.mapping.account_id,
+                    is_external=False,
+                    vault_id=snapshot.vault_id,
+                    resource_ids=snapshot.repo_resource_ids,
+                    config=settings.github_app,
+                    fernet=fernet,
+                    active_turn=active_turn,
                 )
+                async with sm.begin() as session:
+                    await record_app_token_refresh(
+                        session,
+                        ma_session_id=item.mapping.ma_session_id,
+                        issued_at=int(now.timestamp()),
+                    )
             _last_app_access_checks[item.mapping.ma_session_id] = now
         except Exception:
+            _last_app_access_checks[item.mapping.ma_session_id] = now
             log.exception(
                 "scheduler.github_app_session_refresh.failed",
                 session_id=item.mapping.ma_session_id,
             )
     async with sm() as session:
-        mcp_live = await list_live_mcp_app_sessions(session, now=now)
+        mcp_live = await list_live_mcp_app_sessions(session, now=now, include_expired=True)
     for candidate in mcp_live:
         try:
             async with session_mutation_fence(sm, candidate.session_id, check=False):
@@ -766,17 +783,40 @@ async def _refresh_github_app_sessions(
                     current = next(
                         iter(
                             await list_live_mcp_app_sessions(
-                                session, now=datetime.now(UTC), session_id=candidate.session_id
+                                session,
+                                now=datetime.now(UTC),
+                                session_id=candidate.session_id,
+                                include_expired=True,
                             )
                         ),
                         None,
                     )
                 if current is None:
                     continue
-                observed = await anthropic_client.beta.sessions.retrieve(current.session_id)
-                if observed.status != "idle":
+                try:
+                    observed = await anthropic_client.beta.sessions.retrieve(current.session_id)
+                except anthropic.NotFoundError:
+                    async with sm.begin() as session:
+                        await finish_headless_app_session(session, session_id=current.session_id)
                     continue
+                active_turn = observed.status in ("running", "rescheduling")
+                if observed.status not in ("idle", "running", "rescheduling"):
+                    async with sm.begin() as session:
+                        await finish_headless_app_session(session, session_id=current.session_id)
+                    continue
+                if current.created_at <= now - timedelta(hours=12):
+                    # An abandoned running turn cannot renew its tokens indefinitely.
+                    continue
+                if not active_turn and current.last_started_at <= now - timedelta(minutes=46):
+                    continue
+                if active_turn:
+                    async with sm.begin() as session:
+                        await touch_running_mcp_app_session(
+                            session, session_id=current.session_id, now=datetime.now(UTC)
+                        )
                 if current.account_id is None:
+                    if active_turn:
+                        continue
                     await _retire_mcp_app_session(anthropic_client, sm, current, fernet=fernet)
                     continue
                 due_for_expiry = (
@@ -785,6 +825,12 @@ async def _refresh_github_app_sessions(
                 last_check = _last_app_access_checks.get(current.session_id)
                 due_for_access = last_check is None or last_check <= now - timedelta(minutes=5)
                 if not due_for_expiry and not due_for_access:
+                    continue
+                if (
+                    due_for_expiry
+                    and last_check is not None
+                    and last_check > now - timedelta(minutes=1)
+                ):
                     continue
                 desired_urls, desired_permissions = await effective_repo_state(
                     sm,
@@ -795,7 +841,7 @@ async def _refresh_github_app_sessions(
                     config=settings.github_app,
                     fernet=fernet,
                 )
-                if desired_urls != current.repo_urls:
+                if desired_urls != current.repo_urls and not active_turn:
                     await _retire_mcp_app_session(anthropic_client, sm, current, fernet=fernet)
                     continue
                 level = {"none": 0, "read": 1, "write": 2}
@@ -821,9 +867,11 @@ async def _refresh_github_app_sessions(
                         resource_ids=current.repo_resource_ids,
                         config=settings.github_app,
                         fernet=fernet,
+                        active_turn=active_turn,
                     )
                 _last_app_access_checks[current.session_id] = now
         except Exception:
+            _last_app_access_checks[candidate.session_id] = now
             log.exception(
                 "scheduler.github_mcp_app_session_refresh.failed",
                 session_id=candidate.session_id,
@@ -848,6 +896,29 @@ async def _close_github_app_sessions(
                         )
                     if current is None:
                         continue
+                    if current.is_mcp:
+                        try:
+                            observed = await anthropic_client.beta.sessions.retrieve(
+                                item.session_id
+                            )
+                        except anthropic.NotFoundError:
+                            observed = None
+                        except Exception:
+                            # Unknown upstream state must not destroy a running turn.
+                            continue
+                        if (
+                            observed is not None
+                            and observed.status in ("running", "rescheduling")
+                            and (
+                                current.created_at is None
+                                or current.created_at > datetime.now(UTC) - timedelta(hours=12)
+                            )
+                        ):
+                            async with sm.begin() as session:
+                                await touch_running_mcp_app_session(
+                                    session, session_id=item.session_id, now=datetime.now(UTC)
+                                )
+                            continue
                     if fernet is None:
                         async with sm() as session:
                             if await list_session_tokens(session, session_id=item.session_id):

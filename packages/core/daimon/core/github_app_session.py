@@ -37,6 +37,8 @@ from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, add_github_copilot_cre
 from daimon.core.stores.github_access import (
     AgentGrant,
     AuthorizedRepo,
+    list_agent_grants,
+    list_authorized_repos,
     list_live_grant_repositories,
 )
 from daimon.core.stores.github_issued_tokens import (
@@ -49,6 +51,7 @@ from daimon.core.stores.github_issued_tokens import (
     mark_headless_app_session_closed,
     mark_revoked,
     mark_session_tokens_superseded,
+    restore_session_tokens,
     select_stale_tokens,
     set_session_id,
     store_token,
@@ -589,6 +592,84 @@ async def archive_app_vault(anthropic: AsyncAnthropic, *, vault_id: str) -> None
             raise
 
 
+async def _current_app_access(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    session_id: str,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    fernet: MultiFernet,
+) -> AppSessionAccess:
+    """Rebuild the current mounted values from encrypted issued tokens for rollback."""
+    async with sessionmaker() as session:
+        issued = [
+            row
+            for row in await list_session_tokens(session, session_id=session_id)
+            if row.status == "delivered" and row.superseded_at is None
+        ]
+        # A revoked grant or removed installation repository is still needed to
+        # restore a running turn if this refresh fails after touching MA.
+        repo_rows = await list_authorized_repos(session, tenant_id=tenant_id)
+        grant_rows = await list_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
+        repos = {repo.repo_id: repo for repo in repo_rows}
+        grants = {grant.repo_id: grant for grant in grant_rows}
+        working_ids = {grant.repo_id for grant in grant_rows if grant.is_working_repo}
+    ordered = sorted(
+        issued,
+        key=lambda row: (
+            row.installation_id,
+            "write" if row.permissions.get("contents") == "write" else "read",
+            row.repo_ids,
+        ),
+    )
+    tokens: list[AppToken] = []
+    resources: list[Resource] = []
+    working_token: str | None = None
+    for group_index, row in enumerate(ordered):
+        token = decrypt_issued_token(row, fernet=fernet)
+        if (
+            token is None
+            or not row.repo_ids
+            or any(repo_id not in repos for repo_id in row.repo_ids)
+        ):
+            raise ValueError("current App token cannot be restored")
+        profile: PermissionProfile = (
+            "write" if row.permissions.get("contents") == "write" else "read"
+        )
+        owner = repos[row.repo_ids[0]].repo_full_name.split("/", 1)[0]
+        owner_key = "".join(char if char.isalnum() else "_" for char in owner.upper())
+        credential_name = f"GH_TOKEN_{owner_key}_{profile.upper()}"
+        if any(item.credential_name == credential_name for item in tokens):
+            credential_name += f"_{group_index}"
+        tokens.append(
+            AppToken(
+                row.token_id,
+                token,
+                row.installation_id,
+                tuple(row.repo_ids),
+                profile,
+                credential_name,
+            )
+        )
+        for repo_id in row.repo_ids:
+            repo = repos[repo_id]
+            owner, name = repo.repo_full_name.split("/", 1)
+            resources.append(
+                {
+                    "type": "github_repository",
+                    "url": f"https://github.com/{repo.repo_full_name}",
+                    "authorization_token": token,
+                    "mount_path": (grants[repo_id].mount_path if repo_id in grants else None)
+                    or f"/workspace/{owner}/{name}",
+                }
+            )
+        if working_token is None and any(repo_id in working_ids for repo_id in row.repo_ids):
+            working_token = token
+    return AppSessionAccess(
+        tuple(resources), tuple(tokens), working_token or (tokens[0].token if tokens else None)
+    )
+
+
 async def rotate_live_app_tokens(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -602,8 +683,9 @@ async def rotate_live_app_tokens(
     resource_ids: dict[str, str],
     config: GithubAppSettings,
     fernet: MultiFernet,
+    active_turn: bool = False,
 ) -> None:
-    """Refresh mounted clone resources and the session vault together."""
+    """Refresh resources and vault in place; leave equal-access old tokens to expire."""
     provisional = f"pending:{uuid.uuid4()}"
     swapped = False
 
@@ -611,6 +693,17 @@ async def rotate_live_app_tokens(
         nonlocal swapped
         swapped = True
 
+    old_access = (
+        await _current_app_access(
+            sessionmaker,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            fernet=fernet,
+        )
+        if active_turn
+        else None
+    )
     async with httpx.AsyncClient() as client:
         access = await prepare_app_access(
             sessionmaker,
@@ -634,12 +727,23 @@ async def rotate_live_app_tokens(
                     # vault token works for API calls; the next turn replaces
                     # the session to mount the new checkout.
                     continue
-                await anthropic.beta.sessions.resources.update(
-                    resource_id,
-                    session_id=session_id,
-                    authorization_token=resource["authorization_token"],
-                )
-                swapped = True
+                try:
+                    await anthropic.beta.sessions.resources.update(
+                        resource_id,
+                        session_id=session_id,
+                        authorization_token=resource["authorization_token"],
+                    )
+                    swapped = True
+                except APIStatusError:
+                    if not active_turn:
+                        raise
+                    # MA can refuse resource changes while a turn is running.
+                    # Keep the in-session environment and Copilot token fresh.
+                    _log.warning(
+                        "MA refused App resource refresh during active turn %s: %s",
+                        session_id,
+                        resource_id,
+                    )
             await add_app_credentials(
                 anthropic, vault_id=vault_id, access=access, on_mutation=mark_swapped
             )
@@ -659,7 +763,41 @@ async def rotate_live_app_tokens(
                 )
         except Exception:
             try:
-                if swapped:
+                if old_access is not None:
+                    try:
+                        async with sessionmaker.begin() as session:
+                            await restore_session_tokens(
+                                session,
+                                token_ids=frozenset(token.token_id for token in old_access.tokens),
+                            )
+                    except Exception:
+                        _log.exception(
+                            "Failed to preserve old App tokens for active session %s", session_id
+                        )
+                    try:
+                        await add_app_credentials(anthropic, vault_id=vault_id, access=old_access)
+                    except Exception:
+                        _log.exception(
+                            "Failed to restore App vault for active session %s", session_id
+                        )
+                    for resource in old_access.resources:
+                        if resource["type"] != "github_repository":
+                            continue
+                        resource_id = resource_ids.get(resource["url"])
+                        if resource_id is not None:
+                            try:
+                                await anthropic.beta.sessions.resources.update(
+                                    resource_id,
+                                    session_id=session_id,
+                                    authorization_token=resource["authorization_token"],
+                                )
+                            except Exception:
+                                _log.exception(
+                                    "Failed to restore App resource %s for active session %s",
+                                    resource_id,
+                                    session_id,
+                                )
+                elif swapped:
                     await anthropic.beta.sessions.archive(session_id)
             finally:
                 await revoke_app_access(sessionmaker, client, access)
