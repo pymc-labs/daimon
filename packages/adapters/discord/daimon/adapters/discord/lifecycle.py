@@ -644,7 +644,10 @@ class DiscordTurnLifecycle:
             return
         try:
             await self._delete(self._message_ref)
-        except discord.HTTPException:
+        except discord.NotFound:
+            # A missing card is already discarded; no pending button remains.
+            pass
+        except (discord.HTTPException, discord.ClientException):
             # Keep the durable intent so a later recovery pass can resolve a
             # card whose pending button may still be visible.
             self._card_discard_failed = True

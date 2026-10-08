@@ -121,11 +121,32 @@ async def retire_turn_card_intent(
 async def turn_card_intent_is_active(session: AsyncSession, *, id: uuid.UUID) -> bool:
     """Whether the turn behind this intent is still running.
 
-    An intent is retired when its turn reaches a terminal state, and retired
-    rows are pruned later, so a missing row means a finished turn.
+    Terminal intents are retired or marked unrecoverable and pruned later,
+    so a missing row means a finished turn.
     """
     status = await session.scalar(select(TurnCardIntent.status).where(TurnCardIntent.id == id))
     return status in ("prepared", "posted")
+
+
+async def mark_turn_card_intent_unrecoverable(
+    session: AsyncSession,
+    *,
+    id: uuid.UUID,
+    cutoff: datetime,
+) -> bool:
+    """Close an aged active Discord intent after boot recovery cannot resolve it."""
+    result = await session.execute(
+        update(TurnCardIntent)
+        .where(
+            TurnCardIntent.id == id,
+            TurnCardIntent.platform == "discord",
+            TurnCardIntent.status.in_(("prepared", "posted")),
+            TurnCardIntent.created_at <= cutoff,
+        )
+        .values(status="unrecoverable", updated_at=func.now())
+    )
+    await session.flush()
+    return cast(CursorResult[object], result).rowcount == 1
 
 
 async def list_recoverable_turn_card_intents(
@@ -133,7 +154,7 @@ async def list_recoverable_turn_card_intents(
     *,
     platform: str,
 ) -> list[TurnCardIntentRow]:
-    """List every non-retired intent for one adapter's boot recovery.
+    """List every active intent for one adapter's boot recovery.
 
     Prepared rows with a NULL message ID are included deliberately. They mark
     the post/response-persistence crash window, whose recovery behavior is an
@@ -158,12 +179,15 @@ async def delete_retired_turn_card_intents(
     cutoff: datetime,
     batch_size: int,
 ) -> int:
-    """Delete at most batch_size retired intents updated before cutoff."""
+    """Delete at most batch_size terminal intents updated before cutoff."""
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     victims = (
         select(TurnCardIntent.id)
-        .where(TurnCardIntent.status == "retired", TurnCardIntent.updated_at < cutoff)
+        .where(
+            TurnCardIntent.status.in_(("retired", "unrecoverable")),
+            TurnCardIntent.updated_at < cutoff,
+        )
         .order_by(TurnCardIntent.updated_at, TurnCardIntent.id)
         .limit(batch_size)
     )

@@ -184,6 +184,9 @@ discord_webhooks	WebhookLoad	LoadUnsafeBackoff	violates:NoBusyRetry	38	-	ignorin
 discord_webhooks	WebhookLoad	LoadUnsafeBound	violates:BoundedPosting	406	-	two windows cannot carry six calls through a two-per-window hook
 discord_webhooks	CardRecovery	CardSafe	clean	17	-	durable intent and token-available recovery clear the pending card
 discord_webhooks	CardRecovery	CardMissingToken	clean	13	-	missing token retains the intent and does not claim completed recovery
+discord_webhooks	CardRecovery	CardStaleUnrecoverable	clean	16	-	aged unresolved intent becomes terminal even without delete permission
+discord_webhooks	CardRecovery	CardStaleDelete	clean	15	-	bot with Manage Messages deletes the stale card when possible
+discord_webhooks	CardRecovery	CardUnsafeStale	violates:NoStaleActive	13	-	old behavior keeps an aged unresolved intent active forever
 discord_webhooks	CardRecovery	CardUnsafeDuplicate	violates:NoDuplicateCard	6	-	blind retry after accepted post with lost response duplicates the card
 discord_webhooks	CardRecovery	CardUnsafeRetire	violates:NoPendingAfterRetirement	14	-	replacement of uneditable card cannot justify retiring the original intent
 discord_webhooks	WebhookLoad	LoadUnsafeDuplicateAnswer	violates:NoDuplicateAnswer	76	-	replaying a recorded answer duplicates delivery

@@ -17,6 +17,7 @@ from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.turn_card_recovery import (
     TurnCardSearchState,
+    expire_unrecoverable_turn_card,
     find_turn_card_message,
     post_initial_turn_card,
     reconcile_turn_card_intent,
@@ -26,10 +27,85 @@ from daimon.adapters.discord.turn_card_recovery import (
 )
 from daimon.adapters.discord.views import CancelView
 from daimon.core.stores.domain import TurnCardIntentRow
-from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+from daimon.core.stores.turn_card_intents import (
+    create_turn_card_intent,
+    list_recoverable_turn_card_intents,
+    record_turn_card_message,
+    turn_card_intent_is_active,
+)
 from daimon.core.turn.state import TurnState
 from daimon.testing.factories import make_tenant
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+@pytest.mark.parametrize("can_delete", [True, False])
+async def test_aged_unrecoverable_card_stops_blocking_and_deletes_when_allowed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    can_delete: bool,
+) -> None:
+    now = datetime.now(UTC)
+    tenant = await make_tenant(db_session)
+    intent = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="456",
+        turn_token=_TURN_ID,
+    )
+    await record_turn_card_message(db_session, id=intent.id, message_id="123")
+    await db_session.execute(
+        text("UPDATE turn_card_intents SET created_at = :created_at WHERE id = :id"),
+        {"created_at": now - timedelta(days=2), "id": intent.id},
+    )
+    await db_session.commit()
+    aged = intent.model_copy(
+        update={"created_at": now - timedelta(days=2), "message_id": "123", "status": "posted"}
+    )
+    thread = MagicMock(spec=discord.Thread)
+    thread.guild.me = MagicMock()
+    thread.permissions_for.return_value.manage_messages = can_delete
+    message = MagicMock(spec=discord.Message)
+    message.delete = AsyncMock()
+    thread.fetch_message = AsyncMock(return_value=message)
+
+    assert await expire_unrecoverable_turn_card(
+        db_session_factory, intent=aged, thread=thread, max_age_s=86400, now=now
+    )
+    assert not await turn_card_intent_is_active(db_session, id=intent.id)
+    assert await list_recoverable_turn_card_intents(db_session, platform="discord") == []
+    if can_delete:
+        thread.fetch_message.assert_awaited_once_with(123)
+        message.delete.assert_awaited_once()
+    else:
+        thread.fetch_message.assert_not_awaited()
+
+
+async def test_fresh_unresolved_card_stays_recoverable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    intent = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="456",
+        turn_token=_TURN_ID,
+    )
+    await db_session.commit()
+
+    assert not await expire_unrecoverable_turn_card(
+        db_session_factory,
+        intent=intent,
+        thread=None,
+        max_age_s=86400,
+        now=intent.created_at + timedelta(hours=1),
+    )
+    assert await turn_card_intent_is_active(db_session, id=intent.id)
+
 
 _TURN_ID = UUID("12345678-1234-5678-1234-567812345678")
 _CREATED_AFTER = datetime(2026, 9, 25, tzinfo=UTC)

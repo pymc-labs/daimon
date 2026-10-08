@@ -19,8 +19,9 @@ These are finite abstractions of the code, not a proof of Discord or discord.py.
 | `CommitIntent`, `RemoteAccept`, `PersistResponse` | `post_initial_turn_card()` commits an intent before `DiscordTurnLifecycle.post_initial()`; it records the returned message ID before the turn proceeds. |
 | `FinishAnswer` | The normal prompted success path posts an initial card, edits the Done card, then edits that message with the answer. Progress edits, sealed responses, answer overflow, and notify-on-completion can add requests. |
 | `SilentEnd` | An unprompted turn with no answer deletes its transient card. If delete fails, the lifecycle marks the discard failure and the caller retains the intent. |
-| `Crash`, `BootLookup`, `RecoverEdit` | `bot.py` gates new turn admission behind orphan sweep, then reconciles the boot intent snapshot; `turn_card_recovery.py` scans history and edits every matching pending card before retirement. |
+| `Crash`, `BootLookup`, `RecoverEdit` | `bot.py` gates new turn admission behind orphan sweep, then reconciles the boot intent snapshot; `turn_card_recovery.py` scans history and edits every matching pending card before retirement. The orphan sweep also refuses replacement, so an unknown webhook cannot create a second bot card while leaving the original pending. |
 | `RecoverReplacement` | The pre-fix recovery path could replace an uneditable webhook card with a new bot message and retire the intent while the old card still displayed a pending button. Recovery now disables replacement and retains the intent on missing/unknown webhook token. Normal non-recovery edits may still replace a message. |
+| `AgeOut` | After the configured age, an unresolved Discord intent becomes `unrecoverable`, which releases the channel tidy gate. If the bot has Manage Messages and knows the card ID, it tries to delete the stale card. A failed delete leaves the old card visible but the terminal state records that automatic recovery is exhausted. |
 
 `WebhookLoad` counts **three requests per prompted turn**: initial card,
 terminal Done edit, answer edit. It models the final answer as one message and
@@ -91,17 +92,20 @@ turn interleavings or prove a latency bound.
 | `CardUnsafeRetire` | Replacing an uneditable card and retiring its intent violates `NoPendingAfterRetirement`. The fix makes recovery edits refuse replacement; transport and recovery regression tests cover missing token and 10015. |
 | `CardDeleteFailed` | An unprompted card delete fails; the turn ends silently but the intent remains active for later recovery. |
 | `CardUnsafeDeleteRetire` | Retiring that intent anyway violates `NoPendingAfterRetirement`. The lifecycle records discard failure and the caller skips retirement; a regression test checks the flag. |
-| `CardMissingToken` | With no token, recovery stays incomplete and the intent remains active. No false retirement is checked. The old pending card may remain until access is restored or an operator resolves it. |
+| `CardMissingToken` | With no token, fresh recovery stays incomplete and the intent remains active. The aged case is covered by `CardStaleUnrecoverable`. |
+| `CardStaleUnrecoverable`, `CardStaleDelete` | An aged unresolved card becomes terminal. Without Manage Messages the old card may remain; with permission and successful deletion it is removed. Both states release the tidy gate. |
+| `CardUnsafeStale` | Keeping an aged unresolved intent active violates `NoStaleActive`; this is the old permanent `turn_in_progress` path. |
 
 `CardSafe` assumes a known card can be edited and a requested delete succeeds. It does not prove that every
 crash is recoverable: Discord history lookup is bounded, a message can be
 unfetchable, a webhook token can disappear, and an edit can fail. The
-`CardMissingToken` configuration explicitly retains that residual state.
+`CardMissingToken` retains that residual state until the configured age is reached.
 “No card left pending after recovery” is therefore a conditional safety rule:
 when recovery retires an intent, every matching card it found has been
 resolved. Pending cards after a failed recovery are visible in the retained
-intent for another attempt. There is no unconditional eventual-clearance
-claim.
+intent for another attempt. An aged failure moves to `unrecoverable`; the
+pending card may remain if Discord denies the final bot delete. There is no
+unconditional eventual-clearance claim.
 
 ## Load answer and fallback
 

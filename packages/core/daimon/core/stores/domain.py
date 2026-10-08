@@ -297,7 +297,7 @@ class TurnCardIntentRow(BaseModel):
     turn_token: uuid.UUID
     channel_id: str | None
     message_id: str | None
-    status: Literal["prepared", "posted", "retired"]
+    status: Literal["prepared", "posted", "retired", "unrecoverable"]
     created_at: datetime
     updated_at: datetime
 

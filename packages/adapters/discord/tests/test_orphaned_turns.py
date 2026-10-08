@@ -49,6 +49,7 @@ def _make_bot(
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 3
     discord_settings.thread_open_notice_after_s = 3.0
+    discord_settings.turn_card_unrecoverable_after_s = 86400
     settings.discord = discord_settings
     runtime = DiscordRuntime(
         settings=settings,
@@ -249,10 +250,12 @@ async def test_sweep_clears_the_row_even_when_the_embed_is_unreachable(
     )
 
 
-async def test_sweep_missing_webhook_token_does_not_block_turns(
+@pytest.mark.parametrize("failure", ["missing_token", "unknown_webhook"])
+async def test_sweep_uneditable_webhook_does_not_post_replacement(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
     await _make_orphan(db_session)
     bot = _make_bot(db_session_factory)
@@ -266,12 +269,23 @@ async def test_sweep_missing_webhook_token_does_not_block_turns(
     thread.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
     bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setattr(DiscordPostTransport, "_ours", lambda *_: True)
-    monkeypatch.setattr(DiscordPostTransport, "_webhook", AsyncMock(return_value=None))
+    if failure == "missing_token":
+        monkeypatch.setattr(DiscordPostTransport, "_webhook", AsyncMock(return_value=None))
+    else:
+        webhook = MagicMock(spec=discord.Webhook)
+        webhook.edit_message = AsyncMock(
+            side_effect=discord.NotFound(
+                MagicMock(status=404, reason="Not Found"),
+                {"code": 10015, "message": "Unknown Webhook"},
+            )
+        )
+        monkeypatch.setattr(DiscordPostTransport, "_webhook", AsyncMock(return_value=webhook))
 
     await bot._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]
     await bot._wait_for_orphan_recovery()  # pyright: ignore[reportPrivateUsage]
 
-    thread.send.assert_awaited_once()
+    thread.send.assert_not_awaited()
+    message.edit.assert_not_awaited()
     assert await list_orphaned_turns(db_session, platform="discord") == []
 
 

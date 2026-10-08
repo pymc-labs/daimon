@@ -1323,6 +1323,32 @@ class TestUnpromptedTurn:
         assert lc.card_discard_failed
         assert lc._card_message_ref is _SENTINEL_REF  # pyright: ignore[reportPrivateUsage]
 
+    async def test_missing_delete_does_not_mark_card_discard_failed(self) -> None:
+        lc, _, _, _ = _make_unprompted_lifecycle()
+
+        async def missing_delete(_message: object) -> None:
+            raise discord.NotFound(
+                types.SimpleNamespace(status=404, reason="Not Found"), "Unknown Message"
+            )
+
+        lc._delete = missing_delete  # pyright: ignore[reportPrivateUsage]
+        await lc.on_render(TurnState(content=[TextBlock(kind="text", text="partial")]))
+        await lc.on_terminal_success(TurnState())
+
+        assert not lc.card_discard_failed
+
+    async def test_client_delete_failure_keeps_card_intent_recoverable(self) -> None:
+        lc, _, _, _ = _make_unprompted_lifecycle()
+
+        async def fail_delete(_message: object) -> None:
+            raise discord.ClientException("cannot delete")
+
+        lc._delete = fail_delete  # pyright: ignore[reportPrivateUsage]
+        await lc.on_render(TurnState(content=[TextBlock(kind="text", text="partial")]))
+        await lc.on_terminal_success(TurnState())
+
+        assert lc.card_discard_failed
+
     async def test_a_tool_trail_with_no_answer_is_removed_too(self) -> None:
         """Tools ran, nothing was said: a mention would keep the done embed, an
         unprompted turn deletes it, since nobody watched those tools run."""

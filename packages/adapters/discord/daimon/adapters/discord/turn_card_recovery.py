@@ -21,6 +21,7 @@ from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.stores.domain import TurnCardIntentRow
 from daimon.core.stores.turn_card_intents import (
     create_turn_card_intent,
+    mark_turn_card_intent_unrecoverable,
     record_turn_card_message,
     retire_turn_card_intent,
 )
@@ -117,6 +118,63 @@ async def retire_terminal_turn_card(
             exc_info=True,
         )
         return False
+
+
+async def expire_unrecoverable_turn_card(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    intent: TurnCardIntentRow,
+    thread: discord.Thread | None,
+    max_age_s: int,
+    now: datetime | None = None,
+) -> bool:
+    """Close an aged unresolved intent and try bot deletion of its known card."""
+    current_time = now or datetime.now(UTC)
+    if (current_time - intent.created_at).total_seconds() < max_age_s:
+        return False
+    try:
+        async with sessionmaker() as session:
+            marked = await mark_turn_card_intent_unrecoverable(
+                session,
+                id=intent.id,
+                cutoff=current_time - timedelta(seconds=max_age_s),
+            )
+            await session.commit()
+    except SQLAlchemyError:
+        log.warning(
+            "turn.card_intent_unrecoverable_record_failed",
+            intent_id=str(intent.id),
+            exc_info=True,
+        )
+        return False
+    if not marked:
+        return False
+
+    deleted = False
+    if thread is not None and intent.message_id is not None:
+        member = thread.guild.me
+        if thread.permissions_for(member).manage_messages:
+            try:
+                message = await thread.fetch_message(int(intent.message_id))
+                await message.delete()
+                deleted = True
+            except discord.NotFound:
+                deleted = True
+            except (discord.HTTPException, discord.ClientException, ValueError):
+                log.warning(
+                    "turn.card_intent_stale_delete_failed",
+                    intent_id=str(intent.id),
+                    message_id=intent.message_id,
+                    exc_info=True,
+                )
+    log.warning(
+        "turn.card_intent_unrecoverable",
+        intent_id=str(intent.id),
+        message_id=intent.message_id,
+        age_s=round((current_time - intent.created_at).total_seconds()),
+        card_deleted=deleted,
+    )
+    return True
 
 
 _TURN_CARD_CUSTOM_ID_PREFIX = "daimon:cancel:"

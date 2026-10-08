@@ -405,6 +405,15 @@ class DiscordSettings(BaseModel):
             "with a retry notice; continuation wakes keep their existing admission path."
         ),
     )
+    turn_card_unrecoverable_after_s: int = Field(
+        default=86400,
+        ge=3600,
+        description=(
+            "Age in seconds after which a Discord turn card that boot recovery cannot "
+            "resolve becomes unrecoverable. Recovery attempts to delete a known stale card "
+            "when the bot has Manage Messages permission."
+        ),
+    )
     health_port: int = Field(
         default=8081,
         description=(

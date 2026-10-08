@@ -41,6 +41,7 @@ from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.adapters.discord.thread_send import safe_thread_send
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.turn_card_recovery import (
+    expire_unrecoverable_turn_card,
     post_initial_turn_card,
     reconcile_turn_card_intent,
     retire_terminal_turn_card,
@@ -1060,7 +1061,9 @@ class DaimonBot(commands.Bot):
                         description="Mention me to try again.",
                     )
                     if transport._destination() is not None:  # pyright: ignore[reportPrivateUsage]
-                        await transport.edit(message, embed=embed, view=None)
+                        await transport.edit(
+                            message, embed=embed, view=None, _allow_replacement=False
+                        )
                     elif not isinstance(message.webhook_id, int):
                         await message.edit(embed=embed, view=None)
                     log.info(
@@ -1132,36 +1135,48 @@ class DaimonBot(commands.Bot):
     ) -> None:
         """Recover one intent independently so a delayed search cannot block others."""
         await self.wait_until_ready()
-        for attempt in range(3):
-            try:
-                channel = self.get_channel(int(intent.thread_id)) or await self.fetch_channel(
-                    int(intent.thread_id)
-                )
-                if not isinstance(channel, discord.Thread):
-                    log.warning(
-                        "turn.card_intent_thread_unavailable",
-                        intent_id=str(intent.id),
-                        thread_id=intent.thread_id,
-                        channel_type=type(channel).__name__,
+        thread: discord.Thread | None = None
+        try:
+            for attempt in range(3):
+                try:
+                    channel = self.get_channel(int(intent.thread_id)) or await self.fetch_channel(
+                        int(intent.thread_id)
+                    )
+                    if not isinstance(channel, discord.Thread):
+                        log.warning(
+                            "turn.card_intent_thread_unavailable",
+                            intent_id=str(intent.id),
+                            thread_id=intent.thread_id,
+                            channel_type=type(channel).__name__,
+                        )
+                        return
+                    thread = channel
+                    await reconcile_turn_card_intent(
+                        self.runtime.sessionmaker,
+                        intent=intent,
+                        thread=channel,
+                        client=self,
                     )
                     return
-                await reconcile_turn_card_intent(
-                    self.runtime.sessionmaker,
-                    intent=intent,
-                    thread=channel,
-                    client=self,
-                )
-                return
-            except (discord.HTTPException, discord.ClientException, ValueError) as err:
-                if attempt < 2:
-                    await sleep(5.0)
-                    continue
-                log.warning(
-                    "turn.card_intent_thread_fetch_failed",
-                    intent_id=str(intent.id),
-                    thread_id=intent.thread_id,
-                    error=str(err),
-                )
+                except (discord.HTTPException, discord.ClientException, ValueError) as err:
+                    if attempt < 2:
+                        await sleep(5.0)
+                        continue
+                    log.warning(
+                        "turn.card_intent_thread_fetch_failed",
+                        intent_id=str(intent.id),
+                        thread_id=intent.thread_id,
+                        error=str(err),
+                    )
+        finally:
+            discord_settings = self.runtime.settings.discord
+            assert discord_settings is not None
+            await expire_unrecoverable_turn_card(
+                self.runtime.sessionmaker,
+                intent=intent,
+                thread=thread,
+                max_age_s=discord_settings.turn_card_unrecoverable_after_s,
+            )
 
     async def on_ready(self) -> None:
         """Forward-only reconcile sweep: provision-if-missing, re-seed pending/failed,
