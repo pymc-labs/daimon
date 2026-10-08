@@ -19,7 +19,9 @@ from daimon.adapters.slack.agent_setup.avatar import (
     run_avatar_submission,
 )
 from daimon.adapters.slack.agent_setup.panel_views import (
+    ACTION_AVATAR_CHANGE,
     AVATAR_FILE_INPUT_ID,
+    build_avatar_status_view,
     build_avatar_upload_form,
 )
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, encode_panel_metadata
@@ -63,8 +65,17 @@ def test_upload_form_and_submission_validation() -> None:
     assert decision.proceed and decision.file_id == "F1"
     assert decision.response_payload is not None
     assert decision.response_payload["response_action"] == "update"
-    assert "Checking image" in str(decision.response_payload["view"])
+    assert "Checking the picture" in str(decision.response_payload["view"])
     assert decision.response_payload["view"]["external_id"] == decision.external_id
+    retry = build_avatar_status_view(
+        meta=_META, message="We couldn't use that picture. Choose another picture.", retry=True
+    )
+    assert ACTION_AVATAR_CHANGE in str(retry)
+    assert [block["text"]["text"] for block in retry["blocks"] if block["type"] == "section"] == [
+        "We couldn't use that picture.",
+        "Choose another picture.",
+    ]
+    assert any(block["type"] == "divider" for block in retry["blocks"])
 
 
 @pytest.mark.asyncio
@@ -278,7 +289,7 @@ async def test_upload_rotates_token_and_records_upload(
         event.operation == "agent_avatar_change" and event.agent_name == "Ada" for event in events
     )
     assert client.views_update.await_count >= 1
-    assert "Avatar changed" in str(client.views_update.await_args_list[0].kwargs["view"])
+    assert "Picture changed" in str(client.views_update.await_args_list[0].kwargs["view"])
     assert client.views_update.await_args_list[0].kwargs["external_id"] == decision.external_id
 
 
@@ -300,8 +311,36 @@ async def test_upload_failure_updates_modal_without_ephemeral(
         runtime, client, team_id="T1", user_id="U_ADMIN", submission=decision
     )  # type: ignore[arg-type]
 
-    assert "could not use" in str(client.views_update.await_args.kwargs["view"])
+    assert "couldn't use" in str(client.views_update.await_args.kwargs["view"])
     client.chat_postEphemeral.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("animated", [False, True])
+async def test_upload_explains_empty_and_animated_files(
+    monkeypatch: pytest.MonkeyPatch, animated: bool
+) -> None:
+    body = b""
+    if animated:
+        output = io.BytesIO()
+        first = Image.new("RGB", (20, 20), "red")
+        second = Image.new("RGB", (20, 20), "blue")
+        first.save(output, format="GIF", save_all=True, append_images=[second])
+        body = output.getvalue()
+    runtime = SimpleNamespace(sessionmaker=MagicMock())
+    client = AsyncMock()
+    client.token = "xoxb-test"
+    monkeypatch.setattr(avatar_module, "may_edit_avatar", AsyncMock(return_value=True))
+    monkeypatch.setattr(avatar_module, "fetch_avatar_file", AsyncMock(return_value=body))
+    monkeypatch.setattr(avatar_module, "_audit", AsyncMock())
+    decision = evaluate_avatar_submission(_payload([{"id": "F1", "size": len(body)}]))
+
+    await run_avatar_submission(
+        runtime, client, team_id="T1", user_id="U_ADMIN", submission=decision
+    )  # type: ignore[arg-type]
+
+    expected = "Use a still picture." if animated else "We couldn't read that file."
+    assert expected in str(client.views_update.await_args.kwargs["view"])
 
 
 @pytest.mark.asyncio

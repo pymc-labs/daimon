@@ -67,6 +67,7 @@ __all__ = [
     "ACTION_CODING_TOOLS",
     "ACTION_DETAILS",
     "ACTION_AVATAR_CHANGE",
+    "ACTION_AVATAR_DETAILS",
     "ACTION_AVATAR_RESET",
     "CALLBACK_AVATAR_UPLOAD",
     "AVATAR_FILE_INPUT_ID",
@@ -119,6 +120,7 @@ __all__ = [
 ACTION_DETAILS: Final = "agent_setup__details"
 ACTION_AVATAR_CHANGE: Final = "agent_setup__avatar_change"
 ACTION_AVATAR_RESET: Final = "agent_setup__avatar_reset"
+ACTION_AVATAR_DETAILS: Final = "agent_setup__avatar_details"
 CALLBACK_AVATAR_UPLOAD: Final = "agent_setup__avatar_upload"
 AVATAR_FILE_INPUT_ID: Final = "agent_setup__avatar_file"
 """Open one agent's Details. The button's `value` is the agent name."""
@@ -498,23 +500,25 @@ def build_details_view(
     blocks.append(_section(f"*Model:* {escape_mrkdwn(details.model_display_name)}"))
     show_avatar = not details.daimon_managed if avatar_editable is None else avatar_editable
     avatar_accessory = (
-        {"type": "image", "image_url": avatar_url, "alt_text": f"{details.name}'s avatar"}
+        {"type": "image", "image_url": avatar_url, "alt_text": f"{details.name}'s picture"}
         if show_avatar and avatar_url
         else None
     )
     if show_avatar:
-        blocks.append(_section("*Avatar*", accessory=avatar_accessory))
+        blocks.append(
+            _section("*Picture*\nShown next to this agent's messages.", accessory=avatar_accessory)
+        )
     if is_admin and show_avatar:
-        reset_button = _button(action_id=ACTION_AVATAR_RESET, label="Reset", value=details.name)
+        reset_button = _button(
+            action_id=ACTION_AVATAR_RESET, label="Use default", value=details.name
+        )
         reset_button["confirm"] = {
-            "title": {"type": "plain_text", "text": "Reset avatar?"},
+            "title": {"type": "plain_text", "text": "Use default picture?"},
             "text": {
                 "type": "mrkdwn",
-                "text": (
-                    "Restore the generated avatar? The old image may remain in platform caches."
-                ),
+                "text": "Use the default picture?",
             },
-            "confirm": {"type": "plain_text", "text": "Reset"},
+            "confirm": {"type": "plain_text", "text": "Use default"},
             "deny": {"type": "plain_text", "text": "Cancel"},
         }
         blocks.append(
@@ -523,15 +527,9 @@ def build_details_view(
                 "elements": [
                     _button(action_id=ACTION_AVATAR_CHANGE, label="Change", value=details.name),
                     reset_button,
+                    _button(action_id=ACTION_AVATAR_DETAILS, label="Details", value=details.name),
                 ],
             }
-        )
-    if show_avatar:
-        blocks.append(
-            _context(
-                "Avatars are public: anyone who sees a message can open its image. "
-                "Platform caches can keep it after a change."
-            )
         )
     blocks.extend(_repo_blocks(details))
     blocks.extend(_detail_list_blocks(details, meta=meta))
@@ -564,16 +562,13 @@ def build_details_view(
 def build_avatar_upload_form(*, meta: PanelMetadata) -> dict[str, Any]:
     """A single image upload for the agent in the details view."""
     return finish_modal(
-        title="Change avatar",
+        title="Change picture",
         blocks=[
-            _section(
-                "Upload a PNG, JPG, GIF, or WebP image (up to 2 MB). "
-                "It will be cropped to a square."
-            ),
+            _section("Choose a picture. Up to 2 MB."),
             {
                 "type": "input",
                 "block_id": AVATAR_FILE_INPUT_ID,
-                "label": {"type": "plain_text", "text": "Image"},
+                "label": {"type": "plain_text", "text": "Picture"},
                 "element": {
                     "type": "file_input",
                     "action_id": AVATAR_FILE_INPUT_ID,
@@ -581,25 +576,61 @@ def build_avatar_upload_form(*, meta: PanelMetadata) -> dict[str, Any]:
                     "max_files": 1,
                 },
             },
-            _context(
-                "Avatars are public: anyone who sees a message can open the image. "
-                "Platform caches can keep it after a change."
-            ),
+            {"type": "divider"},
+            _context("File types: PNG, JPG, GIF or WebP."),
         ],
         private_metadata=encode_panel_metadata(meta),
         callback_id=CALLBACK_AVATAR_UPLOAD,
         close="Cancel",
-        submit="Change",
+        submit="Save",
+    )
+
+
+def build_avatar_details_view(*, meta: PanelMetadata) -> dict[str, Any]:
+    """Keep public-image and cache guidance behind Details."""
+    return finish_modal(
+        title="Picture details",
+        blocks=[
+            _section("Anyone who sees a message can open the picture."),
+            _section("The old picture may still appear for a while."),
+            {"type": "divider"},
+            _context("Agent setup"),
+        ],
+        private_metadata=encode_panel_metadata(meta),
+        callback_id="agent_setup__avatar_details_view",
+        close="Done",
     )
 
 
 def build_avatar_status_view(
-    *, meta: PanelMetadata, message: str, external_id: str | None = None
+    *, meta: PanelMetadata, message: str, external_id: str | None = None, retry: bool = False
 ) -> dict[str, Any]:
     """Show upload progress or a result in the submitted modal itself."""
+    title, separator, next_step = message.partition(". ")
     view = finish_modal(
-        title="Avatar",
-        blocks=[_section(message)],
+        title="Picture",
+        blocks=[
+            _section(title + ("." if separator else "")),
+            *([_section(next_step)] if next_step else []),
+            {"type": "divider"},
+            *(
+                [
+                    {
+                        "type": "actions",
+                        "elements": [
+                            _button(
+                                action_id=ACTION_AVATAR_CHANGE,
+                                label="Choose picture",
+                                value=meta.agent_name or "",
+                            )
+                        ],
+                    },
+                ]
+                if retry
+                else []
+            ),
+            _context("Agent setup"),
+        ],
         private_metadata=encode_panel_metadata(meta),
         callback_id=CALLBACK_AVATAR_UPLOAD,
     )

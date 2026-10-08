@@ -13,7 +13,9 @@ ALLOWED_FORMATS = frozenset({"PNG", "JPEG", "MPO", "GIF", "WEBP"})
 
 def normalize_avatar_image(data: bytes) -> bytes:
     """Return a metadata-free, center-cropped 256px PNG from one still image."""
-    if not data or len(data) > MAX_UPLOAD_BYTES:
+    if not data:
+        raise ValueError("The uploaded image could not be read.")
+    if len(data) > MAX_UPLOAD_BYTES:
         raise ValueError("Upload an image of at most 2 MB.")
     try:
         with Image.open(io.BytesIO(data)) as image:

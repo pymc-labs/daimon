@@ -308,10 +308,10 @@ header until it is reinstalled.
 Restart the Slack and MCP services after reinstalling to clear any remembered
 missing-scope result immediately; otherwise the result expires within 15 minutes.
 
-Workspace admins can open `/agent-setup`, select an agent, then use the Avatar
+Workspace admins can open `/agent-setup`, select an agent, then use the Picture
 row's **Change** button to upload one PNG, JPG, GIF, or WebP image (up to 2 MB).
 The image is center-cropped to a 256×256 PNG. **Reset** restores the generated
-initials avatar. Each change gets a new URL. Avatars are public: anyone who
+initials picture. Each change gets a new URL. Pictures are public: anyone who
 sees a message can open its image, and platform caches can keep a copy after
 the avatar changes. Uploaded files stay in the uploader's Slack files until
 that person removes them from Slack.

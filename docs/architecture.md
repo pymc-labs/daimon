@@ -1112,6 +1112,12 @@ admission before any of this runs.
 
 ## Entry points that are not a chat message
 
+- **Agent setup picture controls** show the current agent picture in Details.
+  Admins can open a Slack upload form or a Discord file modal from Change;
+  Discord's attachment option remains a fallback. The upload path checks
+  platform file URLs, size, and image content before replacing the public
+  picture. Details keeps visibility and cache guidance off the main row.
+
 - **`/here`** in Discord and Slack reads access policy and credential names,
   then renders one ephemeral card through `daimon.core.here_card`.
   `where_am_i` in the MCP adapter returns that same card and structured facts

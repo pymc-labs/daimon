@@ -55,8 +55,8 @@ class AgentSetupCog(commands.Cog):
         description="See your agents, who answers where, and make changes",
     )
     @app_commands.describe(
-        agent="Agent whose avatar to change (use with avatar)",
-        avatar="PNG, JPG, GIF, or WebP image, up to 2 MB (use with agent)",
+        agent="Agent whose picture to change (fallback: use with avatar)",
+        avatar="Picture file, up to 2 MB (fallback: use with agent)",
     )
     @require_registered_guild
     async def agent_setup(
@@ -85,7 +85,7 @@ class AgentSetupCog(commands.Cog):
             if agent is not None or avatar is not None:
                 if not agent or avatar is None:
                     await interaction.edit_original_response(
-                        content="Provide both an agent name and an avatar image.",
+                        content="Choose an agent and picture file.",
                         allowed_mentions=discord.AllowedMentions.none(),
                     )
                     return
