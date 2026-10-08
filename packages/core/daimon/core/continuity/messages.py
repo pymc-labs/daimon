@@ -462,15 +462,16 @@ def render_handoff_acknowledged(
     *, target_name: str, from_name: str, channel: str, requested_work: str | None
 ) -> str:
     """Confirm a task handoff to `target_name`, taking over from `from_name`."""
+    del from_name, channel
     lines = [
-        f"{target_name} takes over this task from your next message here.",
-        "Your conversation, decisions and working files come with it.",
-        f"{target_name} uses its own keys, connections and memory, not {from_name}'s.",
-        f"Who answers in {channel} is unchanged.",
+        f"{target_name} will handle your next message.",
+        "Send a message to continue.",
+        f"Your conversation and files carry over. {target_name} uses its own "
+        "connections and memory.",
     ]
     if requested_work is not None:
         # The person's own words may already end a sentence; never double the stop.
-        lines.append(f"It will pick up with: {requested_work.rstrip().rstrip('.!?')}.")
+        lines.append(f"Next: {requested_work.rstrip().rstrip('.!?')}.")
     return "\n".join(lines)
 
 
@@ -553,19 +554,9 @@ def render_responder_changed_without_handoff(
     (Discord, Slack, Teams). No turn runs in this thread until the work is handed
     over, so without the button the only way on is a new conversation.
     """
-    first = (
-        f"{new_responder} now answers in {channel}, but this conversation's work "
-        f"belongs to {owner}."
-    )
-    if not offer_button:
-        return "\n".join([first, f"Start a new conversation to talk to {new_responder}."])
-    return "\n".join(
-        [
-            first,
-            f"Press Hand over to move this conversation and its working files to {new_responder}.",
-            f"Or start a new conversation to begin fresh with {new_responder}.",
-        ]
-    )
+    del channel, offer_button
+    first = f"{new_responder} answers new conversations here. {owner} is still handling this one."
+    return "\n".join([first, f"New thread → {new_responder}"])
 
 
 def render_replacement_summary(transfer_kind: TransferKind, lost: Sequence[str]) -> str:

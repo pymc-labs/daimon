@@ -105,8 +105,9 @@ async def test_renders_draw_the_turns_tool_lines_and_the_latest_draft() -> None:
     clock.now += 65
     await lifecycle.on_render(TurnState(content=[read, bash], finished_tool_ids=("t1",)))
 
-    headline, tools, draft, _actions = _card_body(sender, -1)
-    assert headline["text"] == "**Working** · 1m 5s", "a running tool makes the turn Working"
+    headline, details, tools, draft, _actions = _card_body(sender, -1)
+    assert headline["text"] == "**Working on it…**"
+    assert details["text"] == "Details"
     assert tools["text"] == "✔️ Read a file\n\n🖋️ Running a command", "one paragraph per line"
     assert tools["fontType"] == "Monospace", "a TextBlock draws no code fence"
     assert (draft["text"], draft["isSubtle"]) == ("Checking the files.", True), "draft on one line"
@@ -114,7 +115,7 @@ async def test_renders_draw_the_turns_tool_lines_and_the_latest_draft() -> None:
     clock.now += 5
     finished = dataclasses.replace(bash, status="complete")
     await lifecycle.on_render(TurnState(content=[read, finished], finished_tool_ids=("t1", "t2")))
-    assert _card_body(sender, -1)[0]["text"] == "**Thinking** · 1m 10s", "no tool runs any more"
+    assert _card_body(sender, -1)[0]["text"] == "**Working on it…**"
 
 
 async def test_answer_replaces_the_card_with_feedback_and_no_usage_footer() -> None:
@@ -197,7 +198,7 @@ async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark()
     await lifecycle.on_terminal_success(_answer("never seen"))
 
     assert sender.activities[-1].id == "m-1"
-    assert "Something went wrong posting the answer" in _card_json(sender, -1)
+    assert "Something went wrong." in _card_json(sender, -1)
     assert lifecycle.card_closed and lifecycle.final_message_id is None
 
 
@@ -249,13 +250,13 @@ async def test_a_timed_out_cancel_notice_is_resent_then_collapsed_without_an_ans
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(TurnState())
     assert [a.id for a in sender.activities[1:]] == ["m-1", "m-1"], "the edit is resent"
-    assert card.CANCELLED_NOTICE in _card_json(sender, -1) and lifecycle.card_closed
+    assert "Stopped." in _card_json(sender, -1) and lifecycle.card_closed
 
     sender = FakeSender(timeout_on={1, 2})
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(TurnState())
     assert sender.activities[-1].id == "m-1"
-    assert "went wrong finishing this turn" in _card_json(sender, -1), "no answer is claimed"
+    assert "Something went wrong." in _card_json(sender, -1), "no answer is claimed"
     assert lifecycle.card_closed
 
 
@@ -372,7 +373,7 @@ async def test_no_answer_reads_as_cancelled_or_done() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(TurnState())
-    assert card.CANCELLED_NOTICE in _card_json(sender, -1)
+    assert "Stopped." in _card_json(sender, -1)
 
     sender = FakeSender()
     lifecycle = await _posted(sender)

@@ -62,7 +62,6 @@ from daimon.core.support_escalation import (
     has_credit,
     is_enabled,
     is_escalation_reaction,
-    offer_text,
     remaining_credits,
 )
 from sqlalchemy.exc import SQLAlchemyError
@@ -72,6 +71,33 @@ from discord.ext import commands
 
 log = structlog.get_logger()
 _WEBHOOK_LOOKUP_TTL_SECONDS = 600
+
+
+def feedback_prompt_embed(link: str, *, shared: bool = False) -> discord.Embed:
+    embed = discord.Embed(
+        title="Feedback",
+        description=f"What went wrong with [this answer]({link})?",
+        colour=discord.Colour.blurple(),
+    )
+    if shared:
+        embed.add_field(
+            name="Shared with support team",
+            value="Your feedback and answer link go to the support team.",
+            inline=False,
+        )
+    embed.set_footer(text="Give feedback")
+    return embed
+
+
+def support_prompt_embed(link: str, *, remaining: int) -> discord.Embed:
+    embed = discord.Embed(
+        title="Ask a person",
+        description=f"Need help with [this answer]({link})?",
+        colour=discord.Colour.blurple(),
+    )
+    embed.set_footer(text=f"{remaining} requests left")
+    return embed
+
 
 # Cap on the per-process memo of resolved author verdicts. The fallback is
 # rare today, but if `message_author_id` ever stops arriving then EVERY
@@ -397,7 +423,11 @@ class FeedbackReactionCog(commands.Cog):
                 )
             )
             await user.send(
-                content=offer_text(remaining=left),
+                embed=support_prompt_embed(
+                    f"https://discord.com/channels/{payload.guild_id}"
+                    f"/{payload.channel_id}/{payload.message_id}",
+                    remaining=left,
+                ),
                 view=view,
             )
         except discord.HTTPException as exc:
@@ -436,11 +466,9 @@ class FeedbackReactionCog(commands.Cog):
             user = self._bot.get_user(payload.user_id)
             if user is None:
                 user = await self._bot.fetch_user(payload.user_id)
-            content = f"You flagged {link} -- want to tell us what went wrong?"
             tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
-            if support_channel_for(self._bot.runtime.settings.support, tenant_id) is not None:
-                content += " What you write also goes to the support team, with that link."
-            await user.send(content=content, view=view)
+            shared = support_channel_for(self._bot.runtime.settings.support, tenant_id) is not None
+            await user.send(embed=feedback_prompt_embed(link, shared=shared), view=view)
         except discord.HTTPException as exc:
             # discord.Forbidden (closed DMs) is the common case -- there is no
             # other channel to reach this person on, so this must never raise.

@@ -349,14 +349,14 @@ async def test_responder_changed_without_handoff_posts_offer_and_runs_no_turn(
         await bot.on_message(message)
 
     mock_run_prepared_turn.assert_not_called()
-    posted = [
-        c.kwargs.get("content") for c in message.channel.send.return_value.edit.call_args_list
-    ]
+    posted = [c.kwargs.get("embed") for c in message.channel.send.return_value.edit.call_args_list]
     assert any(
-        p is not None and "test-agent now answers" in p and "belongs to owner-bot" in p
+        p is not None
+        and "test-agent answers new conversations" in p.description
+        and "owner-bot is still handling" in p.description
         for p in posted
     ), f"expected the responder-changed-without-handoff offer, got {posted}"
-    assert any(p is not None and "Press Hand over" in p for p in posted)
+    assert any(p is not None and p.fields[0].name == "New thread" for p in posted)
     views = [c.kwargs.get("view") for c in message.channel.send.return_value.edit.call_args_list]
     buttons = [item for view in views if view is not None for item in view.children]
     assert [getattr(b, "custom_id", None) for b in buttons] == ["tho:ag_test"], (
@@ -564,7 +564,7 @@ async def test_outcome_replaced_after_loss_prepends_exactly_one_loss_notice_to_t
 
     notice = render_unexpected_loss("transcript" if transfer_kind == "transcript" else "history")
     assert expected_phrase in notice, "the parametrized phrase must pin the right variant"
-    assert _final_answer_text(message) == f"**test-agent** {notice}\n\n{_ANSWER}", (
+    assert _final_answer_text(message) == f"**test-agent**\n\n{notice}\n\n{_ANSWER}", (
         "the loss notice must be the answer's first paragraph, exactly once"
     )
     sent_texts = [c.args[0] for c in message.channel.send.call_args_list if c.args]
@@ -739,7 +739,7 @@ async def test_replaced_makes_the_replacement_summary_the_answers_first_paragrap
         await bot.on_message(message)
 
     summary = render_replacement_summary("transcript", [])
-    assert _final_answer_text(message) == f"**test-agent** {summary}\n\n{_ANSWER}", (
+    assert _final_answer_text(message) == f"**test-agent**\n\n{summary}\n\n{_ANSWER}", (
         "the replacement summary must be the answer's first paragraph"
     )
     sent_texts = [c.args[0] for c in message.channel.send.call_args_list if c.args]
@@ -862,7 +862,7 @@ async def test_replaced_with_no_transfer_kind_posts_no_summary_prefix(
     ):
         await bot.on_message(message)
 
-    assert _final_answer_text(message) == f"**test-agent** {_ANSWER}", (
+    assert _final_answer_text(message) == f"**test-agent**\n\n{_ANSWER}", (
         "a fresh start must not prefix the answer with a replacement summary"
     )
     sent_texts = [c.args[0] for c in message.channel.send.call_args_list if c.args]

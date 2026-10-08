@@ -16,8 +16,8 @@ def test_discord_username_removes_reserved_words_and_fences() -> None:
 
 
 def test_fallback_prefix_labels_only_the_passed_chunk() -> None:
-    assert fallback_name_prefix("Research", "First answer") == "**Research** First answer"
-    assert fallback_name_prefix("A* @everyone", "x") == "**A\\* @\u200beveryone** x"
+    assert fallback_name_prefix("Research", "First answer") == "**Research**\n\nFirst answer"
+    assert fallback_name_prefix("A* @everyone", "x") == "**A\\* @\u200beveryone**\n\nx"
 
 
 def test_webhook_must_match_application_and_channel() -> None:

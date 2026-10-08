@@ -469,7 +469,11 @@ class SlackTurnLifecycle:
                 log.warning("turn.balance_footer_failed", exc_info=True)
 
     async def _flush_terminal(
-        self, fallback_text: str | None = None, *, feedback: bool = False
+        self,
+        fallback_text: str | None = None,
+        *,
+        feedback: bool = False,
+        answer_visible: bool = False,
     ) -> None:
         """Unconditionally flush the terminal Block Kit surface, bypassing debounce.
 
@@ -482,10 +486,18 @@ class SlackTurnLifecycle:
         whose product is this card: a tool-only turn has no answer to carry them.
         """
         self._terminal = True
-        blocks = to_blocks(self._state, now=self._clock(), cancel_key=self._cancel_key)
+        blocks = to_blocks(
+            self._state,
+            now=self._clock(),
+            cancel_key=self._cancel_key,
+            answer_visible=answer_visible,
+        )
         if feedback:
             blocks.append(self._feedback_block())
-        await self._post_or_update(blocks, fallback_text or f"{self._state.phase.value} …")
+        fallback = "Something went wrong. Mention me to try again."
+        if self._state.phase is TurnPhase.DONE:
+            fallback = "Done."
+        await self._post_or_update(blocks, fallback_text or fallback)
 
     def _feedback_block(self) -> dict[str, Any]:
         """👍/👎, plus Ask a human when this deployment offers it."""
@@ -503,8 +515,14 @@ class SlackTurnLifecycle:
         """
         self._terminal = True
         await self._post_or_update(
-            [{"type": "section", "text": {"type": "mrkdwn", "text": "Turn cancelled."}}],
-            "Turn cancelled.",
+            [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Stopped."}},
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "Send a message to start again."},
+                },
+            ],
+            "Stopped. Send a message to start again.",
         )
 
     async def _repair_terminal_flush(self, text: str) -> None:
@@ -523,8 +541,11 @@ class SlackTurnLifecycle:
         with contextlib.suppress(*_SLACK_SEND_ERRORS):
             # The status_ts guard above pins _post_or_update to its update branch.
             await self._post_or_update(
-                [{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
-                text,
+                [
+                    {"type": "section", "text": {"type": "mrkdwn", "text": line}}
+                    for line in text.splitlines()
+                ],
+                text.replace("\n", " "),
             )
 
     async def on_terminal_success(self, state: TurnState) -> None:
@@ -557,7 +578,7 @@ class SlackTurnLifecycle:
         surface_replaced = False
         # A no-answer collapse (tool-only done footer, "Turn cancelled.") must
         # not be repaired with copy that claims an answer existed.
-        repair_notice = "⚠️ Something went wrong finishing this turn."
+        repair_notice = "Something went wrong.\nMention me to try again."
         try:
             answer_parts = [
                 text
@@ -576,7 +597,7 @@ class SlackTurnLifecycle:
                     await self._flush_cancelled()
                     self.final_ts = self._status_ts
                     return
-                final_text = f"{final_text}\n\nTurn cancelled."
+                final_text = f"{final_text}\n\nStopped.\nSend a message to start again."
             if not final_text:
                 # No final answer. A tool-only turn keeps the collapsed done
                 # footer; a truly empty turn (cancellation) shows "Turn
@@ -601,7 +622,7 @@ class SlackTurnLifecycle:
                 self.final_ts = self._status_ts
                 return
 
-            repair_notice = "⚠️ Something went wrong posting the answer."
+            repair_notice = "I couldn't send the full answer.\nMention me to try again."
             if self.answer_prefix is not None:
                 final_text = f"{self.answer_prefix}\n\n{final_text}"
                 self.answer_prefix_applied = True
@@ -620,7 +641,7 @@ class SlackTurnLifecycle:
             # continuity notices, and only the last carries feedback controls.
             self._terminal = True
             if notify_on_completion:
-                await self._flush_terminal()
+                await self._flush_terminal(answer_visible=True)
             index = 0
             first_markdown_prefixed = False
             current_ts: str | None = self._status_ts
@@ -651,7 +672,7 @@ class SlackTurnLifecycle:
                     if mention and block.get("type") == "table":
                         blocks.insert(0, {"type": "markdown", "text": mention})
                         notification_chunk = f"{mention}\n{chunk}"
-                    blocks.extend(to_blocks(self._state, now=self._clock()))
+                    blocks.extend(to_blocks(self._state, now=self._clock(), answer_visible=True))
                 if index == len(deliveries) - 1 and not cancelled:
                     blocks.append(self._feedback_block())
                 try:
@@ -809,7 +830,7 @@ class SlackTurnLifecycle:
             self.final_ts = self._status_ts
         except Exception:
             log.warning("turn.terminal_failure.flush_failed", exc_info=True)
-            await self._repair_terminal_flush("⚠️ Something went wrong finishing this turn.")
+            await self._repair_terminal_flush("Something went wrong.\nMention me to try again.")
         finally:
             if self._status_ts is not None:
                 self._deregister(self._status_ts)

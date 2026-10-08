@@ -145,13 +145,13 @@ class TestToBlocks:
     def test_running_state_leads_with_the_headline(self) -> None:
         state = _make_state(phase=TurnPhase.THINKING, started_at=100.0)
         sections = _find_blocks_by_type(to_blocks(state, now=112.0), "section")
-        assert sections[0]["text"]["text"] == "*Thinking* · 12s", (
+        assert sections[0]["text"]["text"] == "*Working on it…*", (
             "the first section is the bold state word and the elapsed time"
         )
 
     def test_fallback_text_is_the_headline_in_plain_words(self) -> None:
         state = _make_state(phase=TurnPhase.TOOL_RUNNING, started_at=1.0)
-        assert to_fallback_text(state, now=66.0) == "Working · 1m 5s", (
+        assert to_fallback_text(state, now=66.0) == "Working on it…", (
             "notifications read the headline, not an internal phase name"
         )
 
@@ -172,11 +172,9 @@ class TestToBlocks:
         )
         blocks = to_blocks(state, now=66.0)
         sections = _find_blocks_by_type(blocks, "section")
-        assert sections[0]["text"]["text"] == "*Working* · 1m 5s", "a running call reads working"
-        assert sections[1]["text"]["text"] == "```\n✔️ Read a file\n🖋️ Q&amp;A sync\n```", (
-            "tool lines are fenced and entity-escaped"
-        )
-        assert not _find_blocks_by_type(blocks, "context"), "no context block while running"
+        assert sections[0]["text"]["text"] == "*Working on it…*"
+        contexts = _find_blocks_by_type(blocks, "context")
+        assert contexts[0]["elements"][0]["text"] == "*Details*\n✔️ Read a file\n🖋️ Q&amp;A sync"
 
     def test_running_state_with_text_preview_has_quoted_escaped_draft(
         self,
@@ -227,10 +225,8 @@ class TestToBlocks:
         context_blocks = _find_blocks_by_type(blocks, "context")
         assert context_blocks, "ERROR state must produce a context block"
         summary_text = context_blocks[-1]["elements"][0]["text"]
-        assert "❌" in summary_text, "error summary must contain the cross emoji"
-        assert "rate limited" in summary_text, (
-            "error summary must contain the error event's label as the reason"
-        )
+        assert summary_text == "Atlas · 5s"
+        assert blocks[0]["text"]["text"] == "Something went wrong."
 
     def test_no_block_contains_color_key(self) -> None:
         """No block dict anywhere must contain a 'color' key."""
@@ -258,7 +254,7 @@ class TestToBlocks:
 class TestToInterruptedBlocks:
     def test_returns_exactly_one_section_block_with_mrkdwn_text(self) -> None:
         blocks = to_interrupted_blocks()
-        assert len(blocks) == 1, "the frozen card is a single block, nothing else"
+        assert len(blocks) == 2, "restart title and retry step are separate blocks"
         assert blocks[0]["type"] == "section", (
             "the house pattern for a whole-card notice is section"
         )
@@ -273,11 +269,8 @@ class TestToInterruptedBlocks:
         # Literal, not imported from the Discord adapter -- import-linter's
         # independence contract forbids cross-adapter imports, and the point
         # of this test is that the two hand-kept literals stay in sync.
-        discord_copy = (
-            "❌ This turn was interrupted by a restart and cannot be "
-            "resumed. Nothing was lost on your side — mention me again to retry."
-        )
+        discord_copy = "Stopped: Daimon restarted.\nMention me to try again."
         blocks = to_interrupted_blocks()
-        assert blocks[0]["text"]["text"] == discord_copy, (
+        assert "\n".join(block["text"]["text"] for block in blocks) == discord_copy, (
             "Slack's retirement copy must be byte-identical to Discord's"
         )

@@ -667,9 +667,7 @@ class TestNewThreadCreation:
         )
         assert "embeds" in first_send_kwargs, "instant feedback should be an embed, not text"
         embed = cast("list[discord.Embed]", first_send_kwargs["embeds"])[0]
-        assert (embed.description or "").startswith("**Thinking**"), (
-            "initial embed should show the thinking phase"
-        )
+        assert embed.title == "Working on it…", "initial embed should show the thinking phase"
 
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_missing_config_sends_error_no_thread(

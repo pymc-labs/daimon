@@ -7,14 +7,9 @@
         'embeds': list([
           dict({
             'color': 15548997,
-            'description': '''
-              The turn ended unexpectedly.
-              The conversation and its workspace are kept.
-              **Next:** Send your message again. If it keeps happening, share the request id with an admin.
-              `rid: 01TESTREQUESTID0000000000`
-            ''',
-            'footer': '❌ Something went wrong · Atlas · 15s · 500 in / 80 out · $0.003',
-            'title': None,
+            'description': 'Mention me to try again.',
+            'footer': 'Atlas · 15s · $0.003',
+            'title': 'Something went wrong.',
           }),
         ]),
       }),
@@ -25,9 +20,9 @@
         'embeds': list([
           dict({
             'color': 3447003,
-            'description': '**Thinking** · 0s',
-            'footer': None,
-            'title': None,
+            'description': None,
+            'footer': '0s',
+            'title': 'Working on it…',
           }),
         ]),
       }),
@@ -42,14 +37,9 @@
         'embeds': list([
           dict({
             'color': 3447003,
-            'description': '''
-              **Working** · 11s
-              ```
-              🖋️ Running a command
-              ```
-            ''',
-            'footer': None,
-            'title': None,
+            'description': None,
+            'footer': '11s',
+            'title': 'Working on it…',
           }),
         ]),
       }),
@@ -59,7 +49,7 @@
           dict({
             'color': 5763719,
             'description': None,
-            'footer': 'Atlas · 11s · 1.5k in / 320 out · $0.008',
+            'footer': 'Atlas · 11s · $0.008',
             'title': None,
           }),
         ]),
@@ -75,9 +65,9 @@
         'embeds': list([
           dict({
             'color': 3447003,
-            'description': '**Thinking** · 0s',
-            'footer': None,
-            'title': None,
+            'description': None,
+            'footer': '0s',
+            'title': 'Working on it…',
           }),
         ]),
       }),

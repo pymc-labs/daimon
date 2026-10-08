@@ -125,11 +125,11 @@ async def test_unreachable_channel_admins_fall_back_to_the_server_admins(
 
 def test_the_dm_button_and_form_say_ask_the_team_like_slack() -> None:
     button = SupportEscalateButton(guild_id=_GUILD, channel_id=_THREAD, message_id="444").item
-    assert (button.label, str(button.emoji)) == ("Ask the team", "🙋")
+    assert (button.label, str(button.emoji)) == ("Ask a person", "🙋")
     modal = SupportModal(
         runtime=cast(Any, None), guild_id=_GUILD, channel_id=_THREAD, message_id="444"
     )
-    assert modal.title == "Ask the team"
+    assert modal.title == "Ask a person"
     assert modal.note_input.label == "What do you need help with?"
-    assert modal.note_input.placeholder == "Someone from the team will reply."
+    assert modal.note_input.placeholder == "Write a few words."
     assert len(modal.note_input.label) <= 45, "Discord rejects a longer text-input label"

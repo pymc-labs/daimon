@@ -51,7 +51,7 @@ class HandOverButton(
     def __init__(self, *, agent_id: str, agent_name: str | None = None) -> None:
         button: discord.ui.Button[discord.ui.View] = discord.ui.Button(
             style=discord.ButtonStyle.primary,
-            label=f"Hand over to {agent_name}"[:80] if agent_name else "Hand over",
+            label=f"Switch to {agent_name}"[:80] if agent_name else "Switch",
             custom_id=build_custom_id(agent_id),
         )
         super().__init__(button)

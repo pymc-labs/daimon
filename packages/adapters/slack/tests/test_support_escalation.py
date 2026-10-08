@@ -237,9 +237,10 @@ async def test_click_opens_the_note_form_with_the_remaining_count(
     )
     view = _shown(fake_slack_web_client)[-1]
     assert view["callback_id"] == SUPPORT_CALLBACK_ID
-    assert view["blocks"][0]["text"]["text"] == offer_text(remaining=20), (
+    assert view["blocks"][0]["text"]["text"] == offer_text(remaining=20).splitlines()[0], (
         "the default allowance is 20"
     )
+    assert "20 requests left" in str(view["blocks"][1])
     assert json.loads(view["private_metadata"]) == {
         "channel_id": _CHANNEL,
         "message_ts": _ANSWER_TS,
@@ -799,5 +800,5 @@ def test_support_modal_note_input_stays_within_slack_input_limit() -> None:
 
 def test_ask_the_team_button_shows_the_raised_hand_beside_the_words_and_stays_unstyled() -> None:
     button = slack_support.build_ask_human_button()
-    assert button["text"] == {"type": "plain_text", "text": "🙋 Ask the team", "emoji": True}
+    assert button["text"] == {"type": "plain_text", "text": "🙋 Ask a person", "emoji": True}
     assert "style" not in button, "a styled button would tell the channel who asked"

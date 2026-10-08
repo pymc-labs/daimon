@@ -32,6 +32,7 @@ from daimon.core.turn.card_state import (
 )
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.status_lines import (
+    format_duration,
     format_headline,
 )
 
@@ -51,6 +52,7 @@ class EmbedData:
     description: str
     color: int
     footer: str | None
+    details: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +75,7 @@ _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
 # ---------------------------------------------------------------------------
 
 # Discord caps an embed description at 4,096 characters.
-_NOTICE_MAX_CHARS = 4000
+_NOTICE_MAX_CHARS = 950
 
 
 def _escape_markdown(text: str) -> str:
@@ -107,37 +109,49 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         # ❌ + its reason so a failed turn still says why.
         elapsed = int(now - state.started_at) if now is not None else 0
         tokens = f"{_fmt_tokens(state.usage_in)} in / {_fmt_tokens(state.usage_out)} out"
-        parts = [state.agent_name, f"{elapsed}s", tokens]
+        parts = [state.agent_name, f"{elapsed}s"]
         if state.cost_str is not None:
             parts.append(state.cost_str)
         if state.balance_str is not None:
             parts.append(state.balance_str)
         summary = " · ".join(parts)
         description = ""
+        title = ""
+        details = f"Tokens: {tokens}"
         if state.phase is TurnPhase.ERROR:
-            footer = f"{_EMOJI_CROSS} {state.error_reason or 'error'} · {summary}"
-            description = state.notice
+            footer = summary
+            title = "Something went wrong."
+            description = "Mention me to try again."
+            if state.notice:
+                details = f"{state.notice}\n\n{details}"
         else:
             footer = summary
         return EmbedData(
-            phase=state.phase, title="", description=description, color=color, footer=footer
+            phase=state.phase,
+            title=title,
+            description=description,
+            color=color,
+            footer=footer,
+            details=details,
         )
 
     # In progress: one embed, the headline, the tool lines, then the latest draft.
     elapsed_seconds = now - state.started_at if now is not None and state.started_at else None
-    sections = [
-        format_headline(
-            is_working=state.phase is TurnPhase.TOOL_RUNNING,
-            elapsed_seconds=elapsed_seconds,
-            bold=lambda word: f"**{word}**",
-        )
-    ]
-    if state.tool_lines:
-        sections.append("```\n" + "\n".join(state.tool_lines) + "\n```")
+    title = format_headline(
+        is_working=state.phase is TurnPhase.TOOL_RUNNING,
+        elapsed_seconds=elapsed_seconds,
+        bold=lambda word: word,
+    )
+    sections: list[str] = []
     if state.text_preview:
         sections.append(f"> {_escape_markdown(state.text_preview)}")
     return EmbedData(
-        phase=state.phase, title="", description="\n".join(sections), color=color, footer=None
+        phase=state.phase,
+        title=title,
+        description="\n\n".join(sections),
+        color=color,
+        footer=format_duration(elapsed_seconds) if elapsed_seconds is not None else None,
+        details="\n".join(state.tool_lines) if state.tool_lines else None,
     )
 
 

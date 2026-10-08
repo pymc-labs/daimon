@@ -129,7 +129,7 @@ async def test_interrupted_tool_turn_shows_cancelled_and_preserves_partial_answe
     rendered = "\n".join(
         str(kwargs.get("content", "")) for kwargs in sends + [kwargs for _, kwargs in edits]
     )
-    assert "Turn cancelled." in rendered
+    assert "Stopped.\nSend a message to start again." in rendered
     if partial_text:
         assert partial_text in rendered
     assert "<@123>" not in rendered, "cancellation must not send a completion ping"
@@ -172,7 +172,7 @@ async def test_spend_limit_posts_notice_and_error_log(
     embed = edits[-1][1]["embeds"][0]
     assert (
         "Daimon has reached its model usage limit for now. The operators have been notified."
-        in embed.description
+        in embed.fields[0].value
     )
     assert {
         "event": "anthropic.spend_limit_reached",
@@ -233,7 +233,7 @@ class TestPostInitial:
 
         assert len(sends) == 1, "post_initial should post the embed immediately"
         embed: discord.Embed = sends[0]["embeds"][0]
-        assert (embed.description or "").startswith("**Thinking**"), (
+        assert embed.title == "Working on it…", (
             "initial embed should lead with the Thinking headline"
         )
         assert len(edits) == 0, "no edits before any SSE event"
@@ -408,12 +408,13 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     embed = edits[-1][1]["embeds"][0]
     notice = render_termination_notice(reason, state=state)
     assert notice is not None
-    assert embed.footer.text.startswith(f"❌ {notice.headline} · ")
-    assert notice.cause in embed.description
-    assert notice.next_step in embed.description, "the next step is not truncated away"
-    assert "`fit_model`" in embed.description, "work in flight is named"
-    assert "`rid: " in embed.description
-    assert "xxx" not in embed.description + embed.footer.text, "raw error stays in the logs"
+    assert embed.title == "Something went wrong."
+    assert embed.description == "Mention me to try again."
+    assert notice.cause in embed.fields[0].value
+    assert notice.next_step in embed.fields[0].value, "the next step is not truncated away"
+    assert "`fit_model`" in embed.fields[0].value, "work in flight is named"
+    assert "`rid: " in embed.fields[0].value
+    assert "xxx" not in str(embed.to_dict()), "raw error stays in the logs"
 
 
 async def test_terminal_failure_notice_fits_discord_limits_with_many_long_names() -> None:
@@ -449,8 +450,8 @@ async def test_terminal_failure_notice_fits_discord_limits_with_many_long_names(
     embed = edits[-1][1]["embeds"][0]
     assert len(embed.description) <= 4096
     assert len(embed.footer.text) <= 2048
-    assert "and 42 more" in embed.description and "and 40 more" in embed.description
-    assert "`rid: " in embed.description
+    assert "and 42 more" in embed.fields[0].value
+    assert "`rid: " in embed.fields[0].value
 
 
 async def test_a_notice_that_fails_to_build_still_turns_the_card_red(
@@ -467,8 +468,9 @@ async def test_a_notice_that_fails_to_build_still_turns_the_card_red(
 
     embed = edits[-1][1]["embeds"][0]
     assert embed.colour.value == COLOR_RED
-    assert embed.footer.text.startswith("❌ upstream timeout · "), "falls back to the raw label"
-    assert not embed.description
+    assert embed.title == "Something went wrong."
+    assert embed.description == "Mention me to try again."
+    assert not any("upstream timeout" in str(field.value) for field in embed.fields)
 
 
 async def test_the_card_reuses_the_rid_bound_for_the_turn() -> None:
@@ -478,7 +480,7 @@ async def test_the_card_reuses_the_rid_bound_for_the_turn() -> None:
     with structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
         await lc.on_terminal_failure(TurnState(), Exception("x"))
 
-    assert "`rid: 01BOUNDRID`" in edits[-1][1]["embeds"][0].description
+    assert "`rid: 01BOUNDRID`" in edits[-1][1]["embeds"][0].fields[0].value
 
 
 async def test_terminal_failure_without_a_reason_on_the_state_maps_the_error() -> None:
@@ -487,7 +489,7 @@ async def test_terminal_failure_without_a_reason_on_the_state_maps_the_error() -
 
     await lc.on_terminal_failure(TurnState(), TurnError(kind="connection_lost"))
 
-    assert edits[-1][1]["embeds"][0].footer.text.startswith("❌ Connection lost · ")
+    assert edits[-1][1]["embeds"][0].title == "Something went wrong."
 
 
 class TestErrorEmbed:
@@ -612,8 +614,8 @@ class TestSealedResponsePersistence:
         await lc.on_render(_sealed_state("x" * 2100))
         chunks = [sent["content"] for sent in sends if "content" in sent]
         assert len(chunks) > 1
-        assert chunks[0].startswith("**test-agent** ")
-        assert all(not chunk.startswith("**test-agent** ") for chunk in chunks[1:])
+        assert chunks[0].startswith("**test-agent**\n\n")
+        assert all(not chunk.startswith("**test-agent**\n\n") for chunk in chunks[1:])
 
     async def test_on_render_posts_sealed_answer_once(self) -> None:
         """A >=500-char text block sealed by a tool use posts as a permanent
@@ -776,7 +778,7 @@ class TestCancelViewWiring:
         await lc.on_terminal_success(state)
         # The last edit should be the "Turn cancelled." clean-replace
         cancel_edit = edits[-1]
-        assert cancel_edit[1].get("content") == "Turn cancelled.", (
+        assert cancel_edit[1].get("content") == "Stopped.\nSend a message to start again.", (
             "empty-content terminal success must show 'Turn cancelled.'"
         )
         assert cancel_edit[1].get("embed") is None, (
@@ -813,8 +815,8 @@ class TestStatusEmbedFromTurnState:
         embeds = edits[-1][1]["embeds"]
         assert len(embeds) == 1, "the whole status is one embed"
         description = embeds[0].description or ""
-        assert description.startswith("**Working**"), "a pending call reads as working"
-        assert "🔍 Search issues (tracker)" in description, "MCP calls get a readable line"
+        assert embeds[0].title == "Working on it…"
+        assert "🔍 Search issues (tracker)" in embeds[0].fields[0].value
         assert "private words" not in description, "a tool line never shows its arguments"
 
     async def test_message_draft_shares_the_status_embed(self) -> None:
@@ -902,8 +904,8 @@ class TestZeroMessageBehavior:
 
         # Only the terminal flush edit (done embed), no clean-replace edit
         # The flush_terminal edit sets embed= (done embed). No subsequent content= edit.
-        assert len(edits) == 1, "only terminal flush edit, no clean-replace"
         assert "embeds" in edits[0][1], "terminal flush should have embed"
+        assert edits[-1][1]["embed"].description == "Done."
 
     async def test_truly_cancelled_turn_shows_turn_cancelled(self) -> None:
         """Empty content (no blocks at all) still shows 'Turn cancelled.'."""
@@ -914,7 +916,7 @@ class TestZeroMessageBehavior:
         await lc.on_terminal_success(state)
 
         cancel_edit = edits[-1]
-        assert cancel_edit[1].get("content") == "Turn cancelled."
+        assert cancel_edit[1].get("content") == "Stopped.\nSend a message to start again."
         assert cancel_edit[1].get("embed") is None
 
 
@@ -943,7 +945,7 @@ class TestMessageEventMapping:
         embeds: list[discord.Embed] | None = sends[0].get("embeds")
         assert embeds is not None
         description = embeds[0].description or ""
-        assert description.startswith("**Thinking**"), "headline shows the thinking state"
+        assert embeds[0].title == "Working on it…"
         assert "\n" not in description, "no tool lines and no draft for a bare thinking ping"
 
     async def test_message_event_truncates_long_text(self) -> None:
@@ -1082,7 +1084,7 @@ class TestWasAnswered:
 
         assert lc.was_answered is False, "a cancelled turn must not report an answer"
         cancel_edit = edits[-1]
-        assert cancel_edit[1].get("content") == "Turn cancelled.", (
+        assert cancel_edit[1].get("content") == "Stopped.\nSend a message to start again.", (
             "a cancelled turn must render as 'Turn cancelled.'"
         )
 
@@ -1135,7 +1137,7 @@ class TestTurnSummaryFooter:
         footer = _terminal_embed(edits).footer.text
         assert footer is not None, "footer renders even for unpriced model"
         assert "$" not in footer, "unpriced model footer omits the cost segment"
-        assert "1k in / 200 out" in footer, "merged-in token count still shown"
+        assert "1k in / 200 out" in _terminal_embed(edits).fields[0].value
 
     async def test_merged_input_count_in_footer(self) -> None:
         lc, _sends, edits = _make_lifecycle(model_id="claude-sonnet-4-6")
@@ -1154,9 +1156,9 @@ class TestTurnSummaryFooter:
         await lc.on_terminal_failure(state, Exception("boom"))
         footer = _terminal_embed(edits).footer.text
         # merged_in = 1000 + 500 + 2000 = 3500 -> "3.5k"; out = 300
-        assert footer is not None and "3.5k in / 300 out" in footer, (
-            "displayed input is the merged input+cache_creation+cache_read count"
-        )
+        assert (
+            footer is not None and "3.5k in / 300 out" in _terminal_embed(edits).fields[0].value
+        ), "displayed input is the merged input+cache_creation+cache_read count"
 
     async def test_footer_cost_equals_billing_ledger_with_cache_reads(self) -> None:
         # The whole point: footer cost == cost_of for the same 4 cache-split ints.

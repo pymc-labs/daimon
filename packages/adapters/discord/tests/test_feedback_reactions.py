@@ -856,7 +856,7 @@ async def test_first_thumbs_down_sends_exactly_one_private_message(
 
     recipient.send.assert_awaited_once()
     kwargs = recipient.send.call_args.kwargs
-    content = kwargs["content"]
+    content = kwargs["embed"].description
     assert str(_GUILD_ID) in content, "the link must carry the guild id"
     assert "3001" in content, "the link must carry the channel id"
     assert "2001" in content, "the link must carry the message id"

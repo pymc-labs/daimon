@@ -47,9 +47,9 @@ log = structlog.get_logger()
 
 _DEBOUNCE_S = 5.0
 _SEALED_RESPONSE_MIN_CHARS = 500  # Same substantive-answer threshold as Slack.
-_DELIVERY_FAILED = "⚠️ Something went wrong posting the answer."
+_DELIVERY_FAILED = "Something went wrong. Mention me to try again."
 # Slack's copy for a no-answer turn, which must not claim an answer existed.
-_FINISH_FAILED = "⚠️ Something went wrong finishing this turn."
+_FINISH_FAILED = "Something went wrong. Mention me to try again."
 _DELIVERY_UNCERTAIN = "⚠️ Posting the answer timed out. If it isn't above, ask again."
 _ANSWER_CUT_SHORT = "⚠️ Part of this answer may be missing. Ask again if it stops short."
 # Everything an SDK send can raise: httpx.HTTPError for the Bot Framework

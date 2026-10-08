@@ -1054,11 +1054,8 @@ class DaimonBot(commands.Bot):
                     )
                     embed = discord.Embed(
                         color=theme.COLOR_RED,
-                        description=(
-                            "❌ This turn was interrupted by a restart and cannot be "
-                            "resumed. Nothing was lost on your side — mention me again "
-                            "to retry."
-                        ),
+                        title="Stopped: Daimon restarted.",
+                        description="Mention me to try again.",
                     )
                     if transport._destination() is not None:  # pyright: ignore[reportPrivateUsage]
                         await transport.edit(message, embed=embed, view=None)
@@ -2888,12 +2885,20 @@ class DaimonBot(commands.Bot):
             from daimon.adapters.discord.thread_handoff import hand_over_view
 
             view = hand_over_view(agent_id=agent.id, agent_name=agent.name)
+            summary, hint, request_id_line = error_text.split("\n", 2)
+            handoff_embed = discord.Embed(
+                title="Switch agent",
+                description=summary,
+                color=discord.Color.blurple(),
+            )
+            handoff_embed.add_field(name="New thread", value=hint, inline=False)
+            handoff_embed.set_footer(text=request_id_line.strip("`"))
             if lifecycle.message_ref is not None:
                 await _edit_message(
-                    lifecycle.message_ref, content=error_text, embed=None, view=view
+                    lifecycle.message_ref, content=None, embed=handoff_embed, view=view
                 )
             else:
-                await turn_send(error_text, view=view)
+                await turn_send(embed=handoff_embed, view=view)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,

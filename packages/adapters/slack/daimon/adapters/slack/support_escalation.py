@@ -131,10 +131,8 @@ POLICY_UNREADABLE: Final = (
     "This workspace's access policy could not be read, so nothing was sent. "
     "Ask an admin to check it."
 )
-CHECK_FAILED: Final = "Something went wrong checking that. Nothing was spent; try again."
-FORM_DID_NOT_OPEN: Final = (
-    "Slack didn't open the form in time. Click *Ask the team* again; nothing was spent."
-)
+CHECK_FAILED: Final = "That didn't work. Try again."
+FORM_DID_NOT_OPEN: Final = "That didn't work. Try again."
 SEALED_NOTE_HINT: Final = (
     "Only turns inside this channel read it. Your note goes to the support team outside it, so "
     "don't paste anything that has to stay here. They get a link to this answer, "
@@ -183,8 +181,10 @@ def build_support_modal(
     here, so a forged metadata blob can only point the CLICKER's own request
     (counted against their own allowance) at a different message.
     """
+    prompt, count = offer_text(remaining=remaining).split("\n", 1)
     blocks: list[dict[str, Any]] = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": offer_text(remaining=remaining)}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": prompt}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": count}]},
     ]
     if sealed:
         blocks.append(
@@ -196,7 +196,7 @@ def build_support_modal(
             "block_id": _NOTE_BLOCK_ID,
             "label": {
                 "type": "plain_text",
-                "text": "What do you need help with? Someone from the team will reply.",
+                "text": "What do you need help with?",
             },
             "element": {
                 "type": "plain_text_input",

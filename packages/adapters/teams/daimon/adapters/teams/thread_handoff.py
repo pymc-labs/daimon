@@ -41,7 +41,7 @@ VERB: Final = "thread_hand_over"
 
 def hand_over_button(*, agent_id: str, agent_name: str) -> ExecuteAction:
     """One Hand over button carrying the agent's MA id."""
-    return button(VERB, f"Hand over to {agent_name}", "hand_over", style="positive", agent=agent_id)
+    return button(VERB, f"Switch to {agent_name}", "hand_over", style="positive", agent=agent_id)
 
 
 class TeamsThreadHandoff:

@@ -18,7 +18,7 @@ def fallback_name_prefix(name: str, content: str) -> str:
     """Label the first answer chunk when platform identity override is unavailable."""
     safe_name = discord_username(name).replace("\\", "\\\\").replace("*", "\\*")
     safe_name = safe_name.replace("@", "@\u200b").replace("`", "\\`")
-    return f"**{safe_name}** {content}"
+    return f"**{safe_name}**\n\n{content}"
 
 
 def is_our_discord_webhook(

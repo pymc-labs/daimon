@@ -53,6 +53,7 @@ from daimon.core.turn.card_state import (
 )
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.status_lines import (
+    format_duration,
     format_headline,
 )
 
@@ -71,10 +72,7 @@ _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
 
 # Copy is byte-identical to the Discord adapter's orphan-retirement embed: the
 # two adapters must say the same thing about the same event.
-INTERRUPTED_NOTICE: str = (
-    f"{_EMOJI_CROSS} This turn was interrupted by a restart and cannot be "
-    "resumed. Nothing was lost on your side — mention me again to retry."
-)
+INTERRUPTED_NOTICE: str = "Stopped: Daimon restarted.\nMention me to try again."
 
 # ---------------------------------------------------------------------------
 # Pure functions
@@ -107,7 +105,11 @@ def _headline(state: State, now: float | None, *, bold: Callable[[str], str]) ->
 
 
 def to_blocks(
-    state: State, *, now: float | None, cancel_key: str | None = None
+    state: State,
+    *,
+    now: float | None,
+    cancel_key: str | None = None,
+    answer_visible: bool = False,
 ) -> list[dict[str, Any]]:
     """Render State into a list of Slack Block Kit block dicts.
 
@@ -137,7 +139,7 @@ def to_blocks(
         # Terminal collapse: one summary context block only.
         elapsed = int(now - state.started_at) if now is not None else 0
         tokens = f"{_fmt_tokens(state.usage_in)} in / {_fmt_tokens(state.usage_out)} out"
-        parts: list[str] = [f"{elapsed}s", tokens]
+        parts: list[str] = [f"{elapsed}s"]
         if state.agent_name and not state.header_customized:
             parts.insert(0, state.agent_name)
         if state.cost_str is not None:
@@ -145,13 +147,28 @@ def to_blocks(
         if state.balance_str is not None:
             parts.append(state.balance_str)
         summary = " · ".join(parts)
-        if state.phase is TurnPhase.ERROR:
-            summary_text = f"{_EMOJI_CROSS} {state.error_reason or 'error'} · {summary}"
-        else:
-            summary_text = summary
+        summary_text = summary
         blocks: list[dict[str, Any]] = []
-        if state.phase is TurnPhase.ERROR and state.notice:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": state.notice}})
+        if state.phase is TurnPhase.ERROR:
+            blocks.append(
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Something went wrong."}}
+            )
+            blocks.append(
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Mention me to try again."}}
+            )
+            if state.notice:
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": f"*Details*\n{state.notice}"},
+                    }
+                )
+        elif not answer_visible and state.text_preview is None:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "Done."}})
+        blocks.append({"type": "divider"})
+        blocks.append(
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": f"Details · {tokens}"}]}
+        )
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": summary_text}]})
         return blocks
 
@@ -163,7 +180,10 @@ def to_blocks(
     if state.tool_lines:
         tool_lines = escape_mrkdwn("\n".join(state.tool_lines))
         blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"```\n{tool_lines}\n```"}}
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"*Details*\n{tool_lines}"}],
+            }
         )
     # expand=True keeps Slack from folding the draft behind "see more".
     if state.text_preview:
@@ -181,17 +201,25 @@ def to_blocks(
     cancel_button: dict[str, Any] = {
         "type": "button",
         "action_id": "cancel_turn",
-        "text": {"type": "plain_text", "text": "Cancel"},
+        "text": {"type": "plain_text", "text": "Stop"},
         "style": "danger",
     }
     if cancel_key is not None:
         cancel_button["value"] = cancel_key
+    blocks.append({"type": "divider"})
     blocks.append(
         {
             "type": "actions",
             "elements": [cancel_button],
         }
     )
+    if now is not None and state.started_at:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": format_duration(now - state.started_at)}],
+            }
+        )
 
     return blocks
 
@@ -208,7 +236,11 @@ def to_interrupted_blocks() -> list[dict[str, Any]]:
     Takes no arguments and emits no ``actions`` block, so the Cancel button is
     gone by construction -- there is no live turn left to cancel.
     """
-    return [{"type": "section", "text": {"type": "mrkdwn", "text": INTERRUPTED_NOTICE}}]
+    title, next_step = INTERRUPTED_NOTICE.split("\n", 1)
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": title}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": next_step}},
+    ]
 
 
 def format_termination_notice(notice: TerminationNotice) -> str:
