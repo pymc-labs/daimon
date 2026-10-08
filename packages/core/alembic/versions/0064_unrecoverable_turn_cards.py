@@ -8,8 +8,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0063_unrecoverable_turn_cards"
-down_revision: str | None = "0062_github_connect_origin"
+revision: str = "0064_unrecoverable_turn_cards"
+down_revision: str | None = "0063_agent_avatar_face_combo"
 branch_labels: str | None = None
 depends_on: str | None = None
 
