@@ -45,7 +45,9 @@ is supported; government and China clouds use other Bot Framework hosts.
   read, the bot says so instead of starting a turn. A followed thread also
   gets unprompted replies (below).
 - **Private and shared channels** work like standard ones once the app is in
-  them. The package declares `supportsChannelFeatures: tier1` (manifest
+  them, except that Teams sends the bot only the private channel posts that
+  @mention it: there a Reply on a bot message needs a mention too, and a
+  followed thread gets no unprompted replies. The package declares `supportsChannelFeatures: tier1` (manifest
   1.25), but adding the app to a team does not add it to these channels: each
   one's owner adds it from the channel.
 - **Group chats** get a short refusal.
@@ -245,12 +247,6 @@ confirmation card.
 
 ### Channel files (optional)
 
-Tool approvals appear as Adaptive Cards in the conversation. The card shows
-the action, consequence and requester's display name, with **Approve**,
-**Deny** and a **Details** expander for plain labelled inputs. Only the requester can
-approve or deny. Each call gets its own card. Answered, expired and stopped
-cards lose their buttons.
-
 Grant the app `Sites.Selected`, which reaches only the sites granted to it,
 then grant each channel's site. The manifest does not change and no restart is
 needed.
@@ -271,7 +267,8 @@ needed.
    everyone). The Teams service finds the channel's Files folder with that
    sign-in, grants the app write on the site holding it (the team's, or a
    private or shared channel's own) and stores the folder; the channel's next
-   message sees the files.
+   message sees the files. A new channel's Files tab must be opened once
+   first; until then the channel has no folder to find.
 
 Or grant a site by hand as a SharePoint or global admin holding
 `Sites.FullControl.All`:
@@ -335,7 +332,9 @@ registration:
 
 With tool safety on (`DAIMON_TOOL_SAFETY__ENABLED`), an attached tool's write
 waits on an Approve/Deny card in the conversation that only the requester can
-answer.
+answer. It shows the action, its consequence and the requester's name, with a
+**Details** expander for the inputs. Each call gets its own card; answered,
+expired and stopped cards lose their buttons.
 
 Nothing app-only lists the teams an app is in, so the adapter records each
 team when the app is added or anyone writes there; an older install shows up
