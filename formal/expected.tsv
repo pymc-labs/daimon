@@ -161,3 +161,22 @@ skill_sync	BindingIdentity	BindingIdentitySafe	clean	17	-	exact MA identity, dup
 skill_sync	BindingIdentity	BindingIdentityNameSubstitution	violates:NoWrongAgentAttach	18	-	pre-fix: same-name B appears after A bridge resolution, name-only attach selects B
 skill_sync	BindingIdentity	BindingIdentityTitleRace	violates:NoAmbiguousTitleWrite	13	-	residual: same-name B is present when A's shared-name title is written; collision risk only
 skill_sync	RetryDeadline	RetryDeadline	clean	6	-	provider not-before time dominates ordinary queue backoff before a retry claim
+# ---- Discord webhook posting and card recovery ----
+discord_webhooks	WebhookLoad	LoadSafe	clean	1475	-	three requests per turn, one hook, two turns, retry-after and three-window bound
+discord_webhooks	WebhookLoad	LoadBotFallback	clean	33	-	identity off uses bot route with its own window quota
+discord_webhooks	WebhookLoad	LoadTwoChannels	clean	390	-	two parent channels drain independently
+discord_webhooks	WebhookLoad	LoadPoolThreeHooks	clean	156	-	three thread-selected hooks remain below the 15-per-channel cap
+discord_webhooks	WebhookLoad	LoadUnsafe429	violates:NoAnswerLost	20	-	dropping an exhausted 429 loses an answer; final 429 propagation is tested
+discord_webhooks	WebhookLoad	LoadUnsafeBackoff	violates:NoBusyRetry	38	-	ignoring retry_after permits repeated 429 in one window
+discord_webhooks	WebhookLoad	LoadUnsafeBound	violates:BoundedPosting	406	-	two windows cannot carry six calls through a two-per-window hook
+discord_webhooks	CardRecovery	CardSafe	clean	17	-	durable intent and token-available recovery clear the pending card
+discord_webhooks	CardRecovery	CardMissingToken	clean	13	-	missing token retains the intent and does not claim completed recovery
+discord_webhooks	CardRecovery	CardUnsafeDuplicate	violates:NoDuplicateCard	6	-	blind retry after accepted post with lost response duplicates the card
+discord_webhooks	CardRecovery	CardUnsafeRetire	violates:NoPendingAfterRetirement	14	-	replacement of uneditable card cannot justify retiring the original intent
+discord_webhooks	WebhookLoad	LoadUnsafeDuplicateAnswer	violates:NoDuplicateAnswer	76	-	replaying a recorded answer duplicates delivery
+discord_webhooks	WebhookLoad	LoadUnsafeFallback	violates:FallbackRoute	2	-	dropping bot route when identity is off removes name-prefix fallback
+discord_webhooks	CardRecovery	CardUnsafeFinish	violates:NoPendingAfterTurnEnds	8	-	ending a turn before card edit leaves pending status
+discord_webhooks	CardRecovery	CardUnsafeRecovery	violates:NoPendingAfterRecovery	15	-	marking recovery complete before edits leaves pending card
+discord_webhooks	WebhookLoad	LoadDiscordQuota	clean	193	-	production hook and bot quota values with six requests in one parent
+discord_webhooks	CardRecovery	CardDeleteFailed	clean	21	-	failed discard keeps original intent active for later recovery
+discord_webhooks	CardRecovery	CardUnsafeDeleteRetire	violates:NoPendingAfterRetirement	9	-	retiring after failed delete hides a pending card

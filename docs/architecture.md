@@ -182,6 +182,12 @@ assigned by its ID; built-in Daimon posts use the bot. If a webhook is
 unavailable, the first answer chunk carries a bold agent name. The bot and MCP
 Discord tools resolve the webhook matching a message's webhook ID to edit or
 delete that agent's recorded post.
+Restart recovery keeps a card intent active when its webhook token is missing
+or the webhook was deleted. It does not post a replacement status card in that
+case, because the original pending card could not be cleared. A later recovery
+pass can retry the retained intent when editing is possible again.
+An unprompted turn also retains its card intent if deleting a transient card
+fails, so a later recovery pass can find the unresolved message.
 
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
 `thread_participation_scopes`. In a followed thread it joins a quiet-timer

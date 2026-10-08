@@ -168,6 +168,24 @@ async def test_webhook_403_falls_back_with_name_and_caches_unavailability() -> N
     channel.send.assert_awaited_once_with(content="**Research**\n\nanswer")
 
 
+async def test_exhausted_webhook_429_is_not_silently_reposted_by_bot() -> None:
+    client, channel, hook = _world()
+    hook.send = AsyncMock(
+        side_effect=discord.HTTPException(
+            MagicMock(status=429), {"message": "rate limited", "retry_after": 2.0}
+        )
+    )
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+
+    with pytest.raises(discord.HTTPException) as exc_info:
+        await transport.send(content="answer")
+
+    assert exc_info.value.status == 429
+    channel.send.assert_not_awaited()
+
+
 async def test_webhook_400_cooldown_only_applies_to_that_agent_identity() -> None:
     client, channel, hook = _world()
     hook.send = AsyncMock(
@@ -342,6 +360,29 @@ async def test_deleted_webhook_edit_posts_replacement() -> None:
     assert hook.send.call_args.kwargs["content"] == "updated"
 
 
+async def test_recovery_edit_does_not_replace_unknown_webhook_card() -> None:
+    client, channel, hook = _world()
+    message = MagicMock(spec=discord.Message)
+    message.id = 40
+    message.webhook_id = hook.id
+    message.application_id = client.application_id
+    hook.edit_message = AsyncMock(
+        side_effect=discord.NotFound(
+            MagicMock(status=404), {"code": 10015, "message": "Unknown Webhook"}
+        )
+    )
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    await transport._webhook()  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(discord.ClientException, match="no longer exists"):
+        await transport.edit(message, content="updated", _allow_replacement=False)
+
+    hook.send.assert_not_awaited()
+    channel.send.assert_not_awaited()
+
+
 async def test_missing_webhook_token_posts_edit_as_replacement() -> None:
     client, channel, hook = _world()
     message = MagicMock(spec=discord.Message)
@@ -359,6 +400,25 @@ async def test_missing_webhook_token_posts_edit_as_replacement() -> None:
     assert replacement is channel.send.return_value
     channel.send.assert_awaited_once_with(content="**Research**\n\nupdated")
     hook.edit_message.assert_not_awaited()
+
+
+async def test_recovery_edit_does_not_replace_card_without_webhook_token() -> None:
+    client, channel, hook = _world()
+    message = MagicMock(spec=discord.Message)
+    message.id = 40
+    message.webhook_id = hook.id
+    message.application_id = client.application_id
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    channel.permissions_for.return_value.manage_webhooks = False
+    client.http.channel_webhooks = AsyncMock(return_value=[])
+
+    with pytest.raises(discord.ClientException, match="token unavailable"):
+        await transport.edit(message, content="updated", _allow_replacement=False)
+
+    channel.send.assert_not_awaited()
+    hook.send.assert_not_awaited()
 
 
 async def test_webhook_edit_403_lookup_does_not_post_replacement() -> None:

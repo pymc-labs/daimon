@@ -63,6 +63,33 @@ async def test_agent_send_uses_webhook_identity_and_wait(
     assert hook.send.call_args.kwargs["avatar_url"] == "https://example.com/a.png"
 
 
+async def test_exhausted_webhook_429_propagates_without_bot_repost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock(spec=discord.Client)
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock()
+    hook = MagicMock(spec=discord.Webhook)
+    hook.send = AsyncMock(
+        side_effect=discord.HTTPException(
+            MagicMock(status=429), {"message": "rate limited", "retry_after": 2.0}
+        )
+    )
+    monkeypatch.setattr(_post_transport, "own_webhook", AsyncMock(return_value=hook))
+
+    with pytest.raises(discord.HTTPException) as exc_info:
+        await _post_transport.send_agent_message(
+            client,
+            channel,
+            AgentIdentity("Research", None, False),
+            content="answer",
+            identity_enabled=True,
+        )
+
+    assert exc_info.value.status == 429
+    channel.send.assert_not_awaited()
+
+
 async def test_disabled_agent_send_uses_plain_bot_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
