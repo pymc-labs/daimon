@@ -13,6 +13,7 @@ from daimon.core.memory_view import (
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.agent_memory_stores import insert_memory_store
 from daimon.core.stores.identity import find_platform_principal
+from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
     FakeMemoryStoreState,
@@ -111,3 +112,55 @@ async def test_channel_store_raises_when_the_configured_agent_is_missing(
             channel_id="chat-1",
             default=_DEFAULT,
         )
+
+
+async def test_thread_store_follows_the_agent_the_thread_is_handed_to(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, platform="teams", workspace_id="org-4")
+    client = build_fake_anthropic(
+        combine_handlers(
+            make_fake_memory_store_handler(FakeMemoryStoreState()), make_fake_ma_handler()
+        )
+    )
+    for name in ("daimon", "helper"):
+        await client.beta.agents.create(
+            name=name,
+            model="claude-sonnet-4-6",
+            metadata={"daimon_tenant": str(tenant.id), "daimon_name": name},
+        )
+    helper = [a async for a in client.beta.agents.list() if a.name == "helper"][0]
+    store = await client.beta.memory_stores.create(name="m", description="d")
+    await insert_memory_store(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=str(helper.id)),
+        memory_store_id=store.id,
+    )
+    channel, thread = "19:ops@thread.tacv2", "19:ops@thread.tacv2;messageid=1"
+    await create_binding(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        parent_channel_id=channel,
+        thread_id=thread,
+        responder_ma_agent_id=str(helper.id),
+        responder_name="helper",
+        kind="handoff",
+    )
+    await db_session.commit()
+    common = {
+        "tenant_id": tenant.id,
+        "platform": "teams",
+        "user_id": "user-1",
+        "channel_id": channel,
+        "default": _DEFAULT,
+    }
+
+    in_thread = await get_channel_memory_store(
+        db_session_factory, client, thread_id=thread, **common
+    )
+    in_channel = await get_channel_memory_store(db_session_factory, client, **common)
+
+    assert in_thread == ("helper", store.id), "the thread's agent answers there"
+    assert in_channel is None, "the channel's own agent has no store yet"
