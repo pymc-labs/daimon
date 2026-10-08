@@ -25,10 +25,13 @@ Who may vote: the people who could have asked the agent there
 again on submit. A refused vote records nothing.
 
 Hygiene contract (mirrors the Discord feedback modal): the submitted text is
-somebody's unsolicited criticism and belongs in exactly one place — the
-database row. It never enters a log record, an action_id, private_metadata,
-or any non-ephemeral message. Log lines carry the feedback row id and the
-reason codes only.
+somebody's unsolicited criticism and belongs in the database row. It never
+enters a log record, an action_id or private_metadata. Log lines carry the
+feedback row id and the reason codes only. The one other place it may go is
+the support channel, and only for a tenant that turned that on
+(`SupportSettings.feedback_to_support`): then the form says so before it is
+sent, and each submission is posted there once, beside the person, the agent
+and a link to the answer (`post_to_support_channel`, the Ask a human path).
 """
 
 from __future__ import annotations
@@ -48,10 +51,13 @@ from daimon.adapters.slack.click_replies import (
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.modal_limits import MAX_PLAIN_TEXT_INPUT_CHARS
+from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.place_access import may_start_turn_at, resolve_clicker
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.support_escalation import post_to_support_channel
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.message_feedback import FEEDBACK_REASONS, Vote, known_feedback_reasons
+from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     load_access_policy,
@@ -73,6 +79,7 @@ __all__ = [
     "FeedbackTextDecision",
     "build_feedback_actions_block",
     "build_feedback_modal",
+    "render_feedback_post",
     "evaluate_feedback_text_submission",
     "handle_feedback_details_click",
     "handle_feedback_vote",
@@ -96,6 +103,10 @@ _FORM_EXPIRED: Final = (
     "Click \N{THUMBS DOWN SIGN} again to tell us what went wrong."
 )
 _TELL_US_PROMPT: Final = "Thanks — noted. Want to tell us what went wrong?"
+_SHARED_HINT: Final = (
+    "What you send here also goes to the support team, with a link to this answer "
+    "(not its content)."
+)
 
 FEEDBACK_VOTE_UP: Final = "feedback_vote:up"
 FEEDBACK_VOTE_DOWN: Final = "feedback_vote:down"
@@ -162,15 +173,23 @@ def vote_for_action_id(action_id: str) -> Vote | None:
     return None
 
 
-def build_feedback_modal(*, channel_id: str, message_ts: str, thread_ts: str) -> dict[str, Any]:
+def build_feedback_modal(
+    *, channel_id: str, message_ts: str, thread_ts: str, shared: bool = False
+) -> dict[str, Any]:
     """The "What went wrong?" form: optional reasons, optional text, one required.
 
     ``private_metadata`` carries the answer's place only, never identity: the
     submit takes the person from the verified payload, so a forged blob can
     only point the submitter's own feedback at another answer, under the same
-    access check.
+    access check. ``shared`` adds the line saying the form goes to the support
+    team too, for a tenant that routes it there.
     """
     place = _AnswerPlace(channel_id=channel_id, message_ts=message_ts, thread_ts=thread_ts)
+    notice: list[dict[str, Any]] = (
+        [{"type": "context", "elements": [{"type": "mrkdwn", "text": _SHARED_HINT}]}]
+        if shared
+        else []
+    )
     return {
         "type": "modal",
         "callback_id": FEEDBACK_TEXT_CALLBACK_ID,
@@ -179,6 +198,7 @@ def build_feedback_modal(*, channel_id: str, message_ts: str, thread_ts: str) ->
         "submit": {"type": "plain_text", "text": "Send"},
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": [
+            *notice,
             {
                 "type": "input",
                 "block_id": _REASONS_BLOCK_ID,
@@ -227,6 +247,20 @@ def _details_prompt_blocks(place: _AnswerPlace) -> list[dict[str, Any]]:
     ]
 
 
+def _support_channel(runtime: SlackRuntime, *, team_id: str) -> str | None:
+    """The channel this workspace's submitted forms also go to, or None (the default).
+
+    Anything but a configured string channel and a literal True reads as off,
+    so a half-built settings object fails closed, as `slack_support_enabled` does.
+    """
+    support = runtime.settings.support
+    channel = cast(object, support.slack_escalation_channel_id)
+    if not isinstance(channel, str) or not channel:
+        return None
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    return channel if cast(object, support.routes_feedback(tenant_id)) is True else None
+
+
 @dataclasses.dataclass(frozen=True)
 class FeedbackTextDecision:
     """Outcome of the pure pre-ack evaluation of a feedback_text submission.
@@ -246,6 +280,7 @@ class FeedbackTextDecision:
     message_ts: str
     thread_ts: str
     feedback_id: str
+    user_name: str = ""
 
 
 def _metadata(raw: object) -> dict[str, Any]:
@@ -277,6 +312,7 @@ def evaluate_feedback_text_submission(payload: dict[str, Any]) -> FeedbackTextDe
     selected: list[dict[str, Any]] = reasons_element.get("selected_options") or []
     reasons = tuple(known_feedback_reasons([str(o.get("value") or "") for o in selected]))
     message_ts = str(meta.get("message_ts") or "")
+    user: dict[str, Any] = payload.get("user") or {}
     decision = FeedbackTextDecision(
         proceed=False,
         response_payload=None,
@@ -286,6 +322,7 @@ def evaluate_feedback_text_submission(payload: dict[str, Any]) -> FeedbackTextDe
         message_ts=message_ts,
         thread_ts=str(meta.get("thread_ts") or "") or message_ts,
         feedback_id=str(meta.get("feedback_id") or ""),
+        user_name=str(user.get("username") or user.get("name") or ""),
     )
     if not raw_text.strip() and not reasons:
         return dataclasses.replace(
@@ -306,6 +343,22 @@ def evaluate_feedback_text_submission(payload: dict[str, Any]) -> FeedbackTextDe
 _RecordOutcome = Literal["recorded", "missing", "refused", "unreadable"]
 
 
+@dataclasses.dataclass(frozen=True)
+class _Recorded:
+    """What `_record` decided, and what a routed form's post needs to say.
+
+    ``details_changed`` is False when the form matches what the row already
+    held, so a resubmitted identical form is not posted twice.
+    """
+
+    outcome: _RecordOutcome
+    row_id: uuid.UUID | None = None
+    sealed: bool = False
+    ma_agent_id: str | None = None
+    ma_session_id: str | None = None
+    details_changed: bool = False
+
+
 async def _record(
     runtime: SlackRuntime,
     client: AsyncWebClient,
@@ -315,10 +368,9 @@ async def _record(
     place: _AnswerPlace,
     vote: Vote,
     details: tuple[str | None, tuple[str, ...]] | None = None,
-) -> tuple[_RecordOutcome, uuid.UUID | None]:
+) -> _Recorded:
     """Decide access, then upsert the vote, and the form's ``details`` (text,
-    reasons) when given, all in one transaction. Returns the outcome and the
-    row id.
+    reasons) when given, all in one transaction.
 
     The thread session is a best-effort attribution hint only.
     """
@@ -327,7 +379,7 @@ async def _record(
         tenant = await get_tenant(session, tenant_id)
     if tenant is None or tenant.archived_at is not None:
         log.info("feedback.tenant_missing", tenant_id=str(tenant_id))
-        return "missing", None
+        return _Recorded("missing")
     subject, account_id = await resolve_clicker(
         runtime, client, tenant_id=tenant_id, user_id=user_id
     )
@@ -340,12 +392,12 @@ async def _record(
             policy = await load_access_policy(session, tenant_id=tenant_id)
         except AccessPolicyUnreadable:
             log.info("feedback.refused", tenant_id=str(tenant_id), decision="unreadable")
-            return "unreadable", None
+            return _Recorded("unreadable")
         if not may_start_turn_at(
             policy, subject, channel_id=place.channel_id, thread_ts=place.thread_ts
         ):
             log.info("feedback.refused", tenant_id=str(tenant_id), decision="refused")
-            return "refused", None
+            return _Recorded("refused")
         thread_row = await get_latest_thread_session(
             session, tenant_id=tenant_id, platform="slack", thread_id=place.thread_ts
         )
@@ -360,7 +412,15 @@ async def _record(
             ma_session_id=thread_row.ma_session_id if thread_row is not None else None,
             vote=vote,
         )
+        details_changed = False
         if details is not None:
+            details_changed = (
+                result.row.feedback_text,
+                tuple(result.row.feedback_reasons or ()),
+            ) != (
+                details[0],
+                details[1],
+            )
             await attach_feedback_details(
                 session,
                 feedback_id=result.row.id,
@@ -374,7 +434,14 @@ async def _record(
         vote=vote,
         is_new_vote=result.previous_vote != vote,
     )
-    return "recorded", result.row.id
+    return _Recorded(
+        "recorded",
+        row_id=result.row.id,
+        sealed=readers_limited_at(policy, channel_id=place.channel_id, thread_id=place.thread_ts),
+        ma_agent_id=thread_row.ma_agent_id if thread_row is not None else None,
+        ma_session_id=thread_row.ma_session_id if thread_row is not None else None,
+        details_changed=details_changed,
+    )
 
 
 def _refusal_text(outcome: _RecordOutcome) -> str:
@@ -422,13 +489,16 @@ async def handle_feedback_vote(runtime: SlackRuntime, payload: dict[str, Any]) -
             client,
             trigger_id=trigger_id,
             view=build_feedback_modal(
-                channel_id=channel_id, message_ts=message_ts, thread_ts=thread_ts
+                channel_id=channel_id,
+                message_ts=message_ts,
+                thread_ts=thread_ts,
+                shared=_support_channel(runtime, team_id=team_id) is not None,
             ),
         )
 
-    outcome, _row_id = await _record(
-        runtime, client, team_id=team_id, user_id=user_id, place=place, vote=vote
-    )
+    outcome = (
+        await _record(runtime, client, team_id=team_id, user_id=user_id, place=place, vote=vote)
+    ).outcome
     if outcome != "recorded":
         if outcome == "missing" and view_id is None:
             return
@@ -493,7 +563,10 @@ async def handle_feedback_details_click(runtime: SlackRuntime, payload: dict[str
         client,
         trigger_id=trigger_id,
         view=build_feedback_modal(
-            channel_id=channel_id, message_ts=message_ts, thread_ts=thread_ts
+            channel_id=channel_id,
+            message_ts=message_ts,
+            thread_ts=thread_ts,
+            shared=_support_channel(runtime, team_id=team_id) is not None,
         ),
     )
     if view_id is None:
@@ -546,7 +619,7 @@ async def run_feedback_text_submission(
         return
 
     place = _AnswerPlace(channel_id=d.channel_id, message_ts=d.message_ts, thread_ts=d.thread_ts)
-    outcome, row_id = await _record(
+    recorded = await _record(
         runtime,
         client,
         team_id=team_id,
@@ -555,8 +628,70 @@ async def run_feedback_text_submission(
         vote="down",
         details=(d.text if d.text.strip() else None, d.reasons),
     )
-    if outcome != "recorded" or row_id is None:
-        await reply(_refusal_text(outcome))
+    if recorded.outcome != "recorded" or recorded.row_id is None:
+        await reply(_refusal_text(recorded.outcome))
         return
-    log.info("feedback.submission_recorded", feedback_id=str(row_id), reasons=list(d.reasons))
+    log.info(
+        "feedback.submission_recorded",
+        feedback_id=str(recorded.row_id),
+        reasons=list(d.reasons),
+    )
+    dest_channel = _support_channel(runtime, team_id=team_id)
+    if dest_channel is not None and recorded.details_changed:
+        # Best-effort: the form is already recorded, whatever the post does.
+        delivered = await post_to_support_channel(
+            runtime,
+            source_client=client,
+            source_team_id=team_id,
+            channel_id=d.channel_id,
+            message_ts=d.message_ts,
+            dest_channel=dest_channel,
+            render=lambda link: render_feedback_post(
+                decision=d, team_id=team_id, user_id=user_id, recorded=recorded, link=link
+            ),
+        )
+        log.info(
+            "feedback.routed_to_support", feedback_id=str(recorded.row_id), delivered=delivered
+        )
     await reply(_THANKS_TEXT)
+
+
+def render_feedback_post(
+    *,
+    decision: FeedbackTextDecision,
+    team_id: str,
+    user_id: str,
+    recorded: _Recorded,
+    link: str | None,
+) -> str:
+    """The support channel's message for one routed form.
+
+    Who and where are spelled out as Ask a human spells them
+    (`render_escalation_post`): the channel may sit in another workspace.
+    The answer's content is not included, only the link to it.
+    """
+    d = decision
+    who = f"<@{user_id}>"
+    if d.user_name:
+        who += f" ({escape_mrkdwn(d.user_name)}, {user_id} in {team_id})"
+    else:
+        who += f" ({user_id} in {team_id})"
+    lines = [
+        f"*\N{THUMBS DOWN SIGN} Feedback* from {who}",
+        link if link is not None else f"message {d.message_ts} in channel {d.channel_id}",
+    ]
+    if recorded.ma_agent_id or recorded.ma_session_id:
+        lines.append(
+            f"Agent `{recorded.ma_agent_id or 'unknown'}`, session "
+            f"`{recorded.ma_session_id or 'unknown'}`"
+        )
+    labels = [FEEDBACK_REASONS[code] for code in d.reasons if code in FEEDBACK_REASONS]
+    lines.append(f"*Reasons:* {', '.join(labels) if labels else 'none picked'}")
+    if recorded.sealed:
+        lines.append(
+            "_From a channel read only from inside: answer there, the conversation stays in it._"
+        )
+    text = "\n".join(lines)
+    if d.text.strip():
+        text += "\n\n" + escape_mrkdwn(d.text)
+    return text

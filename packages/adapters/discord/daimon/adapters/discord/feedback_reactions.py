@@ -40,6 +40,7 @@ from typing import cast
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.feedback_button import FeedbackButton
+from daimon.adapters.discord.feedback_modal import support_channel_for
 from daimon.adapters.discord.post_transport import DiscordPostTransport, known_webhook_ids
 from daimon.adapters.discord.support_escalation import SupportEscalateButton
 from daimon.core.agent_post_identity import is_our_discord_webhook
@@ -435,9 +436,11 @@ class FeedbackReactionCog(commands.Cog):
             user = self._bot.get_user(payload.user_id)
             if user is None:
                 user = await self._bot.fetch_user(payload.user_id)
-            await user.send(
-                content=f"You flagged {link} -- want to tell us what went wrong?", view=view
-            )
+            content = f"You flagged {link} -- want to tell us what went wrong?"
+            tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
+            if support_channel_for(self._bot.runtime.settings.support, tenant_id) is not None:
+                content += " What you write also goes to the support team, with that link."
+            await user.send(content=content, view=view)
         except discord.HTTPException as exc:
             # discord.Forbidden (closed DMs) is the common case -- there is no
             # other channel to reach this person on, so this must never raise.

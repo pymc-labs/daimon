@@ -192,8 +192,18 @@ adding another.
 Who may vote: anyone who could start a turn there (the invoker allowlist and the
 channel's rules), checked when the vote is recorded and again on send. Anyone else is
 told they can't, and nothing is recorded. External Slack Connect members are refused.
-The text is stored only on the feedback row. Logs carry the row id and the reason
+The text is stored on the feedback row. Logs carry the row id and the reason
 codes. Deleting your data with `/privacy` removes the row.
+
+To also send 👎 forms to the support team, turn on
+`DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` for the workspace's tenant (a JSON object of
+tenant UUID to `true`; off by default). Each sent form is then posted once to the
+**Ask the team** channel (`DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID`), with the
+person, the agent and session, the reasons, the text and a link to the answer, never
+its content. Sending the same form again posts nothing; a changed one posts again.
+The form says it is shared before it is sent. A sealed origin is marked, as Ask the
+team marks it. No support request is spent. Discord does the same with its 👎 text,
+to `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`.
 
 Emoji reactions (a :-1: on the message) are not read: that would need the
 `reactions:read` scope and a reinstall of every workspace.

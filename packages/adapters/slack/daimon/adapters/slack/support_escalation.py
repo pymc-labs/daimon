@@ -49,6 +49,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import uuid
+from collections.abc import Callable
 from typing import Any, Final, cast
 
 import structlog
@@ -111,6 +112,7 @@ __all__ = [
     "build_support_modal",
     "evaluate_support_submission",
     "handle_ask_human_click",
+    "post_to_support_channel",
     "run_support_submission",
     "slack_support_enabled",
 ]
@@ -657,22 +659,45 @@ async def _post_to_escalation_channel(
     dest_channel: str,
     sealed: bool,
 ) -> bool:
-    """Post the request. True only if it landed.
+    """Post the request. True only if it landed."""
+    return await post_to_support_channel(
+        runtime,
+        source_client=source_client,
+        source_team_id=submission.team_id,
+        channel_id=submission.channel_id,
+        message_ts=submission.message_ts,
+        dest_channel=dest_channel,
+        render=lambda link: render_escalation_post(submission=submission, link=link, sealed=sealed),
+    )
 
+
+async def post_to_support_channel(
+    runtime: SlackRuntime,
+    *,
+    source_client: AsyncWebClient,
+    source_team_id: str,
+    channel_id: str,
+    message_ts: str,
+    dest_channel: str,
+    render: Callable[[str | None], str],
+) -> bool:
+    """Post ``render(permalink to the answer)`` to the support channel. True only if it landed.
+
+    Shared by Ask a human and the routed 👎 form (`daimon.adapters.slack.feedback`).
     Posts with the escalation workspace's token when
-    `slack_escalation_team_id` names one, else the requester's own. The
+    `slack_escalation_team_id` names one, else the source workspace's own. The
     destination tenant's policy is read fresh and asked `authorize(POST)` with
     no agent immediately before the send (after the permalink round trip), so
-    a channel protected meanwhile is refused and the row stays undelivered.
+    a channel protected meanwhile is refused.
     No policy lock is held across the send: a protection committed in the
     instant between that read and Slack accepting the post is not ordered
     against it.
     """
     support = runtime.settings.support
-    dest_team = support.slack_escalation_team_id or submission.team_id
+    dest_team = support.slack_escalation_team_id or source_team_id
     dest_client = (
         source_client
-        if dest_team == submission.team_id
+        if dest_team == source_team_id
         else await resolve_web_client(runtime, team_id=dest_team)
     )
     if dest_client is None:
@@ -680,10 +705,8 @@ async def _post_to_escalation_channel(
         return False
     # Network I/O first, so the destination decision below is the last thing
     # before the send and nothing awaits between them but the policy read.
-    link = await _permalink(
-        source_client, channel_id=submission.channel_id, message_ts=submission.message_ts
-    )
-    text = render_escalation_post(submission=submission, link=link, sealed=sealed)
+    link = await _permalink(source_client, channel_id=channel_id, message_ts=message_ts)
+    text = render(link)
     dest_tenant = derive_tenant_uuid(platform="slack", workspace_id=dest_team)
     async with runtime.sessionmaker() as session:
         try:

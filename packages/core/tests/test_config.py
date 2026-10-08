@@ -891,3 +891,25 @@ def test_slack_settings_history_page_limit_rejects_above_slack_maximum() -> None
 
     with pytest.raises(ValidationError):
         SlackSettings(signing_secret="s" * 32, app_token="xapp-test", history_page_limit=1001)
+
+
+def test_feedback_to_support_is_off_by_default_and_reads_a_per_tenant_map(monkeypatch):
+    import uuid
+
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    on = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
+    off = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000002")
+    assert load_settings(_env_file=None).support.routes_feedback(on) is False
+    monkeypatch.setenv(
+        "DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT",
+        '{"AAAAAAAA-0000-0000-0000-000000000001": true, '
+        '"aaaaaaaa-0000-0000-0000-000000000002": false}',
+    )
+    support = load_settings(_env_file=None).support
+    assert support.routes_feedback(on) is True
+    assert support.routes_feedback(off) is False
+    assert support.routes_feedback(uuid.uuid4()) is False
+    monkeypatch.setenv("DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT", '{"typo": true}')
+    with pytest.raises(ValidationError):
+        load_settings(_env_file=None)

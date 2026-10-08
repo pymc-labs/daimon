@@ -21,6 +21,7 @@ import pytest
 from daimon.adapters.discord import feedback_reactions
 from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
 from daimon.adapters.discord.post_transport import DiscordPostTransport
+from daimon.core.config import SupportSettings
 from daimon.core.message_feedback import CUSTOM_ID_PATTERN
 from daimon.core.stores.domain import RecordVoteResult
 from daimon.core.stores.identity import find_platform_principal
@@ -237,13 +238,17 @@ def _fake_bot(
     fetch_channel: Any = None,
     get_user: Any = None,
     fetch_user: Any = None,
+    support: SupportSettings | None = None,
 ) -> Any:
     """Minimal DaimonBot stand-in: only user/runtime/get_channel/fetch_channel/
     get_user/fetch_user are read."""
     return SimpleNamespace(
         user=SimpleNamespace(id=_BOT_USER_ID),
         application_id=_BOT_USER_ID,
-        runtime=SimpleNamespace(sessionmaker=sessionmaker),
+        runtime=SimpleNamespace(
+            sessionmaker=sessionmaker,
+            settings=SimpleNamespace(support=support or SupportSettings()),
+        ),
         get_channel=get_channel or MagicMock(return_value=None),
         fetch_channel=fetch_channel or AsyncMock(),
         get_user=get_user or MagicMock(return_value=None),
@@ -1065,3 +1070,40 @@ async def test_two_different_people_each_receive_one_private_message(
 
     recipients[_REACTOR_ID].send.assert_awaited_once()
     recipients[_OTHER_REACTOR_ID].send.assert_awaited_once()
+
+
+async def test_the_prompt_says_the_text_is_shared_only_when_the_tenant_routes_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session, workspace_id=str(_GUILD_ID))
+    await db_session.commit()
+    _spy_on_record_vote(monkeypatch)
+    contents: list[str] = []
+    for message_id, routed in ((2101, False), (2102, True)):
+        recipient = MagicMock()
+        recipient.send = AsyncMock()
+        support = SupportSettings(
+            escalation_channel_id="300000000000000003",
+            feedback_to_support={tenant.id: True} if routed else {},
+        )
+        bot = _fake_bot(
+            sessionmaker=db_session_factory,
+            get_user=MagicMock(return_value=recipient),
+            support=support,
+        )
+        await FeedbackReactionCog(bot).on_raw_reaction_add(
+            _build_payload(
+                message_id=message_id,
+                channel_id=3001,
+                user_id=_REACTOR_ID,
+                guild_id=_GUILD_ID,
+                emoji_name="\N{THUMBS DOWN SIGN}",
+                message_author_id=_BOT_USER_ID,
+            )
+        )
+        contents.append(recipient.send.call_args.kwargs["content"])
+
+    assert "support team" not in contents[0]
+    assert "also goes to the support team" in contents[1]
