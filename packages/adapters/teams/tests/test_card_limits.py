@@ -20,9 +20,11 @@ from daimon.adapters.teams.billing_panel import Lookup, checkout_card
 from daimon.adapters.teams.billing_panel import panel_card as billing_card
 from daimon.adapters.teams.credential_requests import credential_form, oauthdialog
 from daimon.adapters.teams.help import COMMAND_HELP, help_card
+from daimon.adapters.teams.here import here_card
 from daimon.adapters.teams.privacy_panel import NAME_MISMATCH
 from daimon.adapters.teams.setup_panel import GONE
 from daimon.adapters.teams.tool_confirmation import confirmation_adaptive_card
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import (
     AgentDetails,
@@ -44,6 +46,7 @@ from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_repo_auth import RepoAccess
 from daimon.core.headless_runner import LAST_RESULT_TAIL_MAX
+from daimon.core.here_card import assemble_here_card
 from daimon.core.ma import SessionDeletionReport
 from daimon.core.mcp_auth import coding_tool_config
 from daimon.core.message_split import split_fenced
@@ -409,6 +412,20 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
         f"No memory at /memories/{EMOJI * 10_000}.md.", hint="Send memory to list paths."
     ),
     "help": lambda: help_card(COMMAND_HELP, bot=NAME),
+    "here": lambda: here_card(
+        assemble_here_card(
+            channel_id=f"19:{'x' * 120}@thread.tacv2",
+            platform="teams",
+            agent_name="*" * 1000,
+            tier="channel",
+            channel=None,
+            tenant=None,
+            configuration_target_name="_" * 1000,
+            set_by_label=EMOJI * 1000,
+            policy=TenantAccessPolicy(),
+            details=None,
+        )
+    ),
     **{
         f"posted_{kind}_{state}": lambda kind=kind, state=state: _posted(kind, state)
         for kind in ("env", "mcp", "mcp_oauth", "repo", "skill_repo")
