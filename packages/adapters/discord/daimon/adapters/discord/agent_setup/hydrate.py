@@ -23,7 +23,11 @@ from daimon.adapters.discord.agent_setup.scope_default import (
 from daimon.adapters.discord.agent_setup.state import PanelState, ThreadContext
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
-from daimon.core.agent_identity import is_builtin_agent, resolve_agent_identity
+from daimon.core.agent_identity import (
+    identity_enabled_for,
+    is_builtin_agent,
+    resolve_agent_identity,
+)
 from daimon.core.answering_map import AnsweringMap, load_answering_map
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
@@ -217,7 +221,9 @@ async def load_details_for(
             channel_label=_channel_label(state),
         )
         state.avatar_urls[agent.name] = None
-        if runtime.settings.agent_identity.enabled and not is_builtin_agent(
+        if identity_enabled_for(
+            runtime.settings, "discord", state.guild_id
+        ) and not is_builtin_agent(
             name=details.name,
             metadata={MA_METADATA_KEY_MANAGED: "true"} if details.daimon_managed else None,
             default_agent_name=runtime.deployment_default.agent_name,

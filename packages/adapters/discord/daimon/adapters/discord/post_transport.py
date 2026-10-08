@@ -9,6 +9,7 @@ import time
 from typing import Any, cast
 
 import structlog
+from daimon.core.agent_identity import identity_enabled_for
 from daimon.core.agent_post_identity import (
     DISCORD_AGENT_WEBHOOK_NAME,
     discord_username,
@@ -105,8 +106,13 @@ class DiscordPostTransport:
         if identity_enabled is None:
             runtime = getattr(client, "runtime", None)
             settings = getattr(runtime, "settings", None)
-            configured = getattr(getattr(settings, "agent_identity", None), "enabled", None)
-            identity_enabled = configured if isinstance(configured, bool) else False
+            guild = getattr(channel, "guild", None)
+            guild_id = getattr(guild, "id", None)
+            identity_enabled = (
+                identity_enabled_for(settings, "discord", guild_id)
+                if settings is not None
+                else False
+            )
         self.identity_enabled = identity_enabled
         self.fallback_used = False
         self._fallback_prefix_applied = False

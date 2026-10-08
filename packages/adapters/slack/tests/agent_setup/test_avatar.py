@@ -204,20 +204,30 @@ async def test_avatar_edit_requires_admin_and_non_builtin_agent(
     monkeypatch.setattr(avatar_module, "find_agent_by_daimon_tag", lookup)
     tenant_id = uuid.uuid4()
     assert not await may_edit_avatar(
-        runtime, client, tenant_id=tenant_id, user_id="U", agent_name="Ada"
+        runtime, client, tenant_id=tenant_id, team_id="T1", user_id="U", agent_name="Ada"
     )  # type: ignore[arg-type]
     lookup.assert_not_awaited()
     admin.return_value = True
     assert await may_edit_avatar(
-        runtime, client, tenant_id=tenant_id, user_id="U", agent_name="Ada"
+        runtime, client, tenant_id=tenant_id, team_id="T1", user_id="U", agent_name="Ada"
     )  # type: ignore[arg-type]
     lookup.return_value = SimpleNamespace(name="Main", metadata={})
     assert not await may_edit_avatar(
-        runtime, client, tenant_id=tenant_id, user_id="U", agent_name="Main"
+        runtime, client, tenant_id=tenant_id, team_id="T1", user_id="U", agent_name="Main"
+    )  # type: ignore[arg-type]
+    runtime.settings.agent_identity.excluded_slack_team_ids = ["T1"]
+    admin.reset_mock()
+    assert not await may_edit_avatar(
+        runtime, client, tenant_id=tenant_id, team_id="T1", user_id="U", agent_name="Ada"
+    )  # type: ignore[arg-type]
+    admin.assert_not_awaited()
+    lookup.return_value = SimpleNamespace(name="Ada", metadata={})
+    assert await may_edit_avatar(
+        runtime, client, tenant_id=tenant_id, team_id="T2", user_id="U", agent_name="Ada"
     )  # type: ignore[arg-type]
     runtime.settings.agent_identity.enabled = False
     assert not await may_edit_avatar(
-        runtime, client, tenant_id=tenant_id, user_id="U", agent_name="Ada"
+        runtime, client, tenant_id=tenant_id, team_id="T1", user_id="U", agent_name="Ada"
     )  # type: ignore[arg-type]
 
 

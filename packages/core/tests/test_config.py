@@ -32,6 +32,23 @@ def test_agent_identity_switch_is_off_by_default_and_reads_nested_env(
     assert load_settings(_env_file=None).agent_identity.enabled
 
 
+def test_agent_identity_workspace_exclusions_read_json_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS", raising=False)
+    monkeypatch.delenv("DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS", raising=False)
+    default = load_settings(_env_file=None).agent_identity
+    assert default.excluded_discord_guild_ids == []
+    assert default.excluded_slack_team_ids == []
+    monkeypatch.setenv("DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS", '[123, "456"]')
+    monkeypatch.setenv("DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS", '["T123"]')
+    configured = load_settings(_env_file=None).agent_identity
+    assert configured.excluded_discord_guild_ids == ["123", "456"]
+    assert configured.excluded_slack_team_ids == ["T123"]
+
+
 def test_load_settings_parses_nested_delimiter_when_env_provided(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

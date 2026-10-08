@@ -367,6 +367,22 @@ Enable per-agent display names and avatars on Slack and Discord, agent name pref
 Teams, and reply-to-agent routing on Discord. Off by default; set
 DAIMON_AGENT_IDENTITY__ENABLED=true after platform setup is ready.
 
+### `DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS`
+
+`list[str]` · optional · default unset
+
+Discord guild IDs where agent identity stays off when enabled globally. Set
+DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS to a JSON array of IDs. Default: no
+guilds excluded.
+
+### `DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS`
+
+`list[str]` · optional · default unset
+
+Slack workspace team IDs where agent identity stays off when enabled globally. Set
+DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS to a JSON array of IDs. Default: no
+workspaces excluded.
+
 ## Discord
 
 Read from `daimon.core.config.DiscordSettings`. Prefix `DAIMON_DISCORD__`.

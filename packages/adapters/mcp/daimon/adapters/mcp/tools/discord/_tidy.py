@@ -52,6 +52,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.agent_identity import identity_enabled_for
 from daimon.core.channel_tidy import TidyOperation, TidyTarget
 from daimon.core.stores.agent_posts import AgentPostRow, get_post, list_posts_in, mark_deleted
 from daimon.core.stores.turn_origins import request_thread_archive
@@ -263,7 +264,9 @@ async def _edit_message_impl(  # pyright: ignore[reportUnusedFunction]
                     target.channel,
                     message,
                     extra_messages=extra_messages,
-                    identity_enabled=runtime.settings.agent_identity.enabled,
+                    identity_enabled=identity_enabled_for(
+                        runtime.settings, "discord", auth.external_id
+                    ),
                     content=content,
                     embeds=[],
                     attachments=[],
@@ -275,7 +278,9 @@ async def _edit_message_impl(  # pyright: ignore[reportUnusedFunction]
                     target.channel,
                     message,
                     extra_messages=extra_messages,
-                    identity_enabled=runtime.settings.agent_identity.enabled,
+                    identity_enabled=identity_enabled_for(
+                        runtime.settings, "discord", auth.external_id
+                    ),
                     content=content,
                 )
 

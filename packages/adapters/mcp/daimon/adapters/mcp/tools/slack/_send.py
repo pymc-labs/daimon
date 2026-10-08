@@ -50,7 +50,11 @@ from daimon.adapters.mcp.tools.slack._visibility import (
     check_channel_access,
     map_slack_api_error,
 )
-from daimon.core.agent_identity import is_builtin_agent, resolve_agent_identity
+from daimon.core.agent_identity import (
+    identity_enabled_for,
+    is_builtin_agent,
+    resolve_agent_identity,
+)
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.output_delivery import MAX_BYTES_PER_FILE
 from daimon.core.slack_customize_scope import (
@@ -221,7 +225,7 @@ async def _post_with_identity(
 
 
 async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dict[str, str] | None:
-    if not runtime.settings.agent_identity.enabled:
+    if not identity_enabled_for(runtime.settings, "slack", auth.external_id):
         return None
     agent_id = auth.chat_agent_id or auth.agent_id
     if agent_id is None:
@@ -243,7 +247,7 @@ async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dic
                     default_agent_name=runtime.deployment_default.agent_name,
                 ),
                 public_base_url=runtime.settings.mcp.app_root_url,
-                enabled=runtime.settings.agent_identity.enabled,
+                enabled=identity_enabled_for(runtime.settings, "slack", auth.external_id),
                 background_sessionmaker=runtime.session_factory,
             )
     except (anthropic.APIError, SQLAlchemyError) as exc:

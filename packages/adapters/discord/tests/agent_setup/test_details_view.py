@@ -378,8 +378,10 @@ async def test_picture_retry_timeout_ignores_missing_response(account_id: uuid.U
     interaction.edit_original_response.assert_awaited_once()
 
 
-async def test_load_details_for_skips_avatar_with_identity_off(
+@pytest.mark.parametrize("excluded", [False, True])
+async def test_load_details_for_skips_avatar_with_identity_off_or_guild_excluded(
     monkeypatch: pytest.MonkeyPatch,
+    excluded: bool,
 ) -> None:
     details = _details()
     state = _state(details, account_id=uuid.uuid4())
@@ -388,7 +390,9 @@ async def test_load_details_for_skips_avatar_with_identity_off(
     sessionmaker.return_value.__aenter__ = AsyncMock(return_value=session)
     sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
     settings = _mcp_settings()
-    settings.agent_identity.enabled = False
+    settings.agent_identity.enabled = excluded
+    if excluded:
+        settings.agent_identity.excluded_discord_guild_ids = ["2001"]
     runtime = _make_runtime(sessionmaker, settings=settings)
     monkeypatch.setattr(hydrate_mod, "load_agent_details", AsyncMock(return_value=details))
     avatar_lookup = AsyncMock()

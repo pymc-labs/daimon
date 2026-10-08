@@ -181,11 +181,16 @@ async def test_reply_to_recorded_agent_post_starts_turn(
         bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
 
 
-async def test_identity_off_ignores_reply_without_mention(
+@pytest.mark.parametrize("excluded", [False, True])
+async def test_identity_off_or_excluded_ignores_reply_without_mention(
     db_session_factory: async_sessionmaker[AsyncSession],
+    excluded: bool,
 ) -> None:
     runtime = _make_runtime(db_session_factory)
-    runtime.settings.agent_identity.enabled = False
+    if excluded:
+        runtime.settings.agent_identity.excluded_discord_guild_ids = ["801000099"]
+    else:
+        runtime.settings.agent_identity.enabled = False
     bot = make_bot(runtime)
     bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue,reportMethodAssign]
     message = _make_channel_message(guild_id=801000099)

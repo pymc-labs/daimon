@@ -46,7 +46,7 @@ from daimon.core.agent_detail_lists import (
     format_detail_lists,
 )
 from daimon.core.agent_details import AgentDetails, RepoBinding
-from daimon.core.agent_identity import is_builtin_agent
+from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
@@ -390,7 +390,7 @@ class DetailsView(PanelViewBase):
                 metadata={MA_METADATA_KEY_MANAGED: "true"} if details.daimon_managed else None,
                 default_agent_name=runtime.deployment_default.agent_name,
             ),
-            identity_enabled=runtime.settings.agent_identity.enabled,
+            identity_enabled=identity_enabled_for(runtime.settings, "discord", state.guild_id),
         )
         for name, toggle in _toggle_buttons(container).items():
             toggle.callback = functools.partial(  # type: ignore[method-assign]  # per-instance callback

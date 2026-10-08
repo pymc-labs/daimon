@@ -1186,6 +1186,35 @@ class AgentIdentitySettings(BaseModel):
             "set DAIMON_AGENT_IDENTITY__ENABLED=true after platform setup is ready."
         ),
     )
+    excluded_discord_guild_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Discord guild IDs where agent identity stays off when enabled globally. "
+            "Set DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS to a JSON array of IDs. "
+            "Default: no guilds excluded."
+        ),
+    )
+    excluded_slack_team_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Slack workspace team IDs where agent identity stays off when enabled globally. "
+            "Set DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS to a JSON array of IDs. "
+            "Default: no workspaces excluded."
+        ),
+    )
+
+    @field_validator("excluded_discord_guild_ids", "excluded_slack_team_ids", mode="before")
+    @classmethod
+    def _stringify_workspace_ids(cls, value: object) -> object:
+        if isinstance(value, list):
+            entries = cast(list[object], value)
+            if all(isinstance(item, (str, int)) and not isinstance(item, bool) for item in entries):
+                normalized: list[str] = []
+                for item in entries:
+                    normalized.append(str(item))
+                return normalized
+            return entries
+        return value
 
 
 class Settings(BaseSettings):

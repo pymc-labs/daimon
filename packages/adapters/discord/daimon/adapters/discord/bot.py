@@ -53,7 +53,7 @@ from daimon.adapters.discord.vision import (
     download_as_image_blocks,
     is_vision_image_attachment,
 )
-from daimon.core.agent_identity import AgentIdentity, resolve_agent_identity
+from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import DirectMessagePolicy, Settings
@@ -1553,7 +1553,9 @@ class DaimonBot(commands.Bot):
             )
         )
         if (
-            self.runtime.settings.agent_identity.enabled
+            identity_enabled_for(
+                self.runtime.settings, "discord", str(message.guild.id) if message.guild else None
+            )
             and not bot_mentioned
             and isinstance(reference, discord.MessageReference)
             and reference.type is discord.MessageReferenceType.reply
@@ -1589,7 +1591,9 @@ class DaimonBot(commands.Bot):
             author_id=str(message.author.id),
             bot_mentioned=bot_mentioned,
             reply_to_recorded_post=reply_to_recorded_post,
-            identity_enabled=self.runtime.settings.agent_identity.enabled,
+            identity_enabled=identity_enabled_for(
+                self.runtime.settings, "discord", str(message.guild.id) if message.guild else None
+            ),
             author_is_webhook=is_webhook_post,
             guild_id=str(message.guild.id) if message.guild else None,
             self_user_id=str(self.user.id) if self.user is not None else None,
@@ -1981,7 +1985,7 @@ class DaimonBot(commands.Bot):
             may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
             client=self,
             public_base_url=self.runtime.settings.mcp.app_root_url,
-            identity_enabled=self.runtime.settings.agent_identity.enabled,
+            identity_enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
         )
 
     async def _may_post_in(self, *, tenant_id: uuid.UUID, channel: object) -> bool:
@@ -2203,7 +2207,7 @@ class DaimonBot(commands.Bot):
                     agent_name=agent.name,
                     is_builtin=agent.name.casefold() == "daimon",
                     public_base_url=self.runtime.settings.mcp.app_root_url,
-                    enabled=self.runtime.settings.agent_identity.enabled,
+                    enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
                     background_sessionmaker=self.runtime.sessionmaker,
                 )
         except Exception as exc:
@@ -2223,7 +2227,7 @@ class DaimonBot(commands.Bot):
             name=identity.name,
             avatar_url=identity.avatar_url,
             builtin=identity.builtin,
-            identity_enabled=self.runtime.settings.agent_identity.enabled,
+            identity_enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
         )
 
         async def _edit_message(
@@ -2780,7 +2784,7 @@ class DaimonBot(commands.Bot):
                     agent_name=agent.name,
                     is_builtin=agent.name.casefold() == "daimon",
                     public_base_url=self.runtime.settings.mcp.app_root_url,
-                    enabled=self.runtime.settings.agent_identity.enabled,
+                    enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
                     background_sessionmaker=self.runtime.sessionmaker,
                 )
         except Exception as exc:
@@ -2793,7 +2797,7 @@ class DaimonBot(commands.Bot):
             name=identity.name,
             avatar_url=identity.avatar_url,
             builtin=identity.builtin,
-            identity_enabled=self.runtime.settings.agent_identity.enabled,
+            identity_enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
         )
 
         async def _edit_message(

@@ -11,8 +11,16 @@ post as the platform bot: Slack keeps the agent name in the footer, Discord
 uses ordinary bot posts and requires a mention to start a turn, Teams adds no
 name prefix, and setup panels hide avatar controls. No default avatar row is
 created. Set it to `true` for the per-agent behavior described below, after
-configuring the platform permissions. The setting applies to one deployment,
-not to individual tenants; restart its services after changing it.
+configuring the platform permissions. Restart the deployment's services after
+changing it.
+
+When the switch is on, `DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS` and
+`DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS` can exclude individual Discord
+guilds and Slack workspaces. Each is a JSON array of IDs, for example
+`["123456789"]` or `["T123456"]`; both default to `[]`. An excluded workspace
+uses the switch-off behavior throughout turns, tool posts, reply routing and
+setup panels. Existing webhook posts can still be edited or deleted. The
+Slack OAuth consent scope remains controlled by the deployment-wide switch.
 
 ## Problem
 

@@ -33,7 +33,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.agent_identity import resolve_agent_identity
+from daimon.core.agent_identity import identity_enabled_for, resolve_agent_identity
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -158,7 +158,7 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
             raise ToolError("channel does not support sending messages")
         actor_id = executing_agent_id(auth)
         identity = None
-        if actor_id is not None and runtime.settings.agent_identity.enabled:
+        if actor_id is not None and identity_enabled_for(runtime.settings, "discord", guild_id):
             try:
                 key = (auth.tenant_id, actor_id)
                 cached = _actor_names.get(key)
@@ -179,7 +179,7 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                             agent_name=actor_name,
                             is_builtin=actor_name.casefold() == "daimon",
                             public_base_url=runtime.settings.mcp.app_root_url,
-                            enabled=runtime.settings.agent_identity.enabled,
+                            enabled=identity_enabled_for(runtime.settings, "discord", guild_id),
                             background_sessionmaker=runtime.session_factory,
                         )
             except Exception as exc:
@@ -197,7 +197,7 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                 content=content,
                 files=files,
                 extra_messages=extra_messages,
-                identity_enabled=runtime.settings.agent_identity.enabled,
+                identity_enabled=identity_enabled_for(runtime.settings, "discord", guild_id),
             )
         await record_agent_posts(
             runtime,

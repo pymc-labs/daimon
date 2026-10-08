@@ -18,7 +18,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_panel_metadata
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_avatar_image import MAX_UPLOAD_BYTES, normalize_avatar_image
-from daimon.core.agent_identity import is_builtin_agent
+from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
@@ -157,10 +157,11 @@ async def may_edit_avatar(
     client: AsyncWebClient,
     *,
     tenant_id: uuid.UUID,
+    team_id: str,
     user_id: str,
     agent_name: str,
 ) -> bool:
-    if not runtime.settings.agent_identity.enabled:
+    if not identity_enabled_for(runtime.settings, "slack", team_id):
         return False
     if not await resolve_is_admin(client, user_id=user_id):
         return False
@@ -257,7 +258,12 @@ async def reset_agent_avatar(
         return
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=meta.team_id)
     if not await may_edit_avatar(
-        runtime, client, tenant_id=tenant_id, user_id=user_id, agent_name=meta.agent_name
+        runtime,
+        client,
+        tenant_id=tenant_id,
+        team_id=team_id,
+        user_id=user_id,
+        agent_name=meta.agent_name,
     ):
         await _audit(
             runtime,
@@ -268,7 +274,7 @@ async def reset_agent_avatar(
             reason="needs_admin_or_agent_gone",
             agent_name=meta.agent_name,
         )
-        if not runtime.settings.agent_identity.enabled:
+        if not identity_enabled_for(runtime.settings, "slack", team_id):
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=view_id,
                 view=build_avatar_status_view(meta=meta, message="Agent pictures are turned off."),
@@ -319,7 +325,12 @@ async def run_avatar_submission(
         return
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
     if not await may_edit_avatar(
-        runtime, client, tenant_id=tenant_id, user_id=user_id, agent_name=meta.agent_name
+        runtime,
+        client,
+        tenant_id=tenant_id,
+        team_id=team_id,
+        user_id=user_id,
+        agent_name=meta.agent_name,
     ):
         await _audit(
             runtime,
@@ -335,7 +346,7 @@ async def run_avatar_submission(
             submission=submission,
             message=(
                 "Only admins can change this agent's picture. Ask an admin to change it."
-                if runtime.settings.agent_identity.enabled
+                if identity_enabled_for(runtime.settings, "slack", team_id)
                 else "Agent pictures are turned off."
             ),
         )
@@ -372,7 +383,12 @@ async def run_avatar_submission(
         await _show_status(client, submission=submission, message=message, retry=True)
         return
     if not await may_edit_avatar(
-        runtime, client, tenant_id=tenant_id, user_id=user_id, agent_name=meta.agent_name
+        runtime,
+        client,
+        tenant_id=tenant_id,
+        team_id=team_id,
+        user_id=user_id,
+        agent_name=meta.agent_name,
     ):
         await _audit(
             runtime,

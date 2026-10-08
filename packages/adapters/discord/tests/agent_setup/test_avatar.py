@@ -43,6 +43,7 @@ def _attachment(
 def _interaction(user_id: int = 42) -> MagicMock:
     interaction = MagicMock()
     interaction.user.id = user_id
+    interaction.guild_id = 123
     return interaction
 
 
@@ -64,11 +65,16 @@ def test_avatar_url_uses_app_root_not_mcp_endpoint() -> None:
     )
 
 
-async def test_upload_refuses_when_agent_pictures_are_off(
+@pytest.mark.parametrize("excluded", [False, True])
+async def test_upload_refuses_when_agent_pictures_are_off_or_guild_excluded(
     monkeypatch: pytest.MonkeyPatch,
+    excluded: bool,
 ) -> None:
     runtime = _runtime()
-    runtime.settings.agent_identity.enabled = False
+    if excluded:
+        runtime.settings.agent_identity.excluded_discord_guild_ids = ["123"]
+    else:
+        runtime.settings.agent_identity.enabled = False
     lookup = AsyncMock()
     monkeypatch.setattr(avatar_module, "find_agent_by_daimon_tag", lookup)
     monkeypatch.setattr(avatar_module, "_audit", AsyncMock())
