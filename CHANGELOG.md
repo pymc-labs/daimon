@@ -49,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Sonnet 5.5 cache reads are billed at $0.10 per million tokens**, Anthropic's price since 2026-10-07. Daimon still charged the old $0.20, so the default model's cache reads cost tenants twice the list price in estimates and ledger debits.
 - Approving a tool call no longer fails the turn with "re-requested approval for tool call(s) already confirmed". The approved call now runs inside the turn, so a notebook or attachment publish is no longer refused after Approve.
 - Allow-listed Discord QA bots can start a turn by replying without a mention to a recorded agent post, as they already can by mentioning Daimon.
 - Slack keeps the agent name in answer footers when it accepts custom header fields but posts with the bot's header.

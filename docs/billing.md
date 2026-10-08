@@ -93,7 +93,12 @@ Put any margin in `DAIMON_BILLING__MARKUP` (below), not in the table, because
 reports read the table as provider cost.
 
 Opus 5.5 is priced at $4 input, $20 output, $5 five-minute cache write, and
-$0.20 cache read per million tokens; Sonnet 5.5 at $2, $10, $2.50 and $0.20.
+$0.20 cache read per million tokens; Sonnet 5.5 at $2, $10, $2.50 and $0.10.
+`AGENT_PRICING_CHECKED_ON` records the day every row was last checked against
+`AGENT_PRICING_SOURCE`. `test_pricing.py` pins each row, so a price edit fails
+until the test table and the date move with it, and
+`uv run pytest -m contract packages/core/tests/test_pricing.py` compares the
+rows with the live pricing page.
 The four-field ledger cannot distinguish one-hour cache writes, which
 Anthropic prices at $8 (Opus 5.5) and $4 (Sonnet 5.5) per million tokens; it
 currently treats all cache writes as five-minute writes.
