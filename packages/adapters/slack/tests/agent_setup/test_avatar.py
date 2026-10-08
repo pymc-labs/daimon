@@ -68,9 +68,14 @@ def test_upload_form_and_submission_validation() -> None:
     assert "Checking the picture" in str(decision.response_payload["view"])
     assert decision.response_payload["view"]["external_id"] == decision.external_id
     retry = build_avatar_status_view(
-        meta=_META, message="We couldn't use that picture.", retry=True
+        meta=_META, message="We couldn't use that picture. Choose another picture.", retry=True
     )
     assert ACTION_AVATAR_CHANGE in str(retry)
+    assert [block["text"]["text"] for block in retry["blocks"] if block["type"] == "section"] == [
+        "We couldn't use that picture.",
+        "Choose another picture.",
+    ]
+    assert any(block["type"] == "divider" for block in retry["blocks"])
 
 
 @pytest.mark.asyncio

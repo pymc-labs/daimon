@@ -603,12 +603,15 @@ def build_avatar_status_view(
     *, meta: PanelMetadata, message: str, external_id: str | None = None, retry: bool = False
 ) -> dict[str, Any]:
     """Show upload progress or a result in the submitted modal itself."""
+    title, separator, next_step = message.partition(". ")
     view = finish_modal(
         title="Picture",
         blocks=[
-            _section(message),
+            _section(title + ("." if separator else "")),
+            *([_section(next_step)] if next_step else []),
             *(
                 [
+                    {"type": "divider"},
                     {
                         "type": "actions",
                         "elements": [
@@ -618,7 +621,7 @@ def build_avatar_status_view(
                                 value=meta.agent_name or "",
                             )
                         ],
-                    }
+                    },
                 ]
                 if retry
                 else []
