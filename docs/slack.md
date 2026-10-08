@@ -1,6 +1,6 @@
 # Slack Adapter — Trust Model
 
-This page documents how daimon's Slack adapter handles per-user access and
+This page documents how Daimon's Slack adapter handles per-user access and
 what operators should understand about the resulting trust model.
 
 ### `/here` card
@@ -41,7 +41,7 @@ limit gets one in-thread notice and no deliveries until space is freed.
 ### Files in message tools
 
 `read_channel`, `read_thread`, `get_message` and `search_messages` include attached
-file names, MIME types and sizes. Download URLs are signed and use daimon's file
+file names, MIME types and sizes. Download URLs are signed and use Daimon's file
 proxy; private Slack download URLs are never exposed. Anyone holding a URL can
 download the file, so these expire after an hour, with the turn grant, rather than
 the 24 hours a turn's own attachment links last. Without a configured public MCP
@@ -115,7 +115,7 @@ needs the person's Approve on a confirmation card, which only tool safety
 session asks before `add_skill`. When no card can show, the preview says which
 it is: approval cards are off for the deployment, or this conversation can't
 show one and why (a missing or stale `origin_context_id`, a session started
-before tool safety was on, a session daimon could not read). Without the card, use the setup panel's Add skill form, which
+before tool safety was on, a session Daimon could not read). Without the card, use the setup panel's Add skill form, which
 takes a paste only, since Slack modals have no file input.
 
 ### Per-user Slack access (optional)
@@ -128,17 +128,17 @@ the requester can approve or deny. Each call gets its own card. Answered,
 expired and stopped cards lose
 their buttons.
 
-By default daimon reads only channels the bot is invited to. Members can
-additionally **connect their Slack account** (daimon nudges them once, and
+By default Daimon reads only channels the bot is invited to. Members can
+additionally **connect their Slack account** (Daimon nudges them once, and
 offers a link whenever it hits a channel it can't read). A connected member's
 reads run with *their* Slack permissions: any channel or DM they can see, no
 bot invite needed, plus message search (results that come from a DM are only
-surfaced when you ask in a DM with daimon).
+surfaced when you ask in a DM with Daimon).
 
 Trust model notes for operators:
 
 - Connected users' reach is no longer signalled by bot presence in a channel.
-  daimon answers with channel content wherever the connected user asks, gated
+  Daimon answers with channel content wherever the connected user asks, gated
   only by whether that user can see the source channel themselves.
 - User tokens (`xoxp-…`) are stored Fernet-encrypted (`DAIMON_CRYPTO__KEYS`),
   one row per (workspace, user), and are deleted + revoked from the `/privacy`
@@ -148,7 +148,7 @@ Trust model notes for operators:
 - Reads mirror the connecting user's own Slack visibility: any channel or DM
   they can see, answered wherever they ask — the same model as the Discord
   bot. The one exception is direct-message content (DMs and group DMs), which
-  daimon will only surface in a DM with you, never in a channel.
+  Daimon will only surface in a DM with you, never in a channel.
 
 `/agent-setup` opens the Agents roster, which pushes into either an agent's Details view or Who answers where. Setup conversations can be opened with **⚙️ Manage agents** from the Agents roster or from Details; creating a new agent lands on its Details view rather than a separate confirmation screen, and Details also offers **🧰 Use from your coding tools** to connect that agent over MCP. The channel gets a short launcher with a **Reply to Daimon** button; Daimon's welcome appears inside the shared thread. The panel also provides the reply button immediately after opening setup. Follow it, reply in that thread, and mention the bot. Daimon answers while the named agent is configured. Opening setup does not run a billed turn or change channel defaults. Each participant keeps a separate session.
 
@@ -177,7 +177,7 @@ See Slack's [conversations.open reference](https://docs.slack.dev/reference/meth
 and the tenant [recipient policy](architecture.md#agent-initiated-direct-messages).
 
 When a direct-message call fails because an install lacks `im:write`, the tool
-asks a workspace admin to reinstall or reauthorize daimon from the install link.
+asks a workspace admin to reinstall or reauthorize Daimon from the install link.
 Revoked, expired, or invalid bot authorizations give the same recovery direction.
 Errors include the number of chunks already delivered; a failure to open the DM
 sends no messages.
@@ -186,7 +186,7 @@ With the tenant enabled in `DAIMON_TABLE_RENDERING`, final-answer Markdown table
 text. Surrounding prose and multiple tables are delivered in order.
 
 Final answers go out as `markdown` blocks. Slack shows text inside inline code
-and fenced blocks exactly as written, entities included, so daimon sends code
+and fenced blocks exactly as written, entities included, so Daimon sends code
 unescaped and escapes only the prose around it: `<https://example.com|label>`
 in prose becomes a link, while the same text in code stays literal. Prose keeps
 user and channel mentions but not `<!channel>`, `<!here>` or `<!everyone>`. Each
@@ -289,7 +289,7 @@ bot scopes `im:history` and `im:write`, subscribe to `message.im`, and enable th
 Home messages tab. Existing installations remain DM-disabled until an admin opts in.
 This version moves recent channel text, not Slack thread replies or attachments.
 
-Before `/dm` moves a conversation or `/dm enable` changes policy, daimon checks the
+Before `/dm` moves a conversation or `/dm enable` changes policy, Daimon checks the
 granted `x-oauth-scopes` for both IM scopes. Missing or unreadable grants refuse
 without saving a route; scope/token errors request reinstall or reauthorization.
 The scope header cannot verify event subscriptions: operators must also apply the

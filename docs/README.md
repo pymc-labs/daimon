@@ -1,6 +1,6 @@
 # Documentation
 
-daimon is an open source data science agent that joins a team's Discord,
+Daimon is an open source data science agent that joins a team's Discord,
 Slack or Microsoft Teams, runs the analysis in the thread, and posts back
 charts, models and a reproducible notebook. Start with
 [self-hosting.md](self-hosting.md) to get a

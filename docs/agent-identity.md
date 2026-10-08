@@ -172,7 +172,7 @@ Named-agent routing is tracked separately from this identity work.
 - Table `agent_avatars (tenant_id, agent_name, token, sha256, png, png_128,
   png_512, previous_sha256, previous_png, previous_png_128,
   previous_png_512, source, face_combo, face_thumbnail,
-  updated_by_account_id, updated_at)`, keyed by tenant and the agent's daimon
+  updated_by_account_id, updated_at)`, keyed by tenant and the agent's Daimon
   name normalized as #409 normalizes names (NFKC, casefolded), so an agent the
   resolver recreates keeps its avatar. A rename moves the row; archiving or
   deleting the agent, and tenant purge, delete it, so a later agent reusing

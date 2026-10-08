@@ -38,6 +38,8 @@ It describes behaviour that has shipped, for operators and contributors.
 Plans, designs, adoption reviews, refactor notes and anything measured on a
 real deployment do not go in `docs/` or the nav; put them in the issue or
 the PR description. A note about a scaffold belongs in that package's README.
+Prose names the product Daimon; lowercase `daimon` is only the CLI, the
+Python package and paths.
 
 Adding a page to `docs/` means two more edits: a line in `docs/README.md`
 and a nav entry in `mkdocs.yml`. The strict build fails on a page missing
