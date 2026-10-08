@@ -68,6 +68,9 @@ from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
 from anthropic.types.beta.sessions.beta_managed_agents_user_custom_tool_result_event import (
     BetaManagedAgentsUserCustomToolResultEvent,
 )
+from anthropic.types.beta.sessions.beta_managed_agents_user_tool_confirmation_event import (
+    BetaManagedAgentsUserToolConfirmationEvent,
+)
 
 _T = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -200,6 +203,19 @@ def make_status_idle(
         id=event_id,
         type="session.status_idle",
         stop_reason=stop_reason,
+        processed_at=_T,
+    )
+
+
+def make_tool_confirmation(
+    *, event_id: str, tool_use_id: str, result: Literal["allow", "deny"] = "allow"
+) -> BetaManagedAgentsUserToolConfirmationEvent:
+    """MA's echo of a `user.tool_confirmation` it has taken."""
+    return BetaManagedAgentsUserToolConfirmationEvent(
+        id=event_id,
+        type="user.tool_confirmation",
+        tool_use_id=tool_use_id,
+        result=result,
         processed_at=_T,
     )
 

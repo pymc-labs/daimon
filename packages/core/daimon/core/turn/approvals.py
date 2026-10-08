@@ -311,6 +311,8 @@ def _publish_only(decide: ToolCallDecider, *, trusted_servers: frozenset[str]) -
     refused, as `RequireApproval` would have ended the turn before it ran."""
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
+        if _is_unseen(call):
+            return _unseen_refusal(call)
         if is_publish_call(call, trusted_servers):
             return await decide(call)
         return ToolConfirmationResult(

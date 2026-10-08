@@ -62,6 +62,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSystemMessageEventParams,
     BetaManagedAgentsTextBlockParam,
     BetaManagedAgentsUserMessageEventParams,
+    BetaManagedAgentsUserToolConfirmationEvent,
     BetaManagedAgentsUserToolConfirmationEventParams,
 )
 from daimon.core.errors import TurnError
@@ -552,6 +553,11 @@ async def _pump(
     # re-delivered `requires_action` idle after an eventless-cycle
     # reconnect must not be double-confirmed (T-19-08-B).
     confirmed_tool_use_ids: set[str] = set()
+    # The confirmed ids MA has taken: their `user.tool_confirmation` came
+    # back on the stream or in a replay. A `requires_action` idle naming a
+    # confirmed id MA has not taken yet is a stale duplicate, not a re-ask
+    # (`_consume_with_reconnect`).
+    accepted_tool_use_ids: set[str] = set()
     delivered_event_ids: set[str] = set()
     # Per-turn billing dedup, shared by the live consume loop and both replay
     # folds: a model call MA emitted while no stream was attached exists only
@@ -656,6 +662,7 @@ async def _pump(
                                 billing=billing,
                                 tool_confirmation=tool_confirmation,
                                 confirmed_tool_use_ids=confirmed_tool_use_ids,
+                                accepted_tool_use_ids=accepted_tool_use_ids,
                                 delivered_event_ids=delivered_event_ids,
                                 billed_event_ids=billed_event_ids,
                                 stream_read_timeout_s=stream_read_timeout_s,
@@ -938,6 +945,15 @@ def _events_since_last_turn_boundary(
     return current_events
 
 
+def _note_accepted(events: Sequence[object], accepted: set[str]) -> None:
+    """Add the tool_use ids whose `user.tool_confirmation` MA has recorded."""
+    accepted.update(
+        event.tool_use_id
+        for event in events
+        if isinstance(event, BetaManagedAgentsUserToolConfirmationEvent)
+    )
+
+
 async def _bill_once(billing: BillingPosture, event: object, billed_event_ids: set[str]) -> None:
     """Meter one `span.model_request_end` through the turn's recorder, once.
 
@@ -992,6 +1008,7 @@ async def _consume_with_reconnect(
     billing: BillingPosture,
     tool_confirmation: ToolConfirmation,
     confirmed_tool_use_ids: set[str],
+    accepted_tool_use_ids: set[str],
     delivered_event_ids: set[str],
     billed_event_ids: set[str],
     stream_read_timeout_s: float,
@@ -1042,6 +1059,7 @@ async def _consume_with_reconnect(
             # completeness, so rebuilding from empty could regress behind the
             # adapter's append-only render anchor if a page omits old history.
             await _bill_replayed(billing, current_turn_events, billed_event_ids)
+            _note_accepted(replayed, accepted_tool_use_ids)
             state_cell[0] = functools.reduce(apply, current_turn_events, state_cell[0])
             log.info(
                 "turn.reconnect.completed",
@@ -1128,6 +1146,7 @@ async def _consume_with_reconnect(
                 await _bill_once(billing, event, billed_event_ids)
                 await lifecycle.on_sse_event(event)
                 delivered_event_ids.add(event.id)
+            _note_accepted((event,), accepted_tool_use_ids)
             state_cell[0] = apply(state_cell[0], event)
             events_folded_cell[0] += 1
             if event.type == "session.status_terminated":
@@ -1171,8 +1190,25 @@ async def _consume_with_reconnect(
                                 count=len(fresh),
                             )
                             continue
-                        # MA is re-asking for ids we already allowed -- stop
-                        # instead of spinning until the ceiling (T-19-08-C).
+                        if pending_confirmation_ids(
+                            event.stop_reason, confirmed=accepted_tool_use_ids
+                        ):
+                            # MA repeats a `requires_action` idle while the
+                            # paused batch's other tools run (idle, running,
+                            # idle again, same ids). A repeat read after our
+                            # send but before MA echoed the confirmation is
+                            # that duplicate, not a refusal: keep reading.
+                            # If MA never takes it, the stream goes quiet and
+                            # the eventless-cycle check ends the turn.
+                            log.info(
+                                "turn.tool_confirmation.stale_idle",
+                                session_id=session_id,
+                                event_id=event.id,
+                            )
+                            continue
+                        # MA took our confirmations and asked again for the
+                        # same ids -- stop instead of spinning until the
+                        # ceiling (T-19-08-C).
                         log.info("turn.tool_confirmation.exhausted", session_id=session_id)
                         return
                     case RequireApproval():

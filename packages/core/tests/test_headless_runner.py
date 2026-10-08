@@ -261,14 +261,13 @@ async def test_tail_truncated_at_1000() -> None:
     )
 
 
-async def test_auto_allow_dedups_across_reemitted_requires_action_then_terminates() -> None:
+async def test_auto_allow_confirms_once_and_rides_out_a_reemitted_requires_action() -> None:
     """Two requires_action idle events naming the same blocked id: the first
-    is auto-confirmed exactly once (no double-ack); MA re-asking for the SAME
-    id it was already told to allow is not silently spun forever -- the
-    driver terminates the turn as a TurnError instead (plan 19-08's
-    exhausted-ids termination). This is a deliberate, better behavior change
-    from the old headless drain's continue-forever dedup loop (CONTEXT.md
-    decision 4) -- see 19-08-SUMMARY.md.
+    is auto-confirmed exactly once (no double-ack). MA repeats the pause while
+    the batch's other tools run, so a repeat read before MA has taken the
+    allow is a duplicate, not a re-ask: the turn carries on to its answer.
+    Production 2026-10-08 ended such turns as `requires_action`. A real
+    re-ask after MA took the allow still ends the turn (`test_driver_auto_approve`).
     """
     send_capture: list[dict[str, Any]] = []
 
@@ -306,17 +305,11 @@ async def test_auto_allow_dedups_across_reemitted_requires_action_then_terminate
     ]
     client = _build_client(events, send_capture=send_capture)
 
-    with pytest.raises(TurnError) as exc_info:
-        await run_turn(
-            anthropic=client,
-            agent_id="agent_x",
-            environment_id="env_x",
-            trigger_message="hi",
-        )
-
-    assert exc_info.value.kind == "requires_action", (
-        "re-requesting an already-confirmed id must terminate as requires_action, "
-        "not spin until the ceiling"
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="hi",
     )
 
     # send_capture has all POST /v1/sessions/{id}/events bodies:
