@@ -104,20 +104,45 @@ jobs:
           echo "notebook=$BASE/notebook-host:$SHA" >> "$GITHUB_OUTPUT"
           echo "report=$BASE/report-host:$SHA" >> "$GITHUB_OUTPUT"
 
+      # Builds read the GitHub Actions cache that ci.yml's docker-build job
+      # fills on every push to main, so only changed layers are rebuilt. No
+      # provenance or SBOM attestations: they would turn the push into an
+      # image index, and every consumer (VMs, Cloud Run, promote.yml's image
+      # check) has only ever seen the plain manifest `docker push` produces.
+      - uses: docker/setup-buildx-action@v3
+
       - name: Build + push daimon image
-        run: |
-          docker build -t "${{ steps.tags.outputs.daimon }}" -f Dockerfile .
-          docker push "${{ steps.tags.outputs.daimon }}"
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          tags: ${{ steps.tags.outputs.daimon }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=daimon
 
       - name: Build + push notebook-host image
-        run: |
-          docker build -t "${{ steps.tags.outputs.notebook }}" -f apps/notebook-host/Dockerfile .
-          docker push "${{ steps.tags.outputs.notebook }}"
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/notebook-host/Dockerfile
+          tags: ${{ steps.tags.outputs.notebook }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=notebook-host
 
       - name: Build + push report-host image
-        run: |
-          docker build -t "${{ steps.tags.outputs.report }}" -f apps/report-host/Dockerfile .
-          docker push "${{ steps.tags.outputs.report }}"
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/report-host/Dockerfile
+          tags: ${{ steps.tags.outputs.report }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=report-host
 
       - name: Run migrations (blocking gate)
         run: |
