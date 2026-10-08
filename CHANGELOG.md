@@ -411,6 +411,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Building the image needs Docker 23 or later: the Dockerfile uses BuildKit instructions the legacy builder rejects.
 - Run migrations `0046_account_external` and `0047_turn_origin_external` before deploying. The new code leaves an empty member guest list out of the stored access policy, so older processes still read it; once one is listed, upgrade every process.
 - Isolated channels' agents no longer read other channels, nor sessions with no channel stamp: setups that relied on it stop working.
 - Teams guests in standard and private channels and 1:1 chats are no longer answered outside isolated channels unless listed with `daimon tenants access-policy --add-member-guest`, or unless `DAIMON_TEAMS__RESTRICT_GUESTS=false`.
