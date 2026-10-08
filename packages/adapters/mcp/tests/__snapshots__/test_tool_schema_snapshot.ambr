@@ -2981,6 +2981,50 @@
         'type': 'object',
       }),
     }),
+    'github_connect': dict({
+      'description': '''
+        Connect this agent to GitHub when someone asks to set up GitHub.
+        
+        Send the admin a private, single-use link bound to the selected agent.
+        Members get Ask an admin and a recorded request. Never repeat a private
+        link in a shared reply. For a setup target, pass its current name and
+        MA id from turn_controls; otherwise this defaults to the responder.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_name': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'hand_off_task': dict({
       'description': '''
         Hand this task over to another agent in the same conversation: "have that one take over", "let churn-explorer finish this".

@@ -29,6 +29,7 @@ log = structlog.get_logger()
 _BODY = """\
 *Agent management*
 /agent-setup — See your agents, who answers where, and make changes
+/github — Connect GitHub repos to an agent
 /memory — List what this channel's agent remembers; add a path to see one file
 
 *Routines*
