@@ -6445,7 +6445,7 @@
     }),
     'where_am_i': dict({
       'description': '''
-        Return the fixed /here card with structured facts and rendered text.
+        Return short /here text and full structured facts.
         Use this when someone asks which agent you are, who answers here, whether
         you can see a channel, which channel or agent rule applies, whether
         publishing needs approval, or whose token or sign-in you hold. Never
