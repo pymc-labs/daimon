@@ -152,8 +152,6 @@ async def connect_link(
     workspace_label: str | None = None,
     requester_label: str | None = None,
     start_over: bool = False,
-    preselected_repo_full_name: str | None = None,
-    preselected_repo_full_names: list[str] | None = None,
     agent_id: uuid.UUID | None = None,
     agent_name: str | None = None,
 ) -> str:
@@ -182,8 +180,6 @@ async def connect_link(
         requester_account_id=account_id,
         requester_label=requester_label or platform_user_id,
         workspace_label=workspace_label,
-        preselected_repo_full_name=preselected_repo_full_name,
-        preselected_repo_full_names=preselected_repo_full_names,
         agent_id=agent_id,
         agent_name=agent_name,
     )

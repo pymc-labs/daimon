@@ -284,7 +284,6 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 verified_tenant_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
                 workspace_label=guild.name,
                 requester_label=member.display_name,
-                preselected_repo_full_names=request.repo_names,
             )
             await approve_connection_request(
                 session,

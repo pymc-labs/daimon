@@ -1,11 +1,10 @@
-"""Track one new-repo card claim and optional invitation preselection.
+"""Track new-repo card claims and grant drafts.
 
 downgrade: destructive
 """
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import ARRAY
 
 revision: str = "0066_github_panel_notices"
 down_revision: str | None = "0065_turn_card_recovery_failures"
@@ -14,10 +13,6 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
-    op.add_column("github_connect_invitations", sa.Column("preselected_repo_full_name", sa.Text()))
-    op.add_column(
-        "github_connect_invitations", sa.Column("preselected_repo_full_names", ARRAY(sa.Text()))
-    )
     op.add_column("github_connect_invitations", sa.Column("encrypted_token", sa.LargeBinary()))
     op.add_column("github_connect_flows", sa.Column("encrypted_invitation_token", sa.LargeBinary()))
     op.add_column("github_new_repo_notices", sa.Column("claimed_at", sa.DateTime(timezone=True)))
@@ -50,5 +45,3 @@ def downgrade() -> None:
     op.drop_column("github_new_repo_notices", "claimed_at")
     op.drop_column("github_connect_flows", "encrypted_invitation_token")
     op.drop_column("github_connect_invitations", "encrypted_token")
-    op.drop_column("github_connect_invitations", "preselected_repo_full_names")
-    op.drop_column("github_connect_invitations", "preselected_repo_full_name")

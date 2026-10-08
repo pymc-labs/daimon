@@ -263,7 +263,6 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                     verified_tenant_admin=await resolve_is_admin(client, user_id=user_id),
                     workspace_label=str(team.get("name") or "") or None,
                     requester_label=str(user.get("name") or "") or None,
-                    preselected_repo_full_names=[name for _, name in entries],
                 )
             else:
                 for installation_id, repo_name in entries:

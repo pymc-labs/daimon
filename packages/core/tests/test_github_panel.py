@@ -637,12 +637,10 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
         platform="discord",
         platform_user_id="clicker",
         verified_tenant_admin=True,
-        preselected_repo_full_name="example/new",
     )
     invitation = await get_invitation(db_session, digest(url.rsplit("/", 1)[-1]))
     assert invitation is not None
     assert invitation.requester_label == "clicker"
-    assert invitation.preselected_repo_full_name == "example/new"
     grouped_url = await connect_link(
         db_session,
         settings=settings,
@@ -650,11 +648,9 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
         platform="discord",
         platform_user_id="clicker",
         verified_tenant_admin=True,
-        preselected_repo_full_names=["example/first", "example/second"],
     )
     grouped = await get_invitation(db_session, digest(grouped_url.rsplit("/", 1)[-1]))
     assert grouped is not None
-    assert grouped.preselected_repo_full_names == ["example/first", "example/second"]
     pending = await pending_connect_link(
         db_session,
         settings=settings,

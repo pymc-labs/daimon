@@ -197,7 +197,6 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
                 verified_tenant_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
                 workspace_label=guild.name,
                 requester_label=member.display_name,
-                preselected_repo_full_names=list(visible),
             )
     except ValueError as error:
         await interaction.response.send_message(safe_github_error(error), ephemeral=True)
@@ -275,7 +274,6 @@ class NewRepoCard(discord.ui.View):
                     verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
                     workspace_label=interaction.guild.name if interaction.guild else None,
                     requester_label=interaction.user.display_name,
-                    preselected_repo_full_names=list(self.visible_names),
                 )
         except ValueError:
             await interaction.response.send_message(

@@ -352,7 +352,6 @@ class GitHubWaitingView(PanelViewBase):
                         verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
                         workspace_label=interaction.guild.name if interaction.guild else None,
                         requester_label=interaction.user.display_name,
-                        preselected_repo_full_names=request.repo_names,
                     )
                     changed = await approve_connection_request(
                         session,

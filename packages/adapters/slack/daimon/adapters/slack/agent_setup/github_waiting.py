@@ -442,7 +442,6 @@ async def handle(
                         verified_tenant_admin=is_admin,
                         requester_label=str(user.get("name") or user_id),
                         workspace_label=str(team.get("name") or team_id),
-                        preselected_repo_full_names=request.repo_names,
                     )
                     changed = await approve_connection_request(
                         session,

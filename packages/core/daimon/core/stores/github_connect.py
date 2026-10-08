@@ -135,8 +135,6 @@ class Invitation(BaseModel):
     agent_name: str | None
     operator_issued: bool
     activation_status: Literal["activated", "update_pending"] | None
-    preselected_repo_full_name: str | None
-    preselected_repo_full_names: list[str] | None
     connected_repo_count: int | None
     encrypted_token: bytes | None
     expires_at: datetime
@@ -162,8 +160,6 @@ async def mint_invitation(
     requester_account_id: uuid.UUID,
     requester_label: str | None = None,
     workspace_label: str | None = None,
-    preselected_repo_full_name: str | None = None,
-    preselected_repo_full_names: list[str] | None = None,
     agent_id: uuid.UUID | None = None,
     agent_name: str | None = None,
     operator_issued: bool = False,
@@ -199,8 +195,6 @@ async def mint_invitation(
             agent_id=agent_id,
             agent_name=agent_name,
             operator_issued=operator_issued,
-            preselected_repo_full_name=preselected_repo_full_name,
-            preselected_repo_full_names=preselected_repo_full_names,
             expires_at=datetime.now(UTC) + timedelta(days=7),
         )
     )

@@ -2524,8 +2524,6 @@ class GitHubConnectInvitation(Base):
         Boolean, nullable=False, server_default=text("false")
     )
     activation_status: Mapped[str | None] = mapped_column(Text)
-    preselected_repo_full_name: Mapped[str | None] = mapped_column(Text)
-    preselected_repo_full_names: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
     connected_repo_count: Mapped[int | None] = mapped_column(Integer)
     encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
