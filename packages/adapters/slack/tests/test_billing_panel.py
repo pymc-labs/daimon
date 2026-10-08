@@ -178,7 +178,7 @@ def test_build_billing_container_empty_period_renders_cleanly() -> None:
     all_text = " ".join(
         str(b.get("text", {}).get("text", "") or b.get("elements", [])) for b in blocks
     )
-    assert "no usage" in all_text.lower(), (
+    assert "nothing used this month" in all_text.lower(), (
         "empty-period render must include a 'no usage' line rather than implying an error"
     )
 
@@ -311,8 +311,8 @@ def test_top_spenders_are_user_mentions_which_a_modal_shows_as_names() -> None:
         _make_admin_state(), member_rows=(_row("U0123ABCD"), _row("W0456EFGH", is_caller=True))
     )
     lines = _spender_lines(state)
-    assert lines[0] == "1. <@U0123ABCD>  $2.00 · 3 turns", lines
-    assert lines[1] == "2. <@W0456EFGH> _(you)_  $2.00 · 3 turns", "the caller is still marked"
+    assert lines[0] == "1. <@U0123ABCD>  $2.00", lines
+    assert lines[1] == "2. <@W0456EFGH> _(you)_  $2.00", "the caller is still marked"
 
 
 def test_an_id_that_is_not_a_slack_user_id_keeps_the_escaped_label() -> None:
@@ -351,29 +351,29 @@ def _credit(remaining: str, day: int) -> ActiveTimedCredit:
 
 def test_server_credit_without_timed_credit_is_just_the_total() -> None:
     [section] = _credit_blocks(_make_admin_state())
-    assert section["text"]["text"] == "🏦 *Server credit*\n*$50.00* total balance"
+    assert section["text"]["text"] == "🏦 *Server credit*\n*$50.00* total credit left"
 
 
 def test_server_credit_details_are_a_context_block_under_the_total() -> None:
     end = int(datetime(2025, 1, 20, 18, 0, tzinfo=UTC).timestamp())
     state = dataclasses.replace(_make_admin_state(), timed_credit=(_credit("20", 20),))
     [section, context] = _credit_blocks(state)
-    assert section["text"]["text"].endswith("*$50.00* total balance")
+    assert section["text"]["text"].endswith("*$50.00* total credit left")
     assert context["type"] == "context"
     assert context["elements"][0]["text"] == (
-        "Includes timed credit:\n"
-        f"$20.00 remaining · expires <!date^{end}^{{date_short_pretty}} {{time}}"
-        "|2025-01-20 18:00 UTC>\n"
-        "Timed credit is spent first; unused amounts expire."
+        f"Includes $20.00 that expires <!date^{end}^{{date_short_pretty}} {{time}}"
+        "|2025-01-20 18:00 UTC>. It's used first."
     )
 
 
-def test_server_credit_lists_three_timed_credits_and_counts_the_rest() -> None:
+def test_several_timed_credits_are_one_line_with_the_soonest_end() -> None:
+    first = int(datetime(2025, 1, 21, 18, 0, tzinfo=UTC).timestamp())
     credits = tuple(_credit(str(n), 20 + n) for n in range(1, 5))
     state = dataclasses.replace(_make_admin_state(), timed_credit=credits)
     [_, context] = _credit_blocks(state)
     detail = context["elements"][0]["text"]
-    assert detail.count("remaining · expires") == 3 and "\n1 more timed credit\n" in detail
+    assert detail.startswith(f"Includes $10.00 that expires, first on <!date^{first}^"), detail
+    assert "\n" not in detail, "one line, however many credits"
 
 
 def test_a_negative_balance_still_shows_its_total_and_timed_credit() -> None:
@@ -381,9 +381,22 @@ def test_a_negative_balance_still_shows_its_total_and_timed_credit() -> None:
         _make_member_state(), guild_balance_usd=Decimal("-3"), timed_credit=(_credit("5", 20),)
     )
     [section, context] = _credit_blocks(state)
-    assert "*-$3.00* total balance" in section["text"]["text"]
+    assert "*No credit left* · $3.00 spent beyond it" in section["text"]["text"]
     detail = context["elements"][0]["text"]
-    assert "$5.00 remaining" in detail and detail.endswith("Top-ups are admin-only.")
+    assert "Includes $5.00 that expires" in detail
+    assert detail.endswith("\nAsk an admin to add credit.")
+
+
+def test_the_header_and_own_use_are_short() -> None:
+    from daimon.adapters.slack.billing_panel.views import build_billing_container
+
+    admin = build_billing_container(_make_admin_state(), now=_NOW, since=_SINCE)
+    assert admin[0]["text"]["text"] == (
+        "*💸 Billing · admin view*\nJanuary 2025 · $10.00 spent by 2 people"
+    )
+    member = build_billing_container(_make_member_state(), now=_NOW, since=_SINCE)
+    assert member[0]["text"]["text"] == "*💸 Billing*\nJanuary 2025"
+    assert member[2]["text"]["text"] == "*You*\n$0.75 of your $5.00 this month"
 
 
 def test_channel_budget_is_its_own_group_before_top_spenders() -> None:

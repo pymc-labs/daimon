@@ -636,7 +636,7 @@ async def test_member_lookup_select_still_renders_spend_for_a_live_admin(
     )
     text = _joined_view_text(rendered)
     assert "bob" in text, "the card must name the looked-up member"
-    assert "no usage this period" in text, (
+    assert "Nothing used this month" in text, (
         "a member with no seeded usage must render the zero-spend copy, not a refusal"
     )
     assert db_session is not None
@@ -673,8 +673,8 @@ def test_admin_container_with_8_member_rows_renders_top5_plus_more_line() -> Non
     assert "-# 6." not in text, "rank 6 must not appear — only top 5 render"
 
     # Overflow: (8 - 5) = 3 in member_rows beyond 5, plus over_cap_count=2 → 5 total
-    assert "5 more members — look one up below" in text, (
-        "overflow line must report (8-5)+over_cap_count=5 more members"
+    assert "-# + 5 more — look one up below" in text, (
+        "overflow line must report (8-5)+over_cap_count=5 more"
     )
 
 
@@ -700,8 +700,8 @@ def test_admin_container_with_5_or_fewer_rows_and_no_overflow_has_no_more_line()
     )
 
 
-def test_admin_container_header_subtext_contains_period_guild_totals_and_active_members() -> None:
-    """Header subtext must contain period label, guild total, turn count, and active-member count."""
+def test_admin_container_header_subtext_is_the_month_spend_and_people() -> None:
+    """Header subtext reads `May 2026 · $42.50 spent by 5 people`, nothing more."""
     state = _make_state(
         is_admin=True,
         guild_spend=42.50,
@@ -712,10 +712,7 @@ def test_admin_container_header_subtext_contains_period_guild_totals_and_active_
     # The first TextDisplay child is the header (from layout.header)
     header_td = next(c for c in container.children if isinstance(c, discord.ui.TextDisplay))
     text = header_td.content
-    assert "May 2026" in text, "period month/year must appear in header subtext"
-    assert "$42.50" in text, "guild total spend must appear in header subtext"
-    assert "17 turns" in text, "guild turn count must appear in header subtext"
-    assert "5 active members" in text, "active member count must appear in header subtext"
+    assert text.endswith("\n-# May 2026 · $42.50 spent by 5 people"), text
 
 
 def test_member_container_has_you_group_and_no_top_spenders_group() -> None:
@@ -800,43 +797,67 @@ def _credit_block(state: BillingPanelState) -> str:
 
 def test_server_credit_without_timed_credit_is_just_the_total() -> None:
     block = _credit_block(_make_state(is_admin=True, guild_balance_usd=Decimal("37.4")))
-    assert block == "🏦 **Server credit**\n**$37.40** total balance", block
+    assert block == "🏦 **Server credit**\n**$37.40** total credit left", block
 
 
-def test_server_credit_lists_the_timed_credit_the_total_includes() -> None:
+def test_server_credit_says_how_much_of_the_total_expires() -> None:
     end = int(datetime(2026, 5, 20, 18, 0, tzinfo=UTC).timestamp())
     state = _make_state(
         is_admin=True, guild_balance_usd=Decimal("62.4"), timed_credit=(_credit("20", 20),)
     )
     assert _credit_block(state) == (
         "🏦 **Server credit**\n"
-        "**$62.40** total balance\n"
-        "-# Includes timed credit:\n"
-        f"-# $20.00 remaining · expires <t:{end}:D> (<t:{end}:R>)\n"
-        "-# Timed credit is spent first; unused amounts expire."
+        "**$62.40** total credit left\n"
+        f"-# Includes $20.00 that expires <t:{end}:D> (<t:{end}:R>). It's used first."
     )
 
 
-def test_server_credit_lists_three_timed_credits_and_counts_the_rest() -> None:
+def test_several_timed_credits_are_one_line_with_the_soonest_end() -> None:
+    first = int(datetime(2026, 5, 21, 18, 0, tzinfo=UTC).timestamp())
     credits = tuple(_credit(str(n), 20 + n) for n in range(1, 5))
     block = _credit_block(_make_state(is_admin=True, timed_credit=credits))
-    assert block.count("remaining · expires") == 3, "at most three timed credit lines"
-    assert "-# 1 more timed credit\n" in block
-    assert "$4.00 remaining" not in block, "the soonest-ending three are the ones listed"
+    assert block.splitlines()[2:] == [
+        f"-# Includes $10.00 that expires, first on <t:{first}:D> (<t:{first}:R>). It's used first."
+    ], block
 
 
-def test_a_negative_balance_still_shows_its_total_and_timed_credit() -> None:
+def test_a_negative_balance_says_no_credit_left_and_still_shows_timed_credit() -> None:
     state = _make_state(
-        is_admin=True, guild_balance_usd=Decimal("-12.5"), timed_credit=(_credit("5", 20),)
+        is_admin=True, guild_balance_usd=Decimal("-3.1"), timed_credit=(_credit("5", 20),)
     )
     block = _credit_block(state)
-    assert "**-$12.50** total balance" in block, "an operator-funded tenant runs negative"
-    assert "$5.00 remaining" in block, "timed credit still shows under a negative total"
+    assert "**No credit left** · $3.10 spent beyond it" in block, "an operator-funded tenant"
+    assert "Includes $5.00 that expires" in block, "timed credit still shows under it"
 
 
-def test_the_member_view_says_top_ups_are_admin_only_under_the_credit() -> None:
+def test_the_member_view_says_to_ask_an_admin_under_the_credit() -> None:
     block = _credit_block(_make_state(timed_credit=(_credit("5", 20),)))
-    assert block.endswith("-# Top-ups are admin-only."), block
+    assert block.endswith("-# Ask an admin to add credit."), block
+
+
+def test_the_member_view_shows_own_use_in_plain_words() -> None:
+    def you(**overrides: Any) -> str:
+        text = _joined_container_text(
+            build_billing_container(_make_state(**overrides), now=NOW, since=SINCE)
+        )
+        return text.split("**You**\n", 1)[1].splitlines()[0]
+
+    assert you(caller_spend=11.5, caller_turns=71, caller_cap=Decimal("25")) == (
+        "-# $11.50 of your $25.00 this month"
+    )
+    assert you(caller_spend=11.5, caller_turns=71) == "-# $11.50 used this month"
+    assert you() == "-# Nothing used this month"
+
+
+def test_top_spender_rows_show_name_and_amount_only() -> None:
+    rows = (
+        _make_member_row(display_name="Maya Chen", cost_usd=14.02),
+        _make_member_row(platform_user_id="2", display_name="derwells", is_caller=True),
+    )
+    text = _joined_container_text(
+        build_billing_container(_make_state(is_admin=True, member_rows=rows), now=NOW, since=SINCE)
+    )
+    assert "-# 1. Maya Chen  $14.02\n-# 2. derwells (you)  $1.23" in text, text
 
 
 def test_top_spender_names_are_escaped() -> None:
@@ -875,7 +896,7 @@ def test_nominal_container_has_no_accent() -> None:
 
 
 def test_member_lookup_container_zero_spend_renders_no_usage_copy() -> None:
-    """lookup container with spend==0.0 and turns==0 must contain 'no usage this period'."""
+    """lookup container with spend==0.0 and turns==0 says 'Nothing used this month'."""
     container = build_member_lookup_container(
         display_name="charlie",
         spend_usd=0.0,
@@ -884,9 +905,7 @@ def test_member_lookup_container_zero_spend_renders_no_usage_copy() -> None:
         now=NOW,
     )
     text = _joined_container_text(container)
-    assert "no usage this period" in text, (
-        "zero-spend lookup must render the locked 'no usage this period' copy"
-    )
+    assert "Nothing used this month" in text, "zero-spend lookup says nothing was used"
 
 
 def test_member_lookup_container_nonzero_spend_renders_spend_and_turns() -> None:
@@ -899,8 +918,7 @@ def test_member_lookup_container_nonzero_spend_renders_spend_and_turns() -> None
         now=NOW,
     )
     text = _joined_container_text(container)
-    assert "$12.34" in text, "lookup container must show formatted spend"
-    assert "5 turns" in text, "lookup container must show turn count"
+    assert text.endswith("\n$12.34 this month"), text
 
 
 def _budget_status(channel_id: str, spent: str) -> ChannelBudgetStatus:

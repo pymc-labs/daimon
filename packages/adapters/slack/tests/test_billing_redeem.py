@@ -111,13 +111,12 @@ def test_timed_credit_lines_in_both_views() -> None:
         blocks = build_billing_container(
             _state(is_admin=is_admin, timed_credit=credit), now=_NOW, since=_SINCE
         )
-        assert f"$7.50 remaining · expires <!date^{int(_END.timestamp())}^" in _texts(blocks), (
+        assert f"Includes $7.50 that expires <!date^{int(_END.timestamp())}^" in _texts(blocks), (
             "each view should show the timed credit and its end"
         )
-    assert (
-        "timed credit"
-        not in _texts(build_billing_container(_state(), now=_NOW, since=_SINCE)).lower()
-    ), "no timed credit should mean no line"
+    assert "Includes" not in _texts(build_billing_container(_state(), now=_NOW, since=_SINCE)), (
+        "no timed credit should mean no line"
+    )
 
 
 def test_evaluate_redeem_submission() -> None:
@@ -210,7 +209,7 @@ async def test_submission_redeems_and_refreshes_the_panel(
     assert result["view_id"] == "V_FORM" and "Redeemed *$10.00*" in _texts(
         result["view"]["blocks"]
     ), "the form should confirm the credit"
-    assert root["view_id"] == "V_ROOT" and "*$10.00* total balance" in _texts(
+    assert root["view_id"] == "V_ROOT" and "*$10.00* total credit left" in _texts(
         root["view"]["blocks"]
     ), "the panel should show the new balance"
     assert "$0.00 of $5.00 spent this month" in _texts(root["view"]["blocks"]), (

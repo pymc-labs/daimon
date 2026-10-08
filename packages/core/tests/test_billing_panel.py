@@ -13,13 +13,18 @@ import jwt as pyjwt
 import pytest
 from daimon.core.billing_panel import (
     BillingPanelState,
+    admin_summary,
+    caller_line,
     channel_budget_phrase,
     create_checkout,
+    credit_total,
     estimate_turns,
     fmt_usd,
     load_billing_snapshot,
+    lookup_line,
     member_label,
-    timed_credit_lines,
+    spender_line,
+    timed_credit_note,
 )
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.errors import DaimonError
@@ -75,21 +80,42 @@ def _ends(day: int) -> datetime:
     return datetime(2025, 1, day, tzinfo=UTC)
 
 
-def test_timed_credit_lines_are_empty_without_timed_credit() -> None:
-    assert timed_credit_lines((), when=str) == []
+def test_credit_total_reads_as_a_total_or_as_none_left() -> None:
+    bold = "**{}**".format
+    assert credit_total(Decimal("62.4"), bold=bold) == "**$62.40** total credit left"
+    assert credit_total(Decimal("0"), bold=bold) == "**$0.00** total credit left"
+    assert credit_total(Decimal("-3.1"), bold=bold) == "**No credit left** · $3.10 spent beyond it"
 
 
-def test_timed_credit_lines_list_three_count_the_rest_and_explain() -> None:
-    credits = [ActiveTimedCredit(Decimal(n), _ends(20 + n)) for n in range(1, 6)]
-    lines = timed_credit_lines(credits, when=lambda moment: f"{moment:%b %d}")
-    assert lines == [
-        "Includes timed credit:",
-        "$1.00 remaining · expires Jan 21",
-        "$2.00 remaining · expires Jan 22",
-        "$3.00 remaining · expires Jan 23",
-        "2 more timed credits",
-        "Timed credit is spent first; unused amounts expire.",
-    ]
+def test_timed_credit_note_is_none_without_timed_credit() -> None:
+    assert timed_credit_note((), when=str) is None
+
+
+def test_timed_credit_note_names_one_credits_end() -> None:
+    credit = [ActiveTimedCredit(Decimal("20"), _ends(20))]
+    assert timed_credit_note(credit, when=lambda moment: f"{moment:%b %d}") == (
+        "Includes $20.00 that expires Jan 20. It's used first."
+    )
+
+
+def test_timed_credit_note_sums_several_and_names_the_soonest_end() -> None:
+    credits = [ActiveTimedCredit(Decimal(n), _ends(20 + n)) for n in (4, 1, 2, 3)]
+    assert timed_credit_note(credits, when=lambda moment: f"{moment:%b %d}") == (
+        "Includes $10.00 that expires, first on Jan 21. It's used first."
+    )
+
+
+def test_the_month_summary_and_own_use_lines() -> None:
+    since = datetime(2026, 10, 1, tzinfo=UTC)
+    assert admin_summary(since, spend=48.17, people=9) == "October 2026 · $48.17 spent by 9 people"
+    assert admin_summary(since, spend=1.0, people=1) == "October 2026 · $1.00 spent by 1 person"
+    assert admin_summary(since, spend=0.0, people=0) == "October 2026 · nothing used yet"
+    assert caller_line(11.5, Decimal("25"), 71) == "$11.50 of your $25.00 this month"
+    assert caller_line(11.5, None, 71) == "$11.50 used this month"
+    assert caller_line(0.0, Decimal("25"), 0) == "Nothing used this month"
+    assert lookup_line(14.02, 88) == "$14.02 this month"
+    assert lookup_line(0.0, 0) == "Nothing used this month"
+    assert spender_line(2, "derwells", cost=11.5, is_caller=True) == "2. derwells (you)  $11.50"
 
 
 def _budget(

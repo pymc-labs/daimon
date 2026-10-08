@@ -94,7 +94,7 @@ async def test_only_the_admin_view_offers_top_ups(
         member = await _command(service, teams_api_fake, OTHER_AAD_OBJECT_ID)
         admin = await _command(service, teams_api_fake, AAD_OBJECT_ID)
 
-    assert "Top-ups are admin-only." in member and "topup" not in member, "members only look"
+    assert "Ask an admin to add credit." in member and "topup" not in member, "members only look"
     assert admin.count('"op": "topup"') == 4, "an admin gets one button per amount"
     assert "admin view" in admin
 
@@ -253,8 +253,8 @@ async def test_the_admin_card_names_top_spenders_from_team_rosters(
     async with _running(db_session_factory, teams_api_fake) as service:
         admin = await _command(service, teams_api_fake, AAD_OBJECT_ID)
 
-    assert "1. Maya \\\\*Chen\\\\* $" in admin, "a roster name, its markdown escaped"
-    assert "2. User 0007 $" in admin, "someone no roster has keeps `User XXXX`"
+    assert "1. Maya \\\\*Chen\\\\*  $" in admin, "a roster name, its markdown escaped"
+    assert "2. User 0007  $" in admin, "someone no roster has keeps `User XXXX`"
     assert "<at>" not in admin and '"mention"' not in admin, "a name is never a mention"
     looked_up = sorted(
         r.url.rsplit("/conversations/", 1)[-1]
@@ -335,38 +335,40 @@ def _state(**overrides: object) -> BillingPanelState:
 def test_the_credit_without_timed_credit_is_just_the_total() -> None:
     lines = _card_text(_state())
     at = lines.index("🏦 **Organisation credit**")
-    assert lines[at + 1] == "**$62.40** total balance"
+    assert lines[at + 1] == "**$62.40** total credit left"
     assert lines[at + 2] == "🏆 **Top spenders**", "nothing between the total and the next group"
 
 
-def test_the_credit_lists_the_timed_credit_it_includes_as_grey_detail() -> None:
+def test_the_credit_says_how_much_of_it_expires_in_one_grey_line() -> None:
     credits = tuple(
         ActiveTimedCredit(Decimal(n), datetime(2026, 1, 10 + n, tzinfo=UTC)) for n in range(1, 5)
     )
     card = panel_card(_state(timed_credit=credits), since=datetime(2026, 1, 1, tzinfo=UTC))
     body = card.model_dump(by_alias=True, exclude_none=True)["body"]
-    at = next(i for i, e in enumerate(body) if e.get("text") == "**$62.40** total balance")
-    details = body[at + 1 : at + 7]
-    assert [d["text"] for d in details] == [
-        "Includes timed credit:",
-        "$1.00 remaining · expires {{DATE(2026-01-11T00:00:00Z, SHORT)}} "
-        "{{TIME(2026-01-11T00:00:00Z)}}",
-        "$2.00 remaining · expires {{DATE(2026-01-12T00:00:00Z, SHORT)}} "
-        "{{TIME(2026-01-12T00:00:00Z)}}",
-        "$3.00 remaining · expires {{DATE(2026-01-13T00:00:00Z, SHORT)}} "
-        "{{TIME(2026-01-13T00:00:00Z)}}",
-        "1 more timed credit",
-        "Timed credit is spent first; unused amounts expire.",
-    ]
-    assert all(d.get("isSubtle") and d.get("size") == "Small" for d in details)
+    at = next(i for i, e in enumerate(body) if e.get("text") == "**$62.40** total credit left")
+    note = body[at + 1]
+    assert note["text"] == (
+        "Includes $10.00 that expires, first on {{DATE(2026-01-11T00:00:00Z, SHORT)}} "
+        "{{TIME(2026-01-11T00:00:00Z)}}. It's used first."
+    )
+    assert note.get("isSubtle") and note.get("size") == "Small"
+    assert body[at + 2]["text"] == "🏆 **Top spenders**", "one line, however many credits"
 
 
-def test_a_negative_balance_still_shows_its_total_and_timed_credit() -> None:
+def test_a_negative_balance_says_no_credit_left_and_still_shows_timed_credit() -> None:
     credit = (ActiveTimedCredit(Decimal("5"), datetime(2026, 1, 20, tzinfo=UTC)),)
     lines = _card_text(_state(is_admin=False, guild_balance_usd=Decimal("-3"), timed_credit=credit))
-    assert "**-$3.00** total balance" in lines
-    assert any(line.startswith("$5.00 remaining") for line in lines)
-    assert lines[-1] == "Top-ups are admin-only."
+    assert "**No credit left** · $3.00 spent beyond it" in lines
+    assert any(line.startswith("Includes $5.00 that expires ") for line in lines)
+    assert lines[-1] == "Ask an admin to add credit."
+
+
+def test_the_header_own_use_and_spender_rows_are_short() -> None:
+    admin = _card_text(_state(guild_spend=48.17, guild_distinct_members=9))
+    assert admin[1] == "January 2026 · $48.17 spent by 9 people"
+    assert "1. User 0000 (you)  $1.00" in admin
+    member = _card_text(_state(is_admin=False, caller_spend=11.5, caller_cap=Decimal("25")))
+    assert member[1:3] == ["January 2026", "**You**: $11.50 of your $25.00 this month"]
 
 
 def test_the_channel_budget_group_sits_between_credit_and_top_spenders() -> None:

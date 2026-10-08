@@ -18,24 +18,28 @@ from typing import Any
 
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.billing_panel import (
+    ASK_ADMIN,
     CHANNEL_BUDGETS_SHOWN,
+    NOTHING_USED,
+    TOP_SPENDERS_SHOWN,
     TOPUP_AMOUNTS,
-    TOPUPS_ADMIN_ONLY,
     BillingPanelState,
     MemberRow,
+    admin_summary,
     caller_line,
     channel_budget_line,
     channel_budget_phrase,
+    credit_total,
     estimate_turns,
-    fmt_usd,
+    month_label,
     more_channel_budgets,
-    period_label,
+    more_spenders,
     spend_over_cap,
-    timed_credit_lines,
+    spender_line,
+    timed_credit_note,
 )
 
 REDEEM_OPEN_ACTION_ID = "billing_redeem_open"
-_TOP_SHOWN = 5
 # A Slack user id, as a mention may carry it; anything else is shown as `User XXXX`.
 _USER_ID = re.compile(r"^[UW][A-Z0-9]{2,}$")
 
@@ -59,12 +63,17 @@ def _section(text: str) -> dict[str, Any]:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
 
+def _bold(text: str) -> str:
+    return f"*{text}*"
+
+
 def _server_credit_blocks(state: BillingPanelState) -> list[dict[str, Any]]:
-    """The total balance, then the timed credit it includes in a grey context block."""
-    blocks = [_section(f"🏦 *Server credit*\n*{fmt_usd(state.guild_balance_usd)}* total balance")]
-    details = timed_credit_lines(state.timed_credit, when=slack_time)
+    """The total credit left, then the timed credit it includes in a grey context block."""
+    total = credit_total(state.guild_balance_usd, bold=_bold)
+    blocks = [_section(f"🏦 *Server credit*\n{total}")]
+    details = [note] if (note := timed_credit_note(state.timed_credit, when=slack_time)) else []
     if not state.is_admin:
-        details.append(TOPUPS_ADMIN_ONLY)
+        details.append(ASK_ADMIN)
     if details:
         blocks.append(_context("\n".join(details)))
     return blocks
@@ -125,7 +134,7 @@ def build_billing_container(
     """Build Block Kit blocks for the /billing modal view.
 
     Admin branch:
-      - Header section: '💸 Billing · admin view' + period/workspace totals
+      - Header section: '💸 Billing · admin view' + month, spend and people
       - Divider
       - Server credit section (total) + context (timed credit it includes)
       - Channel budget section + context, when the channel has one
@@ -135,7 +144,7 @@ def build_billing_container(
       - Top-up actions block with static_select (admin only)
 
     Member branch:
-      - Header section: '💸 Billing' + period
+      - Header section: '💸 Billing' + the month
       - Divider
       - Caller section
       - Server credit section + context
@@ -147,12 +156,7 @@ def build_billing_container(
     blocks: list[dict[str, Any]] = []
 
     if state.is_admin:
-        subtext = (
-            f"{period_label(since)} · "
-            f"workspace total {fmt_usd(state.guild_spend)} · "
-            f"{state.guild_turns} turns · "
-            f"{state.guild_distinct_members} active members"
-        )
+        subtext = admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
         blocks.append(
             {
                 "type": "section",
@@ -165,21 +169,17 @@ def build_billing_container(
         blocks += _channel_budget_blocks(state, now=now)
 
         # Top spenders
-        top5 = state.member_rows[:_TOP_SHOWN]
+        top5 = state.member_rows[:TOP_SPENDERS_SHOWN]
         spenders_lines: list[str] = ["🏆 *Top spenders*"]
-        if top5:
-            for i, row in enumerate(top5):
-                rank = i + 1
-                you = " _(you)_" if row.is_caller else ""
-                spend_str = fmt_usd(row.cost_usd)
-                name = spender_name(row)
-                spenders_lines.append(f"{rank}. {name}{you}  {spend_str} · {row.turn_count} turns")
-        else:
-            spenders_lines.append("no usage yet this period")
-
-        overflow = max(0, len(state.member_rows) - _TOP_SHOWN) + state.over_cap_count
+        spenders_lines += [
+            spender_line(
+                rank, spender_name(row), cost=row.cost_usd, is_caller=row.is_caller, you=" _(you)_"
+            )
+            for rank, row in enumerate(top5, start=1)
+        ] or [NOTHING_USED]
+        overflow = more_spenders(len(state.member_rows), state.over_cap_count)
         if overflow > 0:
-            spenders_lines.append(f"_{overflow} more members_")
+            spenders_lines.append(f"+ {overflow} more")
 
         blocks.append(_section("\n".join(spenders_lines)))
         if (budgets_text := _channel_budgets_text(state)) is not None:
@@ -227,17 +227,14 @@ def build_billing_container(
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*💸 Billing*\n{period_label(since)}",
+                    "text": f"*💸 Billing*\n{month_label(since)}",
                 },
             }
         )
         blocks.append({"type": "divider"})
 
         # Caller spend
-        if state.caller_spend == 0.0 and state.caller_turns == 0:
-            caller_body = "no usage yet this period"
-        else:
-            caller_body = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
+        caller_body = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
         over_cap = spend_over_cap(state.caller_spend, state.caller_cap)
         caller_header = "*You* ⚠️ over cap" if over_cap else "*You*"
         blocks.append(

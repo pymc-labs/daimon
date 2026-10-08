@@ -50,11 +50,10 @@ MEMBER_CAP = 25
 CHANNEL_BUDGETS_SHOWN = 5
 # Per-turn cost assumed while a tenant has no usage history yet.
 _FALLBACK_TURN_COST_USD = 0.10
-# Live timed credits listed under the balance; the rest are counted in one line.
-TIMED_CREDIT_SHOWN = 3
-TIMED_CREDIT_INTRO = "Includes timed credit:"
-TIMED_CREDIT_NOTE = "Timed credit is spent first; unused amounts expire."
-TOPUPS_ADMIN_ONLY = "Top-ups are admin-only."
+# Rows the admin view names under Top spenders; the rest are counted.
+TOP_SPENDERS_SHOWN = 5
+ASK_ADMIN = "Ask an admin to add credit."
+NOTHING_USED = "Nothing used this month"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -202,27 +201,31 @@ def fmt_usd(value: float | Decimal) -> str:
     return f"${value:,.2f}"
 
 
-def timed_credit_lines(
-    credits: Sequence[ActiveTimedCredit], *, when: Callable[[datetime], str]
-) -> list[str]:
-    """What the balance includes in timed credit, for the lines under the total.
+def credit_total(balance: Decimal, *, bold: Callable[[str], str]) -> str:
+    """`**$62.40** total credit left`, or below zero `**No credit left** · $3.10 spent beyond it`.
 
-    Nothing without timed credit. Otherwise an intro, one line per credit
-    (soonest-ending first, at most ``TIMED_CREDIT_SHOWN``), a count of the rest
-    and the note on how it is spent. ``when`` renders an end date in the
-    platform's own date syntax.
+    ``bold`` wraps text in the platform's bold syntax.
+    """
+    if balance < 0:
+        return f"{bold('No credit left')} · {fmt_usd(-balance)} spent beyond it"
+    return f"{bold(fmt_usd(balance))} total credit left"
+
+
+def timed_credit_note(
+    credits: Sequence[ActiveTimedCredit], *, when: Callable[[datetime], str]
+) -> str | None:
+    """The one line under the total about the timed credit it includes; None without any.
+
+    `Includes $25.00 that expires, first on <date>. It's used first.`, naming
+    the soonest end; with a single credit, `Includes $20.00 that expires <date>.`
+    ``when`` renders a date in the platform's own syntax.
     """
     if not credits:
-        return []
-    lines = [TIMED_CREDIT_INTRO] + [
-        f"{fmt_usd(credit.remaining_usd)} remaining · expires {when(credit.ends_at)}"
-        for credit in credits[:TIMED_CREDIT_SHOWN]
-    ]
-    more = len(credits) - TIMED_CREDIT_SHOWN
-    if more > 0:
-        lines.append(f"{more} more timed credit{'s' if more > 1 else ''}")
-    lines.append(TIMED_CREDIT_NOTE)
-    return lines
+        return None
+    amount = fmt_usd(sum((credit.remaining_usd for credit in credits), Decimal("0")))
+    soonest = when(min(credit.ends_at for credit in credits))
+    expires = f"expires {soonest}" if len(credits) == 1 else f"expires, first on {soonest}"
+    return f"Includes {amount} that {expires}. It's used first."
 
 
 def channel_budget_phrase(status: ChannelBudgetStatus, *, now: datetime) -> str:
@@ -257,8 +260,17 @@ def more_channel_budgets(state: BillingPanelState) -> int:
     return max(0, len(state.channel_budgets) - CHANNEL_BUDGETS_SHOWN)
 
 
-def period_label(since: datetime) -> str:
-    return f"Period: {since.strftime('%B %Y')} (UTC)"
+def month_label(since: datetime) -> str:
+    """`October 2026`: the month the panel covers, and the member view's subtext."""
+    return since.strftime("%B %Y")
+
+
+def admin_summary(since: datetime, *, spend: float, people: int) -> str:
+    """The admin view's subtext: `October 2026 · $48.17 spent by 9 people`."""
+    if people == 0:
+        return f"{month_label(since)} · nothing used yet"
+    who = "1 person" if people == 1 else f"{people} people"
+    return f"{month_label(since)} · {fmt_usd(spend)} spent by {who}"
 
 
 def spend_over_cap(spend: float, cap: Decimal | None) -> bool:
@@ -266,12 +278,27 @@ def spend_over_cap(spend: float, cap: Decimal | None) -> bool:
 
 
 def caller_line(spend: float, cap: Decimal | None, turns: int) -> str:
-    """The member view's own spend line, with the cap share when one applies."""
+    """The member's own use: `$11.50 of your $25.00 this month`, `$11.50 used this month`."""
+    if not spend and not turns:
+        return NOTHING_USED
     if cap is None:
-        return f"💸 {fmt_usd(spend)} spent · {turns} turns"
-    cap_usd = float(cap)
-    pct = int(spend / cap_usd * 100) if cap_usd > 0 else 0
-    return f"💸 {fmt_usd(spend)} / {fmt_usd(cap_usd)} cap ({pct}%) · {turns} turns"
+        return f"{fmt_usd(spend)} used this month"
+    return f"{fmt_usd(spend)} of your {fmt_usd(cap)} this month"
+
+
+def lookup_line(spend: float, turns: int) -> str:
+    """One person's use in the admin member lookup: `$14.02 this month`."""
+    return NOTHING_USED if not spend and not turns else f"{fmt_usd(spend)} this month"
+
+
+def spender_line(rank: int, name: str, *, cost: float, is_caller: bool, you: str = " (you)") -> str:
+    """`1. Maya Chen  $14.02`; ``name`` is already in the platform's safe form."""
+    return f"{rank}. {name}{you if is_caller else ''}  {fmt_usd(cost)}"
+
+
+def more_spenders(row_count: int, over_cap_count: int) -> int:
+    """Spenders past the first ``TOP_SPENDERS_SHOWN``, for a `+ N more` line."""
+    return max(0, row_count - TOP_SPENDERS_SHOWN) + over_cap_count
 
 
 def estimate_turns(amount_usd: float, *, guild_spend: float, guild_turns: int) -> int:

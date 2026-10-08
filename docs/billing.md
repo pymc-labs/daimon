@@ -401,11 +401,10 @@ many tenants may redeem it. Each tenant redeems a code at most once.
 
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
 timed credit only changes what the ledger holds. `/billing` shows the balance
-as a total that already includes live timed credit, then lists that credit
-under it: the amount left and when it expires, soonest first (three at most,
-with a count of the rest), and a note that timed credit is spent first and what
-is left of it expires. A negative total (an operator-funded tenant) still lists
-its timed credit. Admins redeem from `/billing` on Discord or Slack,
+as `$62.40 total credit left`, a total that already includes live timed credit,
+and under it one line: `Includes $25.00 that expires, first on <date>. It's used
+first.` (the sum left, and the soonest end). Below zero (an operator-funded
+tenant) it reads `No credit left · $3.10 spent beyond it`, still with that line. Admins redeem from `/billing` on Discord or Slack,
 `billing` on Teams, or with the admin-only MCP tool `redeem_promo_code`. Refusals are one of
 `invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
 `already_redeemed` and `throttled`; five refusals in 15 minutes pause a

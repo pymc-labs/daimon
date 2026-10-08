@@ -21,7 +21,7 @@ from daimon.adapters.discord.billing_panel.state import (
     MemberRow,
 )
 from daimon.adapters.discord.checks import is_member_guild_admin
-from daimon.core.billing_panel import member_label
+from daimon.core.billing_panel import TOP_SPENDERS_SHOWN, member_label
 from daimon.core.channel_budget import get_channel_budget_status, list_channel_budget_statuses
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.promo_credit import get_active_timed_credit
@@ -48,7 +48,6 @@ BotInteraction = Interaction[commands.Bot]
 _log = structlog.get_logger()
 
 _TOP_MEMBERS_CAP = 25  # same number as _PICKER_CAP, different semantics
-TOP_SPENDERS_SHOWN = 5  # rows the panel lists by name
 # The panel waits at most this long for the member fetches, all together.
 NAME_FETCH_TIMEOUT_S = 1.5
 

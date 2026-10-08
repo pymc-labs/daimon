@@ -24,7 +24,6 @@ from decimal import Decimal
 import httpx
 from daimon.adapters.discord import layout
 from daimon.adapters.discord.billing_panel.read import (
-    TOP_SPENDERS_SHOWN,
     invoking_channel_id,
     is_guild_admin,
     load_billing_snapshot,
@@ -38,12 +37,20 @@ from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.billing_panel import (
+    ASK_ADMIN,
     CHANNEL_BUDGETS_SHOWN,
-    TOPUPS_ADMIN_ONLY,
+    NOTHING_USED,
+    TOP_SPENDERS_SHOWN,
+    admin_summary,
+    caller_line,
     channel_budget_line,
     channel_budget_phrase,
-    fmt_usd,
-    timed_credit_lines,
+    credit_total,
+    lookup_line,
+    month_label,
+    more_spenders,
+    spender_line,
+    timed_credit_note,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -68,14 +75,6 @@ _FALLBACK_TURN_COST_USD = 0.10
 # ---------------------------------------------------------------------------
 
 
-def _fmt_usd(value: float | Decimal) -> str:
-    return fmt_usd(value)
-
-
-def _period_label(since: datetime) -> str:
-    return f"period: {since.strftime('%B %Y')} (UTC)"
-
-
 def _is_over_cap(spend: float, cap: Decimal | None) -> bool:
     return cap is not None and spend > float(cap)
 
@@ -92,25 +91,18 @@ def _discord_date(moment: datetime) -> str:
     return f"<t:{epoch}:D> (<t:{epoch}:R>)"
 
 
+def _bold(text: str) -> str:
+    return f"**{text}**"
+
+
 def _server_credit_lines(state: BillingPanelState) -> list[str]:
-    """The total balance, then the timed credit it includes, if any, in dim lines."""
-    lines = [
-        "🏦 **Server credit**",
-        f"**{_fmt_usd(state.guild_balance_usd)}** total balance",
-        *(f"-# {line}" for line in timed_credit_lines(state.timed_credit, when=_discord_date)),
-    ]
+    """The total credit left, then one dim line on the timed credit it includes, if any."""
+    lines = ["🏦 **Server credit**", credit_total(state.guild_balance_usd, bold=_bold)]
+    if (note := timed_credit_note(state.timed_credit, when=_discord_date)) is not None:
+        lines.append(f"-# {note}")
     if not state.is_admin:
-        lines.append(f"-# {TOPUPS_ADMIN_ONLY}")
+        lines.append(f"-# {ASK_ADMIN}")
     return lines
-
-
-def _format_caller_line(spend: float, cap: Decimal | None, turns: int) -> str:
-    """Regular-view caller line."""
-    if cap is None:
-        return f"💸 {_fmt_usd(spend)} spent · {turns} turns"
-    cap_f = float(cap)
-    pct = int(spend / cap_f * 100) if cap_f > 0 else 0
-    return f"💸 {_fmt_usd(spend)} / {_fmt_usd(cap_f)} cap ({pct}%) · {turns} turns"
 
 
 def _channel_budget_lines(state: BillingPanelState, *, now: datetime) -> list[str]:
@@ -169,15 +161,15 @@ def build_billing_container(
     """Build the B8 billing Container (text-only, no ActionRows).
 
     Admin branch:
-      - header: '💸 Billing · admin view' + subtext with period/guild totals
+      - header: '💸 Billing · admin view' + subtext 'October 2026 · $48.17 spent by 9 people'
       - hairline
       - one TextDisplay: 🏦 Server credit (total, then the timed credit it
         includes), 📊 Channel budget for the invoking channel, 🏆 Top spenders
-        (top 5, names escaped) with a dim '{N} more members' line when N > 0,
+        (top 5, names escaped) with a dim '+ N more' line when N > 0,
         then 📊 Channel budgets for every channel
 
     Member branch:
-      - header: '💸 Billing' + subtext with period
+      - header: '💸 Billing' + subtext with the month
       - hairline
       - one TextDisplay: **You** group + 🏦 Server credit + 📊 Channel budget
 
@@ -187,12 +179,7 @@ def build_billing_container(
     accent = COLOR_OVER_CAP if _is_over_cap(state.caller_spend, state.caller_cap) else None
 
     if state.is_admin:
-        subtext = (
-            f"{_period_label(since)} · "
-            f"guild total {_fmt_usd(state.guild_spend)} · "
-            f"{state.guild_turns} turns · "
-            f"{state.guild_distinct_members} active members"
-        )
+        subtext = admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
         hdr = layout.header("💸 Billing · admin view", subtext=subtext)
 
         body_lines: list[str] = [
@@ -202,20 +189,16 @@ def build_billing_container(
             "🏆 **Top spenders**",
         ]
         top5 = state.member_rows[:TOP_SPENDERS_SHOWN]
-        if top5:
-            for i, row in enumerate(top5):
-                rank = i + 1
-                you = " (you)" if row.is_caller else ""
-                spend_str = _fmt_usd(row.cost_usd)
-                name = plain_name(row.display_name)
-                body_lines.append(f"-# {rank}. {name}{you}  {spend_str} · {row.turn_count} turns")
-        else:
-            body_lines.append("-# no usage yet this period")
-
-        # 'N more members' overflow line
-        overflow = max(0, len(state.member_rows) - TOP_SPENDERS_SHOWN) + state.over_cap_count
+        body_lines += [
+            "-# "
+            + spender_line(
+                rank, plain_name(row.display_name), cost=row.cost_usd, is_caller=row.is_caller
+            )
+            for rank, row in enumerate(top5, start=1)
+        ] or [f"-# {NOTHING_USED}"]
+        overflow = more_spenders(len(state.member_rows), state.over_cap_count)
         if overflow > 0:
-            body_lines.append(f"-# {overflow} more members — look one up below")
+            body_lines.append(f"-# + {overflow} more — look one up below")
         body_lines += _channel_budgets_lines(state)
 
         body: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
@@ -224,15 +207,8 @@ def build_billing_container(
         return discord.ui.Container(hdr, layout.hairline(), body, accent_colour=accent)
 
     # Member (non-admin) branch
-    subtext = _period_label(since)
-    hdr = layout.header("💸 Billing", subtext=subtext)
-
-    if state.caller_spend == 0.0 and state.caller_turns == 0:
-        caller_body = "-# no usage yet this period"
-    else:
-        caller_body = (
-            f"-# {_format_caller_line(state.caller_spend, state.caller_cap, state.caller_turns)}"
-        )
+    hdr = layout.header("💸 Billing", subtext=month_label(since))
+    caller_body = f"-# {caller_line(state.caller_spend, state.caller_cap, state.caller_turns)}"
 
     body_lines_member: list[str] = [
         "**You**",
@@ -257,15 +233,11 @@ def build_member_lookup_container(
 ) -> discord.ui.Container[discord.ui.LayoutView]:
     """Pure builder for the member-spend lookup ephemeral reply.
 
-    When spend == 0.0 and turns == 0 the body is the locked line
-    'no usage this period' — covers the zero-daimon-account case invisibly.
+    When spend == 0.0 and turns == 0 the body is 'Nothing used this month' —
+    covers the zero-daimon-account case invisibly.
     """
-    hdr = layout.header(f"🔍 {plain_name(display_name)}", subtext=_period_label(since))
-
-    if spend_usd == 0.0 and turns == 0:
-        body_text = "no usage this period"
-    else:
-        body_text = f"{_fmt_usd(spend_usd)} spent · {turns} turns"
+    hdr = layout.header(f"🔍 {plain_name(display_name)}", subtext=month_label(since))
+    body_text = lookup_line(spend_usd, turns)
 
     body: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(body_text)
     return discord.ui.Container(hdr, layout.hairline(), body)
