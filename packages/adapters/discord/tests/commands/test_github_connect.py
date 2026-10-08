@@ -59,6 +59,8 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
     )
     monkeypatch.setattr(github_command, "set_role", AsyncMock())
     monkeypatch.setattr(github_command, "mint_invitation", AsyncMock(return_value="private-token"))
+    audit = AsyncMock()
+    monkeypatch.setattr(github_command, "append_event", audit)
     cog = github_command.GitHubCog(AsyncMock())
     await github_command.GitHubCog.connect.callback.__wrapped__(  # type: ignore[attr-defined]
         cog, interaction, "ResearchBot"
@@ -70,3 +72,5 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
     button = kwargs["view"].children[0]
     assert button.label == "Connect GitHub"
     assert button.url == "https://mcp.test/oauth/github/connect/private-token"
+    assert audit.await_args.kwargs["reason"] == "admin link minted"
+    assert audit.await_args.kwargs["platform"] == "discord"

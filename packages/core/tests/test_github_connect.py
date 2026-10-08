@@ -49,6 +49,7 @@ from daimon.core.github_requester_access import (
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import (
+    agent_files,
     github_access,
     github_app_installations,
     github_connect,
@@ -221,6 +222,73 @@ async def test_self_serve_refuses_every_saved_github_state_at_mint_and_activatio
             invitation=invitation,
             repos=[],
         )
+
+
+@pytest.mark.asyncio
+async def test_mint_waits_for_concurrent_agent_key_write(
+    db_engine: AsyncEngine,
+    db_clean: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del db_clean
+    committing_sessionmaker = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    tenant_id, admin_id, agent_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with committing_sessionmaker.begin() as session:
+        session.add(Tenant(id=tenant_id, platform="discord", external_id="workspace"))
+        await session.flush()
+        session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    held, attempted, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original_lock = agent_files.lock_agent_keys
+
+    async def observed_lock(
+        session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+    ) -> None:
+        if session.info.get("minter"):
+            attempted.set()
+        await original_lock(session, tenant_id=tenant_id, agent_id=agent_id)
+
+    monkeypatch.setattr(agent_files, "lock_agent_keys", observed_lock)
+
+    async def write_key() -> None:
+        async with committing_sessionmaker.begin() as session:
+            await agent_files.lock_agent_keys(session, tenant_id=tenant_id, agent_id=agent_id)
+            session.add(
+                AgentFile(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    key="GH_TOKEN",
+                    content="encrypted-placeholder",
+                    encoding="plain",
+                )
+            )
+            await session.flush()
+            held.set()
+            await release.wait()
+
+    async def mint() -> None:
+        async with committing_sessionmaker.begin() as session:
+            session.info["minter"] = True
+            await github_connect.mint_invitation(
+                session,
+                tenant_id=tenant_id,
+                requester_account_id=admin_id,
+                agent_id=agent_id,
+                agent_name="ResearchBot",
+            )
+
+    writer = asyncio.create_task(write_key())
+    try:
+        await asyncio.wait_for(held.wait(), timeout=10)
+        minter = asyncio.create_task(mint())
+        await asyncio.wait_for(attempted.wait(), timeout=10)
+        release.set()
+        await writer
+        with pytest.raises(github_connect.ClientAgentConnectionError):
+            await minter
+    finally:
+        release.set()
+        if not writer.done():
+            await writer
 
 
 @pytest.mark.asyncio
@@ -455,6 +523,26 @@ async def test_agent_bound_connection_activates_without_a_saved_key_and_waits_wi
                 mount_path="/workspace/work",
                 is_working_repo=True,
             )
+            db_session.add(
+                AgentRepoBinding(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    repo_url="example/old-work",
+                    default_branch="main",
+                    ma_secret_ref="leftover-key",
+                )
+            )
+            db_session.add(
+                AgentSkillRepoCredential(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    repo_url="example/old-skill",
+                    default_branch="main",
+                    ma_secret_ref="leftover-key",
+                    proof_kind="private",
+                )
+            )
+            await db_session.flush()
             again = await github_connect.mint_invitation(
                 db_session,
                 tenant_id=tenant_id,
@@ -480,8 +568,11 @@ async def test_agent_bound_connection_activates_without_a_saved_key_and_waits_wi
                 github_user_id=17,
                 repos=[confirmation],
             )
-            await github_connect.activate_confirmed_agent(
-                db_session, invitation=again_invitation, repos=[confirmation]
+            assert (
+                await github_connect.activate_confirmed_agent(
+                    db_session, invitation=again_invitation, repos=[confirmation]
+                )
+                == "activated"
             )
             restaged = await db_session.get(AgentGitHubGrant, (tenant_id, agent_id, 101))
             assert restaged is not None

@@ -2,8 +2,15 @@
 
 import re
 import uuid
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import AsyncMock
 
+import pytest
+from anthropic import AsyncAnthropic
+from daimon.adapters.cli.commands import github as github_command
 from daimon.adapters.cli.commands.github import _grant_session_action, github_app
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.session_snapshot import SessionSnapshot
 from typer.testing import CliRunner
 
@@ -22,6 +29,31 @@ def test_connect_link_requires_platform_requester_and_explains_authority() -> No
     missing = runner.invoke(github_app, ["connect-link", "--tenant", str(uuid.uuid4())])
     assert missing.exit_code != 0
     assert "--requester" in _plain(missing.output)
+
+
+@pytest.mark.asyncio
+async def test_connect_link_agent_must_exist_in_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    tenant_id = uuid.uuid4()
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ma-agent")
+    listed = AsyncMock(return_value=[SimpleNamespace(id="ma-agent", name="ResearchBot")])
+    monkeypatch.setattr(github_command, "list_agents_by_tenant", listed)
+    client = cast(AsyncAnthropic, object())
+    await github_command._require_tenant_agent(  # pyright: ignore[reportPrivateUsage]
+        client, tenant_id=tenant_id, agent_id=agent_id, agent_name="ResearchBot"
+    )
+    with pytest.raises(ValueError, match="current agent in this workspace"):
+        await github_command._require_tenant_agent(  # pyright: ignore[reportPrivateUsage]
+            client, tenant_id=tenant_id, agent_id=uuid.uuid4(), agent_name="ResearchBot"
+        )
+    with pytest.raises(ValueError, match="current agent in this workspace"):
+        await github_command._require_tenant_agent(  # pyright: ignore[reportPrivateUsage]
+            client, tenant_id=tenant_id, agent_id=agent_id, agent_name="OtherBot"
+        )
+    listed.return_value = []
+    with pytest.raises(ValueError, match="current agent in this workspace"):
+        await github_command._require_tenant_agent(  # pyright: ignore[reportPrivateUsage]
+            client, tenant_id=tenant_id, agent_id=agent_id, agent_name="ResearchBot"
+        )
 
 
 def test_grant_edit_rotates_only_when_app_repo_set_is_unchanged() -> None:

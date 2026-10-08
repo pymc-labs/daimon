@@ -59,6 +59,8 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
     )
     monkeypatch.setattr(github_command, "set_role", AsyncMock())
     monkeypatch.setattr(github_command, "mint_invitation", AsyncMock(return_value="private-token"))
+    audit = AsyncMock()
+    monkeypatch.setattr(github_command, "append_event", audit)
     await github_command.handle_github_command(
         cast(SlackRuntime, runtime),
         {"team_id": "T1", "user_id": "U1", "channel_id": "C1", "text": "connect ResearchBot"},
@@ -69,3 +71,5 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
     button = kwargs["blocks"][1]["elements"][0]
     assert button["text"]["text"] == "Connect GitHub"
     assert button["url"] == "https://mcp.test/oauth/github/connect/private-token"
+    assert audit.await_args.kwargs["reason"] == "admin link minted"
+    assert audit.await_args.kwargs["platform"] == "slack"

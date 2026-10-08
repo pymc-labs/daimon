@@ -24,6 +24,7 @@ from daimon.core.stores.github_connect import (
     require_app_eligible_agent,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.security_audit import append_event
 
 import discord
 from discord import Interaction, app_commands
@@ -188,6 +189,18 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     requester_label=str(interaction.user.id),
                     agent_id=agent_id,
                     agent_name=target_name,
+                )
+                await append_event(
+                    session,
+                    tenant_id=tenant_id,
+                    account_id=principal.account_id,
+                    agent_id=agent_id,
+                    platform="discord",
+                    platform_user_id=str(interaction.user.id),
+                    tool_name="github_connect",
+                    operation="github_connect",
+                    outcome="allowed",
+                    reason="admin link minted",
                 )
             await interaction.followup.send(
                 f"Opens GitHub to pick repos for {target_name}.\n"

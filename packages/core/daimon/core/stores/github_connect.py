@@ -50,6 +50,8 @@ async def require_app_eligible_agent(
     rule = policy.agent_rules.get(agent_name)
     if rule is not None and rule.runs_in is not None:
         raise ClientAgentConnectionError(CLIENT_AGENT_MESSAGE)
+    if await github_access.get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_id) == "app":
+        return
     if await has_saved_github_state(session, tenant_id=tenant_id, agent_id=agent_id):
         raise ClientAgentConnectionError(CLIENT_AGENT_MESSAGE)
 
@@ -171,10 +173,12 @@ async def mint_invitation(
         raise ValueError("workspace not found")
     if (agent_id is None) != (agent_name is None):
         raise ValueError("agent id and name must be supplied together")
-    if agent_name is not None and agent_id is not None and not operator_issued:
-        await require_app_eligible_agent(
-            session, tenant_id=tenant_id, agent_id=agent_id, agent_name=agent_name
-        )
+    if agent_name is not None and agent_id is not None:
+        await agent_files.lock_agent_keys(session, tenant_id=tenant_id, agent_id=agent_id)
+        if not operator_issued:
+            await require_app_eligible_agent(
+                session, tenant_id=tenant_id, agent_id=agent_id, agent_name=agent_name
+            )
     token = secrets.token_urlsafe(32)
     session.add(
         GitHubConnectInvitation(
@@ -251,6 +255,7 @@ async def activate_confirmed_agent(
     if invitation.agent_id is None:
         return None
     agent_id = invitation.agent_id
+    await agent_files.lock_agent_keys(session, tenant_id=invitation.tenant_id, agent_id=agent_id)
     if not invitation.operator_issued:
         await require_app_eligible_agent(
             session,
@@ -273,6 +278,12 @@ async def activate_confirmed_agent(
         if await session.get(AgentFile, (invitation.tenant_id, agent_id, key)) is not None:
             has_token_env = True
             break
+    app_active = (
+        await github_access.get_agent_mode(
+            session, tenant_id=invitation.tenant_id, agent_id=agent_id
+        )
+        == "app"
+    )
     staged: list[RepoConfirmation] = []
     for repo in repos:
         authorized = await session.get(TenantGitHubRepo, (invitation.tenant_id, repo.repo_id))
@@ -296,14 +307,17 @@ async def activate_confirmed_agent(
     if not staged:
         raise ValueError("No authorized repositories remain. Start a new GitHub connection.")
     await _drop_stale_grants(session, tenant_id=invitation.tenant_id, agent_id=agent_id)
-    await _check_required_repos(
-        session,
-        tenant_id=invitation.tenant_id,
-        agent_id=agent_id,
-        working=working,
-        skill_repos=skill_repos,
-    )
-    if has_pat is not None or has_token_env or working is not None or skill_repos:
+    if not app_active:
+        await _check_required_repos(
+            session,
+            tenant_id=invitation.tenant_id,
+            agent_id=agent_id,
+            working=working,
+            skill_repos=skill_repos,
+        )
+    if not app_active and (
+        has_pat is not None or has_token_env or working is not None or skill_repos
+    ):
         status: Literal["activated", "update_pending"] = "update_pending"
     else:
         await github_access.activate_agent(

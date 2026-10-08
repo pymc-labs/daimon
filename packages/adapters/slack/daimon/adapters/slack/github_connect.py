@@ -26,6 +26,7 @@ from daimon.core.stores.github_connect import (
     require_app_eligible_agent,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.security_audit import append_event
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -158,6 +159,18 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 requester_label=user_id,
                 agent_id=agent_id,
                 agent_name=target_name,
+            )
+            await append_event(
+                session,
+                tenant_id=tenant_id,
+                account_id=principal.account_id,
+                agent_id=agent_id,
+                platform="slack",
+                platform_user_id=user_id,
+                tool_name="github_connect",
+                operation="github_connect",
+                outcome="allowed",
+                reason="admin link minted",
             )
         message = (
             f"Opens GitHub to pick repos for {target_name}.\nNothing is shared until you confirm."
