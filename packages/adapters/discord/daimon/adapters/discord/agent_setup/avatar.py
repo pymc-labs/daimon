@@ -142,8 +142,6 @@ async def upload_agent_avatar(
             raise ValueError("attachment exceeds 2 MB")
         png = await asyncio.to_thread(normalize_avatar_image, body)
     except (aiohttp.ClientError, discord.HTTPException, TimeoutError):
-        return "We couldn't read that file. Upload it again.", None
-    except ValueError:
         await _audit(
             runtime,
             tenant_id=tenant_id,
@@ -153,6 +151,19 @@ async def upload_agent_avatar(
             reason="invalid_image",
             agent_name=agent_name,
         )
+        return "We couldn't read that file. Upload it again.", None
+    except ValueError as exc:
+        await _audit(
+            runtime,
+            tenant_id=tenant_id,
+            user_id=interaction.user.id,
+            change=True,
+            outcome="error",
+            reason="invalid_image",
+            agent_name=agent_name,
+        )
+        if "2 MB" in str(exc):
+            return "That picture is too big. Choose one up to 2 MB.", None
         return "We couldn't use that picture. Use PNG, JPG, GIF or WebP.", None
     if not await _may_edit(
         interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=True

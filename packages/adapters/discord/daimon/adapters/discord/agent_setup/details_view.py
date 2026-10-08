@@ -31,6 +31,7 @@ from daimon.adapters.discord.agent_setup.avatar import (
 )
 from daimon.adapters.discord.agent_setup.budget import LAYOUT_TEXT_BUDGET
 from daimon.adapters.discord.agent_setup.conversations import open_setup_conversation
+from daimon.adapters.discord.agent_setup.expiry import ExpiringView
 from daimon.adapters.discord.agent_setup.mcp_access import send_coding_tools_access
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
@@ -568,13 +569,15 @@ class PictureUploadModal(discord.ui.Modal):
         embed = picture_status_embed(message, success=avatar is not None)
         if avatar is None:
             await interaction.followup.send(
-                embed=embed, view=PictureRetryView(self._view), ephemeral=True
+                embed=embed,
+                view=PictureRetryView(self._view).bind_render_interaction(interaction, panel=None),
+                ephemeral=True,
             )
         else:
             await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-class PictureRetryView(discord.ui.View):
+class PictureRetryView(ExpiringView, discord.ui.View):
     """Let a rejected file be replaced from the same panel."""
 
     def __init__(self, details: DetailsView) -> None:

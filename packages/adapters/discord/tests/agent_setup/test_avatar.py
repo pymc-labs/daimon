@@ -187,7 +187,7 @@ async def test_upload_rejects_untrusted_attachment_url(
         agent_name="analyst",
         attachment=attachment,
     )
-    assert result is None and "Attach" in message
+    assert result is None and "couldn't use that picture" in message
     attachment.read.assert_not_awaited()
     assert audit.await_args.kwargs["outcome"] == "error"
 
@@ -210,7 +210,7 @@ async def test_upload_handles_attachment_network_error(monkeypatch: pytest.Monke
         agent_name="analyst",
         attachment=attachment,
     )
-    assert result is None and "could not use" in message
+    assert result is None and "couldn't read that file" in message
     assert audit.await_args.kwargs["outcome"] == "error"
 
 
