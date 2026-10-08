@@ -186,12 +186,15 @@ delete that agent's recorded post.
 Restart recovery keeps a card intent active when a pending card cannot be
 edited. It does not post a replacement status card, because the original
 button could remain. A definite missing-webhook, missing-token, permission or
-deleted-thread failure can mark an aged intent unrecoverable. A periodic pass
-revisits aged intents without waiting for another restart. If the bot can
+deleted-thread failure can mark an aged intent unrecoverable. So can a configured
+number of failed recovery passes, counted across restarts. An hourly pass
+revisits aged intents without waiting for another restart. It does not overlap
+startup reconciliation or inspect a turn still running in this process. The
+unrecoverable age setting must exceed the turn ceiling. If the bot can
 manage messages, it fetches each known matching card and deletes it only while
 it still carries that turn's pending button. Answered cards without that button
-stay intact. Transient API failures and shutdown cancellation keep the intent
-active for another recovery attempt. An unprompted turn likewise retains its
+stay intact. An isolated transient API failure and shutdown cancellation keep
+the intent active for another recovery attempt. An unprompted turn likewise retains its
 intent when its card delete fails, including an unknown-webhook error.
 
 An unmentioned reply in a Discord or Teams thread costs one cascade read of

@@ -21,7 +21,7 @@ These are finite abstractions of the code, not a proof of Discord or discord.py.
 | `SilentEnd` | An unprompted turn with no answer deletes its transient card. If delete fails, the lifecycle marks the discard failure and the caller retains the intent. |
 | `Crash`, `BootLookup`, `RecoverEdit` | `bot.py` gates new turn admission behind orphan sweep, then reconciles the boot intent snapshot; `turn_card_recovery.py` scans history and edits every matching pending card before retirement. The orphan sweep also refuses replacement, so an unknown webhook cannot create a second bot card while leaving the original pending. |
 | `RecoverReplacement` | The pre-fix recovery path could replace an uneditable webhook card with a new bot message and retire the intent while the old card still displayed a pending button. Recovery now disables replacement and retains the intent on missing/unknown webhook token. Normal non-recovery edits may still replace a message. |
-| `RecoveryFailure`, `AgeOut` | An aged Discord intent becomes `unrecoverable` only after a definite missing-webhook, missing-token, permission or deleted-thread failure. Transient API failures and cancellation keep it active. The bot periodically revisits aged intents. With Manage Messages, it deletes only fetched messages that still carry this turn's pending button, including duplicates; a finished answer is preserved. A failed delete is logged and the terminal state records exhausted automatic recovery. |
+| `PeriodicLookup`, `RecoveryFailure`, `AgeOut` | Startup and hourly passes serialize reconciliation. The hourly pass excludes local live-turn intent IDs and active card IDs; the age threshold exceeds the turn ceiling. An aged Discord intent becomes `unrecoverable` after a definite missing-webhook, missing-token, permission or deleted-thread failure, or after the configured number of failed passes. The pass count persists across restarts. A single transient API failure or cancellation keeps the intent active. With Manage Messages, recovery deletes only fetched messages that still carry this turn's pending button, including duplicates; a finished answer is preserved. A failed delete is logged and the terminal state records exhausted automatic recovery. |
 
 `WebhookLoad` counts **three requests per prompted turn**: initial card,
 terminal Done edit, answer edit. It models the final answer as one message and
@@ -95,13 +95,16 @@ turn interleavings or prove a latency bound.
 | `CardMissingToken` | With no token, fresh recovery stays incomplete and the intent remains active. The aged case is covered by `CardStaleUnrecoverable`. |
 | `CardStaleUnrecoverable`, `CardStaleDelete` | After a definite recovery failure, an aged intent becomes terminal. Without Manage Messages the old pending card may remain; with permission and successful deletion it is removed. Both states release the tidy gate. |
 | `CardAnsweredSafe`, `CardUnsafeAnsweredDelete` | A recorded message ID may point at an answered card before the intent retires. Checking the turn's pending button preserves the answer; blind deletion violates `NoDeletedAnswer`. The Discord age-out tests cover answered cards and multiple matches. |
+| `CardPeriodicSafe`, `CardPeriodicLiveUnsafe` | Periodic recovery while the process is up excludes a still-running turn. Removing that guard retires a live turn and violates `NoLiveTurnRetired`. The Discord periodic-sweep tests cover local intent filtering and persistent failed-pass counts. |
 | `CardUnsafeStale` | Keeping an aged unresolved intent active violates `NoStaleActive`; this is the old permanent `turn_in_progress` path. |
 
 `CardSafe` assumes a known card can be edited and a requested delete succeeds. It does not prove that every
 crash is recoverable: Discord history lookup is bounded, a message can be
 unfetchable, a webhook token can disappear, and an edit can fail. The
 `CardMissingToken` retains that residual state until both the configured age
-and a definite recovery failure are present.
+and a definite recovery failure or the configured number of failed passes are
+present. The finite model abstracts that threshold as one `RecoveryFailure`
+action; the database-backed tests check the counter across process restarts.
 “No card left pending after recovery” is therefore a conditional safety rule:
 when recovery retires an intent, every matching card it found has been
 resolved. Pending cards after a failed recovery are visible in the retained

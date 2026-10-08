@@ -134,7 +134,7 @@ async def mark_turn_card_intent_unrecoverable(
     id: uuid.UUID,
     cutoff: datetime,
 ) -> bool:
-    """Close an aged active Discord intent after boot recovery cannot resolve it."""
+    """Close an aged active Discord intent after recovery cannot resolve it."""
     result = await session.execute(
         update(TurnCardIntent)
         .where(
@@ -147,6 +147,26 @@ async def mark_turn_card_intent_unrecoverable(
     )
     await session.flush()
     return cast(CursorResult[object], result).rowcount == 1
+
+
+async def record_turn_card_recovery_failure(
+    session: AsyncSession,
+    *,
+    id: uuid.UUID,
+) -> int | None:
+    """Count one unresolved Discord recovery pass, across process restarts."""
+    count = await session.scalar(
+        update(TurnCardIntent)
+        .where(
+            TurnCardIntent.id == id,
+            TurnCardIntent.platform == "discord",
+            TurnCardIntent.status.in_(("prepared", "posted")),
+        )
+        .values(recovery_failures=TurnCardIntent.recovery_failures + 1)
+        .returning(TurnCardIntent.recovery_failures)
+    )
+    await session.flush()
+    return count
 
 
 async def list_recoverable_turn_card_intents(

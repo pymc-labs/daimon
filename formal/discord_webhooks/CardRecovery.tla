@@ -2,13 +2,13 @@
 EXTENDS Naturals, FiniteSets, TLC
 
 \* One durable turn-card intent and at most two remote messages. Discord
-\* accepts a post before the process knows its message ID; boot lookup finds
-\* all matching cancel IDs. The two Unsafe switches reproduce forbidden paths.
+\* accepts a post before the process knows its message ID; recovery lookup finds
+\* all matching cancel IDs. Unsafe switches reproduce forbidden paths.
 CONSTANTS BlindRetry, TokenAvailable, RetireReplacement,
           FinishBeforeEdit, CompleteEarly, DeleteFails,
           RetireOnDeleteFailure, EnableAgeOut, SkipAgeRetirement,
           ManageMessages, DeleteSucceeds, AnswerBeforeRetire,
-          DeleteAnsweredCard
+          DeleteAnsweredCard, EnablePeriodic, UnsafeLiveAgeOut
 VARIABLES process, intent, card, responseKnown, phase, answerPosts,
           bootRead, recoveryDone, aged, recoveryFailed
 vars == <<process, intent, card, responseKnown, phase, answerPosts,
@@ -98,6 +98,16 @@ BootLookup ==
     /\ UNCHANGED <<process, intent, card, responseKnown, phase,
                    answerPosts, recoveryDone, aged, recoveryFailed>>
 
+\* Periodic recovery may inspect an old unresolved card while this process
+\* is still up. A live turn is excluded unless the unsafe guard is enabled.
+PeriodicLookup ==
+    /\ EnablePeriodic /\ process = "up" /\ ~bootRead
+    /\ intent \in {"prepared", "posted"}
+    /\ (phase # "working" \/ UnsafeLiveAgeOut)
+    /\ bootRead' = TRUE
+    /\ UNCHANGED <<process, intent, card, responseKnown, phase, answerPosts,
+                   recoveryDone, aged, recoveryFailed>>
+
 \* Orphan sweep and intent reconciliation edit every known pending card.
 RecoverEdit ==
     /\ process = "down" /\ bootRead /\ TokenAvailable
@@ -125,10 +135,13 @@ CompleteRecovery ==
     /\ UNCHANGED <<process, card, responseKnown, phase, answerPosts,
                    bootRead, aged, recoveryFailed>>
 
-\* A missing webhook/token or denied access is definite evidence. A 429, 5xx,
-\* incomplete history read or cancellation does not enable age-out.
+\* A missing webhook/token or denied access is definite evidence. Repeated
+\* failed passes also qualify after the configured count. A single 429, 5xx,
+\* incomplete history read or cancellation does not enable age-out. The pass
+\* counter itself is covered by the database-backed runtime tests.
 RecoveryFailure ==
-    /\ process = "down" /\ bootRead /\ ~TokenAvailable
+    /\ bootRead /\ ~TokenAvailable
+    /\ (process = "down" \/ phase # "working" \/ UnsafeLiveAgeOut)
     /\ intent \in {"prepared", "posted"} /\ ~recoveryFailed
     /\ recoveryFailed' = TRUE
     /\ UNCHANGED <<process, intent, card, responseKnown, phase, answerPosts,
@@ -137,7 +150,8 @@ RecoveryFailure ==
 \* A stale unresolved intent stops blocking later channel work. A bot with
 \* Manage Messages makes one last delete attempt; deletion may still fail.
 AgeOut ==
-    /\ EnableAgeOut /\ process = "down" /\ bootRead /\ recoveryFailed /\ ~aged
+    /\ EnableAgeOut /\ bootRead /\ recoveryFailed /\ ~aged
+    /\ (process = "down" \/ phase # "working" \/ UnsafeLiveAgeOut)
     /\ intent \in {"prepared", "posted"}
     /\ aged' = TRUE
     /\ intent' = IF SkipAgeRetirement THEN intent ELSE "unrecoverable"
@@ -149,7 +163,7 @@ AgeOut ==
 
 Next == CommitIntent \/ RemoteAccept \/ PersistResponse \/ BlindPostAgain
         \/ FinishAnswer \/ AnswerVisibleBeforeRetire \/ SilentEnd \/ Crash
-        \/ BootLookup \/ RecoverEdit \/ RecoverReplacement \/ CompleteRecovery
+        \/ BootLookup \/ PeriodicLookup \/ RecoverEdit \/ RecoverReplacement \/ CompleteRecovery
         \/ RecoveryFailure \/ AgeOut
 Spec == Init /\ [][Next]_vars
 
@@ -173,4 +187,5 @@ NoDuplicateAnswer == answerPosts <= 1
 NoLostFinishedAnswer == phase = "finished" => answerPosts = 1
 NoDeletedAnswer == phase = "finished" => card[1] # "absent"
 NoStaleActive == aged => intent \notin {"prepared", "posted"}
+NoLiveTurnRetired == process = "up" /\ phase = "working" => intent # "unrecoverable"
 =================================================================

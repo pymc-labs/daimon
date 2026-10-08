@@ -102,7 +102,10 @@ from daimon.core.stores.thread_sessions import (
     mark_turn_active,
     update_watermark,
 )
-from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+from daimon.core.stores.turn_card_intents import (
+    list_recoverable_turn_card_intents,
+    record_turn_card_recovery_failure,
+)
 from daimon.core.stores.turn_origins import get_active_origin, thread_archive_requested
 from daimon.core.thread_naming import strip_mentions
 from daimon.core.thread_participation import ParticipationMode
@@ -523,6 +526,9 @@ class DaimonBot(commands.Bot):
         self._boot_turn_card_intents: list[TurnCardIntentRow] | None = None
         self._turn_card_recovery_started: bool = False
         self._turn_card_periodic_started: bool = False
+        self._turn_card_recovery_lock = asyncio.Lock()
+        self._boot_card_recovery_task: asyncio.Task[None] | None = None
+        self._live_turn_card_intent_ids: set[uuid.UUID] = set()
         # Set by setup_hook, which runs after login and before the gateway
         # connects, so it is set before any message or interaction can arrive.
         # From then on every turn entry passes the sweep barrier. Left unset
@@ -540,6 +546,14 @@ class DaimonBot(commands.Bot):
         task.add_done_callback(self._bg_tasks.discard)
         task.add_done_callback(_log_bg_task_exception)
         return task
+
+    def _track_live_turn_card(self, intent_id: uuid.UUID) -> None:
+        """Exclude this process's turn from periodic recovery until its task ends."""
+        task = asyncio.current_task()
+        if task is None:  # pragma: no cover - turns always run in tasks
+            return
+        self._live_turn_card_intent_ids.add(intent_id)
+        task.add_done_callback(lambda _done: self._live_turn_card_intent_ids.discard(intent_id))
 
     def _forget_output_sweep(self, session_id: str, task: asyncio.Task[None]) -> None:
         if self._output_sweeps.get(session_id) is task:
@@ -1113,7 +1127,9 @@ class DaimonBot(commands.Bot):
         ):
             return
         self._turn_card_recovery_started = True
-        self._spawn(self._reconcile_boot_turn_cards(self._boot_turn_card_intents))
+        self._boot_card_recovery_task = self._spawn(
+            self._reconcile_boot_turn_cards(self._boot_turn_card_intents)
+        )
         if not self._turn_card_periodic_started:
             self._turn_card_periodic_started = True
             self._spawn(self._periodic_turn_card_recovery())
@@ -1128,6 +1144,11 @@ class DaimonBot(commands.Bot):
                 log.warning("turn.card_intent_periodic_sweep_failed", exc_info=True)
 
     async def _sweep_aged_turn_cards(self) -> None:
+        if self._turn_card_recovery_lock.locked() or (
+            self._boot_card_recovery_task is not None and not self._boot_card_recovery_task.done()
+        ):
+            log.info("turn.card_intent_periodic_sweep_skipped", reason="recovery_in_progress")
+            return
         discord_settings = self.runtime.settings.discord
         assert discord_settings is not None
         cutoff = datetime.now(UTC).timestamp() - discord_settings.turn_card_unrecoverable_after_s
@@ -1140,36 +1161,42 @@ class DaimonBot(commands.Bot):
         aged = [
             intent
             for intent in intents
-            if intent.created_at.timestamp() <= cutoff and intent.message_id not in live_card_ids
+            if intent.created_at.timestamp() <= cutoff
+            and intent.message_id not in live_card_ids
+            and intent.id not in self._live_turn_card_intent_ids
         ]
-        await self._reconcile_boot_turn_cards(aged)
+        await self._reconcile_boot_turn_cards(aged, restarted=False)
 
-    async def _reconcile_boot_turn_cards(self, intents: list[TurnCardIntentRow]) -> None:
-        """Run a fixed number of workers over the startup intent snapshot."""
+    async def _reconcile_boot_turn_cards(
+        self, intents: list[TurnCardIntentRow], *, restarted: bool = True
+    ) -> None:
+        """Run bounded recovery workers for boot or periodic intents."""
         if not intents:
             return
-        await self.wait_until_ready()
-        intent_iter = iter(intents)
+        async with self._turn_card_recovery_lock:
+            await self.wait_until_ready()
+            intent_iter = iter(intents)
 
-        async def worker() -> None:
-            for intent in intent_iter:
-                try:
-                    await self._reconcile_turn_card_intent(intent)
-                except Exception:
-                    log.warning(
-                        "turn.card_intent_recovery_failed",
-                        intent_id=str(intent.id),
-                        exc_info=True,
-                    )
+            async def worker() -> None:
+                for intent in intent_iter:
+                    try:
+                        await self._reconcile_turn_card_intent(intent, restarted=restarted)
+                    except Exception:
+                        log.warning(
+                            "turn.card_intent_recovery_failed",
+                            intent_id=str(intent.id),
+                            exc_info=True,
+                        )
 
-        await asyncio.gather(
-            *(worker() for _ in range(min(_TURN_CARD_RECOVERY_CONCURRENCY, len(intents))))
-        )
+            await asyncio.gather(
+                *(worker() for _ in range(min(_TURN_CARD_RECOVERY_CONCURRENCY, len(intents))))
+            )
 
     async def _reconcile_turn_card_intent(
         self,
         intent: TurnCardIntentRow,
         *,
+        restarted: bool = True,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         """Recover one intent independently so a delayed search cannot block others."""
@@ -1187,6 +1214,7 @@ class DaimonBot(commands.Bot):
                         thread_id=intent.thread_id,
                         channel_type=type(channel).__name__,
                     )
+                    await self._record_failed_card_recovery(intent, thread=None)
                     return
                 thread = channel
                 await reconcile_turn_card_intent(
@@ -1194,7 +1222,9 @@ class DaimonBot(commands.Bot):
                     intent=intent,
                     thread=channel,
                     client=self,
+                    restarted=restarted,
                 )
+                await self._record_failed_card_recovery(intent, thread=thread)
                 return
             except UnrecoverableTurnCardError as err:
                 discord_settings = self.runtime.settings.discord
@@ -1229,6 +1259,26 @@ class DaimonBot(commands.Bot):
                     thread_id=intent.thread_id,
                     error=str(err),
                 )
+                await self._record_failed_card_recovery(intent, thread=thread)
+
+    async def _record_failed_card_recovery(
+        self, intent: TurnCardIntentRow, *, thread: discord.Thread | None
+    ) -> None:
+        """Count unresolved passes, then retire an aged intent at the configured limit."""
+        async with self.runtime.sessionmaker() as session:
+            failures = await record_turn_card_recovery_failure(session, id=intent.id)
+            await session.commit()
+        discord_settings = self.runtime.settings.discord
+        assert discord_settings is not None
+        if failures is None or failures < discord_settings.turn_card_unrecoverable_after_attempts:
+            return
+        await expire_unrecoverable_turn_card(
+            self.runtime.sessionmaker,
+            intent=intent,
+            thread=thread,
+            max_age_s=discord_settings.turn_card_unrecoverable_after_s,
+            reason="recovery attempts exhausted",
+        )
 
     async def on_ready(self) -> None:
         """Forward-only reconcile sweep: provision-if-missing, re-seed pending/failed,
@@ -2344,6 +2394,7 @@ class DaimonBot(commands.Bot):
             thread_id=row.thread_id,
             make_lifecycle=_make_lifecycle,
         )
+        self._track_live_turn_card(turn_card_intent.id)
 
         session_account_id = admission.account_id
         prepared = await bind_session(
@@ -2913,6 +2964,7 @@ class DaimonBot(commands.Bot):
             thread_id=str(thread.id),
             make_lifecycle=_make_lifecycle,
         )
+        self._track_live_turn_card(turn_card_intent.id)
         turn_send = recorder.sender(
             thread, turn_card_intent_id=turn_card_intent.id, transport=transport
         )

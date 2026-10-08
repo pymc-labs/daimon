@@ -13,6 +13,7 @@ from daimon.core.stores.turn_card_intents import (
     list_recoverable_turn_card_intents,
     mark_turn_card_intent_unrecoverable,
     record_turn_card_message,
+    record_turn_card_recovery_failure,
     retire_turn_card_intent,
 )
 from daimon.testing.factories import make_tenant
@@ -114,6 +115,33 @@ async def test_unrecoverable_transition_requires_an_aged_discord_intent(
         db_session, id=intent.id, cutoff=now - timedelta(hours=24)
     )
     assert await list_recoverable_turn_card_intents(db_session, platform="discord") == []
+
+
+async def test_recovery_failures_persist_and_stop_counting_after_retirement(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    intent = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-failures",
+        turn_token=uuid.uuid4(),
+    )
+    await db_session.commit()
+
+    async with db_session_factory() as session:
+        assert await record_turn_card_recovery_failure(session, id=intent.id) == 1
+        await session.commit()
+    async with db_session_factory() as session:
+        assert await record_turn_card_recovery_failure(session, id=intent.id) == 2
+        await session.commit()
+        row = (await list_recoverable_turn_card_intents(session, platform="discord"))[0]
+        assert row.recovery_failures == 2
+        assert await retire_turn_card_intent(session, id=intent.id, expected_message_id=None)
+        await session.commit()
+        assert await record_turn_card_recovery_failure(session, id=intent.id) is None
 
 
 async def test_turn_card_intent_database_rejects_empty_posted_message_id(

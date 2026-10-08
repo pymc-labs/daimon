@@ -429,9 +429,17 @@ notice; continuation wakes keep their existing admission path.
 
 `int` · optional · default `86400`
 
-Age in seconds after which a Discord turn card that boot recovery cannot resolve becomes
-unrecoverable. Recovery attempts to delete a known stale card when the bot has Manage
+Minimum age in seconds before Discord can retire a card after definite recovery failure
+or repeated failed recovery passes. Must exceed the turn ceiling. Recovery runs at
+startup and periodically, and deletes a known pending card when the bot has Manage
 Messages permission.
+
+### `DAIMON_DISCORD__TURN_CARD_UNRECOVERABLE_AFTER_ATTEMPTS`
+
+`int` · optional · default `3`
+
+Failed Discord card recovery passes required before an aged intent can be retired
+without a definite platform failure. Count persists across restarts.
 
 ### `DAIMON_DISCORD__HEALTH_PORT`
 
