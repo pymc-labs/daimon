@@ -13,6 +13,7 @@ only; key values are never part of the rendered model.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 from typing import cast
 from urllib.parse import quote
@@ -474,10 +475,16 @@ class DetailsView(PanelViewBase):
             details=self.details,
             agent=self.agent,
         )
-        await panel_interaction.edit_original_response(
-            view=refreshed.bind_render_interaction(panel_interaction, panel=self.state),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        try:
+            await panel_interaction.edit_original_response(
+                view=refreshed.bind_render_interaction(panel_interaction, panel=self.state),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.NotFound:
+            return
+        except discord.HTTPException as exc:
+            if exc.status != 401 or exc.code != 50027:
+                raise
 
     async def _on_avatar_details(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
@@ -622,6 +629,18 @@ class PictureRetryView(ExpiringView, discord.ui.View):
 
     async def _on_retry(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(PictureUploadModal(self._details))
+
+    async def on_timeout(self) -> None:
+        """Expire the retry button while keeping the response as an embed."""
+        interaction = self._render_interaction
+        if interaction is None:
+            return
+        with contextlib.suppress(discord.NotFound):
+            await interaction.edit_original_response(
+                embed=picture_status_embed("Panel expired. Open agent setup.", success=False),
+                view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
 
 class AvatarResetConfirmView(PanelViewBase):
