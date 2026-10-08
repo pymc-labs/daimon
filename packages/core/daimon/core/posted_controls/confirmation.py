@@ -75,7 +75,7 @@ def build_confirmation_card(
     if state == "pending":
         headline = prompt.title
         body = None
-        footer = "Only {requester} can approve or deny · expires {expires}"
+        footer = "Only {requester} can approve or deny\nExpires {expires}"
     else:
         headline = state.capitalize()
         body = (

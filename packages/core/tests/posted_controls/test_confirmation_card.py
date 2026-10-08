@@ -95,12 +95,15 @@ def test_slack_blocks_carry_buttons_only_while_pending() -> None:
         "dcf:tok_abcdefgh:details",
     ]
     assert "<@U1>" in pending[-1]["elements"][0]["text"]
+    assert pending[-1]["elements"][0]["text"].startswith("Only <@U1> can approve or deny\nExpires ")
+    assert " · " not in str(pending)
     assert "linear" not in str(pending)
     assert "create_issue" not in str(pending)
     fallback = confirmation_card_text(
         build_confirmation_card(prompt, state="pending", token="tok_abcdefgh")
     )
     assert "linear" not in fallback and "create_issue" not in fallback
+    assert " · " not in fallback
     approved = build_confirmation_blocks(
         build_confirmation_card(prompt, state="approved", answered_by_platform_user_id="U1"),
         prompt=prompt,

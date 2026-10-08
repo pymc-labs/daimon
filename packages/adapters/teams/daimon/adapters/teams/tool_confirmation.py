@@ -60,15 +60,17 @@ _ANSWERS: dict[str, ConfirmationAnswer] = {"approve": "approved", "deny": "denie
 EDIT_TIMEOUT_S = 2.0
 
 
-def _footer(card: ConfirmationCard, prompt: ConfirmationPrompt, answered_by: str | None) -> str:
+def _footer(
+    card: ConfirmationCard, prompt: ConfirmationPrompt, answered_by: str | None
+) -> tuple[str, ...]:
     name = prompt.requester_display_name or answered_by or "requester"
     if card.state == "pending":
         # Teams renders TIME() in the reader's own timezone.
         expires = prompt.expires_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return f"Only {name} can approve or deny · expires {{{{TIME({expires})}}}}"
+        return (f"Only {name} can approve or deny", f"Expires {{{{TIME({expires})}}}}")
     if card.state in {"approved", "denied"}:
-        return f"by {answered_by or name}"
-    return ""
+        return (f"by {answered_by or name}",)
+    return ()
 
 
 def confirmation_adaptive_card(
@@ -116,8 +118,8 @@ def confirmation_adaptive_card(
                 ]
             )
         )
-    if footer := _footer(card, prompt, answered_by):
-        body.append(TextBlock(text=footer, is_subtle=True, size="Small", wrap=True))
+    for line in _footer(card, prompt, answered_by):
+        body.append(TextBlock(text=line, is_subtle=True, size="Small", wrap=True))
     style = (
         "warning" if card.state == "pending" else "good" if card.state == "approved" else "emphasis"
     )

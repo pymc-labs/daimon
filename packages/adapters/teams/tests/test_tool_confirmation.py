@@ -137,11 +137,16 @@ def test_grouped_card_has_expander_and_state_color() -> None:
     assert "CodeBlock" not in pending and "Tool:" not in pending
     assert "Approve all 3" in pending and "Deny all 3" in pending
     assert "Ada Lovelace" in pending and "warning" in pending
+    assert "Only Ada Lovelace can approve or deny" in pending
+    assert '"text":"Expires {{TIME(' in pending
+    assert " · " not in pending
     approved = confirmation_adaptive_card(
         build_confirmation_card(prompt, state="approved"), prompt
     ).model_dump_json(by_alias=True)
     assert "good" in approved and "Action.Execute" not in approved
+    assert " · " not in approved
     denied = confirmation_adaptive_card(
         build_confirmation_card(prompt, state="denied"), prompt
     ).model_dump_json(by_alias=True)
     assert "emphasis" in denied and "Action.Execute" not in denied
+    assert " · " not in denied

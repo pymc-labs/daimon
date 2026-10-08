@@ -46,7 +46,8 @@ class _ConfirmationView(discord.ui.LayoutView):
             container.add_item(row)
         footer = _footer(card, prompt)
         if footer is not None:
-            container.add_item(discord.ui.TextDisplay(f"-# {footer}"))
+            for line in footer.splitlines():
+                container.add_item(discord.ui.TextDisplay(f"-# {line}"))
         self.add_item(container)
 
     async def _on_approve(self, interaction: discord.Interaction) -> None:

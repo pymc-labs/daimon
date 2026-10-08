@@ -52,7 +52,8 @@ def test_a_pending_card_shows_the_write_and_two_buttons() -> None:
     )
     texts = _texts(view)
     assert texts[0] == '**Create issue "Bug"?**'
-    assert texts[-1].startswith("-# Only <@111> can approve or deny · expires <t:")
+    assert texts[-2] == "-# Only <@111> can approve or deny"
+    assert texts[-1].startswith("-# Expires <t:")
     assert [b.label for b in _buttons(view)] == ["Approve", "Deny", "Details"]
 
 
