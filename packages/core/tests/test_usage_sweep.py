@@ -305,6 +305,71 @@ async def test_sweep_idempotent_across_runs_no_double_count(
     assert count == 1, "replaying the sweep must not double-count the same event"
 
 
+async def test_sweep_requests_only_model_calls_and_replays_only_unrecorded_ones(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A pass over a metered session asks the API for model calls only and
+    writes nothing for calls already in usage_events, so an hourly full pass
+    over a quiet workspace costs no per-event transactions."""
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="discord-user-skip"
+    )
+    events = [_model_request_end_dict(event_id="evt_old", input_tokens=10, output_tokens=5)]
+    requested_types: list[list[str]] = []
+
+    def serve_events(req: httpx.Request, match: Any) -> httpx.Response:
+        requested_types.append(req.url.params.get_list("types[]"))
+        return list_response(events)
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions",
+        lambda req, m: list_response(
+            [
+                _session_dict(
+                    session_id="sesn_skip",
+                    tenant_id=principal.tenant_id,
+                    account_id=principal.account_id,
+                )
+            ]
+        ),
+    )
+    router.add("GET", r"/v1/sessions/[^/]+/events", serve_events)
+    client = build_fake_anthropic(router.dispatch)
+
+    first = await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.0"))
+    idle = await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.0"))
+    events.append(_model_request_end_dict(event_id="evt_new", input_tokens=20, output_tokens=5))
+    later = await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.0"))
+
+    assert requested_types == [["span.model_request_end"]] * 3, (
+        f"every event read is filtered to model calls server-side, got {requested_types}"
+    )
+    assert (first, idle, later) == (1, 0, 1), (
+        f"only calls not yet recorded are replayed, got {(first, idle, later)}"
+    )
+    recorded = (
+        (
+            await db_session.execute(
+                select(UsageEvent.event_id).where(UsageEvent.managed_session_id == "sesn_skip")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert sorted(recorded) == ["evt_new", "evt_old"], "both calls are metered exactly once"
+    debits = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(TenantLedger)
+            .where(TenantLedger.idempotency_key.like("turn:sesn_skip:%"))
+        )
+    ).scalar_one()
+    assert debits == 2, "each call is debited once"
+
+
 async def test_sweep_skips_session_without_tenant_tag(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -536,7 +601,7 @@ async def test_sweep_bills_valid_tenant_with_malformed_account_and_retry_is_idem
     assert first_recorded == 2, (
         "valid-tenant sessions should both be billed despite bad account metadata"
     )
-    assert retry_recorded == 2, "retry replays both events through the idempotent recorder"
+    assert retry_recorded == 0, "retry skips both events, already recorded"
     assert [(row.managed_session_id, row.tenant_id, row.platform_user_id) for row in rows] == [
         ("sesn_after_bad_account", account.tenant_id, principal.external_id),
         ("sesn_bad_account", account.tenant_id, None),
