@@ -567,6 +567,7 @@ async def _start_turn_impl(
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
+            agent_github_app=runtime.settings.github_app,
             billing_exempt=billing_exempt,
             memory_read_only=memory_read_only,
             budget_channel_id=budget_channel_id,

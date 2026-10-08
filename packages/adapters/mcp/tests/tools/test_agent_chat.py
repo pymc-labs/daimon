@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 import uuid
 from dataclasses import replace
@@ -32,6 +33,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsTextBlock,
     BetaManagedAgentsUserMessageEvent,
 )
+from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.hosted_artifacts import ChartUrl, HostedChartDelivery
 from daimon.adapters.mcp.middleware.mcp_identity import (
@@ -64,6 +66,7 @@ from daimon.adapters.mcp.tools.agent_chat import (
 from daimon.adapters.mcp.tools.sessions import SessionEventOut
 from daimon.core import bundle_handle
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.config import GithubAppSettings
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
@@ -71,9 +74,12 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_SEALED,
 )
+from daimon.core.github_app_session import prepare_app_access as mint_app_access
+from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores import github_access, github_app_installations
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.scoped_config_write import set_fields
@@ -99,6 +105,7 @@ from fastmcp.server.transforms.search.base import serialize_tools_for_output_mar
 from fastmcp.tools import ToolResult
 from mcp.types import ImageContent
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
 
@@ -451,6 +458,107 @@ async def test_non_narrowed_token_still_gets_bm25_search_surface() -> None:
 # ---------------------------------------------------------------------------
 # Test 2: Start/poll — start_turn creates session, get_reply returns running→done
 # ---------------------------------------------------------------------------
+
+
+async def test_start_turn_mints_new_app_token_for_live_grant(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, id=_TENANT_ID, workspace_id="app-start-turn")
+        await make_account(session, tenant=tenant, id=_ACCOUNT_ID)
+        await session.execute(
+            text(
+                "INSERT INTO tenant_github_repos "
+                "(tenant_id, repo_id, owner_id, installation_id, repo_full_name, "
+                "max_access, authorized_by_github_user_id, status, version) "
+                "VALUES (:tenant_id, 101, 55, 77, 'example/repo', 'read', 17, 'active', 1)"
+            ),
+            {"tenant_id": tenant.id},
+        )
+        await session.flush()
+        await github_app_installations.upsert_github_app(
+            session,
+            installation_id=77,
+            account_id=55,
+            account_login="example",
+            account_type="Organization",
+            repository_selection="selected",
+            suspended_at=None,
+        )
+        await github_access.stage_grant(
+            session,
+            tenant_id=tenant.id,
+            agent_id=_AGENT_UUID,
+            repo_id=101,
+            baseline_access="read",
+            ceiling_access="read",
+            granted_by_account_id=_ACCOUNT_ID,
+        )
+        await github_access.activate_agent(session, tenant_id=tenant.id, agent_id=_AGENT_UUID)
+
+    minted: list[dict[str, Any]] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/app/installations/77/access_tokens"
+        assert request.headers["Authorization"] == "Bearer app-jwt"
+        minted.append(json.loads(request.content))
+        return httpx.Response(201, json={"token": "ghs_start_turn"})
+
+    async def prepare_with_mock_github(*args: Any, **kwargs: Any) -> Any:
+        assert kwargs["config"] == app_settings
+        async with httpx.AsyncClient(transport=httpx.MockTransport(github_handler)) as github:
+            return await mint_app_access(args[0], github, **kwargs)
+
+    app_settings = GithubAppSettings(app_id="123", private_key=SecretStr("unused"))
+    monkeypatch.setattr("daimon.core.github_app_session.build_app_jwt", lambda *_a, **_k: "app-jwt")
+    monkeypatch.setattr("daimon.core.sessions.prepare_app_access", prepare_with_mock_github)
+    monkeypatch.setattr(
+        "daimon.core.sessions.create_session_vault", AsyncMock(return_value="vlt_start_turn")
+    )
+    monkeypatch.setattr("daimon.core.sessions.add_app_credentials", AsyncMock())
+
+    router = _agent_and_env_router()
+    router.add(
+        "POST",
+        r"/v1/sessions",
+        lambda _r, _m: httpx.Response(200, json=_session_json(session_id="ses_app_start")),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: send_events_response(
+            data=[
+                BetaManagedAgentsUserMessageEvent(
+                    id="sevt_app_start",
+                    content=[BetaManagedAgentsTextBlock(type="text", text="hi")],
+                    type="user.message",
+                    processed_at=None,
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    runtime = _runtime(
+        build_fake_anthropic(router.dispatch),
+        session_factory=db_session_factory,
+        environment_name=_ENV_NAME,
+    )
+    runtime.settings.github_app = app_settings
+    runtime = replace(runtime, fernet=build_multifernet((Fernet.generate_key().decode(),)))
+    result = await _start_turn_impl(runtime, _auth(), "hi")
+
+    assert result["handle"] == "ses_app_start"
+    assert minted == [
+        {
+            "repository_ids": [101],
+            "permissions": {
+                "metadata": "read",
+                "contents": "read",
+                "issues": "read",
+                "pull_requests": "read",
+            },
+        }
+    ]
 
 
 async def test_start_turn_then_poll_get_session_and_read_transcript(
@@ -2311,6 +2419,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "github_fallback_pat",
         "github_app_id",
         "github_app_private_key",
+        "agent_github_app",
         "billing_exempt",
         "memory_read_only",
         "budget_channel_id",
