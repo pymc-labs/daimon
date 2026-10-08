@@ -242,6 +242,8 @@ def test_github_migrations_follow_agent_avatars() -> None:
     installation_kind = script.get_revision("0058_github_app_install_kind")
     assert installation_kind is not None
     assert installation_kind.down_revision == "0057_github_mcp_session_refresh"
+    panel_audit = script.get_revision("0059_security_audit_agent_name")
+    assert panel_audit is not None and panel_audit.down_revision == "0058_github_app_install_kind"
 
 
 def test_main_returns_zero_for_clean_real_tree(capsys: pytest.CaptureFixture[str]) -> None:
