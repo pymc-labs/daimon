@@ -206,11 +206,11 @@ GitHub App install-link tool: post_github_app_install_link.
 
 ## `here`
 
-Current-place status tool, sharing the slash commands' fixed card.
+Current-place status tool with short text and complete structured facts.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `where_am_i` | all callers | Return the fixed /here card with structured facts and rendered text. |
+| `where_am_i` | all callers | Return short /here text and full structured facts. |
 
 ## `media`
 

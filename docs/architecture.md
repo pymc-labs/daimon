@@ -1118,22 +1118,18 @@ admission before any of this runs.
   platform file URLs, size, and image content before replacing the public
   picture. Details keeps visibility and cache guidance off the main row.
 
-- **`/here`** in Discord and Slack reads access policy and credential names,
-  then renders one ephemeral card through `daimon.core.here_card`.
-  `where_am_i` in the MCP adapter returns that same card and structured facts
-  when the agent is asked about its identity, reach or credentials. The model
-  does not compose the card. A single line identifies the answering agent and
-  routing tier; `/agent-setup` and `explain_agent_resolution` provide routing
-  detail. The card shows the channel's stored reader/writer
-  rule, a stricter thread or category rule, and the resulting rule here. It
-  shows the responding agent's visible `runs_in` channels and home, who may
-  answer, whether that agent can read here, whether reads stay inside and memory is
-  writable, and whether publishing needs the requester's approval. These
-  answers use `daimon.core.permissions` and `authorize`. Its channel-turn view
-  uses member visibility even for an admin, because the model's answer may be
+- **`/here`** in Discord and Slack reads routing and access policy, then shows
+  an ephemeral card built from `daimon.core.here_card`: who answers here,
+  reading scope, and whether publishing needs approval. Discord uses an embed;
+  Slack uses Block Kit with a state colour and notes that threads can differ.
+  The card omits credential names, rule provenance, memory and session details.
+  `where_am_i` returns the same short text plus the complete structured facts.
+  The model does not compose either summary. `/agent-setup` and
+  `explain_agent_resolution` provide routing detail. The facts use
+  `daimon.core.permissions` and `authorize`. The MCP channel-turn view uses
+  member visibility even for an admin, because the model's answer may be
   posted to the channel. Slack slash commands have no thread identifier, so
-  Slack `/here` reports channel routing and says when thread routing could not
-  be checked.
+  Slack `/here` reports channel routing only.
   Discord read and scoped search tools explain when the bot lacks View Channel
   or Read Message History permission, including on an otherwise empty read.
 
