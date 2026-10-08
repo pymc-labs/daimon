@@ -21,8 +21,11 @@ picks it up answers there, and the form warns that the note leaves it.
 When it is, every answer also carries an Ask a human button (`card.ASK_HUMAN_DIALOG`),
 Slack's: it opens the same form in a dialog only the clicker sees, for the
 people who could have asked the agent there (`answer_access`), and the request
-links to that answer. The same post path carries a tenant's routed 👎 forms
-(`routes_feedback`, `feedback`), which spend no credit.
+links to that answer. One person asks once per answer: a second Send on it is
+told the first is in hand and spends nothing. Access is decided for the last
+time under the ledger and policy locks, in the transaction that spends. The
+same post path carries a tenant's routed 👎 forms (`routes_feedback`,
+`feedback`), which spend no credit.
 """
 
 from __future__ import annotations
@@ -34,11 +37,15 @@ from dataclasses import dataclass, replace
 
 import structlog
 from daimon.adapters.teams.answer_access import (
+    NOT_ALLOWED,
     POLICY_UNREADABLE,
     AnswerAccess,
     AnswerPlace,
     check_answer_access,
+    clicker,
+    may_start_turn_at,
     refusal_text,
+    sealed_at,
 )
 from daimon.adapters.teams.card import ASK_HUMAN_DIALOG
 from daimon.adapters.teams.card_actions import (
@@ -64,14 +71,16 @@ from daimon.adapters.teams.identity import DENIED, TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import (
     count_escalations_for_user,
     mark_delivered,
-    record_escalation,
+    record_escalation_once,
 )
 from daimon.core.stores.thread_sessions import get_latest_thread_session
 from daimon.core.support_escalation import (
+    ALREADY_REQUESTED,
     OUT_OF_CREDITS,
     RECEIVED,
     RECORDED_UNDELIVERED,
@@ -97,8 +106,10 @@ from microsoft_teams.cards import (
     TextBlock,
     TextInput,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
+    "ALREADY_REQUESTED",
     "OUT_OF_CREDITS",
     "RECEIVED",
     "RECORDED_UNDELIVERED",
@@ -130,7 +141,7 @@ SEALED_HINT = (
     "so don't paste anything that has to stay there. They get a link, not the conversation."
 )
 SEALED_LINE = "_From a channel read only from inside: answer there, the conversation stays in it._"
-# OUT_OF_CREDITS, RECEIVED and RECORDED_UNDELIVERED are the shared core copy
+# ALREADY_REQUESTED, OUT_OF_CREDITS, RECEIVED and RECORDED_UNDELIVERED are the shared core copy
 # (`daimon.core.support_escalation`), re-exported for this module's callers.
 
 
@@ -295,13 +306,10 @@ class SupportCommand:
             asked = _Asked(actor.user_id, activity.from_.name, chat, chat, activity.id, _DM_LINK)
         else:
             del self._asked[token]
-        if asked.place is not None:
-            # Decided again: the policy may have changed while the form sat in the chat.
-            access = await check_answer_access(self._runtime, actor, asked.place)
-            if access.access != "allowed":
-                return replace_card(text_card(TITLE, _refusal(access)))
-            asked = replace(asked, sealed=access.sealed)
-        return replace_card(text_card(TITLE, await self._escalate(actor.tenant_id, asked, note)))
+        # Access is decided again in `_escalate`: the policy may have changed while
+        # the form sat in the chat.
+        reply = await self._escalate(actor, asked, note, not_allowed=NOT_ALLOWED_THERE)
+        return replace_card(text_card(TITLE, reply))
 
     async def on_ask_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
@@ -331,7 +339,7 @@ class SupportCommand:
         return dialog(TITLE, ask_form(place.message_id, remaining, sealed=access.sealed))
 
     async def _ask_submit(self, activity: TaskSubmitInvokeActivity) -> TaskModuleResponse:
-        """Decided again here: the policy may have changed while the dialog was open.
+        """Decided again in `_escalate`: the policy may have changed while the dialog was open.
 
         The answer's id rides in the form; a forged one only points the
         submitter's own request at another message in the same conversation.
@@ -343,9 +351,11 @@ class SupportCommand:
             return dialog_message(DENIED)
         note = str(data.get(NOTE_INPUT) or "").strip()[:MAX_NOTE_CHARS]
         place = AnswerPlace.of(activity, message_id)
-        if (access := await check_answer_access(self._runtime, actor, place)).access != "allowed":
-            return dialog_message(refusal_text(access.access))
         if not note:
+            # Only someone who may ask there gets the form back to fix.
+            access = await check_answer_access(self._runtime, actor, place)
+            if access.access != "allowed":
+                return dialog_message(refusal_text(access.access))
             remaining = await self._remaining(actor.tenant_id, actor.user_id)
             form = ask_form(message_id, remaining, sealed=access.sealed, error=USAGE)
             return dialog(TITLE, form)
@@ -359,9 +369,8 @@ class SupportCommand:
             message_id,
             link,
             place,
-            access.sealed,
         )
-        return dialog_message(await self._escalate(actor.tenant_id, asked, note))
+        return dialog_message(await self._escalate(actor, asked, note, not_allowed=NOT_ALLOWED))
 
     async def _remaining(self, tenant_id: uuid.UUID, user_id: str) -> int:
         async with self._runtime.sessionmaker() as session:
@@ -371,9 +380,33 @@ class SupportCommand:
         allowance = self._runtime.settings.support.credits_per_user
         return remaining_credits(allowance=allowance, used=used)
 
-    async def _escalate(self, tenant_id: uuid.UUID, asked: _Asked, note: str) -> str:
-        """Record the request, post it, and say how it went."""
+    async def _escalate(self, actor: Actor, asked: _Asked, note: str, *, not_allowed: str) -> str:
+        """Record the request once per message, post it, and say how it went.
+
+        A request from a channel is decided under the ledger and policy locks
+        (`record_escalation_once`), so the policy it is allowed by is the one
+        the credit is spent against; `not_allowed` is the refusal's wording.
+        """
         runtime = self._runtime
+        tenant_id = actor.tenant_id
+        refusal, sealed = not_allowed, False
+        source_allowed = None
+        if asked.place is not None:
+            place = asked.place
+            # Looked up with no session open: Graph may be slow.
+            caller = await clicker(runtime, actor)
+
+            async def allowed_at_place(locked: AsyncSession) -> bool:
+                nonlocal refusal, sealed
+                try:
+                    policy = await load_access_policy(locked, tenant_id=tenant_id)
+                except AccessPolicyUnreadable:
+                    refusal = POLICY_UNREADABLE
+                    return False
+                sealed = sealed_at(policy, place)
+                return await may_start_turn_at(locked, policy, actor, caller, place)
+
+            source_allowed = allowed_at_place
         async with runtime.sessionmaker.begin() as session:
             thread = await get_latest_thread_session(
                 session, tenant_id=tenant_id, platform="teams", thread_id=asked.thread_id
@@ -381,7 +414,7 @@ class SupportCommand:
             principal = await find_platform_principal(
                 session, tenant_id=tenant_id, platform="teams", external_id=asked.user_id
             )
-            row = await record_escalation(
+            outcome = await record_escalation_once(
                 session,
                 tenant_id=tenant_id,
                 account_id=principal.account_id if principal is not None else None,
@@ -392,13 +425,21 @@ class SupportCommand:
                 ma_session_id=thread.ma_session_id if thread is not None else None,
                 note=note,
                 allowance=runtime.settings.support.credits_per_user,
+                source_allowed=source_allowed,
             )
+        if outcome.status == "refused":
+            log.info("support.refused", tenant_id=str(tenant_id))
+            return refusal
+        if outcome.status == "duplicate":
+            log.info("support.duplicate_request", tenant_id=str(tenant_id))
+            return ALREADY_REQUESTED
+        row = outcome.row
         if row is None:
             log.info("support.out_of_credits", tenant_id=str(tenant_id))
             return OUT_OF_CREDITS
         # The row is committed; delivery below is best effort, and a failure
         # only changes what the person is told.
-        body = asked.body(note)
+        body = replace(asked, sealed=sealed).body(note)
         delivered = await self._chat_admins(tenant_id, asked, body) or (
             await post_to_support_channel(runtime, self._direct, body)
         )
@@ -408,7 +449,7 @@ class SupportCommand:
         log.info("support.escalation_recorded", escalation_id=str(row.id), delivered=delivered)
         if not delivered:
             return RECORDED_UNDELIVERED
-        return received_text(remaining=await self._remaining(tenant_id, asked.user_id))
+        return received_text(remaining=outcome.remaining)
 
     async def _chat_admins(self, tenant_id: uuid.UUID, asked: _Asked, body: str) -> bool:
         """Message the channel's admins, else the tenant's admins. True once a tier got it.

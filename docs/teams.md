@@ -69,7 +69,7 @@ The last part of an answer carries Teams' thumbs up/down. 👍 records the vote;
 👎 opens a "What went wrong?" form with optional reasons and text, at least one
 required. When support is set up the answer also has an Ask a human button
 that opens the `support` form for it, spending a credit, and the post links
-to the answer. A turn that only ran tools gets both on its finished card; a
+to the answer; asking again about the same answer spends nothing. A turn that only ran tools gets both on its finished card; a
 cancelled turn gets neither. Only people who could start a turn at that
 answer can vote or ask. With `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` on, each
 submitted 👎 form is posted once to the support channel without spending a
@@ -134,7 +134,9 @@ details and Teams has no message only its sender sees. One typed in a channel
 is answered in the sender's 1:1 chat, opened if needed, with a short pointer
 in the channel; `new` there says each post is its own conversation. A message
 is a command only when it is the bare word (or `memory /<path>`); anything
-longer goes to the agent. None of them runs an agent turn.
+longer goes to the agent. A message that is exactly a command word runs the
+command, so a reply of just `here` shows the status card rather than reaching
+the agent. None of them runs an agent turn.
 
 | Command | Does |
 | --- | --- |

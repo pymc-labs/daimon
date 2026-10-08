@@ -261,6 +261,32 @@ async def test_ask_a_human_on_an_answer_spends_a_credit_and_links_the_answer(
     assert (row.message_id, row.channel_id) == ("m-7", CONVERSATION_ID)
 
 
+async def test_ask_a_human_twice_on_one_answer_spends_one_credit(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with _running(db_session_factory, teams_api_fake) as service:
+        await post_activity(service, _ask("send", message="m-7", note="wrong totals"))
+        again = await post_activity(service, _ask("send", message="m-7", note="still wrong"))
+
+    assert again["task"]["value"] == support.ALREADY_REQUESTED, "told the first is in hand"
+    assert len(await _rows(db_session_factory)) == 1, "one request, one credit"
+    assert len(_posts_to(teams_api_fake, OPS)) == 1, "the support team hears it once"
+
+
+async def test_a_typed_request_is_refused_when_the_policy_changed_before_send(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with _running(db_session_factory, teams_api_fake) as service:
+        card = await _form(service, teams_api_fake, make_channel_activity(text="support"))
+        policy = TenantAccessPolicy(invoker_user_ids=(OTHER_AAD_OBJECT_ID,))
+        async with db_session_factory.begin() as session:
+            await set_access_policy(session, tenant_id=TENANT, policy=policy)
+        reply = await _send(service, _token(card), "help")
+
+    assert support.NOT_ALLOWED_THERE in reply, "decided again, in the spending transaction"
+    assert await _rows(db_session_factory) == [] and _posts_to(teams_api_fake, OPS) == []
+
+
 async def test_ask_a_human_with_no_note_shows_the_form_again(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
