@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from anthropic.types.beta.beta_managed_agents_agent_tool_config import (
-    BetaManagedAgentsAgentToolConfig,
+    BetaManagedAgentsBashToolConfig,
 )
 from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
     BetaManagedAgentsAgentToolset20260401,
@@ -545,7 +545,7 @@ def test_build_authoring_params_drops_response_fields_the_sdk_does_not_declare()
     toolset = BetaManagedAgentsAgentToolset20260401(
         type="agent_toolset_20260401",
         configs=[
-            BetaManagedAgentsAgentToolConfig(
+            BetaManagedAgentsBashToolConfig(
                 name="bash",
                 enabled=True,
                 permission_policy=BetaManagedAgentsAlwaysAllowPolicy(type="always_allow"),
@@ -563,9 +563,16 @@ def test_build_authoring_params_drops_response_fields_the_sdk_does_not_declare()
 
     params = build_authoring_params(toolset)
 
+    # SPIKE: anthropic 1.x declares `type` on each tool config, so it is no
+    # longer an unmodelled extra; this test needs a genuinely undeclared field.
     assert params["configs"] == [
-        {"name": "bash", "enabled": True, "permission_policy": {"type": "always_allow"}}
-    ], "the unmodelled nested `type` must not survive into authoring params"
+        {
+            "name": "bash",
+            "enabled": True,
+            "permission_policy": {"type": "always_allow"},
+            "type": "bash",
+        }
+    ], "the now-declared nested `type` survives into authoring params"
     assert params["type"] == "agent_toolset_20260401", (
         "the toolset's own declared discriminator must survive"
     )
