@@ -837,12 +837,22 @@ async def test_sweep_logs_absorbed_cost_of_exempt_session(
     principal = await make_platform_principal(
         db_session, platform="discord", external_id="discord-user-log"
     )
-    client = build_fake_anthropic(
-        _two_session_router(tenant_id=principal.tenant_id, account_id=principal.account_id).dispatch
-    )
+    router = _two_session_router(tenant_id=principal.tenant_id, account_id=principal.account_id)
+    exempt_types: list[list[str]] = []
+
+    def dispatch(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/sessions/sesn_exempt/events":
+            exempt_types.append(req.url.params.get_list("types[]"))
+        return router.dispatch(req)
+
+    client = build_fake_anthropic(dispatch)
 
     with structlog.testing.capture_logs() as logs:
         recorded = await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.5"))
+
+    assert exempt_types == [["span.model_request_end"]], (
+        f"the exempt session's events are filtered to model calls server-side, got {exempt_types}"
+    )
 
     assert recorded == 1, f"only the billed session's event is replayed, got {recorded}"
     skipped = [e for e in logs if e["event"] == "usage_sweep.exempt_skipped"]
