@@ -1870,8 +1870,13 @@ class SlackApp:
                 else None,
             )
         except NamedAgentRefused as err:
+            from daimon.adapters.slack.named_agent_notices import build_named_agent_blocks
+
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                channel=channel, thread_ts=thread_id, text=escape_mrkdwn(str(err))
+                channel=channel,
+                thread_ts=thread_id,
+                text=escape_mrkdwn(str(err)),
+                blocks=build_named_agent_blocks(err),
             )
             return
         except MissingTurnConfigError as err:

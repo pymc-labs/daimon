@@ -164,6 +164,7 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         #    comes first because the admin early-exits in the view checks are
         #    keyed to the caller's perms in THIS guild and must not validate a
         #    channel belonging to another tenant's guild.
+        validated_channels: dict[str, discord.abc.GuildChannel | discord.Thread] = {}
         if channel_ids:
             for ch_id in channel_ids:
                 try:
@@ -173,6 +174,7 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                         raise _bot_read_error(ch_id) from exc
                     raise
                 guild_ch = _require_guild_channel(raw_ch, guild_id)
+                validated_channels[ch_id] = guild_ch
                 if isinstance(guild_ch, discord.Thread):
                     await _check_thread_view(c, guild_ch, member, user_id)
                     read_policy.require(ch_id, str(guild_ch.parent_id))
@@ -219,10 +221,10 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         except discord.Forbidden as exc:
             if exc.code == 50001:
                 if channel_ids:
-                    raise _bot_read_error(channel_ids[0]) from exc
+                    raise _bot_read_error(validated_channels[channel_ids[0]]) from exc
                 raise ToolError(
-                    "daimon's Discord role can't search this server; a server admin can grant "
-                    "View Channel and Read Message History"
+                    "I can't open this server's messages.\n"
+                    "A server admin can give daimon View Channel and Read Message History there."
                 ) from exc
             raise
 

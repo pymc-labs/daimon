@@ -307,12 +307,20 @@ async def test_scoped_empty_search_explains_bot_history_permission(
         )
 
 
-async def test_search_403_missing_access_is_plain(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("channel_ids", "opening"),
+    [(None, "I can't open this server's messages."), (["222"], "I can't open #general.")],
+)
+async def test_search_403_missing_access_is_plain(
+    monkeypatch: pytest.MonkeyPatch, channel_ids: list[str] | None, opening: str
+) -> None:
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path in _standard_guild_member_routes():
             return _standard_guild_member_routes()[route.path]
         if route.path == "/guilds/{guild_id}/channels":
             return [_text_channel_payload()]
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload()
         if route.path == "/guilds/{guild_id}/messages/search":
             raise discord.Forbidden(
                 MagicMock(status=403, reason="Forbidden"),
@@ -321,8 +329,11 @@ async def test_search_403_missing_access_is_plain(monkeypatch: pytest.MonkeyPatc
         raise AssertionError(f"unexpected route {route.method} {route.path}")
 
     patch_discord_http(monkeypatch, handler)
-    with pytest.raises(ToolError, match="can't search this server"):
-        await _search_messages_impl(_runtime_with_discord_token(), _auth(), content="hello")
+    with pytest.raises(ToolError) as refusal:
+        await _search_messages_impl(
+            _runtime_with_discord_token(), _auth(), content="hello", channel_ids=channel_ids
+        )
+    assert str(refusal.value).startswith(opening + "\n")
 
 
 # ---------------------------------------------------------------------------

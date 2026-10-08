@@ -32,8 +32,10 @@ from daimon.core.session_snapshot import (
 )
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.discord_agent_roles import save_role
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
+from daimon.core.turn.errors import NamedAgentRefused
 from daimon.testing import (
     DEFAULT_MODEL_ID,
     ma_agent,
@@ -2362,6 +2364,57 @@ class TestUnpromptedAdmission:
             )
         admission.assert_awaited_once()
         assert admission.await_args.kwargs["requested_agent_name"] is None
+
+    async def test_named_notice_disables_mentions_and_keeps_switch_action(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_thread_message(content="<@999> Planner: draft")
+        refusal = NamedAgentRefused(
+            kind="thread",
+            current_name="Daimon",
+            named_name="<@everyone>",
+            hand_over_agent_id="ag_planner",
+            hand_over_agent_name="Planner",
+        )
+        with patch("daimon.adapters.discord.bot.admit", new_callable=AsyncMock) as admission:
+            admission.side_effect = refusal
+            await bot._orchestrate(message, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
+        posted = message.channel.send.await_args.kwargs  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        assert posted["allowed_mentions"].to_dict() == discord.AllowedMentions.none().to_dict()
+        component = posted["view"].to_components()[0]["components"][-1]["components"][0]
+        assert component["custom_id"] == "tho:ag_planner"
+
+    async def test_two_managed_role_mentions_reach_admission_together(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await db_session.commit()
+        async with db_session_factory.begin() as session:
+            for role_id, agent_id in (("456", "ag_one"), ("457", "ag_two")):
+                await save_role(
+                    session,
+                    tenant_id=tenant.id,
+                    ma_agent_id=agent_id,
+                    role_id=role_id,
+                    agent_name=agent_id,
+                )
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_thread_message(content="<@&456> <@&457> please draft")
+        message.role_mentions = [types.SimpleNamespace(id=456), types.SimpleNamespace(id=457)]  # type: ignore[list-item]  # role mentions
+        with patch("daimon.adapters.discord.bot.admit", new_callable=AsyncMock) as admission:
+            admission.side_effect = NamedAgentRefused(kind="two")
+            await bot._orchestrate(message, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
+        assert admission.await_args.kwargs["requested_agent_ids"] == ["ag_one", "ag_two"]
+        posted = message.channel.send.await_args.kwargs  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        assert posted["view"].to_components()[0]["components"][0]["content"] == (
+            "## You named two agents."
+        )
 
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_missing_config_is_silent_when_unprompted(

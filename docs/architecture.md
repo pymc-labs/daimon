@@ -142,9 +142,13 @@ config). The order is load-bearing and documented as such in the module:
    through `authorize(RUN_AGENT)` for the agent's `runs_in` and home rules,
    plus the usual invoker and budget checks. A new named thread records a
    `handoff` binding so later replies keep its agent. A bound thread rejects a
-   different named agent and points to Hand over or `hand_off_task`. A
-   channel with `readers: own` accepts only its own agent and names that agent
-   in the refusal. On processes running the wake poller, Discord reconciles
+   different named agent and offers the existing Hand over action on Discord
+   and Slack. Teams shows the same notice without a button. Two visible agent
+   choices get a request to use one name. A channel with `readers: own` accepts
+   only its own agent and names that agent in the refusal. The five refusal
+   cases share one copy source: Discord renders a notice card, Slack renders
+   Block Kit and Teams renders an Adaptive Card. On processes running the wake
+   poller, Discord reconciles
    roles after ready, every ten minutes, within a minute of a policy change,
    after its agent-create and channel-rule panel actions, and when a used role
    has an outdated name. It excludes

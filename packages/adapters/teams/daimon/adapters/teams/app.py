@@ -27,7 +27,7 @@ import structlog
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.budget_notice import with_budget_notifier
-from daimon.adapters.teams.card import enable_files_card
+from daimon.adapters.teams.card import enable_files_card, named_agent_notice_card
 from daimon.adapters.teams.card_actions import stored_external, toast
 from daimon.adapters.teams.channel_admin_groups import owned_team_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
@@ -861,7 +861,12 @@ class TeamsApp:
                 else None,
             )
         except NamedAgentRefused as err:
-            await self._say(inbound, str(err))
+            if not inbound.unprompted:
+                await self._sender.send(
+                    inbound.conversation_id,
+                    named_agent_notice_card(err),
+                    service_url=inbound.service_url,
+                )
             if reraise:
                 raise
             return

@@ -2543,27 +2543,18 @@ class DaimonBot(commands.Bot):
                 now=datetime.now(UTC),
                 category_id=category_id,
                 category_unresolved=category_unresolved,
-                requested_agent_id=selected_roles[0].ma_agent_id if selected_roles else None,
+                requested_agent_ids=[row.ma_agent_id for row in selected_roles],
                 requested_agent_name=name_after_mention(message.content, direct_mention.group(0))
-                if direct_mention is not None and not selected_roles
+                if direct_mention is not None
                 else None,
             )
         except NamedAgentRefused as err:
-            from daimon.adapters.discord.thread_handoff import hand_over_view
+            from daimon.adapters.discord.named_agent_notices import build_named_agent_notice
 
-            view = (
-                hand_over_view(agent_id=err.hand_over_agent_id, agent_name=err.hand_over_agent_name)
-                if err.hand_over_agent_id is not None and err.hand_over_agent_name is not None
-                else None
+            await (thread or message.channel).send(
+                view=build_named_agent_notice(err),
+                allowed_mentions=discord.AllowedMentions.none(),
             )
-            if view is None:
-                await (thread or message.channel).send(
-                    str(err), allowed_mentions=discord.AllowedMentions.none()
-                )
-            else:
-                await (thread or message.channel).send(
-                    str(err), view=view, allowed_mentions=discord.AllowedMentions.none()
-                )
             return
         except MissingTurnConfigError as err:
             log.info(

@@ -224,6 +224,7 @@ async def admit(
     external: ExternalFinding | None = None,
     requested_agent_name: str | None = None,
     requested_agent_id: str | None = None,
+    requested_agent_ids: Sequence[str] = (),
 ) -> Admission:
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
@@ -249,6 +250,7 @@ async def admit(
                 external=external,
                 requested_agent_name=requested_agent_name,
                 requested_agent_id=requested_agent_id,
+                requested_agent_ids=requested_agent_ids,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -276,6 +278,7 @@ async def admit_impl(
     external: ExternalFinding | None = None,
     requested_agent_name: str | None = None,
     requested_agent_id: str | None = None,
+    requested_agent_ids: Sequence[str] = (),
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool.
 
@@ -378,12 +381,16 @@ async def admit_impl(
                 context=scope.model_copy(update={"thread_id": None}),
                 default=deps.deployment_default,
             )
-            if (requested_agent_name is not None or requested_agent_id is not None)
+            if (
+                requested_agent_name is not None
+                or requested_agent_id is not None
+                or requested_agent_ids
+            )
             and thread_id is not None
             else config
         )
     named_agent = None
-    if requested_agent_name is not None or requested_agent_id is not None:
+    if requested_agent_name is not None or requested_agent_id is not None or requested_agent_ids:
         here = channel_permissions(
             policy,
             channel_id=thread_id or channel_id,
@@ -421,15 +428,21 @@ async def admit_impl(
             is None
             or agent_home == here.home
         ]
-        named_agent = (
-            next((agent for agent in visible if agent.id == requested_agent_id), None)
-            if requested_agent_id is not None
-            else matching_agent(visible, requested_agent_name or "")
-        )
-        if named_agent is None and requested_agent_id is not None:
-            raise NamedAgentRefused(
-                "That agent is unavailable. Ask an admin to refresh agent roles."
+        requested_ids = tuple(
+            dict.fromkeys(
+                (*requested_agent_ids, *((requested_agent_id,) if requested_agent_id else ()))
             )
+        )
+        by_id = {agent.id: agent for agent in visible}
+        if any(agent_id not in by_id for agent_id in requested_ids):
+            raise NamedAgentRefused(kind="unavailable")
+        by_name = matching_agent(visible, requested_agent_name) if requested_agent_name else None
+        selected = {agent_id: by_id[agent_id] for agent_id in requested_ids}
+        if by_name is not None:
+            selected[by_name.id] = by_name
+        if len(selected) > 1:
+            raise NamedAgentRefused(kind="two")
+        named_agent = next(iter(selected.values()), None)
         if named_agent is not None:
             async with deps.sessionmaker() as session:
                 live_sessions = (
@@ -443,14 +456,28 @@ async def admit_impl(
                 config.thread_binding_id is not None
                 and config.responder_ma_agent_id != named_agent.id
             ) or any(row.ma_agent_id != named_agent.id for row in live_sessions):
+                current_id = (
+                    config.responder_ma_agent_id
+                    if config.thread_binding_id
+                    else next(
+                        (
+                            row.ma_agent_id
+                            for row in live_sessions
+                            if row.ma_agent_id != named_agent.id
+                        ),
+                        None,
+                    )
+                )
+                current = by_id.get(current_id) if current_id is not None else None
+                current_name = current.name if current is not None else "an agent"
                 if config.thread_binding_kind == "setup":
                     raise NamedAgentRefused(
-                        "This setup thread keeps its current agent. "
-                        "Start a new thread for another agent."
+                        kind="setup", current_name=current_name, named_name=named_agent.name
                     )
                 raise NamedAgentRefused(
-                    "This thread already belongs to another agent. Use Hand over where available "
-                    "or ask the current agent to call hand_off_task.",
+                    kind="thread",
+                    current_name=current_name,
+                    named_name=named_agent.name,
                     hand_over_agent_id=named_agent.id,
                     hand_over_agent_name=named_agent.name,
                 )
@@ -458,9 +485,9 @@ async def admit_impl(
                 policy, agent_names(named_agent.name, named_agent.metadata)
             )
             if here.home is not None and run_refusal(named_permissions, here) is not None:
-                own = parent_config.agent_name or "this channel's agent"
+                own = matching_agent(visible, parent_config.agent_name or "")
                 raise NamedAgentRefused(
-                    f"This channel answers as {own}. Name that agent here instead."
+                    kind="own", current_name=own.name if own is not None else "this channel's agent"
                 )
             config = config.model_copy(
                 update={
@@ -610,7 +637,12 @@ async def admit_impl(
         is_dm=is_dm,
         is_external=is_external,
     )
-    _require_run_agent(policy, grant)
+    try:
+        _require_run_agent(policy, grant)
+    except AdmissionDenied as exc:
+        if named_agent is not None:
+            raise NamedAgentRefused(kind="unavailable", denial_reason=exc.reason) from exc
+        raise
     mark("agent_policy")
 
     budget_channel_id = agent_permissions(policy, grant.agent.names).budget_channel or (

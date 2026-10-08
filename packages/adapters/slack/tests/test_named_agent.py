@@ -21,7 +21,13 @@ async def test_slack_passes_named_mention_to_admit() -> None:
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock) as admit,
     ):
         admin.return_value = True
-        admit.side_effect = NamedAgentRefused("stop")
+        admit.side_effect = NamedAgentRefused(
+            kind="thread",
+            current_name="Daimon",
+            named_name="Planner",
+            hand_over_agent_id="ag_planner",
+            hand_over_agent_name="Planner",
+        )
         await app._run_thread_turn_observed(
             {"user": "U", "text": "<@B> Planner: draft", "ts": "1"},
             channel="C",
@@ -31,3 +37,8 @@ async def test_slack_passes_named_mention_to_admit() -> None:
             team_id="T",
         )
     assert admit.await_args.kwargs["requested_agent_name"] == "Planner"
+    posted = web_client.chat_postMessage.await_args.kwargs
+    assert posted["text"] == (
+        "This thread is with Daimon.\nStart a new message in the channel to ask Planner."
+    )
+    assert posted["blocks"][-1]["elements"][0]["value"] == "ag_planner"
