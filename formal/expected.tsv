@@ -15,8 +15,11 @@ approvals	Approvals	ApprovalsPreFix	violates:NoFalseNotAccepted	162	-	pre-#446 d
 approvals	Approvals	ApprovalsPreFixLateRun	violates:ApprovedRunsInTurn	346	-	pre-#446 queued allow runs after turn end
 approvals	Approvals	ApprovalsReAsk	clean	413	-	genuine post-echo re-ask safely ends not accepted
 approvals	Approvals	ApprovalsDroppedConfirm	clean	629	-	dropped queue terminates via quiet-stream timeout
-approvals	Approvals	ApprovalsQuietEarly	violates:ApprovedRunsInTurn	172	-	conditional current-code eventless early exit while allow remains queued
-approvals	Approvals	ApprovalsEarlyCard	violates:CardTruth	14	-	current Discord card displays approved before gathered batch is sent
+approvals	Approvals	ApprovalsQuietEarly	violates:ApprovedRunsInTurn	143	-	pre-fix eventless early exit while allow remains queued
+approvals	Approvals	ApprovalsQuietBounded	clean	836	-	two extra idle cycles; assuming MA consumes or drops queued confirmation within the bound, safety and progress hold
+approvals	Approvals	ApprovalsQuietLateBeyondBound	violates:ApprovedRunsInTurn	420	-	residual if MA takes a queued allow after the two-cycle bound
+approvals	Approvals	ApprovalsEarlyCard	clean	1034	-	retiring an unsent approval on refusal restores eventual card truth
+approvals	Approvals	ApprovalsEarlyCardOld	violates:EventualCardTruth	1061	-	old refusal path leaves an unsent approved card after turn end
 # ---- scheduler ----
 scheduler	RoutineScheduler	RoutineScheduler	clean	110	-	two schedulers, one lock: one dispatch per occurrence
 scheduler	RoutineScheduler	RoutineSchedulerProgress	clean	110	-	liveness under fairness: pending completes, first occurrence advances
