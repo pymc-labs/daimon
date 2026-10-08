@@ -72,6 +72,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub App grants can be staged and activated per agent. App sessions use per-turn repository tokens and a session-owned vault; legacy agents retain their existing GitHub path. The GitHub connection page offers Select all for repos the confirmer administers, and the default environment includes `gh`.
 
 - `/here` on Discord and Slack shows a fixed, caller-filtered card for channel access, stored channel and agent rules, their effective limits here, and credential names. It points to the answering agent and routing tier in one line. The `where_am_i` MCP tool returns the same card for conversational questions. Discord read and scoped search tools explain when the bot lacks channel view or message history access.
+- **`here` on Teams.** Typed in a channel post, `here` answers in the 1:1
+  chat with the same card as Discord and Slack for that post's thread: who
+  answers and why, the channel and agent rules and their effect there, what
+  the agent can read and the credential names it holds. Typed in the chat it
+  describes the chat, or the setup conversation it is in. Only the place it
+  was typed in counts as one the caller can see, so an agent rule's other
+  channels stay unnamed. The `where_am_i` MCP tool now answers in Teams
+  channel turns too, and the card names a Teams setter by stored name.
+- **Teams `memory` shows the agent where it was typed.** Typed in a channel
+  post, `memory` now lists what that post's agent remembers, following a
+  thread handed to another agent, instead of the 1:1 chat's agent. The answer
+  still arrives in the 1:1 chat, so when the channel's readers are limited
+  (`inside` or `own`) the card says the memory is kept inside the channel and
+  shows nothing, rather than carry it out. Typed in the chat it is
+  unchanged.
+- **Teams `billing` shows the channel's budget.** Typed in a channel with a
+  budget, `billing` adds the **This channel** section the Discord and Slack
+  panels show, worded from its state, and keeps it across Refresh, Add credit
+  and Redeem code clicks on the card. The channel is held server-side for the
+  person who typed the command, so a crafted click cannot read another
+  channel's budget; after a restart a refresh drops the section until
+  `billing` is typed again.
+- **Look up a person on the Teams billing card.** Admins get a **Look up a
+  person** action with the Teams people picker over the organisation's
+  directory. Picking someone shows their spend and turn count this month
+  under the actions, with the name daimon stored for them, or "Name
+  unavailable" for someone it has never seen. Admin is checked again on the
+  click, as on Discord and Slack.
 
 - Slack message reads and searches include file metadata and expiring download links. `send_message` uploads staged file handles, or reposts a file link from the same workspace when the requester can read the file where it was shared and the channel policy lets the call read it there; a file in a sealed thread is reposted only into that thread, and a file shared only in a 1:1 DM only into a DM. `add_skill` applies the same check to a Slack file link. A caption is required, the combined limit is ten files, and posting needs the `files:write` scope. The upload messages are recorded with the caption, so the agent can delete them and `delete_thread` still accepts a thread whose files it posted. Slack thread reads return continuation cursors for newer replies.
 - A thread can move to another agent without opening a new thread. Ask the agent in the thread to hand it over (`hand_off_task`), or, when a channel's agent changed under an existing thread, press Hand over on the notice that thread shows (Discord, Slack and Teams). The new agent gets the conversation and working files from the next message, and the old session is archived with its history still readable. Inherited seals keep memory read-only. A member may hand a thread to an agent of that channel: the one it answers with, one pinned to it, or one of an isolated channel's own agents. Other agents need a server admin, or a channel admin of the channel when the thread is not sealed and the agent is one they could make its default.

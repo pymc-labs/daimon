@@ -248,6 +248,7 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 Members can read a channel's budget with `get_channel_budget`; listing,
 setting and clearing are for server admins only, never a channel's own admins
 (`daimon.core.authz`, `SET_CHANNEL_BUDGET`); each change is recorded in `security_audit_events`, from the CLI too. `/billing` in a channel with a budget
+(`billing` typed in one on Teams, answered in the 1:1 chat)
 shows it in a **This channel** section under the credit, worded from its
 window (`$1.20 of $5.00 used this month`, `… used since 2026-07-01`, `$5.00
 budget from 2026-07-01` before it starts). An admin's `/billing` also lists,
@@ -526,9 +527,9 @@ platform. A member sees their own use against their cap and the credit left,
 with "Ask an admin to add credit."; an admin sees the month's spend and how
 many people spent it, the credit left, the **Top spenders** (five, then a
 count) and the **Channel budgets**, with the actions **Add credit** and
-**Redeem code** (while a code is redeemable) and, on Discord and Slack, a
-**Look up a person** picker that re-checks admin and shows one person's spend
-this month. Both get **Expiry dates** while the credit includes timed credit:
+**Redeem code** (while a code is redeemable) and a **Look up a person**
+picker that re-checks admin and shows one person's spend this month (on Teams,
+the people picker over the organisation's directory). Both get **Expiry dates** while the credit includes timed credit:
 a private reply on Discord, a pushed view on Slack, an expanding section on
 Teams. Admin-only figures are not fetched for a non-admin rather than fetched
 and hidden. On Discord the panel's accent is red with no credit left or the

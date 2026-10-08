@@ -141,10 +141,11 @@ longer goes to the agent. None of them runs an agent turn.
 | `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
 | `help` | List the commands. |
 | `setup` | Agents, their details and who answers where; create an agent, add a skill to one, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
+| `here` | Who answers where it was typed (a channel post's thread, or the 1:1 chat), its rules, what the agent can read and the credential names it holds. Only that place counts as one you can see, so an agent rule's other channels stay unnamed. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
-| `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
+| `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. Typed in a channel whose readers are limited, it says so instead, since the answer would leave the channel. |
 | `privacy` | See, export or delete what daimon stores about you. |
-| `billing` | Your usage this month and the credit left, with when timed credit expires; admins also see the month's spend, the top spenders and channel budgets, add credit and redeem promo codes. |
+| `billing` | Your usage this month and the credit left, with when timed credit expires, and, typed in a channel with a budget, that budget; admins also see the month's spend, the top spenders and channel budgets, add credit, redeem promo codes and look up one person's spend with the people picker. |
 | `support` | Ask a person for help: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked; one from a channel with channel admins goes to them first (above). |
 
 A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
