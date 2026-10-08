@@ -298,6 +298,7 @@ class TurnCardIntentRow(BaseModel):
     channel_id: str | None
     message_id: str | None
     status: Literal["prepared", "posted", "retired", "unrecoverable"]
+    recovery_failures: int = 0
     created_at: datetime
     updated_at: datetime
 

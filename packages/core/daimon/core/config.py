@@ -407,13 +407,34 @@ class DiscordSettings(BaseModel):
     )
     turn_card_unrecoverable_after_s: int = Field(
         default=86400,
-        ge=3600,
+        ge=1,
         description=(
-            "Age in seconds after which a Discord turn card that boot recovery cannot "
-            "resolve becomes unrecoverable. Recovery attempts to delete a known stale card "
-            "when the bot has Manage Messages permission."
+            "Minimum age in seconds before Discord can retire a card after definite "
+            "recovery failure or repeated failed recovery passes. Must exceed the turn "
+            "ceiling. Recovery runs at startup and periodically, and deletes a known "
+            "pending card when the bot has Manage Messages permission."
         ),
     )
+    turn_card_unrecoverable_after_attempts: int = Field(
+        default=3,
+        ge=2,
+        description=(
+            "Failed Discord card recovery passes required before an aged intent can "
+            "be retired without a definite platform failure. Count persists across restarts."
+        ),
+    )
+
+    @field_validator("turn_card_unrecoverable_after_s")
+    @classmethod
+    def _stale_card_age_exceeds_turn_ceiling(cls, age_s: int) -> int:
+        # Import after config is initialized: turn.__init__ imports admission,
+        # which imports config, so a module-level import would form a cycle.
+        from daimon.core.turn.ceiling import TURN_CEILING_S
+
+        if age_s <= TURN_CEILING_S:
+            raise ValueError("turn card unrecoverable age must exceed the turn ceiling")
+        return age_s
+
     health_port: int = Field(
         default=8081,
         description=(

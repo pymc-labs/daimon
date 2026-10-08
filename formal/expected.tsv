@@ -184,8 +184,10 @@ discord_webhooks	WebhookLoad	LoadUnsafeBackoff	violates:NoBusyRetry	38	-	ignorin
 discord_webhooks	WebhookLoad	LoadUnsafeBound	violates:BoundedPosting	406	-	two windows cannot carry six calls through a two-per-window hook
 discord_webhooks	CardRecovery	CardSafe	clean	17	-	durable intent and token-available recovery clear the pending card
 discord_webhooks	CardRecovery	CardMissingToken	clean	17	-	missing token retains the intent until a definite failure allows age-out
-discord_webhooks	CardRecovery	CardStaleUnrecoverable	clean	20	-	aged intent needs definite recovery failure before terminal state without delete permission
-discord_webhooks	CardRecovery	CardStaleDelete	clean	19	-	bot deletes only a stale pending card after definite recovery failure
+discord_webhooks	CardRecovery	CardStaleUnrecoverable	clean	20	-	aged intent needs a qualifying recovery failure before terminal state without delete permission
+discord_webhooks	CardRecovery	CardStaleDelete	clean	19	-	bot deletes only a stale pending card after a qualifying recovery failure
+discord_webhooks	CardRecovery	CardPeriodicSafe	clean	26	-	periodic recovery while process runs cannot retire a live turn
+discord_webhooks	CardRecovery	CardPeriodicLiveUnsafe	violates:NoLiveTurnRetired	19	-	periodic age-out without a live-turn guard retires an active turn
 discord_webhooks	CardRecovery	CardAnsweredSafe	clean	26	-	aged recovery failure leaves a card carrying the finished answer intact
 discord_webhooks	CardRecovery	CardUnsafeAnsweredDelete	violates:NoDeletedAnswer	26	-	deleting a recorded message ID without checking its pending button loses the answer
 discord_webhooks	CardRecovery	CardUnsafeStale	violates:NoStaleActive	17	-	old behavior keeps an aged unresolved intent active forever

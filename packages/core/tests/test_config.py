@@ -22,10 +22,24 @@ from daimon.core.config import (
 from pydantic import HttpUrl, PostgresDsn, SecretStr, ValidationError
 
 
-def test_discord_stale_card_age_defaults_to_one_day_and_has_floor() -> None:
-    assert DiscordSettings(bot_token=SecretStr("test")).turn_card_unrecoverable_after_s == 86400
+def test_discord_stale_card_age_exceeds_turn_ceiling_and_attempts_are_bounded() -> None:
+    from daimon.core.turn.ceiling import TURN_CEILING_S
+
+    defaults = DiscordSettings(bot_token=SecretStr("test"))
+    assert defaults.turn_card_unrecoverable_after_s == 86400
+    assert defaults.turn_card_unrecoverable_after_attempts == 3
     with pytest.raises(ValidationError):
-        DiscordSettings(bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=3599)
+        DiscordSettings(
+            bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=int(TURN_CEILING_S)
+        )
+    with pytest.raises(ValidationError):
+        DiscordSettings(bot_token=SecretStr("test"), turn_card_unrecoverable_after_attempts=1)
+    assert (
+        DiscordSettings(
+            bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=int(TURN_CEILING_S) + 1
+        ).turn_card_unrecoverable_after_s
+        == int(TURN_CEILING_S) + 1
+    )
 
 
 def test_agent_identity_switch_is_off_by_default_and_reads_nested_env(

@@ -115,6 +115,40 @@ async def test_fresh_unresolved_card_stays_recoverable(
     assert await turn_card_intent_is_active(db_session, id=intent.id)
 
 
+async def test_age_out_waits_for_guild_member_before_marking(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    tenant = await make_tenant(db_session)
+    intent = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="456",
+        turn_token=_TURN_ID,
+    )
+    await db_session.execute(
+        text("UPDATE turn_card_intents SET created_at = :at WHERE id = :id"),
+        {"at": now - timedelta(days=2), "id": intent.id},
+    )
+    await db_session.commit()
+    aged = intent.model_copy(update={"created_at": now - timedelta(days=2)})
+    thread = MagicMock(spec=discord.Thread)
+    thread.guild.me = None
+
+    assert not await expire_unrecoverable_turn_card(
+        db_session_factory,
+        intent=aged,
+        thread=thread,
+        max_age_s=86400,
+        reason="recovery attempts exhausted",
+        now=now,
+    )
+    assert await turn_card_intent_is_active(db_session, id=intent.id)
+    thread.permissions_for.assert_not_called()
+
+
 async def test_age_out_does_not_delete_answered_card(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -215,6 +249,19 @@ async def test_recovery_edits_webhook_card_via_transport(
     )
     edit.assert_awaited_once()
     assert edit.await_args.kwargs["_allow_replacement"] is False
+
+
+async def test_periodic_recovery_uses_stopped_card_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _fetched_message(123, _TURN_ID)
+    edit = AsyncMock()
+    monkeypatch.setattr(discord.Message, "edit", edit)
+
+    assert await turn_card_recovery._mark_card_interrupted(  # pyright: ignore[reportPrivateUsage]
+        message, intent_id=_TURN_ID, restarted=False
+    )
+    assert edit.await_args.kwargs["embed"].title == "Stopped."
 
 
 async def test_recovery_keeps_pending_card_when_webhook_token_is_gone(

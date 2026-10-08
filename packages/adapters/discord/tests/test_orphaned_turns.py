@@ -36,7 +36,10 @@ from daimon.core.stores.thread_sessions import (
     list_orphaned_turns,
     mark_turn_active,
 )
-from daimon.core.stores.turn_card_intents import create_turn_card_intent
+from daimon.core.stores.turn_card_intents import (
+    create_turn_card_intent,
+    list_recoverable_turn_card_intents,
+)
 from daimon.testing import build_fake_anthropic, ma_session
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
@@ -52,6 +55,7 @@ def _make_bot(
     discord_settings.max_concurrent_turns_per_tenant = 3
     discord_settings.thread_open_notice_after_s = 3.0
     discord_settings.turn_card_unrecoverable_after_s = 86400
+    discord_settings.turn_card_unrecoverable_after_attempts = 3
     settings.discord = discord_settings
     runtime = DiscordRuntime(
         settings=settings,
@@ -601,7 +605,8 @@ async def test_boot_card_recovery_bounds_worker_fanout(
     active = 0
     peak_active = 0
 
-    async def reconcile(_intent: TurnCardIntentRow) -> None:
+    async def reconcile(_intent: TurnCardIntentRow, *, restarted: bool = True) -> None:
+        assert restarted
         nonlocal active, peak_active
         active += 1
         peak_active = max(peak_active, active)
@@ -669,7 +674,7 @@ async def test_definite_recovery_failure_reaches_age_out(
     assert expire.await_args.kwargs["thread"] is thread
 
 
-async def test_transient_recovery_failure_and_cancellation_never_age_out(
+async def test_single_transient_recovery_failure_and_cancellation_do_not_age_out(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -736,6 +741,72 @@ async def test_periodic_recovery_revisits_aged_intents(
 
     recovered = bot._reconcile_boot_turn_cards.await_args.args[0]  # pyright: ignore[reportPrivateUsage, reportUnknownMemberType, reportUnknownVariableType]
     assert [intent.id for intent in recovered] == [old.id]
+    assert bot._reconcile_boot_turn_cards.await_args.kwargs == {"restarted": False}  # pyright: ignore[reportPrivateUsage, reportUnknownMemberType]
+
+    bot._live_turn_card_intent_ids.add(old.id)  # pyright: ignore[reportPrivateUsage]
+    await bot._sweep_aged_turn_cards()  # pyright: ignore[reportPrivateUsage]
+    assert bot._reconcile_boot_turn_cards.await_args.args[0] == []  # pyright: ignore[reportPrivateUsage, reportUnknownMemberType]
+
+
+async def test_periodic_recovery_skips_while_boot_recovery_holds_lock(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bot = _make_bot(db_session_factory)
+    bot._reconcile_boot_turn_cards = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+    async with bot._turn_card_recovery_lock:  # pyright: ignore[reportPrivateUsage]
+        await bot._sweep_aged_turn_cards()  # pyright: ignore[reportPrivateUsage]
+    bot._reconcile_boot_turn_cards.assert_not_awaited()  # pyright: ignore[reportPrivateUsage, reportUnknownMemberType]
+
+
+async def test_periodic_recovery_skips_while_boot_task_is_pending(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bot = _make_bot(db_session_factory)
+    bot._reconcile_boot_turn_cards = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+    boot_task = asyncio.create_task(asyncio.Event().wait())
+    bot._boot_card_recovery_task = boot_task  # pyright: ignore[reportPrivateUsage]
+    try:
+        await bot._sweep_aged_turn_cards()  # pyright: ignore[reportPrivateUsage]
+        bot._reconcile_boot_turn_cards.assert_not_awaited()  # pyright: ignore[reportPrivateUsage, reportUnknownMemberType]
+    finally:
+        boot_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await boot_task
+
+
+async def test_repeated_incomplete_recovery_passes_retire_an_aged_intent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    intent = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="456",
+        turn_token=uuid.uuid4(),
+    )
+    await db_session.execute(
+        text("UPDATE turn_card_intents SET created_at = :at WHERE id = :id"),
+        {"at": datetime.now(UTC) - timedelta(days=2), "id": intent.id},
+    )
+    await db_session.commit()
+    aged = intent.model_copy(update={"created_at": datetime.now(UTC) - timedelta(days=2)})
+    # An exhausted history budget returns without retiring. Each new bot
+    # instance represents another recovery run against the same stored row.
+    monkeypatch.setattr("daimon.adapters.discord.bot.reconcile_turn_card_intent", AsyncMock())
+    for attempt in range(1, 4):
+        bot = _make_bot(db_session_factory)
+        bot.wait_until_ready = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        thread = MagicMock(spec=discord.Thread)
+        thread.guild.me = MagicMock()
+        thread.permissions_for.return_value.manage_messages = False
+        bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+        await bot._reconcile_turn_card_intent(aged)  # pyright: ignore[reportPrivateUsage]
+        async with db_session_factory() as session:
+            rows = await list_recoverable_turn_card_intents(session, platform="discord")
+        assert len(rows) == (1 if attempt < 3 else 0)
 
 
 async def test_boot_card_snapshot_excludes_intents_created_after_the_sweep(

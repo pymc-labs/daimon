@@ -156,6 +156,9 @@ async def expire_unrecoverable_turn_card(
     current_time = now or datetime.now(UTC)
     if (current_time - intent.created_at).total_seconds() < max_age_s:
         return False
+    if thread is not None and thread.guild.me is None:  # pyright: ignore[reportUnnecessaryComparison]
+        log.warning("turn.card_intent_unrecoverable_deferred", intent_id=str(intent.id))
+        return False
     try:
         async with sessionmaker() as session:
             marked = await mark_turn_card_intent_unrecoverable(
@@ -341,11 +344,12 @@ async def reconcile_turn_card_intent(
     intent: TurnCardIntentRow,
     thread: discord.Thread,
     client: discord.Client | None = None,
+    restarted: bool = True,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
-    """Reconcile one boot-snapshotted intent without delaying admission."""
+    """Reconcile one snapshotted intent without delaying admission."""
     complete_miss_at: float | None = None
     incomplete_attempts = 0
     while incomplete_attempts < 3:
@@ -387,6 +391,7 @@ async def reconcile_turn_card_intent(
                     message_ids=message_ids,
                     known_message_id=intent.message_id,
                     sleep=sleep,
+                    restarted=restarted,
                 )
 
             async def retire(message_id: str) -> None:
@@ -419,6 +424,7 @@ async def reconcile_turn_card_intent(
                 message_ids=set(),
                 known_message_id=intent.message_id,
                 sleep=sleep,
+                restarted=restarted,
             ):
                 return
             await retire_terminal_turn_card(
@@ -460,6 +466,7 @@ async def _reconcile_matching_messages(
     message_ids: set[int],
     known_message_id: str | None,
     sleep: Callable[[float], Awaitable[None]],
+    restarted: bool = True,
 ) -> bool:
     """Edit every still-live match; return false on any unresolved API failure."""
     if known_message_id is not None:
@@ -485,14 +492,20 @@ async def _reconcile_matching_messages(
                     error=str(err),
                 )
                 return False
-            if not await _mark_card_interrupted(message, intent_id=intent_id, client=client):
+            if not await _mark_card_interrupted(
+                message, intent_id=intent_id, client=client, restarted=restarted
+            ):
                 return False
             break
     return True
 
 
 async def _mark_card_interrupted(
-    message: discord.Message, *, intent_id: UUID, client: discord.Client | None = None
+    message: discord.Message,
+    *,
+    intent_id: UUID,
+    client: discord.Client | None = None,
+    restarted: bool = True,
 ) -> bool:
     """Return true for a terminal card or a successfully edited live card."""
     if intent_id not in turn_card_ids_from_message(message):
@@ -500,7 +513,7 @@ async def _mark_card_interrupted(
     try:
         embed = discord.Embed(
             color=0xE74C3C,
-            title="Stopped: Daimon restarted.",
+            title="Stopped: Daimon restarted." if restarted else "Stopped.",
             description="Mention me to try again.",
         )
         if client is not None and message.webhook_id is not None:
