@@ -47,6 +47,14 @@ def test_reply_to_recorded_agent_post_is_addressed() -> None:
         reply_to_recorded_post=False,
         guild_id="g1",
     )
+    assert not should_process_message(
+        author_is_bot=False,
+        author_id=HUMAN_ID,
+        bot_mentioned=False,
+        reply_to_recorded_post=True,
+        identity_enabled=False,
+        guild_id="g1",
+    )
 
 
 def test_only_allow_listed_qa_bot_can_reply_to_recorded_post() -> None:

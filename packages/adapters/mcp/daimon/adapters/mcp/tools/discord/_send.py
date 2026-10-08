@@ -158,7 +158,7 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
             raise ToolError("channel does not support sending messages")
         actor_id = executing_agent_id(auth)
         identity = None
-        if actor_id is not None:
+        if actor_id is not None and runtime.settings.agent_identity.enabled:
             try:
                 key = (auth.tenant_id, actor_id)
                 cached = _actor_names.get(key)
@@ -179,6 +179,7 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                             agent_name=actor_name,
                             is_builtin=actor_name.casefold() == "daimon",
                             public_base_url=runtime.settings.mcp.app_root_url,
+                            enabled=runtime.settings.agent_identity.enabled,
                         )
             except Exception as exc:
                 _log.warning(
@@ -189,7 +190,13 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
             sent = await channel.send(content=content, files=files)
         else:
             sent = await send_agent_message(
-                c, channel, identity, content=content, files=files, extra_messages=extra_messages
+                c,
+                channel,
+                identity,
+                content=content,
+                files=files,
+                extra_messages=extra_messages,
+                identity_enabled=runtime.settings.agent_identity.enabled,
             )
         await record_agent_posts(
             runtime,

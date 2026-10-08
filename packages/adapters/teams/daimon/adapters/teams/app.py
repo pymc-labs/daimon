@@ -919,7 +919,8 @@ class TeamsApp:
                 requester=requester,
                 agent_name_prefix=(
                     None
-                    if is_builtin_agent(
+                    if not self.runtime.settings.agent_identity.enabled
+                    or is_builtin_agent(
                         name=admission.agent.name,
                         metadata=admission.agent.metadata,
                         default_agent_name=self.runtime.deployment_default.agent_name,

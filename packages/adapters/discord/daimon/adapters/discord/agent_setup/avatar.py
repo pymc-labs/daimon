@@ -71,7 +71,7 @@ async def _may_edit(
     agent_name: str,
     change: bool,
 ) -> bool:
-    if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+    if runtime.settings.agent_identity.enabled and is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
         agent = await find_agent_by_daimon_tag(
             runtime.anthropic, tenant_id=tenant_id, name=agent_name
         )

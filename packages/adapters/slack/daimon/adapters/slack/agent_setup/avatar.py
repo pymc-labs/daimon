@@ -160,6 +160,8 @@ async def may_edit_avatar(
     user_id: str,
     agent_name: str,
 ) -> bool:
+    if not runtime.settings.agent_identity.enabled:
+        return False
     if not await resolve_is_admin(client, user_id=user_id):
         return False
     agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=agent_name)

@@ -1547,7 +1547,8 @@ class DaimonBot(commands.Bot):
             )
         )
         if (
-            not bot_mentioned
+            self.runtime.settings.agent_identity.enabled
+            and not bot_mentioned
             and isinstance(reference, discord.MessageReference)
             and reference.type is discord.MessageReferenceType.reply
             and reference.message_id is not None
@@ -1582,6 +1583,7 @@ class DaimonBot(commands.Bot):
             author_id=str(message.author.id),
             bot_mentioned=bot_mentioned,
             reply_to_recorded_post=reply_to_recorded_post,
+            identity_enabled=self.runtime.settings.agent_identity.enabled,
             author_is_webhook=is_webhook_post,
             guild_id=str(message.guild.id) if message.guild else None,
             self_user_id=str(self.user.id) if self.user is not None else None,
@@ -1971,6 +1973,7 @@ class DaimonBot(commands.Bot):
             may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
             client=self,
             public_base_url=self.runtime.settings.mcp.app_root_url,
+            identity_enabled=self.runtime.settings.agent_identity.enabled,
         )
 
     async def _may_post_in(self, *, tenant_id: uuid.UUID, channel: object) -> bool:
@@ -2192,6 +2195,7 @@ class DaimonBot(commands.Bot):
                     agent_name=agent.name,
                     is_builtin=agent.name.casefold() == "daimon",
                     public_base_url=self.runtime.settings.mcp.app_root_url,
+                    enabled=self.runtime.settings.agent_identity.enabled,
                 )
         except Exception as exc:
             log.warning("discord.identity_resolution_failed", error_type=type(exc).__name__)
@@ -2210,6 +2214,7 @@ class DaimonBot(commands.Bot):
             name=identity.name,
             avatar_url=identity.avatar_url,
             builtin=identity.builtin,
+            identity_enabled=self.runtime.settings.agent_identity.enabled,
         )
 
         async def _edit_message(
@@ -2766,6 +2771,7 @@ class DaimonBot(commands.Bot):
                     agent_name=agent.name,
                     is_builtin=agent.name.casefold() == "daimon",
                     public_base_url=self.runtime.settings.mcp.app_root_url,
+                    enabled=self.runtime.settings.agent_identity.enabled,
                 )
         except Exception as exc:
             log.warning("discord.identity_resolution_failed", error_type=type(exc).__name__)
@@ -2777,6 +2783,7 @@ class DaimonBot(commands.Bot):
             name=identity.name,
             avatar_url=identity.avatar_url,
             builtin=identity.builtin,
+            identity_enabled=self.runtime.settings.agent_identity.enabled,
         )
 
         async def _edit_message(

@@ -2014,6 +2014,7 @@ class SlackApp:
                         default_agent_name=self.runtime.deployment_default.agent_name,
                     ),
                     public_base_url=self.runtime.settings.mcp.app_root_url,
+                    enabled=self.runtime.settings.agent_identity.enabled,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
             log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
@@ -2913,6 +2914,7 @@ class SlackApp:
                         default_agent_name=self.runtime.deployment_default.agent_name,
                     ),
                     public_base_url=self.runtime.settings.mcp.app_root_url,
+                    enabled=self.runtime.settings.agent_identity.enabled,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
             log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)

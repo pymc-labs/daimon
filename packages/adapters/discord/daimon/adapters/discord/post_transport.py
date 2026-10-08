@@ -95,12 +95,19 @@ class DiscordPostTransport:
         name: str,
         avatar_url: str | None,
         builtin: bool,
+        identity_enabled: bool | None = None,
     ) -> None:
         self.client = client
         self.channel = channel
         self.name = discord_username(name)
         self.avatar_url = avatar_url
         self.builtin = builtin
+        if identity_enabled is None:
+            runtime = getattr(client, "runtime", None)
+            settings = getattr(runtime, "settings", None)
+            configured = getattr(getattr(settings, "agent_identity", None), "enabled", None)
+            identity_enabled = configured if isinstance(configured, bool) else True
+        self.identity_enabled = identity_enabled
         self.fallback_used = False
         self._fallback_prefix_applied = False
 
@@ -132,7 +139,7 @@ class DiscordPostTransport:
     async def _webhook(
         self, *, create: bool = True, webhook_id: int | None = None
     ) -> discord.Webhook | None:
-        if self.builtin and create:
+        if not self.identity_enabled or (self.builtin and create):
             return None
         destination = self._destination()
         if destination is None:
@@ -279,7 +286,7 @@ class DiscordPostTransport:
                         time.monotonic() + _UNAVAILABLE_SECONDS
                     )
                 webhook_rejected = True
-        self.fallback_used = not self.builtin
+        self.fallback_used = self.identity_enabled and not self.builtin
         content = kwargs.get("content") if isinstance(kwargs.get("content"), str) else None
         if content is None and args and isinstance(args[0], str):
             content = args[0]
@@ -288,6 +295,7 @@ class DiscordPostTransport:
         )
         should_prefix = (
             (webhook_rejected or prefix_if_fallback)
+            and self.identity_enabled
             and not self.builtin
             and not self._fallback_prefix_applied
             and not already_prefixed
@@ -312,6 +320,8 @@ class DiscordPostTransport:
         ):
             self._fallback_prefix_applied = True
         if self._ours(message):
+            if not self.identity_enabled:
+                return await self.send(**_replacement_send_kwargs(kwargs))
             if self._destination() is None:
                 raise discord.ClientException("webhook channel unavailable")
             hook = await self._webhook(create=False, webhook_id=message.webhook_id)
@@ -335,6 +345,8 @@ class DiscordPostTransport:
 
     async def delete(self, message: discord.Message) -> None:
         if self._ours(message):
+            if not self.identity_enabled:
+                return
             if self._destination() is None:
                 raise discord.ClientException("webhook channel unavailable")
             hook = await self._webhook(create=False, webhook_id=message.webhook_id)

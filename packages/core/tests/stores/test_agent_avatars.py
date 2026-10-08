@@ -15,6 +15,7 @@ from daimon.core.stores.agent_avatars import (
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.testing.factories import make_tenant
 from PIL import Image
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -83,6 +84,29 @@ async def test_avatar_lifecycle_and_resolver(db_session: AsyncSession) -> None:
     assert (
         await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="Ada")
     ).token != reset.token
+
+
+@pytest.mark.asyncio
+async def test_disabled_identity_is_builtin_style_and_creates_no_avatar(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    identity = await resolve_agent_identity(
+        db_session,
+        tenant_id=tenant.id,
+        agent_name="Research",
+        is_builtin=False,
+        public_base_url="https://example.test",
+        enabled=False,
+    )
+    assert identity.name == "Research"
+    assert identity.builtin
+    assert identity.avatar_url is None
+    count = await db_session.scalar(
+        text("SELECT count(*) FROM agent_avatars WHERE tenant_id = :tenant_id"),
+        {"tenant_id": tenant.id},
+    )
+    assert count == 0
 
 
 @pytest.mark.asyncio

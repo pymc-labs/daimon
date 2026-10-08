@@ -38,6 +38,9 @@ The first four must be set before the first `docker compose` command:
 stack is up, `docker compose run --rm init "daimon crypto verify"` confirms it
 is set and that no agent key is stored in plaintext. `.env` is gitignored, so secrets never get committed.
 `.env.example` documents every other setting.
+Agent names and avatars in message headers are off by default. Set
+`DAIMON_AGENT_IDENTITY__ENABLED=true` in `.env` and restart the services
+after configuring platform permissions; see [agent identity](agent-identity.md).
 Set `DAIMON_OPS__ALERT_WEBHOOK_URL` to a private Discord channel webhook to
 receive short alerts for installs, Stripe top-ups, and Anthropic limits.
 Leave it unset to disable operator alerts.

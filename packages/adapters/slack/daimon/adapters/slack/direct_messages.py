@@ -266,6 +266,7 @@ async def handle_direct_message(
                             default_agent_name=runtime.deployment_default.agent_name,
                         ),
                         public_base_url=runtime.settings.mcp.app_root_url,
+                        enabled=runtime.settings.agent_identity.enabled,
                     )
             except (anthropic.APIError, SQLAlchemyError) as exc:
                 log.warning("slack.dm.identity_lookup_failed", error_type=type(exc).__name__)

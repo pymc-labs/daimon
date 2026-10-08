@@ -227,6 +227,17 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
     )
     assert "Avatars are public" not in _container_text(built_in)
 
+    disabled = build_details_container(
+        state,
+        details,
+        expanded_detail=None,
+        is_admin=True,
+        attribution=None,
+        identity_enabled=False,
+    )
+    assert "Avatars are public" not in _container_text(disabled)
+    assert not any(isinstance(item, discord.ui.Thumbnail) for item in _walk(disabled))
+
 
 def test_managed_agent_details_hide_avatar_controls_even_if_roster_flag_is_false(
     account_id: uuid.UUID,

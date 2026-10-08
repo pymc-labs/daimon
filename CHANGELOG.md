@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Agent identity now has a deployment switch, `DAIMON_AGENT_IDENTITY__ENABLED`,
+  off by default. When off, Slack and Discord post as the app, Discord replies
+  need a mention, Teams omits the agent name prefix, and setup panels hide
+  avatar controls.
 - **👎 feedback can go to the support channel, per tenant.** With
   `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` on for a tenant (off by default), each
   submitted "What went wrong?" form on Slack, and each 👎 text on Discord, is

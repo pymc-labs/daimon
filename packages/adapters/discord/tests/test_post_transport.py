@@ -65,6 +65,35 @@ async def test_agent_uses_channel_webhook_with_wait_and_identity() -> None:
     channel.send.assert_not_awaited()
 
 
+async def test_disabled_identity_posts_plain_bot_message_without_webhook() -> None:
+    client, channel, hook = _world()
+    transport = DiscordPostTransport(
+        client,
+        channel,
+        name="Research",
+        avatar_url="https://x/y",
+        builtin=False,
+        identity_enabled=False,
+    )
+    await transport.send(content="answer")
+    channel.send.assert_awaited_once_with(content="answer")
+    channel.create_webhook.assert_not_awaited()
+    client.http.channel_webhooks.assert_not_awaited()
+    hook.send.assert_not_awaited()
+    assert not transport.fallback_used
+
+
+async def test_bot_runtime_switch_covers_recovery_transports() -> None:
+    client, channel, _ = _world()
+    client.runtime.settings.agent_identity.enabled = False
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    await transport.send(content="answer")
+    channel.send.assert_awaited_once_with(content="answer")
+    channel.create_webhook.assert_not_awaited()
+
+
 async def test_terminal_flush_without_card_omits_none_view() -> None:
     client, channel, hook = _world()
     transport = DiscordPostTransport(
