@@ -195,7 +195,7 @@ def build_billing_container(
       - a member's own use: `*You*` + `$11.50 of your $25.00 this month`
       - credit: `*$62.40* total credit left` + context with the timed credit it
         includes (and for a member `Ask an admin to add credit.`)
-      - `*Channel budget*` + `$1.20 of $5.00 used this month`, when the
+      - `*This channel*` + `$1.20 of $5.00 used this month`, when the
         invoking channel has one
       - admin only: `*Top spenders*` as mentions, then `*Channel budgets*`
       - actions: `Add credit` and `Redeem code` (admin), `Expiry dates` with

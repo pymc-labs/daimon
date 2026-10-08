@@ -214,7 +214,7 @@ async def test_submission_redeems_and_refreshes_the_panel(
     assert root["view_id"] == "V_ROOT" and "*$10.00* total credit left" in _texts(
         root["view"]["blocks"]
     ), "the panel should show the new balance"
-    assert "*Channel budget*\n$0.00 of $5.00 used this month" in _texts(root["view"]["blocks"]), (
+    assert "*This channel*\n$0.00 of $5.00 used this month" in _texts(root["view"]["blocks"]), (
         "the refreshed panel should keep the channel's budget line"
     )
     assert json.loads(root["view"]["private_metadata"]) == {"channel_id": "C1"}, (

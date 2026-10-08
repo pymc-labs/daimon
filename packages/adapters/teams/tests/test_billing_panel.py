@@ -403,7 +403,7 @@ def test_a_negative_balance_says_no_credit_left_and_still_shows_timed_credit() -
 def test_this_channels_budget_has_its_own_section() -> None:
     status = _budget_status("19:c", "1.2")
     body = _body(panel_card(_state(channel_budget=status), since=JAN))
-    assert _texts(body[2]) == ["Channel budget", "$1.20 of $10.00 used this month"]
+    assert _texts(body[2]) == ["This channel", "$1.20 of $10.00 used this month"]
     assert body[2]["separator"] is True
 
 

@@ -747,7 +747,7 @@ def test_the_admin_panel_is_header_credit_channel_and_spenders_apart() -> None:
         "---",
         "### $62.40\ntotal credit left\n-# Includes $25.00 that expires. It's used first.",
         "---",
-        "**Channel budget**\n$1.20 of $5.00 used this month",
+        "**This channel**\n$1.20 of $5.00 used this month",
         "---",
         "**Top spenders**\n1. Maya Chen  $14.02",
         "---",

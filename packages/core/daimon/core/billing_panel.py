@@ -67,7 +67,7 @@ REDEEM_CODE = "Redeem code"
 EXPIRY_DATES = "Expiry dates"
 EXPIRY_INTRO = "Unused credit expires:"
 LOOK_UP = "Look up a person"
-CHANNEL_BUDGET = "Channel budget"
+CHANNEL_BUDGET = "This channel"
 TOP_SPENDERS = "Top spenders"
 CHANNEL_BUDGETS = "Channel budgets"
 
