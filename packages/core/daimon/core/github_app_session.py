@@ -464,7 +464,7 @@ async def add_app_credentials(
                 on_mutation()
     if access.working_token is not None:
         await add_github_copilot_credential(
-            anthropic, vault_id=vault_id, token=access.working_token
+            anthropic, vault_id=vault_id, token=access.working_token, in_place=True
         )
         if on_mutation is not None:
             on_mutation()

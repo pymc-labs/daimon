@@ -301,6 +301,7 @@ async def add_github_copilot_credential(
     *,
     vault_id: str,
     token: str,
+    in_place: bool = False,
 ) -> None:
     """Create or replace the GitHub Copilot MCP `static_bearer` credential.
 
@@ -314,9 +315,13 @@ async def add_github_copilot_credential(
     the local Fernet blob is already the source of truth, and the next
     session create writes it again.
 
-    Idempotent on retry: update an existing static credential in place. A person's own
-    `mcp_oauth` grant at that URL is left in place and nothing is created:
-    their sign-in outranks the agent's PAT, and the slot is taken anyway.
+    Idempotent on retry: list existing credentials, delete any static one
+    pointed at the GitHub Copilot URL, then create the new one. With
+    ``in_place`` (GitHub App rotation during a running turn) the first static
+    credential is updated instead, so the slot is never empty, and any
+    duplicates are deleted. A person's own `mcp_oauth` grant at that URL is
+    left in place and nothing is created: their sign-in outranks the agent's
+    PAT, and the slot is taken anyway.
     """
     existing: list[str] = []
     async for cred in client.beta.vaults.credentials.list(vault_id=vault_id):
@@ -327,6 +332,11 @@ async def add_github_copilot_credential(
         if cred.auth.type == "mcp_oauth":
             return
         existing.append(cred.id)
+    if not in_place:
+        # Collect first: deleting while the list paginates can skip an entry.
+        for credential_id in existing:
+            await client.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
+        existing = []
     if existing:
         await client.beta.vaults.credentials.update(
             existing[0],

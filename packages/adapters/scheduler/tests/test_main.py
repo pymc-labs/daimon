@@ -301,31 +301,38 @@ async def test_running_mcp_turn_refreshes_across_three_token_expiries(
         assert await github_issued_tokens.list_closed_app_sessions(session, now=clock["now"]) == []
 
 
-async def test_mapped_active_turn_rotates_without_archiving(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tenant_id, agent_id, account_id, mapping_id = (uuid.uuid4() for _ in range(4))
+def _mapped_app_session(
+    *, active_turn: bool = True, started_ago: timedelta = timedelta(hours=1)
+) -> SimpleNamespace:
     url = "https://github.com/acme/repo"
-    item = SimpleNamespace(
+    return SimpleNamespace(
         mapping=SimpleNamespace(
-            id=mapping_id,
-            tenant_id=tenant_id,
-            account_id=account_id,
+            id=uuid.UUID(int=1),
+            tenant_id=uuid.UUID(int=2),
+            account_id=uuid.UUID(int=3),
             ma_session_id="mapped-active-turn",
-            active_turn_message_id="turn-1",
+            active_turn_message_id="turn-1" if active_turn else None,
+            active_turn_started_at=datetime.now(UTC) - started_ago if active_turn else None,
             effective_config=SimpleNamespace(
                 vault_id="mapped-vault", repo_urls=(url,), repo_resource_ids={url: "res-1"}
             ),
         ),
-        agent_id=agent_id,
+        agent_id=uuid.UUID(int=4),
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
         permissions_by_repo={11: {"contents": "read"}},
     )
-    monkeypatch.setattr(
-        "daimon.adapters.scheduler.main.list_live_app_sessions",
-        unittest.mock.AsyncMock(return_value=[item]),
-    )
+
+
+async def _refresh_mapped(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    listed: list[list[SimpleNamespace]],
+    *,
+    rotate: unittest.mock.AsyncMock | None = None,
+) -> tuple[unittest.mock.AsyncMock, unittest.mock.AsyncMock, unittest.mock.AsyncMock]:
+    """Run the mapped refresh; ``listed`` is the pre-fence then in-fence mapping read."""
+    lister = unittest.mock.AsyncMock(side_effect=listed)
+    monkeypatch.setattr("daimon.adapters.scheduler.main.list_live_app_sessions", lister)
     monkeypatch.setattr(
         "daimon.adapters.scheduler.main.list_live_mcp_app_sessions",
         unittest.mock.AsyncMock(return_value=[]),
@@ -336,7 +343,14 @@ async def test_mapped_active_turn_rotates_without_archiving(
             return_value=(("https://github.com/acme/other",), {11: {"contents": "none"}})
         ),
     )
-    rotate = unittest.mock.AsyncMock()
+    monkeypatch.setattr("daimon.adapters.scheduler.main.mark_dead", unittest.mock.AsyncMock())
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.revoke_session_tokens", unittest.mock.AsyncMock()
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.archive_app_vault", unittest.mock.AsyncMock()
+    )
+    rotate = rotate or unittest.mock.AsyncMock()
     monkeypatch.setattr("daimon.adapters.scheduler.main.rotate_live_app_tokens", rotate)
     archive = unittest.mock.AsyncMock()
     anthropic = SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace(archive=archive)))
@@ -351,9 +365,89 @@ async def test_mapped_active_turn_rotates_without_archiving(
         ),
         fernet=build_multifernet((Fernet.generate_key().decode(),)),
     )
+    return lister, rotate, archive
+
+
+@pytest.fixture
+def fresh_refresh_state(monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[int, datetime]]:
+    failures: dict[str, tuple[int, datetime]] = {}
+    monkeypatch.setattr("daimon.adapters.scheduler.main._last_app_access_checks", {})
+    monkeypatch.setattr("daimon.adapters.scheduler.main._app_refresh_failures", failures)
+    return failures
+
+
+async def test_mapped_active_turn_rotates_without_archiving(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session()
+    lister, rotate, archive = await _refresh_mapped(
+        db_session_factory, monkeypatch, [[item], [item]]
+    )
     rotate.assert_awaited_once()
     assert rotate.await_args.kwargs["active_turn"] is True
     archive.assert_not_awaited()
+    assert lister.await_args_list[1].kwargs == {"session_id": "mapped-active-turn"}
+
+
+async def test_mapped_refresh_rereads_turn_state_inside_the_fence(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    # The turn finished between the sweep's listing and the fence: the moved
+    # repos now archive the session instead of rotating it as an active turn.
+    _, rotate, archive = await _refresh_mapped(
+        db_session_factory,
+        monkeypatch,
+        [[_mapped_app_session()], [_mapped_app_session(active_turn=False)]],
+    )
+    rotate.assert_not_awaited()
+    archive.assert_awaited_once_with("mapped-active-turn")
+
+
+async def test_mapped_turn_older_than_twelve_hours_stops_refreshing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session(started_ago=timedelta(hours=12, minutes=1))
+    _, rotate, archive = await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]])
+    rotate.assert_not_awaited()
+    archive.assert_not_awaited()
+
+
+async def test_failed_refresh_backs_off_exponentially(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session()
+    rotate = unittest.mock.AsyncMock(side_effect=RuntimeError("mint failed"))
+    await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    count, retry_at = fresh_refresh_state["mapped-active-turn"]
+    assert count == 1
+    assert timedelta(seconds=55) < retry_at - datetime.now(UTC) <= timedelta(minutes=1)
+    # Still backing off: the next tick neither reads nor mints.
+    await _refresh_mapped(db_session_factory, monkeypatch, [[item]], rotate=rotate)
+    assert rotate.await_count == 1
+    for expected in (2, 4, 8, 16, 30, 30):
+        fresh_refresh_state["mapped-active-turn"] = (
+            fresh_refresh_state["mapped-active-turn"][0],
+            datetime.now(UTC) - timedelta(seconds=1),
+        )
+        await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+        _, retry_at = fresh_refresh_state["mapped-active-turn"]
+        assert (
+            timedelta(minutes=expected) - timedelta(seconds=5)
+            < retry_at - datetime.now(UTC)
+            <= timedelta(minutes=expected)
+        )
+    rotate.side_effect = None
+    fresh_refresh_state["mapped-active-turn"] = (7, datetime.now(UTC) - timedelta(seconds=1))
+    await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    assert "mapped-active-turn" not in fresh_refresh_state
 
 
 @pytest.mark.parametrize("missing", [False, True])

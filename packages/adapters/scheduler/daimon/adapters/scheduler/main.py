@@ -672,6 +672,25 @@ async def _sweep_github_app_tokens(
 
 
 _last_app_access_checks: dict[str, datetime] = {}
+# Session id -> (consecutive failures, earliest next attempt). A failing refresh
+# mints fresh tokens each attempt, so retries back off from 1 to 30 minutes.
+_app_refresh_failures: dict[str, tuple[int, datetime]] = {}
+_REFRESH_BACKOFF_START = timedelta(minutes=1)
+_REFRESH_BACKOFF_MAX = timedelta(minutes=30)
+# Like MCP sessions, a mapped turn older than this is treated as abandoned and
+# stops renewing its tokens.
+_ACTIVE_TURN_REFRESH_CAP = timedelta(hours=12)
+
+
+def _refresh_backing_off(session_id: str, now: datetime) -> bool:
+    failure = _app_refresh_failures.get(session_id)
+    return failure is not None and failure[1] > now
+
+
+def _record_refresh_failure(session_id: str, now: datetime) -> None:
+    count = _app_refresh_failures.get(session_id, (0, now))[0] + 1
+    delay = min(_REFRESH_BACKOFF_START * 2 ** min(count - 1, 5), _REFRESH_BACKOFF_MAX)
+    _app_refresh_failures[session_id] = (count, now + delay)
 
 
 async def _retire_mcp_app_session(
@@ -703,53 +722,67 @@ async def _refresh_github_app_sessions(
     now = datetime.now(UTC)
     async with sm() as session:
         live = await list_live_app_sessions(session)
-    for item in live:
-        snapshot = item.mapping.effective_config
-        if snapshot is None or snapshot.vault_id is None:
-            continue
-        active_turn = item.mapping.active_turn_message_id is not None
-        due_for_expiry = item.expires_at <= now + timedelta(minutes=15)
-        last_check = _last_app_access_checks.get(item.mapping.ma_session_id)
+    for candidate in live:
+        session_id = candidate.mapping.ma_session_id
+        due_for_expiry = candidate.expires_at <= now + timedelta(minutes=15)
+        last_check = _last_app_access_checks.get(session_id)
         due_for_access = last_check is None or last_check <= now - timedelta(minutes=5)
         if not due_for_expiry and not due_for_access:
             continue
-        if due_for_expiry and last_check is not None and last_check > now - timedelta(minutes=1):
+        if _refresh_backing_off(session_id, now):
             continue
         try:
-            desired_urls, desired_permissions = await effective_repo_state(
-                sm,
-                tenant_id=item.mapping.tenant_id,
-                agent_id=item.agent_id,
-                account_id=item.mapping.account_id,
-                is_external=False,
-                config=settings.github_app,
-                fernet=fernet,
-            )
-            if desired_urls != snapshot.repo_urls and not active_turn:
-                await anthropic_client.beta.sessions.archive(item.mapping.ma_session_id)
-                async with sm.begin() as session:
-                    await mark_dead(session, id=item.mapping.id)
-                async with httpx.AsyncClient() as github:
-                    await revoke_session_tokens(
-                        sm, github, session_id=item.mapping.ma_session_id, fernet=fernet
+            async with session_mutation_fence(sm, session_id, check=False):
+                # Turn start and finish take this fence too. Re-read the mapping
+                # inside it so the active-turn decision can't go stale.
+                async with sm() as session:
+                    item = next(
+                        iter(await list_live_app_sessions(session, session_id=session_id)), None
                     )
-                await archive_app_vault(anthropic_client, vault_id=snapshot.vault_id)
-                continue
-            level = {"none": 0, "read": 1, "write": 2}
-            narrowed = any(
-                level.get(desired_permissions.get(repo_id, {}).get(key, "none"), 0)
-                < level.get(value, 0)
-                for repo_id, current in item.permissions_by_repo.items()
-                for key, value in current.items()
-            )
-            if not due_for_expiry and not narrowed:
-                _last_app_access_checks[item.mapping.ma_session_id] = now
-                continue
-            async with session_mutation_fence(sm, item.mapping.ma_session_id, check=False):
+                if item is None:
+                    continue
+                snapshot = item.mapping.effective_config
+                if snapshot is None or snapshot.vault_id is None:
+                    continue
+                active_turn = item.mapping.active_turn_message_id is not None
+                started = item.mapping.active_turn_started_at
+                if active_turn and (started is None or started <= now - _ACTIVE_TURN_REFRESH_CAP):
+                    # An abandoned running turn cannot renew its tokens indefinitely.
+                    continue
+                desired_urls, desired_permissions = await effective_repo_state(
+                    sm,
+                    tenant_id=item.mapping.tenant_id,
+                    agent_id=item.agent_id,
+                    account_id=item.mapping.account_id,
+                    is_external=False,
+                    config=settings.github_app,
+                    fernet=fernet,
+                )
+                if desired_urls != snapshot.repo_urls and not active_turn:
+                    await anthropic_client.beta.sessions.archive(session_id)
+                    async with sm.begin() as session:
+                        await mark_dead(session, id=item.mapping.id)
+                    async with httpx.AsyncClient() as github:
+                        await revoke_session_tokens(
+                            sm, github, session_id=session_id, fernet=fernet
+                        )
+                    await archive_app_vault(anthropic_client, vault_id=snapshot.vault_id)
+                    _app_refresh_failures.pop(session_id, None)
+                    continue
+                level = {"none": 0, "read": 1, "write": 2}
+                narrowed = any(
+                    level.get(desired_permissions.get(repo_id, {}).get(key, "none"), 0)
+                    < level.get(value, 0)
+                    for repo_id, current in item.permissions_by_repo.items()
+                    for key, value in current.items()
+                )
+                if not due_for_expiry and not narrowed:
+                    _last_app_access_checks[session_id] = now
+                    continue
                 await rotate_live_app_tokens(
                     anthropic_client,
                     sm,
-                    session_id=item.mapping.ma_session_id,
+                    session_id=session_id,
                     tenant_id=item.mapping.tenant_id,
                     agent_id=item.agent_id,
                     account_id=item.mapping.account_id,
@@ -763,16 +796,15 @@ async def _refresh_github_app_sessions(
                 async with sm.begin() as session:
                     await record_app_token_refresh(
                         session,
-                        ma_session_id=item.mapping.ma_session_id,
+                        ma_session_id=session_id,
                         issued_at=int(now.timestamp()),
                     )
-            _last_app_access_checks[item.mapping.ma_session_id] = now
+            _last_app_access_checks[session_id] = now
+            _app_refresh_failures.pop(session_id, None)
         except Exception:
-            _last_app_access_checks[item.mapping.ma_session_id] = now
-            log.exception(
-                "scheduler.github_app_session_refresh.failed",
-                session_id=item.mapping.ma_session_id,
-            )
+            _last_app_access_checks[session_id] = now
+            _record_refresh_failure(session_id, now)
+            log.exception("scheduler.github_app_session_refresh.failed", session_id=session_id)
     async with sm() as session:
         mcp_live = await list_live_mcp_app_sessions(session, now=now, include_expired=True)
     for candidate in mcp_live:
@@ -826,11 +858,7 @@ async def _refresh_github_app_sessions(
                 due_for_access = last_check is None or last_check <= now - timedelta(minutes=5)
                 if not due_for_expiry and not due_for_access:
                     continue
-                if (
-                    due_for_expiry
-                    and last_check is not None
-                    and last_check > now - timedelta(minutes=1)
-                ):
+                if _refresh_backing_off(current.session_id, now):
                     continue
                 desired_urls, desired_permissions = await effective_repo_state(
                     sm,
@@ -870,8 +898,10 @@ async def _refresh_github_app_sessions(
                         active_turn=active_turn,
                     )
                 _last_app_access_checks[current.session_id] = now
+                _app_refresh_failures.pop(current.session_id, None)
         except Exception:
             _last_app_access_checks[candidate.session_id] = now
+            _record_refresh_failure(candidate.session_id, now)
             log.exception(
                 "scheduler.github_mcp_app_session_refresh.failed",
                 session_id=candidate.session_id,

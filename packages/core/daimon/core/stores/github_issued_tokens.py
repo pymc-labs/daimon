@@ -184,7 +184,14 @@ def decrypt_issued_token(row: IssuedToken, *, fernet: MultiFernet) -> str | None
 async def select_stale_tokens(
     session: AsyncSession, *, now: datetime | None = None
 ) -> list[IssuedToken]:
-    """Find live tokens with changed grant, authorization or requester link state."""
+    """Find live tokens with changed grant, authorization or requester link state.
+
+    A superseded token (its session already holds a replacement) is revoked
+    early only on a hard change: the installation, requester link, grant or
+    authorization is gone, staged or inactive, or write access was narrowed.
+    A version bump alone, such as a ceiling raise or working-repo move, leaves
+    it to expire through ``revoke_after``.
+    """
     current = now or datetime.now(UTC)
     statement = (
         select(GitHubIssuedToken)
@@ -234,10 +241,20 @@ async def select_stale_tokens(
                      OR auth_row.status <> 'active'
                      OR auth_row.installation_id <> token.installation_id
                      OR NOT (auth_row.repo_full_name = ANY(installation.repo_full_names))
-                     OR token.grant_versions ->> ('grant:' || repo.repo_id::text)
-                        IS DISTINCT FROM grant_row.version::text
-                     OR token.grant_versions ->> ('authorization:' || repo.repo_id::text)
-                        IS DISTINCT FROM auth_row.version::text
+                     OR (
+                       token.superseded_at IS NULL
+                       AND (
+                         token.grant_versions ->> ('grant:' || repo.repo_id::text)
+                           IS DISTINCT FROM grant_row.version::text
+                         OR token.grant_versions ->> ('authorization:' || repo.repo_id::text)
+                           IS DISTINCT FROM auth_row.version::text
+                       )
+                     )
+                     OR (
+                       token.superseded_at IS NOT NULL
+                       AND token.permissions ->> 'contents' = 'write'
+                       AND (grant_row.ceiling_access <> 'write' OR auth_row.max_access <> 'write')
+                     )
                 )
               )
             """
@@ -460,8 +477,10 @@ async def select_deactivated_tokens(session: AsyncSession) -> list[IssuedToken]:
     return [IssuedToken.model_validate(row) for row in rows]
 
 
-async def list_live_app_sessions(session: AsyncSession) -> list[LiveAppSession]:
-    rows = await session.execute(
+async def list_live_app_sessions(
+    session: AsyncSession, *, session_id: str | None = None
+) -> list[LiveAppSession]:
+    statement = (
         select(ThreadSession, GitHubIssuedToken)
         .join(GitHubIssuedToken, GitHubIssuedToken.session_id == ThreadSession.ma_session_id)
         .where(
@@ -470,6 +489,9 @@ async def list_live_app_sessions(session: AsyncSession) -> list[LiveAppSession]:
             GitHubIssuedToken.superseded_at.is_(None),
         )
     )
+    if session_id is not None:
+        statement = statement.where(ThreadSession.ma_session_id == session_id)
+    rows = await session.execute(statement)
     grouped: dict[str, LiveAppSession] = {}
     for mapping, token in rows:
         mapped = ThreadSessionRow.model_validate(mapping)

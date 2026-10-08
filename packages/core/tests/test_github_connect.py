@@ -1296,6 +1296,116 @@ async def test_live_app_rotation_updates_ma_and_delays_revocation(
     assert revoked == ["new-second"]
 
 
+async def test_superseded_token_survives_version_bumps_but_not_hard_changes(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    await github_app_installations.upsert(
+        db_session, installation_id=101, account_login="acme", repo_full_names=["acme/first"]
+    )
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=11,
+            owner_id=1,
+            installation_id=101,
+            repo_full_name="acme/first",
+            max_access="write",
+            authorized_by_github_user_id=501,
+            status="active",
+            version=1,
+        )
+    )
+    await db_session.flush()
+    db_session.add(
+        AgentGitHubGrant(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=11,
+            baseline_access="read",
+            ceiling_access="read",
+            staged=False,
+            is_working_repo=False,
+            version=1,
+        )
+    )
+    await db_session.flush()
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    now = datetime.now(UTC)
+    token_ids: dict[str, uuid.UUID] = {}
+    for label, contents in (("old", "read"), ("live", "read")):
+        row = await github_issued_tokens.create_pending(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            session_id="long-turn",
+            installation_id=101,
+            repo_ids=[11],
+            permissions={"contents": contents},
+            grant_versions={"grant:11": 1, "authorization:11": 1},
+            expires_at=now + timedelta(minutes=50),
+        )
+        await github_issued_tokens.store_token(
+            db_session, token_id=row.token_id, token=f"{label}-token", fernet=fernet
+        )
+        await github_issued_tokens.mark_delivered(db_session, token_id=row.token_id)
+        token_ids[label] = row.token_id
+    await github_issued_tokens.mark_session_tokens_superseded(
+        db_session, session_id="long-turn", except_ids=frozenset({token_ids["live"]}), now=now
+    )
+
+    async def stale() -> set[uuid.UUID]:
+        return {row.token_id for row in await github_issued_tokens.select_stale_tokens(db_session)}
+
+    # A ceiling raise and a working-repo move mid-turn bump both versions.
+    await db_session.execute(
+        text(
+            "UPDATE agent_github_grants SET ceiling_access = 'write', is_working_repo = true, "
+            "version = 3 WHERE tenant_id = :tenant_id"
+        ),
+        {"tenant_id": tenant_id},
+    )
+    await db_session.execute(
+        text("UPDATE tenant_github_repos SET version = 2 WHERE tenant_id = :tenant_id"),
+        {"tenant_id": tenant_id},
+    )
+    assert await stale() == {token_ids["live"]}
+
+    await db_session.execute(
+        text("UPDATE agent_github_grants SET staged = true WHERE tenant_id = :tenant_id"),
+        {"tenant_id": tenant_id},
+    )
+    assert await stale() == set(token_ids.values())
+    await db_session.execute(
+        text("UPDATE agent_github_grants SET staged = false WHERE tenant_id = :tenant_id"),
+        {"tenant_id": tenant_id},
+    )
+    await db_session.execute(
+        text("UPDATE tenant_github_repos SET status = 'revoked' WHERE tenant_id = :tenant_id"),
+        {"tenant_id": tenant_id},
+    )
+    assert await stale() == set(token_ids.values())
+    await db_session.execute(
+        text("UPDATE tenant_github_repos SET status = 'active' WHERE tenant_id = :tenant_id"),
+        {"tenant_id": tenant_id},
+    )
+    await db_session.execute(
+        text(
+            'UPDATE github_issued_tokens SET permissions = \'{"contents": "write"}\' '
+            "WHERE token_id = :token_id"
+        ),
+        {"token_id": token_ids["old"]},
+    )
+    assert await stale() == {token_ids["live"]}
+    await db_session.execute(
+        text("UPDATE agent_github_grants SET ceiling_access = 'read' WHERE tenant_id = :tenant_id"),
+        {"tenant_id": tenant_id},
+    )
+    assert await stale() == set(token_ids.values())
+
+
 async def test_app_rotation_keeps_old_session_when_first_resource_update_fails(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:

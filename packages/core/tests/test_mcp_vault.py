@@ -1367,6 +1367,64 @@ async def test_add_github_copilot_credential_leaves_the_callers_grant_in_place()
     assert writes == [], f"the grant is neither replaced nor duplicated; attempted {writes}"
 
 
+async def test_legacy_copilot_credential_is_deleted_then_created() -> None:
+    from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, add_github_copilot_credential
+
+    writes: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": credential_id,
+                            "type": "credential",
+                            "vault_id": "vlt_1",
+                            "auth": {
+                                "type": "static_bearer",
+                                "mcp_server_url": GITHUB_COPILOT_MCP_URL,
+                            },
+                        }
+                        for credential_id in ("vcrd_old", "vcrd_duplicate")
+                    ],
+                    "has_more": False,
+                },
+            )
+        writes.append((req.method, req.url.path, json.loads(req.content) if req.content else None))
+        if req.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(
+            200,
+            json={
+                "id": "vcrd_new",
+                "type": "credential",
+                "vault_id": "vlt_1",
+                "auth": {"type": "static_bearer", "mcp_server_url": GITHUB_COPILOT_MCP_URL},
+            },
+        )
+
+    await add_github_copilot_credential(
+        _make_client(httpx.MockTransport(handler)), vault_id="vlt_1", token="pat-token"
+    )
+    assert writes == [
+        ("DELETE", "/v1/vaults/vlt_1/credentials/vcrd_old", None),
+        ("DELETE", "/v1/vaults/vlt_1/credentials/vcrd_duplicate", None),
+        (
+            "POST",
+            "/v1/vaults/vlt_1/credentials",
+            {
+                "auth": {
+                    "type": "static_bearer",
+                    "mcp_server_url": GITHUB_COPILOT_MCP_URL,
+                    "token": "pat-token",
+                }
+            },
+        ),
+    ]
+
+
 async def test_add_github_copilot_credential_updates_static_token_in_place() -> None:
     from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, add_github_copilot_credential
 
@@ -1403,7 +1461,10 @@ async def test_add_github_copilot_credential_updates_static_token_in_place() -> 
         )
 
     await add_github_copilot_credential(
-        _make_client(httpx.MockTransport(handler)), vault_id="vlt_1", token="new-token"
+        _make_client(httpx.MockTransport(handler)),
+        vault_id="vlt_1",
+        token="new-token",
+        in_place=True,
     )
     assert writes == [
         (
@@ -1453,7 +1514,10 @@ async def test_add_github_copilot_credential_removes_duplicate_static_tokens() -
         )
 
     await add_github_copilot_credential(
-        _make_client(httpx.MockTransport(handler)), vault_id="vlt_1", token="new-token"
+        _make_client(httpx.MockTransport(handler)),
+        vault_id="vlt_1",
+        token="new-token",
+        in_place=True,
     )
     assert writes == [
         ("POST", "/v1/vaults/vlt_1/credentials/vcrd_first"),
