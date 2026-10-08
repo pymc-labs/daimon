@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from daimon.adapters.teams import card
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import TurnCardIntentRow
@@ -70,7 +69,7 @@ async def test_markers_and_intents_are_interrupted_cleared_and_retired(
 
     edits = [(conversation, activity.id) for conversation, activity, _ in sender.sent]
     assert edits == [(CONVERSATION_ID, "m-dm"), (THREAD_ID, "m-channel")], "one edit per card"
-    assert all(card.INTERRUPTED_NOTICE in a.model_dump_json() for a in sender.activities)
+    assert all("Stopped: Daimon restarted." in a.model_dump_json() for a in sender.activities)
     interrupt.assert_awaited_once()
     assert interrupt.await_args is not None
     assert interrupt.await_args.kwargs["session_id"] == row.ma_session_id

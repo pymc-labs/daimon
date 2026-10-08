@@ -165,7 +165,7 @@ async def test_webhook_403_falls_back_with_name_and_caches_unavailability() -> N
         client, channel, name="Research", avatar_url=None, builtin=False
     )
     await transport.send(content="answer")
-    channel.send.assert_awaited_once_with(content="**Research** answer")
+    channel.send.assert_awaited_once_with(content="**Research**\n\nanswer")
 
 
 async def test_webhook_400_cooldown_only_applies_to_that_agent_identity() -> None:
@@ -357,7 +357,7 @@ async def test_missing_webhook_token_posts_edit_as_replacement() -> None:
     client.http.channel_webhooks = AsyncMock(return_value=[])
     replacement = await transport.edit(message, content="updated")
     assert replacement is channel.send.return_value
-    channel.send.assert_awaited_once_with(content="**Research** updated")
+    channel.send.assert_awaited_once_with(content="**Research**\n\nupdated")
     hook.edit_message.assert_not_awaited()
 
 
@@ -473,5 +473,5 @@ async def test_lifecycle_prefix_is_not_duplicated_after_webhook_rejection() -> N
     transport = DiscordPostTransport(
         client, channel, name="Research", avatar_url=None, builtin=False
     )
-    await transport.send(content="**Research** first")
-    assert channel.send.call_args.kwargs["content"] == "**Research** first"
+    await transport.send(content="**Research**\n\nfirst")
+    assert channel.send.call_args.kwargs["content"] == "**Research**\n\nfirst"

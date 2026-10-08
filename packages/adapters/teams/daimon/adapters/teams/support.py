@@ -76,12 +76,9 @@ _DISCORD_API = "https://discord.com/api/v10"
 _DM_LINK = "(sent in the 1:1 chat)"
 _MAX_PENDING = 256  # forms whose "asked in" is remembered; older ones name the 1:1 chat
 MAX_NOTE_CHARS = 4000  # Discord's support modal cap.
-TITLE = "🙋 Human support"
-FORM_TEXT = (
-    "Tell us what you need help with and a person will follow up. "
-    "You have {remaining} requests left."
-)
-USAGE = "Write what you need help with first."
+TITLE = "Ask a person"
+FORM_TEXT = "What do you need help with?\n{remaining} requests left"
+USAGE = "Write a few words first."
 # OUT_OF_CREDITS, RECEIVED and RECORDED_UNDELIVERED are the shared core copy
 # (`daimon.core.support_escalation`), re-exported for this module's callers.
 

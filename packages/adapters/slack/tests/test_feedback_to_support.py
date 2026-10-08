@@ -203,7 +203,7 @@ async def test_on_the_form_says_it_is_shared_and_posts_once_to_the_support_chann
     assert lines[3] == "*Reasons:* Wrong or inaccurate, Too slow"
     assert lines[4] == ""
     assert "&lt;!channel&gt;" in lines[5], "the text must not be able to ping the channel"
-    assert _ephemeral_texts(permalink)[-1] == "Thanks — your feedback has been recorded."
+    assert _ephemeral_texts(permalink)[-1] == "Thanks for the feedback."
 
 
 async def test_an_identical_resubmission_posts_nothing_and_a_changed_one_posts_again(
@@ -301,4 +301,4 @@ async def test_a_protected_support_channel_posts_nothing_and_still_thanks(
     assert _posts(permalink) == []
     (row,) = await _feedback_rows(db_session_factory)
     assert row["feedback_text"] == "wrong"
-    assert _ephemeral_texts(permalink) == ["Thanks — your feedback has been recorded."]
+    assert _ephemeral_texts(permalink) == ["Thanks for the feedback."]

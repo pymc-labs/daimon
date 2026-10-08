@@ -438,7 +438,7 @@ async def test_deleted_webhook_edit_records_replacement(
         origin_context_id=origin,
     )
     assert result.message_id != old_id
-    assert fake.messages[result.message_id]["content"] == "**user900** updated"
+    assert fake.messages[result.message_id]["content"] == "**user900**\n\nupdated"
     async with committing_sessionmaker() as session:
         old_post = await get_post(
             session,
@@ -502,7 +502,7 @@ async def test_an_agent_edits_then_deletes_its_own_message_and_each_is_audited_w
         ("delete_message", "allowed"),
     ], "each action writes one allowed audit row"
     first, second = rows
-    assert first.content_hmac == _hmac("**ag_acme** first draft"), (
+    assert first.content_hmac == _hmac("**ag_acme**\n\nfirst draft"), (
         "the edit row records a hash of the text it replaced"
     )
     assert second.content_hmac == _hmac("second draft"), (
@@ -701,7 +701,9 @@ async def test_a_pinned_agent_cannot_tidy_outside_its_channels(
             content="moved",
             origin_context_id=origin,
         )
-    assert fake.messages[message_id]["content"] == "**ag_acme** first draft", "nothing was edited"
+    assert fake.messages[message_id]["content"] == "**ag_acme**\n\nfirst draft", (
+        "nothing was edited"
+    )
 
 
 def _isolate(channel_id: str, *, own_agent: str) -> TenantAccessPolicy:
@@ -730,7 +732,9 @@ async def test_no_other_agent_edits_into_an_isolated_channel(
             content="moved",
             origin_context_id=origin,
         )
-    assert fake.messages[message_id]["content"] == "**ag_acme** first draft", "nothing was edited"
+    assert fake.messages[message_id]["content"] == "**ag_acme**\n\nfirst draft", (
+        "nothing was edited"
+    )
 
 
 async def test_a_turn_inside_an_isolated_channel_edits_nothing_outside_it(
@@ -753,7 +757,9 @@ async def test_a_turn_inside_an_isolated_channel_edits_nothing_outside_it(
             content="what C said",
             origin_context_id=setup,
         )
-    assert fake.messages[message_id]["content"] == "**ag_acme** first draft", "nothing was edited"
+    assert fake.messages[message_id]["content"] == "**ag_acme**\n\nfirst draft", (
+        "nothing was edited"
+    )
 
 
 async def test_a_sealed_channel_is_tidied_only_from_a_turn_inside_it(
