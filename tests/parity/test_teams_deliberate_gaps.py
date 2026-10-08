@@ -28,7 +28,10 @@ consent a followed thread stays mention-only; and where Discord's unprompted
 card appears once there is output, Teams posts only the answer, so there is no
 running card or Cancel button. The `here` card counts only the place it was
 typed in as one the caller can see: naming their other channels would take
-Graph lookups per team, so an agent rule's other channels stay unnamed.
+Graph lookups per team, so an agent rule's other channels stay unnamed. Slack
+answers `memory` privately inside the channel; Teams answers in the 1:1 chat,
+so for a channel whose readers are limited it says why instead, as `/dm`
+refuses to carry such a channel's work out.
 
 No platform parametrization, no database -- this is a scope check.
 """
@@ -45,7 +48,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import yaml
-from daimon.adapters.teams import here, installations
+from daimon.adapters.teams import here, installations, memory
 from daimon.adapters.teams.attachments import (
     ChannelMedia,
     InboundFile,
@@ -62,7 +65,7 @@ from daimon.adapters.teams.identity import (
 )
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.credential_requests import ENV_FILE_TARGET
 from daimon.core.here_card import assemble_here_card
 from daimon.core.stores.domain import CredentialRequestRow
@@ -156,6 +159,42 @@ async def test_the_teams_here_card_sees_only_the_place_it_was_typed_in() -> None
         await here.show_here(context)
     assert load.await_args.kwargs["visible_channel_ids"] == {channel}, (
         "Teams names no other channel the caller may see; if it learned to, replace this record"
+    )
+
+
+async def test_teams_memory_from_a_limited_readers_channel_is_not_shown_in_the_chat() -> None:
+    channel = "19:vault@thread.tacv2"
+    asked = TeamsInbound(
+        kind="channel",
+        entra_tenant_id=TENANT,
+        user_id=str(uuid.UUID(int=2)),
+        conversation_id=f"{channel};messageid=1",
+        channel_id=channel,
+        activity_id="1",
+        text="memory",
+        service_url=None,
+    )
+    send = AsyncMock()
+    context = CommandContext(
+        inbound=dataclasses.replace(
+            asked, kind="dm", conversation_id="a:chat", channel_id="a:chat"
+        ),
+        tenant_id=uuid.uuid4(),
+        args="",
+        is_admin=False,
+        runtime=MagicMock(),
+        send=send,
+        asked_in=asked,
+    )
+    policy = TenantAccessPolicy(channel_rules={channel: ChannelRule(readers="inside")})
+    with (
+        patch.object(memory, "load_access_policy", AsyncMock(return_value=policy)),
+        patch.object(memory, "get_channel_memory_store", AsyncMock()) as store,
+    ):
+        await memory.show_memory(context)
+    store.assert_not_awaited()
+    assert memory.KEPT_INSIDE in send.await_args.args[0].model_dump_json(), (
+        "Teams has no private reply inside a channel; if it gained one, replace this record"
     )
 
 

@@ -1,7 +1,11 @@
-"""The `memory` command: a read-only look at what this chat's agent remembers.
+"""The `memory` command: a read-only look at what the agent where it was typed remembers.
 
 `memory` lists the paths; `memory <path>` shows one memory. Mirrors Slack's
-`/memory`, resolved for the 1:1 chat the way a turn there resolves its agent.
+`/memory`, resolved for the place it was typed the way a turn there resolves
+its agent: a channel post's thread, or the 1:1 chat. Typed in a channel it is
+answered in the 1:1 chat, so a channel whose readers are limited gets a refusal
+instead: Slack answers there privately, and Slack's `/dm` likewise refuses to
+carry such a channel's work outside it.
 """
 
 from __future__ import annotations
@@ -11,17 +15,24 @@ import structlog
 from daimon.adapters.teams.card import TEAMS_LIMIT
 from daimon.adapters.teams.card_actions import clip, heading
 from daimon.adapters.teams.commands import CommandContext
+from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.errors import DaimonError
 from daimon.core.memory_view import (
     get_channel_memory_store,
     get_memory_content,
     list_memory_paths,
 )
+from daimon.core.permissions import readers_limited_at
+from daimon.core.stores.access_policy import load_access_policy
 from microsoft_teams.cards import AdaptiveCard, CardElement, TextBlock
 
 log = structlog.get_logger()
 
 EMPTY = "This agent has no memories yet — it will start remembering as it works."
+KEPT_INSIDE = (
+    "Only turns inside that channel read it, so its agent's memory isn't shown here. "
+    "Ask the agent in the channel instead."
+)
 _FAILED = "Something went wrong fetching memory — try again later."
 _TITLE_MAX_CHARS = 300
 
@@ -40,16 +51,30 @@ def _card(title: str, text: str | None = None, hint: str | None = None) -> Adapt
     return AdaptiveCard(body=body, fallback_text=title)
 
 
+async def _kept_inside(context: CommandContext, asked: TeamsInbound) -> bool:
+    """Whether the answer would carry a limited-readers channel's memory to the 1:1 chat."""
+    if context.asked_in is None:
+        return False
+    async with context.runtime.sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=context.tenant_id)
+    return readers_limited_at(policy, channel_id=asked.channel_id, thread_id=asked.thread_id)
+
+
 async def _memory_card(context: CommandContext) -> AdaptiveCard:
     runtime, path = context.runtime, context.args
+    asked = context.asked_in or context.inbound
+    if await _kept_inside(context, asked):
+        return _card(KEPT_INSIDE)
     resolved = await get_channel_memory_store(
         runtime.sessionmaker,
         runtime.anthropic,
         tenant_id=context.tenant_id,
         platform="teams",
-        user_id=context.inbound.user_id,
-        channel_id=context.inbound.channel_id,
+        user_id=asked.user_id,
+        channel_id=asked.channel_id,
         default=runtime.deployment_default,
+        # A plain 1:1 chat is its own thread; only a post or a setup conversation is one.
+        thread_id=asked.thread_id if asked.thread_id != asked.channel_id else None,
     )
     if resolved is None:
         return _card(EMPTY)
