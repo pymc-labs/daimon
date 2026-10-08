@@ -260,7 +260,7 @@ You need:
 | Register the app in Entra | Anyone, if your organisation lets users register apps; otherwise the Application Developer role |
 | Create the Azure Bot | Contributor (or Owner) on the subscription or a resource group |
 | Upload the app to Teams | A Teams administrator, or anyone if custom app uploads are allowed |
-| Turn on channel files (optional) | A global administrator (or Privileged Role Administrator) to consent once, then a SharePoint or global admin per team |
+| Turn on channel files (optional) | A global administrator (or Privileged Role Administrator) to consent once, then a SharePoint or global admin who is a member of the channel |
 
 ### 1. Register the app in Entra
 
@@ -508,9 +508,10 @@ owner to accept it. See [`teams.md`](teams.md).
 ### Channel files (optional)
 
 Out of the box, the bot reads images in channel messages, and handles files
-in 1:1 chats both ways. Files shared in a channel live in the team's
-SharePoint site, which the team-level permission doesn't reach. To let the
-bot open those files and save its own outputs to the channel's Files tab:
+in 1:1 chats both ways. Files shared in a channel live in SharePoint (the
+team's site for a standard channel, a site of its own for a private or shared
+one), which the team-level permission doesn't reach. To let the bot open
+those files and save its own outputs to the channel's Files tab:
 
 1. Entra → **App registrations** → your app → **API permissions** → **Add a
    permission** → **Microsoft Graph** → **Application permissions** →
@@ -521,15 +522,19 @@ bot open those files and save its own outputs to the channel's Files tab:
 3. Set `DAIMON_TEAMS__PUBLIC_URL=https://teams.example.com` in `.env` (your
    hostname, without `/api/messages`) and run
    `docker compose --profile teams up -d` so the service picks it up.
-4. When a daimon admin shares a file in a team daimon can't open yet, the bot
-   posts an **Enable files** card. Click it and sign in as a SharePoint or
-   global admin. The first sign-in in your organisation must be a global
-   admin, who approves this for everyone. daimon then grants itself access
-   to that one team's site, and the next message can read the file.
+4. In the channel, a daimon admin asks the bot to turn files on ("enable
+   files in this channel"), or shares a file it can't open, and the bot posts
+   an **Enable files** card. Click it and sign in as a SharePoint or global
+   admin who is a member of that channel. The first sign-in in your
+   organisation must be a global admin, who approves this for everyone.
+   daimon then grants itself access to that channel's site, and the next
+   message can read the file.
 
-This covers standard channels. Private and shared channels keep their files
-in a separate site, which daimon doesn't use. [`teams.md`](teams.md#channel-files-optional)
-also shows how to grant a site by hand.
+One sign-in covers a team's standard channels, which share its site; each
+private or shared channel is turned on from inside it. Open a new channel's
+Files tab once first. A shared channel hosted by another organisation keeps
+its files there, out of reach. [`teams.md`](teams.md#channel-files-optional)
+also shows how to grant a team's site by hand.
 
 ### If the bot doesn't answer
 
@@ -544,6 +549,8 @@ also shows how to grant a site by hand.
   team before the messaging endpoint was right, the team never linked up.
   Remove the app from the team (team → ⋯ → **Manage team** → **Apps**) and
   add it again. Check, too, that the mention was picked from autocomplete.
+- **A Reply on a bot message gets no answer in a private channel:** Teams
+  sends the bot only the private channel posts that @mention it. Mention it.
 - **Every daimon process fails at startup after adding Teams:** a
   `DAIMON_TEAMS__` value is missing, or `DAIMON_TEAMS__ADMIN_USER_IDS` isn't
   a JSON array of object IDs.
