@@ -93,7 +93,7 @@
           }),
           dict({
             'text': dict({
-              'text': 'Mention me to try again.',
+              'text': 'Send your message again. If it keeps happening, share the request id with an admin.',
               'type': 'mrkdwn',
             }),
             'type': 'section',
@@ -104,7 +104,6 @@
                 *Details*
                 The turn ended unexpectedly.
                 The conversation and its workspace are kept.
-                *Next:* Send your message again. If it keeps happening, share the request id with an admin.
                 `rid: 01TESTREQUESTID0000000000`
               ''',
               'type': 'mrkdwn',
