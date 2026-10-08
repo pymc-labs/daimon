@@ -411,7 +411,8 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     assert embed.title == "Something went wrong."
     assert embed.description == notice.next_step
     assert notice.cause in embed.fields[0].value
-    assert notice.next_step in embed.fields[0].value, "the next step is not truncated away"
+    assert notice.next_step in embed.description, "the next step is not truncated away"
+    assert "**Next:**" not in embed.fields[0].value
     assert "`fit_model`" in embed.fields[0].value, "work in flight is named"
     assert "`rid: " in embed.fields[0].value
     assert "Tokens:" in embed.fields[1].value

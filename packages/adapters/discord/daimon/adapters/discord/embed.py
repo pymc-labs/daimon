@@ -117,6 +117,7 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         description = ""
         title = ""
         details = "\n".join(parts)
+        notice_text: str | None = None
         if state.phase is TurnPhase.ERROR:
             footer = state.agent_name
             title = "Something went wrong."
@@ -125,6 +126,13 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
                 next_marker = "**Next:** "
                 if next_marker in state.notice:
                     description = state.notice.split(next_marker, 1)[1].split("\n", 1)[0]
+                    notice_text = "\n".join(
+                        line
+                        for line in state.notice.splitlines()
+                        if not line.startswith(next_marker)
+                    )
+                else:
+                    notice_text = state.notice
         else:
             footer = state.agent_name
         return EmbedData(
@@ -134,7 +142,7 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
             color=color,
             footer=footer,
             details=details,
-            notice=(state.notice or None) if state.phase is TurnPhase.ERROR else None,
+            notice=notice_text,
         )
 
     # In progress: one embed, the headline, the tool lines, then the latest draft.

@@ -246,6 +246,18 @@ class TestToBlocks:
         assert context_blocks[-2]["elements"][0]["text"] == "Atlas"
         assert blocks[0]["text"]["text"] == "Something went wrong."
 
+    def test_error_uses_notice_next_step_once(self) -> None:
+        state = replace(
+            _make_state(phase=TurnPhase.ERROR),
+            notice="Model usage limit reached.\n*Next:* Add credit.\n`rid: test`",
+        )
+        blocks = to_blocks(state, now=5.0)
+        section_texts = [block["text"]["text"] for block in blocks if block["type"] == "section"]
+        assert section_texts[1] == "Add credit."
+        assert "*Next:*" not in section_texts[2]
+        assert "Model usage limit reached." in section_texts[2]
+        assert "`rid: test`" in section_texts[2]
+
     def test_no_block_contains_color_key(self) -> None:
         """No block dict anywhere must contain a 'color' key."""
         state = _make_state(

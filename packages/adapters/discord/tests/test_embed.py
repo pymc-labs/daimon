@@ -61,7 +61,7 @@ def test_max_length_error_notice_keeps_all_metrics() -> None:
     embed = build_discord_embed(to_embed_data(state, now=12.0))
 
     assert embed.description == "Add credit."
-    assert embed.fields[0].value == notice
+    assert embed.fields[0].value == notice.replace("**Next:** Add credit.\n", "")
     assert embed.fields[1].value == (
         "Time: 12s\nCost: $0.05\nTokens: 1.2k in / 300 out\nBalance: $9.95"
     )

@@ -150,14 +150,18 @@ def to_blocks(
                 {"type": "section", "text": {"type": "mrkdwn", "text": "Something went wrong."}}
             )
             next_step = "Mention me to try again."
+            notice_text = state.notice
             if state.notice and "*Next:* " in state.notice:
                 next_step = state.notice.split("*Next:* ", 1)[1].split("\n", 1)[0]
+                notice_text = "\n".join(
+                    line for line in state.notice.splitlines() if not line.startswith("*Next:* ")
+                )
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": next_step}})
             if state.notice:
                 blocks.append(
                     {
                         "type": "section",
-                        "text": {"type": "mrkdwn", "text": f"*Details*\n{state.notice}"},
+                        "text": {"type": "mrkdwn", "text": f"*Details*\n{notice_text}"},
                     }
                 )
         elif not answer_visible and state.text_preview is None:
