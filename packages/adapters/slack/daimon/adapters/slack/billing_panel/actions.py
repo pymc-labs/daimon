@@ -344,7 +344,17 @@ async def handle_panel_action(runtime: SlackRuntime, payload: dict[str, Any]) ->
             channel_id=channel_id,
             lookup=(picked, lookup_line(spend, turns)),
         )
-        await client.views_update(view_id=view_id, view=view)  # pyright: ignore[reportUnknownMemberType]
+        # The hash makes a slower, earlier lookup lose to a newer one instead of
+        # overwriting it.
+        try:
+            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+                view_id=view_id, hash=open_view.get("hash"), view=view
+            )
+        except SlackApiError as exc:
+            error = str(cast("dict[str, object]", exc.response.data).get("error", ""))  # pyright: ignore[reportUnknownMemberType]
+            if error != "hash_conflict":
+                raise
+            log.info("slack.billing_panel_lookup_superseded", team_id=team_id)
     except (DaimonError, SlackApiError, SQLAlchemyError) as exc:
         log.error(
             "slack.billing_panel_action_failed",

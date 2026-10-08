@@ -436,7 +436,11 @@ def _panel_payload(action_id: str, **action: str) -> dict[str, Any]:
         "team": {"id": "T_PANEL"},
         "user": {"id": "U_CALLER"},
         "trigger_id": "TRIGGER",
-        "view": {"id": "V_PANEL", "private_metadata": json.dumps({"channel_id": "C1"})},
+        "view": {
+            "id": "V_PANEL",
+            "hash": "H_PANEL",
+            "private_metadata": json.dumps({"channel_id": "C1"}),
+        },
         "actions": [{"action_id": action_id, **action}],
     }
 
@@ -510,6 +514,7 @@ async def test_a_pick_redraws_the_panel_with_that_persons_spend(
     assert kwargs["is_admin"] is True and kwargs["channel_id"] == "C1", "read fresh, same channel"
     [updated] = _sent(fake_slack_web_client, "views.update")
     assert updated["view_id"] == "V_PANEL"
+    assert updated["hash"] == "H_PANEL", "a slower, earlier pick can't overwrite a newer one"
     assert json.loads(updated["view"]["private_metadata"]) == {"channel_id": "C1"}
     result = updated["view"]["blocks"][-1]
     assert result["block_id"] == "billing_lookup_result"
