@@ -152,6 +152,7 @@ def _make_runtime(
 
 def _mcp_settings() -> MagicMock:
     settings = MagicMock()
+    settings.agent_identity.enabled = True
     settings.mcp.public_url = _PUBLIC_URL
     secret = MagicMock()
     secret.get_secret_value.return_value = _JWT_SECRET

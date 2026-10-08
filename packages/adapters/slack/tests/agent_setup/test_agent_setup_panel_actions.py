@@ -172,6 +172,7 @@ def _build_runtime(
     deployment_default: DeploymentDefault | None = None,
 ) -> SlackRuntime:
     settings = MagicMock()
+    settings.agent_identity.enabled = True
     settings.crypto.keys = (SecretStr(fernet_key),)
     settings.mcp.public_url = None
     settings.mcp.jwt_secret = None

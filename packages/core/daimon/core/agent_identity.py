@@ -38,7 +38,9 @@ def identity_enabled_for(
     workspace_id: str | int | None,
 ) -> bool:
     """Apply the deployment switch and a platform's workspace exclusions."""
-    identity = settings.agent_identity
+    identity = getattr(settings, "agent_identity", None)
+    if identity is None:
+        return False
     if identity.enabled is not True:
         return False
     if platform == "discord":
