@@ -162,7 +162,7 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     )
     await lc.post_initial()
     await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
-    assert _block_text(_last_update_blocks(fake_slack_web_client)).endswith("· $12.50 left")
+    assert _block_text(_last_update_blocks(fake_slack_web_client)).endswith("Balance: $12.50 left")
 
     async with db_session_factory() as s, s.begin():
         await set_funding_mode(s, tenant_id=tenant.id, funding_mode="operator_funded")
@@ -874,7 +874,7 @@ async def test_interrupted_tool_turn_shows_cancelled_and_preserves_partial_answe
     )
 
     rendered = _block_text(_last_update_blocks(fake_slack_web_client))
-    assert "Turn cancelled." in rendered
+    assert "Stopped." in rendered
     if partial_text:
         assert partial_text in rendered
     assert "cancel_turn" not in _action_ids(_last_update_blocks(fake_slack_web_client))
@@ -959,8 +959,8 @@ async def test_terminal_success_empty_content_shows_turn_cancelled(
     assert lc.final_ts is not None, "final_ts must be set even for cancelled turns"
 
     blocks = _last_update_blocks(fake_slack_web_client)
-    assert "Turn cancelled." in _block_text(blocks), (
-        "an empty turn (no text, no tools) must render 'Turn cancelled.'"
+    assert "Stopped.\nSend a message to start again." in _block_text(blocks), (
+        "an empty turn shows the stop and next step"
     )
     assert not _has_actions_block(blocks), "cancelled turn must not keep the cancel button"
 
@@ -1003,13 +1003,14 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     blocks = _last_update_blocks(fake_slack_web_client)
     notice = render_termination_notice(reason, state=state)
     assert notice is not None
-    section, context = blocks[0], blocks[-1]
+    section, context = blocks[2], blocks[-1]
     assert section["type"] == "section"
     assert notice.cause in section["text"]["text"]
-    assert notice.next_step in section["text"]["text"], "the next step is not truncated away"
+    assert blocks[1]["text"]["text"] == notice.next_step
+    assert "*Next:*" not in section["text"]["text"]
     assert "`fit_model`" in section["text"]["text"], "work in flight is named"
     assert "`rid: " in section["text"]["text"]
-    assert context["elements"][0]["text"].startswith(f"❌ {notice.headline} · ")
+    assert "0s" in context["elements"][0]["text"]
     assert "xxx" not in _block_text(blocks), "raw error stays in the logs"
 
 
@@ -1048,7 +1049,7 @@ async def test_terminal_failure_notice_fits_slack_limits_with_many_long_names(
 
     calls = fake_slack_web_client.mock.requests.get(("POST", _UPDATE_URL), [])
     body = calls[-1].kwargs["json"]
-    section = body["blocks"][0]["text"]["text"]
+    section = body["blocks"][2]["text"]["text"]
     assert len(section) <= 3000
     assert "and 42 more" in section and "and 40 more" in section
     assert "`rid: " in section
@@ -1069,8 +1070,8 @@ async def test_a_notice_that_fails_to_build_still_draws_the_error_card(
     await lc.on_terminal_failure(TurnState(), RuntimeError("upstream timeout"))
 
     blocks = _last_update_blocks(fake_slack_web_client)
-    assert [b["type"] for b in blocks] == ["context"], "no notice section, no repair notice"
-    assert blocks[0]["elements"][0]["text"].startswith("❌ upstream timeout · ")
+    assert blocks[0]["text"]["text"] == "Something went wrong."
+    assert not any("upstream timeout" in str(block) for block in blocks)
 
 
 async def test_the_card_reuses_the_rid_bound_for_the_turn(fake_slack_web_client: Any) -> None:
@@ -1097,9 +1098,7 @@ async def test_terminal_failure_does_not_raise(fake_slack_web_client: Any) -> No
 
     blocks = _last_update_blocks(fake_slack_web_client)
     text = _block_text(blocks)
-    assert "❌ Something went wrong" in text, (
-        "terminal failure must render the ❌ error footer with the notice headline"
-    )
+    assert "Something went wrong." in text
     assert "`rid: " in text, "the notice carries a request id to find the logged error"
     assert "upstream blew up" not in text, "raw exception text stays in the logs"
     assert not _has_actions_block(blocks), "error terminal must drop the cancel button"
@@ -1199,7 +1198,7 @@ async def test_terminal_success_flush_failure_repairs_status_message(
         "the failed answer replace must be followed by exactly one repair chat.update"
     )
     blocks = _last_update_blocks(fake_slack_web_client)
-    assert "went wrong" in _block_text(blocks), (
+    assert "I couldn't send the full answer." in _block_text(blocks), (
         "the repair must render a plain failure notice, not the live surface"
     )
     assert not _has_actions_block(blocks), "the repair must not keep the dead cancel button"
@@ -1327,7 +1326,7 @@ async def test_terminal_failure_flush_failure_repairs_status_message(
         "the failed error flush must be followed by exactly one repair chat.update"
     )
     blocks = _last_update_blocks(fake_slack_web_client)
-    assert "went wrong" in _block_text(blocks), (
+    assert "Something went wrong." in _block_text(blocks), (
         "the repair must render a plain failure notice, not the live surface"
     )
     assert not _has_actions_block(blocks), "the repair must not keep the dead cancel button"
@@ -1367,7 +1366,7 @@ async def test_terminal_success_transport_error_repairs_and_does_not_raise(
     await lc.on_terminal_success(state)  # must not raise
 
     blocks = _last_update_blocks(fake_slack_web_client)
-    assert "went wrong" in _block_text(blocks), (
+    assert "I couldn't send the full answer." in _block_text(blocks), (
         "a transport error must produce the same repair notice as an ok:false response"
     )
     assert lc.final_ts is None, "final_ts must stay unset when the answer never posted"
@@ -1418,7 +1417,7 @@ async def test_terminal_success_cancelled_collapse_repair_does_not_claim_an_answ
     await lc.on_terminal_success(TurnState())  # empty content — cancelled path
 
     text = _block_text(_last_update_blocks(fake_slack_web_client))
-    assert "went wrong" in text, "the failed collapse must still be repaired"
+    assert "Something went wrong." in text
     assert "answer" not in text, "a turn with no answer must not be described as one"
     assert deregistered == ["1000000000.000001"], "deregister must still run in finally"
 
@@ -1823,9 +1822,9 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
         await lc.post_initial()
         await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
         footers[channel] = _block_text(_last_update_blocks(fake_slack_web_client))
-    assert footers["C1"].endswith("· $3.75 of channel budget left"), "the budget's remainder"
+    assert footers["C1"].endswith("Balance: $3.75 of channel budget left"), "the budget's remainder"
     for channel in ("C2", "C3", None):
-        assert footers[channel].endswith("· $11.25 left"), (
+        assert footers[channel].endswith("Balance: $11.25 left"), (
             f"{channel}: an inactive or missing budget shows the tenant balance"
         )
 

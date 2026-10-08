@@ -39,22 +39,36 @@ _TURN = TurnState(content=_CONTENT, finished_tool_ids=("tu_1",))
 _DRAFT = "Looking through the open issues now"
 
 
-def _discord_text() -> str:
+def _discord_lines() -> list[str]:
     state = discord_embed.update(
         discord_embed.EmbedState(started_at=100.0),
         discord_embed.EmbedEvent(kind="message", label=_DRAFT),
     )
     state = discord_embed.update_activity(state, _TURN)
-    return discord_embed.to_embed_data(state, now=165.0).description
+    data = discord_embed.to_embed_data(state, now=165.0)
+    return [
+        data.title,
+        "Details",
+        *((data.details or "").replace("`", "").splitlines()),
+        data.description.removeprefix("> "),
+    ]
 
 
-def _slack_text() -> str:
+def _slack_lines() -> list[str]:
     state = blockkit.update(
         blockkit.State(started_at=100.0), blockkit.EmbedEvent(kind="message", label=_DRAFT)
     )
     state = blockkit.update_activity(state, _TURN)
     blocks = blockkit.to_blocks(state, now=165.0)
-    return "\n".join(block["text"]["text"] for block in blocks if block["type"] == "section")
+    lines: list[str] = []
+    for block in blocks:
+        if block["type"] == "section":
+            lines.append(block["text"]["text"].strip("*").removeprefix("> "))
+        elif block["type"] == "context":
+            text = block["elements"][0]["text"]
+            if text.startswith("*Details*"):
+                lines.extend(text.replace("*", "").replace("`", "").splitlines())
+    return lines
 
 
 def _teams_lines() -> list[str]:
@@ -68,17 +82,12 @@ def _teams_lines() -> list[str]:
     return [line.replace("**", "") for text in blocks for line in text.split("\n\n")]
 
 
-def _slack_lines() -> list[str]:
-    lines = _slack_text().replace("*", "").splitlines()
-    return [line.removeprefix("> ") for line in lines if line != "```"]
-
-
 def test_teams_shows_the_same_status_words_as_slack() -> None:
     assert _teams_lines() == _slack_lines(), "the Teams card must say what the Slack card says"
 
 
 def test_discord_and_slack_show_the_same_status_words() -> None:
-    assert _discord_text().replace("**", "*") == _slack_text(), (
+    assert _discord_lines() == _slack_lines(), (
         "the two cards must say the same thing about the same turn, markup aside"
     )
 

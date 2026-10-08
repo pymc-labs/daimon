@@ -64,7 +64,7 @@ from discord.ext import commands
 
 _log = structlog.get_logger()
 
-_CALLBACK_FAILED = "Something went wrong opening the feedback form -- please try again."
+_CALLBACK_FAILED = "That didn't work. Try again."
 
 
 class FeedbackButton(
@@ -80,7 +80,7 @@ class FeedbackButton(
     def __init__(self, *, feedback_id: str) -> None:
         button: discord.ui.Button[discord.ui.View] = discord.ui.Button(
             style=discord.ButtonStyle.secondary,
-            label="Tell us what went wrong",
+            label="Give feedback",
             custom_id=build_custom_id(feedback_id),
         )
         super().__init__(button)

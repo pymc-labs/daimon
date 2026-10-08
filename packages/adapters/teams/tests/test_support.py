@@ -100,8 +100,12 @@ async def test_the_default_allowance_is_twenty_requests(
         card = await _form(service, teams_api_fake, make_channel_activity(text="support"))
         reply = await _send(service, _token(card), "help")
 
-    assert "You have 20 requests left" in card
+    assert "20 requests left" in card
     assert support.RECEIVED.format(remaining=19) in reply
+
+
+def test_support_form_uses_singular_request_count() -> None:
+    assert "1 request left" in support.form_card("token", 1).model_dump_json()
 
 
 async def test_a_request_asked_in_a_channel_links_back_to_it(
@@ -111,7 +115,7 @@ async def test_a_request_asked_in_a_channel_links_back_to_it(
         card = await _form(service, teams_api_fake, make_channel_activity(text="support"))
         reply = await _send(service, _token(card), "the routine broke")
 
-    assert "You have 3 requests left" in card
+    assert "3 requests left" in card
     assert support.RECEIVED.format(remaining=2) in reply
     [posted] = _posts_to(teams_api_fake, OPS)
     assert "the routine broke" in posted and "teams.microsoft.com/l/message/" in posted

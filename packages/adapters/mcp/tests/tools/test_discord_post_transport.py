@@ -120,7 +120,7 @@ async def test_missing_webhook_uses_one_name_prefix(
         content="answer",
         identity_enabled=True,
     )
-    channel.send.assert_awaited_once_with(content="**Research** answer", files=[])
+    channel.send.assert_awaited_once_with(content="**Research**\n\nanswer", files=[])
 
 
 async def test_fallback_resplits_when_name_pushes_content_over_discord_limit(

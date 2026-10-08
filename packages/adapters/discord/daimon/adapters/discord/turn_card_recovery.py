@@ -385,10 +385,8 @@ async def _mark_card_interrupted(
     try:
         embed = discord.Embed(
             color=0xE74C3C,
-            description=(
-                "❌ This turn was interrupted by a restart and cannot be resumed. "
-                "Nothing was lost on your side — mention me again to retry."
-            ),
+            title="Stopped: Daimon restarted.",
+            description="Mention me to try again.",
         )
         if client is not None and message.webhook_id is not None:
             transport = DiscordPostTransport(

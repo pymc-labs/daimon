@@ -124,7 +124,7 @@ longer goes to the agent. None of them runs an agent turn.
 | `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
 | `privacy` | See, export or delete what daimon stores about you. |
 | `billing` | Your usage this month and the credit left, with when timed credit expires; admins also see the month's spend, the top spenders and channel budgets, add credit and redeem promo codes. |
-| `support` | Ask a person for help: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked. |
+| `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked. |
 
 A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
 setup conversation for the chosen agent, with its own session. The chat's

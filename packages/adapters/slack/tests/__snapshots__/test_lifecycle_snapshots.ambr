@@ -6,10 +6,13 @@
         'blocks': list([
           dict({
             'text': dict({
-              'text': '*Thinking* · 0s',
+              'text': '*Working on it…*',
               'type': 'mrkdwn',
             }),
             'type': 'section',
+          }),
+          dict({
+            'type': 'divider',
           }),
           dict({
             'elements': list([
@@ -17,7 +20,7 @@
                 'action_id': 'cancel_turn',
                 'style': 'danger',
                 'text': dict({
-                  'text': 'Cancel',
+                  'text': 'Stop',
                   'type': 'plain_text',
                 }),
                 'type': 'button',
@@ -26,8 +29,17 @@
             ]),
             'type': 'actions',
           }),
+          dict({
+            'elements': list([
+              dict({
+                'text': '0s',
+                'type': 'mrkdwn',
+              }),
+            ]),
+            'type': 'context',
+          }),
         ]),
-        'text': 'Thinking · 0s',
+        'text': 'Working on it…',
       }),
     ]),
     'updates': list([
@@ -35,10 +47,13 @@
         'blocks': list([
           dict({
             'text': dict({
-              'text': '*Thinking* · 12s',
+              'text': '*Working on it…*',
               'type': 'mrkdwn',
             }),
             'type': 'section',
+          }),
+          dict({
+            'type': 'divider',
           }),
           dict({
             'elements': list([
@@ -46,7 +61,7 @@
                 'action_id': 'cancel_turn',
                 'style': 'danger',
                 'text': dict({
-                  'text': 'Cancel',
+                  'text': 'Stop',
                   'type': 'plain_text',
                 }),
                 'type': 'button',
@@ -55,17 +70,40 @@
             ]),
             'type': 'actions',
           }),
+          dict({
+            'elements': list([
+              dict({
+                'text': '12s',
+                'type': 'mrkdwn',
+              }),
+            ]),
+            'type': 'context',
+          }),
         ]),
-        'text': 'Thinking · 12s',
+        'text': 'Working on it…',
       }),
       dict({
         'blocks': list([
           dict({
             'text': dict({
+              'text': 'Something went wrong.',
+              'type': 'mrkdwn',
+            }),
+            'type': 'section',
+          }),
+          dict({
+            'text': dict({
+              'text': 'Send your message again. If it keeps happening, share the request id with an admin.',
+              'type': 'mrkdwn',
+            }),
+            'type': 'section',
+          }),
+          dict({
+            'text': dict({
               'text': '''
+                *Details*
                 The turn ended unexpectedly.
                 The conversation and its workspace are kept.
-                *Next:* Send your message again. If it keeps happening, share the request id with an admin.
                 `rid: 01TESTREQUESTID0000000000`
               ''',
               'type': 'mrkdwn',
@@ -73,9 +111,25 @@
             'type': 'section',
           }),
           dict({
+            'type': 'divider',
+          }),
+          dict({
             'elements': list([
               dict({
-                'text': '❌ Something went wrong · Atlas · 12s · 500 in / 80 out · $0.003',
+                'text': 'Atlas',
+                'type': 'mrkdwn',
+              }),
+            ]),
+            'type': 'context',
+          }),
+          dict({
+            'elements': list([
+              dict({
+                'text': '''
+                  Time: 12s
+                  Cost: $0.003
+                  Tokens: 500 in / 80 out
+                ''',
                 'type': 'mrkdwn',
               }),
             ]),
@@ -99,10 +153,13 @@
         'blocks': list([
           dict({
             'text': dict({
-              'text': '*Thinking* · 0s',
+              'text': '*Working on it…*',
               'type': 'mrkdwn',
             }),
             'type': 'section',
+          }),
+          dict({
+            'type': 'divider',
           }),
           dict({
             'elements': list([
@@ -110,7 +167,7 @@
                 'action_id': 'cancel_turn',
                 'style': 'danger',
                 'text': dict({
-                  'text': 'Cancel',
+                  'text': 'Stop',
                   'type': 'plain_text',
                 }),
                 'type': 'button',
@@ -119,8 +176,17 @@
             ]),
             'type': 'actions',
           }),
+          dict({
+            'elements': list([
+              dict({
+                'text': '0s',
+                'type': 'mrkdwn',
+              }),
+            ]),
+            'type': 'context',
+          }),
         ]),
-        'text': 'Thinking · 0s',
+        'text': 'Working on it…',
       }),
     ]),
     'updates': list([
@@ -128,18 +194,7 @@
         'blocks': list([
           dict({
             'text': dict({
-              'text': '*Working* · 6s',
-              'type': 'mrkdwn',
-            }),
-            'type': 'section',
-          }),
-          dict({
-            'text': dict({
-              'text': '''
-                ```
-                🖋️ Running a command
-                ```
-              ''',
+              'text': '*Working on it…*',
               'type': 'mrkdwn',
             }),
             'type': 'section',
@@ -147,10 +202,25 @@
           dict({
             'elements': list([
               dict({
+                'text': '''
+                  *Details*
+                  `🖋️ Running a command`
+                ''',
+                'type': 'mrkdwn',
+              }),
+            ]),
+            'type': 'context',
+          }),
+          dict({
+            'type': 'divider',
+          }),
+          dict({
+            'elements': list([
+              dict({
                 'action_id': 'cancel_turn',
                 'style': 'danger',
                 'text': dict({
-                  'text': 'Cancel',
+                  'text': 'Stop',
                   'type': 'plain_text',
                 }),
                 'type': 'button',
@@ -159,8 +229,17 @@
             ]),
             'type': 'actions',
           }),
+          dict({
+            'elements': list([
+              dict({
+                'text': '6s',
+                'type': 'mrkdwn',
+              }),
+            ]),
+            'type': 'context',
+          }),
         ]),
-        'text': 'Working · 6s',
+        'text': 'Working on it…',
       }),
       dict({
         'blocks': list([
@@ -171,7 +250,21 @@
           dict({
             'elements': list([
               dict({
-                'text': 'Atlas · 16s · 1.5k in / 320 out · $0.008',
+                'text': 'Atlas',
+                'type': 'mrkdwn',
+              }),
+            ]),
+            'type': 'context',
+          }),
+          dict({
+            'elements': list([
+              dict({
+                'text': '''
+                  *Details*
+                  Time: 16s
+                  Cost: $0.008
+                  Tokens: 1.5k in / 320 out
+                ''',
                 'type': 'mrkdwn',
               }),
             ]),

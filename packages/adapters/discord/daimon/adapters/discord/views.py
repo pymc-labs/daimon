@@ -85,7 +85,7 @@ class CancelView(GuardedView):
         if turn_id is not None:
             self.cancel_button.custom_id = turn_card_custom_id(turn_id)
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.grey)
     async def cancel_button(
         self,
         interaction: discord.Interaction,

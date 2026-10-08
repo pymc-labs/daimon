@@ -109,7 +109,7 @@ class TestCancelView:
         cancel = asyncio.Event()
         view = CancelView(allowed_user_id=123, cancel=cancel)
         interaction = _mock_interaction(user_id=123)
-        btn = _find_button(view, "Cancel")
+        btn = _find_button(view, "Stop")
         await btn.callback(interaction)
         assert cancel.is_set(), "cancel event should be set"
         assert view._handled is True, "view should be finalized"
@@ -121,7 +121,7 @@ class TestCancelView:
         view = CancelView(allowed_user_id=123, cancel=cancel)
         # First press
         interaction1 = _mock_interaction(user_id=123)
-        btn = _find_button(view, "Cancel")
+        btn = _find_button(view, "Stop")
         await btn.callback(interaction1)
         # Second press -- interaction_check rejects
         interaction2 = _mock_interaction(user_id=123)
@@ -149,7 +149,7 @@ class TestCancelView:
     def test_button_style_is_grey(self) -> None:
         cancel = asyncio.Event()
         view = CancelView(allowed_user_id=123, cancel=cancel)
-        btn = _find_button(view, "Cancel")
+        btn = _find_button(view, "Stop")
         assert btn.style == discord.ButtonStyle.grey, "cancel button should be grey"
 
     @pytest.mark.asyncio
@@ -157,7 +157,7 @@ class TestCancelView:
         turn_id = UUID("12345678-1234-5678-1234-567812345678")
         cancel = asyncio.Event()
         view = CancelView(allowed_user_id=123, cancel=cancel, turn_id=turn_id)
-        button = _find_button(view, "Cancel")
+        button = _find_button(view, "Stop")
         interaction = _mock_interaction(user_id=123)
 
         assert button.custom_id == f"daimon:cancel:{turn_id}", (

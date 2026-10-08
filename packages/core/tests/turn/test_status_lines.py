@@ -44,10 +44,10 @@ def test_format_duration_covers_seconds_minutes_and_hours() -> None:
 
 def test_format_headline_bolds_the_state_word_with_the_adapter_markup() -> None:
     assert format_headline(is_working=False, elapsed_seconds=12, bold=lambda s: f"**{s}**") == (
-        "**Thinking** · 12s"
-    ), "no running tool reads as thinking"
+        "**Working on it…**"
+    )
     assert format_headline(is_working=True, elapsed_seconds=None, bold=lambda s: f"*{s}*") == (
-        "*Working*"
+        "*Working on it…*"
     ), "without a clock the headline is the word alone"
 
 

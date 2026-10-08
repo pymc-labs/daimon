@@ -386,7 +386,7 @@ project agent a rule. Beyond the rule, whatever an agent can reach (its repo,
 keys, connectors and memory) is also guarded where a member could otherwise
 borrow it:
 
-- `hand_off_task` and the Hand over button let a member hand a thread only
+- `hand_off_task` and the Switch to agent button let a member hand a thread only
   to an agent of that channel: the one it answers with, one whose rule names
   it, or one of the channel's own agents. Any other destination needs a
   server admin, or a channel admin of the parent channel when the thread's
@@ -1082,7 +1082,7 @@ A thread can move to another agent without a new thread. Two triggers:
   Teams.
 - When a channel's agent changes, a thread whose session belongs to the old
   agent can't run a turn, and its next mention gets a notice instead. On
-  Discord, Slack and Teams the notice has a Hand over button that moves the
+  Discord, Slack and Teams the notice has a Switch to agent button that moves the
   thread to the channel's agent for whoever clicks it.
 
 Asking the agent is the default because it is how every other thread change
@@ -1330,7 +1330,7 @@ do not get a completion marker. Continuations without a trigger message skip
 reactions.
 
 A cancelled prompted Discord or Slack turn keeps any partial answer and appends
-"Turn cancelled."; a turn cancelled after only tool calls shows that notice in its
+"Stopped. Send a message to start again."; a turn cancelled after only tool calls shows that notice in its
 status card. A cancelled turn sends no completion ping and no feedback controls.
 An unprompted Discord turn cancelled before it has an answer stays silent.
 
@@ -1339,7 +1339,7 @@ Set `DAIMON_COMPLETION_PINGS` to a JSON object keyed by tenant UUID, for example
 answer as a fresh thread reply mentioning only the requester. Missing or false
 entries keep the existing in-place answer and reactions (none on Discord; Slack keeps its admission eyes). Slack admission adds eyes once; the lifecycle only replaces it on opted-in completion. Recovery lifecycles retain this policy;
 continuity notices and feedback target the new answer. Teams posts the answer fresh (with
-an @mention in a channel), then sets its card to "Done. The answer is below."; bots cannot
+an @mention in a channel), then sets its card to "Done."; bots cannot
 react there.
 
 ### Routine dispatch
