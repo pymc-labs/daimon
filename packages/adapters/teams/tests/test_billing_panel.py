@@ -9,6 +9,7 @@ import asyncio
 import dataclasses
 import functools
 import json
+import re
 import uuid
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
@@ -55,12 +56,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    CHANNEL_ID,
     CONVERSATION_ID,
+    DIRECT_CHAT_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     TeamsApiFake,
     build_teams_runtime,
     make_card_action,
+    make_channel_activity,
     make_message_activity,
     post_activity,
     running_service,
@@ -323,6 +327,40 @@ async def test_the_admin_card_names_top_spenders_and_channels(
         )
     assert stored == {OTHER_AAD_OBJECT_ID: KnownName("Maya *Chen*")}, "a roster name is stored"
     assert channels == {"19:research@thread.tacv2": "Research"}, "a listed channel name is stored"
+
+
+async def test_billing_typed_in_a_channel_shows_its_budget_on_every_click_of_its_typer(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with db_session_factory.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None
+        await make_channel_budget(session, tenant=tenant, platform="teams", channel_id=CHANNEL_ID)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        await post_activity(service, make_channel_activity(text="billing"))
+        async with asyncio.timeout(10):
+            while not (
+                chat := [r for r in teams_api_fake.activity_requests if DIRECT_CHAT_ID in r.url]
+            ):
+                await asyncio.sleep(0.01)
+        card = json.dumps(chat[0].body, ensure_ascii=False)
+        found = re.search(r'"place": "([^"]+)"', card)
+        assert found is not None, "the card's buttons carry the channel's token"
+        refreshed = json.dumps(await post_activity(service, _click("refresh", place=found[1])))
+        forged = json.dumps(
+            await post_activity(
+                service, _click("refresh", user=OTHER_AAD_OBJECT_ID, place=found[1])
+            )
+        )
+        in_chat = await _command(service, teams_api_fake, AAD_OBJECT_ID)
+
+    assert '"This channel"' in card and "of $5.00 used this month" in card, "its budget"
+    assert '"This channel"' in refreshed, "a refresh keeps the channel it was asked in"
+    assert '"Billing"' in forged and '"This channel"' not in forged, (
+        "someone else's click gets their own panel, naming no channel"
+    )
+    assert '"This channel"' not in in_chat, "typed in the chat, there is no channel"
 
 
 async def test_a_message_remembers_its_senders_name(

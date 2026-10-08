@@ -22,6 +22,13 @@ notify them.
 Channel budgets are named the same way: the channel listings of those teams,
 else the name stored from a message there, else `General` for a team's own
 id; never the raw `19:…` id.
+
+Typed in a channel, the card is answered in the 1:1 chat with that channel's
+budget under "This channel", as Slack's and Discord's panels show the budget
+of the channel they were opened in. The channel is held here under a token its
+buttons carry, honoured only for the person who typed the command, so a forged
+click cannot read another channel's budget; after a restart a refresh drops
+the line.
 """
 
 from __future__ import annotations
@@ -30,7 +37,9 @@ import asyncio
 import dataclasses
 import functools
 import re
+import secrets
 import uuid
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import cast
@@ -144,6 +153,10 @@ GENERAL = "General"
 # Team rosters tried per person, in `list_teams_installations` order.
 _ROSTER_TEAMS = 5
 _MARKDOWN = re.compile(r"([\\*_`~\[\]])")
+# Every button carries the card's place token ("" for none), so a click keeps its channel.
+PLACE = "place"
+# Channels held for "This channel" across clicks; the oldest is dropped first.
+_MAX_PLACES = 512
 
 RosterName = Callable[[str, str], Awaitable[str | None]]
 """(team id, Entra object id) -> the person's name on that team's roster, or None."""
@@ -324,26 +337,26 @@ def redeemed_text(result: PromoRedeemed) -> str:
     )
 
 
-def _topup(amount: int, state: BillingPanelState) -> Column:
+def _topup(amount: int, state: BillingPanelState, place: str | None) -> Column:
     """`$10` as a button, and under it in grey what it buys: `about 100 turns`."""
     turns = estimate_turns(amount, guild_spend=state.guild_spend, guild_turns=state.guild_turns)
-    pay = ActionSet(actions=[button(VERB, f"${amount}", "topup", amount=str(amount))])
-    return Column(width="auto", items=[pay, *_details(turns_phrase(turns))])
+    pay = button(VERB, f"${amount}", "topup", amount=str(amount), place=place or "")
+    return Column(width="auto", items=[ActionSet(actions=[pay]), *_details(turns_phrase(turns))])
 
 
 def _sub_card(*items: CardElement) -> AdaptiveCard:
     return AdaptiveCard(body=list(items))
 
 
-def _actions(state: BillingPanelState) -> list[Action]:
+def _actions(state: BillingPanelState, place: str | None) -> list[Action]:
     """`Add credit` and `Redeem code` for an admin; `Expiry dates` with timed credit."""
     actions: list[Action] = []
     if state.is_admin:
-        amounts = ColumnSet(columns=[_topup(amount, state) for amount in TOPUP_AMOUNTS])
+        amounts = ColumnSet(columns=[_topup(amount, state, place) for amount in TOPUP_AMOUNTS])
         actions.append(ShowCardAction(title=ADD_CREDIT, card=_sub_card(amounts)))
         if state.has_redeemable_promo_code:
             code = TextInput(id=CODE_INPUT, placeholder="XXXXX-XXXXX-XXXXX-XXXXX", max_length=100)
-            redeem = ActionSet(actions=[button(VERB, "Redeem", "redeem")])
+            redeem = ActionSet(actions=[button(VERB, "Redeem", "redeem", place=place or "")])
             actions.append(ShowCardAction(title=REDEEM_CODE, card=_sub_card(code, redeem)))
     if state.timed_credit:
         actions.append(ToggleVisibilityAction(title=EXPIRY_DATES, target_elements=[EXPIRY_ID]))
@@ -402,7 +415,11 @@ def _rows(*lines: str) -> list[CardElement]:
 
 
 def _panel_body(
-    state: BillingPanelState, since: datetime, now: datetime, channel_names: Mapping[str, str]
+    state: BillingPanelState,
+    since: datetime,
+    now: datetime,
+    channel_names: Mapping[str, str],
+    place: str | None,
 ) -> list[CardElement]:
     subtext = (
         admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
@@ -425,7 +442,7 @@ def _panel_body(
     if state.timed_credit:
         rows = expiry_rows(state.timed_credit, when=card_date)
         body.append(_titled(EXPIRY_INTRO, *_rows(*rows), element_id=EXPIRY_ID, hidden=True))
-    if actions := _actions(state):
+    if actions := _actions(state, place):
         body.append(ActionSet(actions=actions, separator=True, spacing="Large"))
     return body
 
@@ -437,23 +454,25 @@ def panel_card(
     now: datetime | None = None,
     notice: str | None = None,
     channel_names: Mapping[str, str] | None = None,
+    place: str | None = None,
 ) -> AdaptiveCard:
     """The member view, or for an admin the tenant view with its admin actions.
 
-    ``channel_names`` names the channel budgets by id (`channel_labels`).
+    ``channel_names`` names the channel budgets by id (`channel_labels`);
+    ``place`` is the token every button carries for the channel it was asked in.
     """
-    body = _panel_body(state, since, now or datetime.now(UTC), channel_names or {})
+    body = _panel_body(state, since, now or datetime.now(UTC), channel_names or {}, place)
     if notice is not None:
         body = [*text_lines(notice), *body]
     return AdaptiveCard(body=body, fallback_text=TITLE)
 
 
-def _back() -> ExecuteAction:
-    return button(VERB, "Back", "refresh")
+def _back(place: str | None = None) -> ExecuteAction:
+    return button(VERB, "Back", "refresh", place=place or "")
 
 
-def checkout_card(url: str, amount: int) -> AdaptiveCard:
-    pay: list[Action] = [OpenUrlAction(title="Complete payment", url=url), _back()]
+def checkout_card(url: str, amount: int, place: str | None = None) -> AdaptiveCard:
+    pay: list[Action] = [OpenUrlAction(title="Complete payment", url=url), _back(place)]
     body: list[CardElement] = [
         heading(f"💳 Top up ${amount}"),
         *text_lines("Complete the payment in your browser; the credit lands once Stripe confirms."),
@@ -475,19 +494,38 @@ class BillingPanel:
         self._runtime = runtime
         self._roster_name = roster_name
         self._team_channels = team_channels
+        # Token -> (who typed the command, the channel it was typed in).
+        self._places: OrderedDict[str, tuple[str, str]] = OrderedDict()
 
     async def command(self, context: CommandContext) -> None:
-        await context.send_card(
-            await self._panel(context.tenant_id, context.inbound.user_id, context.is_admin)
-        )
+        asked, place = context.asked_in, None
+        if asked is not None:
+            place = secrets.token_urlsafe(16)
+            self._places[place] = (asked.user_id, asked.channel_id)
+            while len(self._places) > _MAX_PLACES:
+                self._places.popitem(last=False)
+        user_id = context.inbound.user_id
+        card = await self._panel(context.tenant_id, user_id, context.is_admin, place=place)
+        await context.send_card(card)
 
     async def on_action(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
     ) -> AdaptiveCardInvokeResponse:
         return await guarded(self._act(ctx.activity), toast(FAILED), "teams.billing.failed")
 
+    def _channel_of(self, place: str | None, user_id: str) -> str | None:
+        """The channel a held token names, for the person who typed the command only."""
+        held = self._places.get(place) if place is not None else None
+        return held[1] if held is not None and held[0] == user_id else None
+
     async def _panel(
-        self, tenant_id: uuid.UUID, user_id: str, is_admin: bool, *, notice: str | None = None
+        self,
+        tenant_id: uuid.UUID,
+        user_id: str,
+        is_admin: bool,
+        *,
+        notice: str | None = None,
+        place: str | None = None,
     ) -> AdaptiveCard:
         now = datetime.now(UTC)
         since = month_start(now)
@@ -500,6 +538,7 @@ class BillingPanel:
                 since=since,
                 now=now,
                 platform="teams",
+                channel_id=self._channel_of(place, user_id),
             )
             teams = await list_teams_installations(session, tenant_id=tenant_id)
             budget_ids = [
@@ -513,7 +552,9 @@ class BillingPanel:
             self._named(state, tenant_id, team_ids),
             self._channel_names(tenant_id, team_ids, budget_ids, stored_channels),
         )
-        return panel_card(state, since=since, now=now, notice=notice, channel_names=channel_names)
+        return panel_card(
+            state, since=since, now=now, notice=notice, channel_names=channel_names, place=place
+        )
 
     async def _named(
         self, state: BillingPanelState, tenant_id: uuid.UUID, team_ids: list[str]
@@ -559,10 +600,13 @@ class BillingPanel:
         if actor is None:
             return toast(DENIED)
         data = activity.value.action.data
+        place = str(cast(object, data.get(PLACE)) or "") or None
         if data.get("op") == "redeem":
-            return await self._redeem(actor, str(cast(object, data.get(CODE_INPUT)) or ""))
+            code = str(cast(object, data.get(CODE_INPUT)) or "")
+            return await self._redeem(actor, code, place)
         if data.get("op") != "topup":
-            return replace_card(await self._panel(actor.tenant_id, actor.user_id, actor.is_admin))
+            card = await self._panel(actor.tenant_id, actor.user_id, actor.is_admin, place=place)
+            return replace_card(card)
         if not actor.is_admin:
             return toast(ADMIN_ONLY)
         amount = next((a for a in TOPUP_AMOUNTS if str(a) == str(data.get("amount"))), None)
@@ -579,10 +623,12 @@ class BillingPanel:
         except (DaimonError, httpx.HTTPError) as exc:
             log.error("teams.billing.checkout_failed", tenant_id=str(actor.tenant_id), exc_info=exc)
             capture_exception_with_scope(exc)
-            return replace_card(text_card("💸 Billing", NOT_CONFIGURED, back=_back()))
-        return replace_card(checkout_card(url, amount))
+            return replace_card(text_card("💸 Billing", NOT_CONFIGURED, back=_back(place)))
+        return replace_card(checkout_card(url, amount, place))
 
-    async def _redeem(self, actor: Actor, code: str) -> AdaptiveCardInvokeResponse:
+    async def _redeem(
+        self, actor: Actor, code: str, place: str | None
+    ) -> AdaptiveCardInvokeResponse:
         """Redeem for a live admin; a refusal leaves the card, and the typed code, as it was."""
         audit = functools.partial(
             record_panel_write,
@@ -608,5 +654,7 @@ class BillingPanel:
             await audit(outcome="denied", reason=f"promo:{result.reason}")
             return toast(describe_refusal(result.reason))
         await audit(outcome="allowed", reason="completed")
-        card = await self._panel(actor.tenant_id, actor.user_id, True, notice=redeemed_text(result))
+        card = await self._panel(
+            actor.tenant_id, actor.user_id, True, notice=redeemed_text(result), place=place
+        )
         return replace_card(card)
