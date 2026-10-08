@@ -51,12 +51,14 @@ def test_two_frame_mpo_uses_first_jpeg() -> None:
         assert result.getpixel((128, 128))[2] < 50
 
 
-def test_sixteen_bit_grayscale_png_is_normalized() -> None:
-    source = Image.new("I;16", (320, 320), 32768)
+@pytest.mark.parametrize(("value", "expected"), [(1000, 3), (32768, 128), (65535, 255)])
+def test_sixteen_bit_grayscale_png_is_normalized(value: int, expected: int) -> None:
+    source = Image.new("I;16", (320, 320), value)
     normalized = normalize_avatar_image(_bytes(source, "PNG"))
     with Image.open(io.BytesIO(normalized)) as result:
         assert result.mode == "RGB"
         assert result.size == (256, 256)
+        assert result.getpixel((128, 128)) == (expected, expected, expected)
 
 
 @pytest.mark.parametrize("error", [SyntaxError("broken PNG file"), struct.error("bad EXIF")])
