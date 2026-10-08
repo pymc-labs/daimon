@@ -29,7 +29,10 @@ class SchedulerSettings(BaseSettings):
 
     tick_interval_s: float = Field(
         default=30.0,
-        description="Seconds between scheduler ticks (loop sleep).",
+        description=(
+            "Seconds between scheduler ticks (loop sleep). The usage sweep "
+            "runs on its own loop and pauses the same interval between passes."
+        ),
     )
 
     max_age_s: float = Field(

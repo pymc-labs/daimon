@@ -10,6 +10,7 @@ lifecycle (covered by ``tests/integration/test_routines_end_to_end.py``).
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import os
 import unittest.mock
@@ -29,6 +30,7 @@ from daimon.adapters.scheduler.main import (
     _CapsAdapter,  # pyright: ignore[reportPrivateUsage]  # named test seam for cap wiring
     _close_github_app_sessions,  # pyright: ignore[reportPrivateUsage]  # vault cleanup retry
     _refresh_github_app_sessions,  # pyright: ignore[reportPrivateUsage]  # MCP token renewal
+    _run_loops,  # pyright: ignore[reportPrivateUsage]  # tick and usage-sweep loops
     _settle_promo_credit,  # pyright: ignore[reportPrivateUsage]  # test seam for the promo settlement wrapper
     _sweep_retired_turn_card_intents,  # pyright: ignore[reportPrivateUsage]  # test seam for the card-intent sweep wrapper
     _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
@@ -1859,6 +1861,77 @@ async def test_sweep_retired_turn_card_intents_forwards_sessionmaker_and_now(
 
     assert captured[0][0] is db_session_factory
     assert captured[0][1].tzinfo is not None
+
+
+async def test_run_loops_keeps_ticking_while_a_usage_pass_is_in_flight() -> None:
+    """A usage pass that outlasts many ticks no longer holds up routine claims,
+    and stopping cancels the pass in flight."""
+    stop = asyncio.Event()
+    ticks = 0
+    pass_cancelled = False
+
+    async def tick() -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks == 3:
+            stop.set()
+
+    async def endless_pass() -> None:
+        nonlocal pass_cancelled
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass_cancelled = True
+            raise
+
+    async with asyncio.timeout(5):
+        await _run_loops(tick=tick, usage_sweep=endless_pass, interval_s=0.01, stop_event=stop)
+
+    assert ticks == 3, f"ticks continue while the usage pass runs, got {ticks}"
+    assert pass_cancelled, "stopping cancels the usage pass in flight"
+
+
+async def test_run_loops_repeats_usage_passes_while_a_tick_is_in_flight() -> None:
+    """Usage passes keep their own cadence when a tick is slow."""
+    stop = asyncio.Event()
+    third_pass = asyncio.Event()
+    passes = 0
+
+    async def slow_tick() -> None:
+        await third_pass.wait()
+        stop.set()
+
+    async def usage_pass() -> None:
+        nonlocal passes
+        passes += 1
+        if passes == 3:
+            third_pass.set()
+
+    async with asyncio.timeout(5):
+        await _run_loops(tick=slow_tick, usage_sweep=usage_pass, interval_s=0.01, stop_event=stop)
+
+    assert passes >= 3, f"usage passes repeat while the first tick is still running, got {passes}"
+
+
+async def test_run_loops_ends_when_a_usage_pass_crashes() -> None:
+    """An error the sweep's own boundary does not catch still stops the
+    scheduler, as it did when the sweep ran inline."""
+
+    async def tick() -> None:
+        return None
+
+    async def crashing_pass() -> None:
+        raise RuntimeError("unexpected sweep failure")
+
+    async with asyncio.timeout(5):
+        with pytest.raises(ExceptionGroup) as raised:
+            await _run_loops(
+                tick=tick, usage_sweep=crashing_pass, interval_s=0.01, stop_event=asyncio.Event()
+            )
+
+    assert raised.group_contains(RuntimeError, match="unexpected sweep failure"), (
+        "the sweep's error propagates out of the loops"
+    )
 
 
 @pytest.mark.parametrize(
