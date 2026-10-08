@@ -138,8 +138,11 @@ def _state(
 def _make_runtime(
     sessionmaker: Any = None, *, settings: Any = None, anthropic: AsyncAnthropic | None = None
 ) -> DiscordRuntime:
+    if settings is None:
+        settings = MagicMock()
+        settings.agent_identity.enabled = True
     return DiscordRuntime(
-        settings=settings if settings is not None else MagicMock(),
+        settings=settings,
         anthropic=anthropic if anthropic is not None else build_stub_anthropic(),
         sessionmaker=sessionmaker if sessionmaker is not None else MagicMock(),
         notebook_rate_limiter=RateLimiter(max_requests=999),
