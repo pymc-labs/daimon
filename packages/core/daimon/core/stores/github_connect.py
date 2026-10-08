@@ -29,7 +29,7 @@ from daimon.core.stores.github_credentials import delete_credential_for_principa
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.thread_session_lineage import request_fresh_start
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -166,6 +166,22 @@ async def record_connect_request(
         )
     )
     await session.flush()
+
+
+async def count_requests_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
+    count = await session.scalar(
+        select(func.count())
+        .select_from(GitHubConnectRequest)
+        .where(GitHubConnectRequest.requester_account_id == account_id)
+    )
+    return count or 0
+
+
+async def delete_requests_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
+    result = await session.execute(
+        delete(GitHubConnectRequest).where(GitHubConnectRequest.requester_account_id == account_id)
+    )
+    return cast(CursorResult[Any], result).rowcount
 
 
 async def activate_confirmed_agent(
