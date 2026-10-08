@@ -1103,7 +1103,7 @@ async def test_the_prompt_says_the_text_is_shared_only_when_the_tenant_routes_it
                 message_author_id=_BOT_USER_ID,
             )
         )
-        contents.append(recipient.send.call_args.kwargs["content"])
+        contents.append(str(recipient.send.call_args.kwargs["embed"].to_dict()))
 
     assert "support team" not in contents[0]
-    assert "also goes to the support team" in contents[1]
+    assert "feedback and answer link go to the support team" in contents[1]
