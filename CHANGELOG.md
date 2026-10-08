@@ -46,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers where offers on Discord and Slack. The same core checks decide
   which skills a channel may add, refusals say why, and every save is
   audited. A channel's own admins still can't change them.
+- **Teams channel reads link files.** `read_channel`, `read_thread`,
+  `get_message` and `search_messages` now return each file on a message with
+  a download link where the channel's SharePoint site is granted, as Slack
+  reads do, so an agent can open a file it finds there. Elsewhere files are
+  still listed by name. Links last about an hour and only come with messages
+  the read already returns, so a sealed thread's files stay out. Each file is
+  now an object with `name` and `url` instead of a bare name.
 - **Teams files in private and shared channels, turned on by asking.** The
   Enable files sign-in now starts from a channel and grants daimon that
   channel's own SharePoint site: the team's for a standard channel, a site of

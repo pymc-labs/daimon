@@ -38,6 +38,8 @@ _CHANNEL = "19:chan@thread.tacv2"
 _PRIVATE = "19:secret@thread.tacv2"
 _ROOT = "1700000000000"
 _THREAD = f"{_CHANNEL};messageid={_ROOT}"
+_SITE = "example.sharepoint.com,site,web"
+_LIBRARY = "https://example.sharepoint.com/sites/team/Shared Documents"
 
 
 def _message(id: str, text: str, *, user: str = "Ada", app: bool = False) -> dict[str, Any]:
@@ -62,6 +64,8 @@ class _Fake:
         self.requests: list[httpx.Request] = []
         self.graph_status = 200
         self.graph_token_status = 200
+        self.files = False
+        self.site_status = 200
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -90,6 +94,8 @@ class _Fake:
         if url.host == "graph.microsoft.com":
             if self.graph_status != 200:
                 return httpx.Response(self.graph_status)
+            if (site := self._site(path)) is not None:
+                return site
             if path.endswith("/replies"):
                 return httpx.Response(
                     200,
@@ -104,9 +110,14 @@ class _Fake:
             if path.endswith(f"/messages/{_ROOT}"):
                 return httpx.Response(200, json=_message(_ROOT, "root"))
             if path.endswith("/messages"):
-                newer = {**_message("1700000000100", "newer post about budgets"), "replies": []}
+                newer = {
+                    **_message("1700000000100", "newer post about budgets"),
+                    "attachments": self._file("notes.docx"),
+                    "replies": [],
+                }
                 older = {
                     **_message(_ROOT, "root"),
+                    "attachments": self._file("q3.xlsx"),
                     "replies": [
                         _message("1700000000002", "reply two", app=True),
                         _message("1700000000001", "reply one"),
@@ -120,6 +131,27 @@ class _Fake:
                     return httpx.Response(200, json=body)
                 return httpx.Response(200, json={"value": []})
         return httpx.Response(404)
+
+    def _file(self, name: str) -> list[dict[str, str]]:
+        if not self.files:
+            return []
+        return [{"contentType": "reference", "name": name, "contentUrl": f"{_LIBRARY}/{name}"}]
+
+    def _site(self, path: str) -> httpx.Response | None:
+        """The channel's SharePoint site, readable only once granted (`site_status`)."""
+        if path == f"/v1.0/groups/{_GROUP}/sites/root":
+            if self.site_status != 200:
+                return httpx.Response(self.site_status)
+            return httpx.Response(200, json={"id": _SITE})
+        if path == "/v1.0/sites/example.sharepoint.com:/sites/team":
+            return httpx.Response(200, json={"id": _SITE})
+        if path == f"/v1.0/sites/{_SITE}/drives":
+            return httpx.Response(200, json={"value": [{"id": "b!d", "webUrl": _LIBRARY}]})
+        if path.startswith("/v1.0/drives/b!d/root:/"):
+            name = path.rsplit("/", 1)[1]
+            download = f"https://example.sharepoint.com/download/{name}?tempauth=t"
+            return httpx.Response(200, json={"id": name, "@microsoft.graph.downloadUrl": download})
+        return None
 
     def graph(self) -> list[httpx.Request]:
         return [r for r in self.requests if r.url.host == "graph.microsoft.com"]
@@ -282,6 +314,63 @@ async def test_a_sealed_thread_stays_out_of_its_channel_reads(
         await _teams_get_message_impl(
             runtime, auth, channel_id=_CHANNEL, message_id=_ROOT, read_policy=sealed
         )
+
+
+@pytest.mark.parametrize("granted", [True, False])
+async def test_files_are_linked_only_where_the_channels_site_is_granted(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession], granted: bool
+) -> None:
+    auth, fake = await _setup(db_session), _Fake()
+    fake.files, fake.site_status = True, 200 if granted else 403
+    runtime = _runtime(fake, sessionmaker)
+    read = await _teams_read_channel_impl(
+        runtime, auth, channel_id=_CHANNEL, limit=5, cursor=None, read_policy=OPEN_READ_POLICY
+    )
+    found = await _teams_search_messages_impl(
+        runtime,
+        auth,
+        content="budgets",
+        channel_ids=[_CHANNEL],
+        author_ids=None,
+        limit=1,
+        read_policy=OPEN_READ_POLICY,
+    )
+    assert [f.url is not None for f in found.matches[0].message.files] == [granted], "search too"
+    files = [f for p in read.posts for f in p.files]
+    assert [f.name for f in files] == ["q3.xlsx", "notes.docx"], "named either way"
+    if granted:
+        assert [f.url for f in files] == [
+            "https://example.sharepoint.com/download/q3.xlsx?tempauth=t",
+            "https://example.sharepoint.com/download/notes.docx?tempauth=t",
+        ]
+    else:
+        assert all(f.url is None for f in files)
+        sites = [r for r in fake.graph() if "/sites" in r.url.path]
+        assert len(sites) == 2, "a refused site stops each read's lookups at the first"
+
+
+async def test_no_link_for_a_sealed_thread_or_an_ungranted_private_channel(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    auth, fake = await _setup(db_session), _Fake()
+    fake.files = True
+    runtime = _runtime(fake, sessionmaker)
+    sealed = ChannelReadPolicy(
+        policy=TenantAccessPolicy(channel_rules={_THREAD: ChannelRule(readers="inside")})
+    )
+    read = await _teams_read_channel_impl(
+        runtime, auth, channel_id=_CHANNEL, limit=5, cursor=None, read_policy=sealed
+    )
+    assert [f.name for p in read.posts for f in p.files] == ["notes.docx"]
+    assert not any("q3.xlsx" in r.url.path for r in fake.requests), "never resolved"
+
+    fake.requests.clear()
+    inside = ChannelReadPolicy(policy=OPEN_ACCESS_POLICY, origin_channel_ids=frozenset({_PRIVATE}))
+    private = await _teams_read_channel_impl(
+        runtime, auth, channel_id=_PRIVATE, limit=5, cursor=None, read_policy=inside
+    )
+    assert all(f.url is None for p in private.posts for f in p.files)
+    assert not [r for r in fake.graph() if "/sites" in r.url.path], "its own site is not stored"
 
 
 async def test_list_channels_hides_private_channels_from_non_members(

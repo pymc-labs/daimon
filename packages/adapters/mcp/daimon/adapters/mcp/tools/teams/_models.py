@@ -19,6 +19,15 @@ class TeamsChannelRow(BaseModel):
     team_name: str | None = None
 
 
+class TeamsFileRow(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    url: str | None = None
+    """A download link, only where the channel's SharePoint site is granted to daimon.
+    Anyone holding it can fetch the file for about an hour: fetch it, never post it."""
+
+
 class TeamsReadMessage(BaseModel):
     """One message read back from a channel."""
 
@@ -34,8 +43,7 @@ class TeamsReadMessage(BaseModel):
     text: str
     timestamp: str | None = None
     subject: str | None = None
-    files: list[str] = []
-    """Names only: daimon cannot fetch a channel's files for you here."""
+    files: list[TeamsFileRow] = []
     images: int = 0
     web_url: str | None = None
 
