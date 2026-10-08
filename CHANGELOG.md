@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The scheduler's usage sweep no longer re-replays every model call it has
+  already metered.** It asks the API for `span.model_request_end` events only
+  and skips events already in `usage_events` before writing, so the startup and
+  hourly full passes cost one query per session and a read of its model calls,
+  not every event it holds and one transaction per call. On a workspace with
+  tens of thousands of metered calls those passes ran for many minutes of CPU.
+  The sweep also runs on its own loop now, so a long pass no longer holds up
+  routine claims. Billing is unchanged.
 - Identity exclusions now leave unscoped DMs on the deployment switch, and Discord card recovery retires aged pending cards after repeated lookup failures without dropping cards found during a pass.
 - Discord card recovery now keeps the hourly pass away from live turns and startup reconciliation, retires aged intents after repeated failed passes, and uses "Stopped." for cards found while the bot is running.
 - The Discord webhook capacity model now accounts for lifecycle edit debounce; its overload cases distinguish cold bursts from the removed-debounce counterfactual.

@@ -178,8 +178,8 @@ Two boundaries of the design worth stating plainly:
   override) times one turn's cost. Discord's optional process-wide limit refuses
   excess guild mentions and DMs before `admit()`. An MCP `start_turn` session is
   worse. Its spend
-  reaches the ledger only when the scheduler's usage sweep next runs (after
-  the tick's routine fires, which can take up to the 45-minute turn ceiling).
+  reaches the ledger only when the scheduler's usage sweep next reads the
+  session: up to two sweep passes plus one tick interval later.
   Until then the gate reads a balance that leaves out earlier headless turns,
   and MCP turns have no concurrency cap. The overdraft is therefore bounded
   by what a tenant can start between two sweeps, not by N concurrent turns.
@@ -453,16 +453,20 @@ after their Stripe events.
 
 **The sweep.** An MCP `start_turn` creates a session and sends a message but
 never drives the stream, so the inline hook never fires for it.
-`packages/core/daimon/core/usage_sweep.py` closes that hole: each scheduler
-tick it lists Managed Agents sessions, skips any without a `daimon_tenant`
-stamp, belonging to a tenant this deployment does not own, or stamped
-`daimon_billing_exempt`, and replays the rest's `span.model_request_end`
-events through the same recorder. After a successful pass, it skips event
+`packages/core/daimon/core/usage_sweep.py` closes that hole. On its own
+scheduler loop, pausing the tick interval between passes, it lists Managed
+Agents sessions, skips any without a `daimon_tenant` stamp, belonging to a
+tenant this deployment does not own, or stamped `daimon_billing_exempt`, and replays the rest's `span.model_request_end`
+events through the same recorder. It requests only that event type and skips
+events already in `usage_events` before writing, so a session that is fully
+metered costs one query and a read of its model calls, not a write per call.
+After a successful pass, it skips event
 reads for sessions last updated before that pass started minus 15 minutes.
 The watermark stays in scheduler memory; startup and hourly passes read all
 stamped sessions, and a failed pass leaves the watermark in place. It is safe to run
 against already-metered sessions precisely because the idempotency grain is
-the same.
+the same. A call with a `usage_events` row counts as metered, because the
+recorder writes that row and its debit in one transaction.
 
 The sweep and the live recorder race for each model call, and the first
 commit wins. The amount is the same either way, because both price at the
@@ -487,7 +491,8 @@ and logs `usage_sweep.exempt_skipped` with `tenant_id`, `managed_session_id`,
 which prices at zero as in the recorder), `model_calls`, the four token
 counts, `cost_usd` (the raw price) and `would_be_debit_usd` (with
 `DAIMON_BILLING__MARKUP` applied). Each pass ends with one
-`usage_sweep.completed` line carrying `recorded`, `exempt_sessions`,
+`usage_sweep.completed` line carrying `recorded` (calls written in that
+pass), `exempt_sessions`,
 `exempt_model_calls`, `exempt_cost_usd` and `exempt_would_be_debit_usd`.
 
 Nothing is written to the database for these sessions. An exempt session is

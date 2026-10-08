@@ -1198,7 +1198,8 @@ Read from `daimon.adapters.scheduler.settings.SchedulerSettings`. Prefix
 
 `float` · optional · default `30.0`
 
-Seconds between scheduler ticks (loop sleep).
+Seconds between scheduler ticks (loop sleep). The usage sweep runs on its own loop and
+pauses the same interval between passes.
 
 ### `DAIMON_SCHEDULER__MAX_AGE_S`
 

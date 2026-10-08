@@ -11,8 +11,11 @@ them through `record_turn_usage`.
 `record_turn_usage` is idempotent on (managed_session_id, event_id) — the same
 grain the live paths write. A process-local watermark skips event reads for
 sessions unchanged since the previous successful pass (with a 15-minute
-overlap); startup and hourly passes read all stamped sessions. Already-recorded
-events are no-ops. No need to distinguish "headless-only" sessions.
+overlap); startup and hourly passes read all stamped sessions. Only
+`span.model_request_end` events are requested, and events already in
+usage_events are skipped before any write, so a pass over metered sessions
+costs one query per session, not one transaction per event.
+No need to distinguish "headless-only" sessions.
 
 Attribution comes off the metadata `create_session` stamps on every session:
 `daimon_tenant` is the billed tenant (the tenant_ledger debit keys on it) and
@@ -31,8 +34,8 @@ covers every turn on the session: a billed caller continuing an exempt session
 is absorbed too, and an exempt caller acting on a billed session is debited.
 
 Per `guideline:architecture` Error Propagation: this does not swallow
-exceptions — the scheduler tick is the boundary that decides a sweep failure
-must not kill the loop.
+exceptions — the scheduler's sweep loop is the boundary that decides a sweep
+failure must not kill the process.
 """
 
 from __future__ import annotations
@@ -52,6 +55,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_TENANT,
 )
 from daimon.core.pricing import MODEL_PRICING, cost_of
+from daimon.core.stores import usage_events
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.tenants import list_all_tenant_ids
 from daimon.core.tenant_balance import debit_amount
@@ -62,6 +66,9 @@ log = structlog.get_logger(__name__)
 
 _OVERLAP = timedelta(minutes=15)
 _FULL_PASS_INTERVAL = timedelta(hours=1)
+# Filtered server-side: a session's other events (messages, tool results) are
+# most of its history and the sweep never reads them.
+_SWEPT_EVENT_TYPES = ["span.model_request_end"]
 
 
 @dataclass
@@ -91,11 +98,12 @@ async def sweep_headless_usage(
 ) -> int:
     """Fold span.model_request_end events from all tagged MA sessions into usage.
 
-    Returns the number of events replayed through `record_turn_usage` (including
-    idempotent no-ops). Sessions with no `daimon_tenant` tag are skipped — they
-    aren't billable Daimon turns (e.g. DMs or foreign sessions). Sessions
-    stamped `daimon_billing_exempt` are skipped too, after logging their
-    would-be cost (see the module docstring).
+    Returns the number of events replayed through `record_turn_usage`: those
+    not yet in usage_events when the session was read (a live writer racing the
+    sweep can still make one an idempotent no-op). Sessions with no
+    `daimon_tenant` tag are skipped — they aren't billable Daimon turns (e.g.
+    DMs or foreign sessions). Sessions stamped `daimon_billing_exempt` are
+    skipped too, after logging their would-be cost (see the module docstring).
 
     Session listing remains complete. After a successful pass, event reads skip
     sessions last updated before its start minus 15 minutes. Startup and hourly
@@ -161,9 +169,15 @@ async def sweep_headless_usage(
         model_id = session.agent.model.id
         pricing = MODEL_PRICING.get(model_id)
         channel_id = session.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL)
+        async with sessionmaker() as s:
+            recorded_ids = await usage_events.list_event_ids_for_session(
+                s, managed_session_id=session.id
+            )
 
-        async for event in client.beta.sessions.events.list(session.id, order="asc"):
-            if event.type != "span.model_request_end":
+        async for event in client.beta.sessions.events.list(
+            session.id, order="asc", types=_SWEPT_EVENT_TYPES
+        ):
+            if event.type != "span.model_request_end" or event.id in recorded_ids:
                 continue
             await record_turn_usage(
                 sessionmaker=sessionmaker,
@@ -218,7 +232,9 @@ async def _log_absorbed_usage(
     cache_read_input_tokens = 0
     cost = Decimal("0")
     debit = Decimal("0")
-    async for event in client.beta.sessions.events.list(session.id, order="asc"):
+    async for event in client.beta.sessions.events.list(
+        session.id, order="asc", types=_SWEPT_EVENT_TYPES
+    ):
         if event.type != "span.model_request_end":
             continue
         usage = event.model_usage

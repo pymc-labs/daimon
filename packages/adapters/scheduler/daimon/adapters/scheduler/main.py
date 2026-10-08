@@ -9,7 +9,8 @@ Imperative shell that:
    the full process lifetime (created via ``engine.connect()``, never via
    ``async_sessionmaker``).
 3. Installs SIGINT/SIGTERM signal handlers via the running event loop.
-4. Loops: every ``tick_interval_s``, awaits ``run_one_tick``.
+4. Loops: every ``tick_interval_s``, awaits ``run_one_tick``; the usage sweep
+   repeats on its own loop at the same interval.
 5. On stop: releases the lock, disposes the engine, exits.
 
 The ``--once`` flag runs a single tick and exits 0. The tick uses
@@ -551,15 +552,15 @@ async def _sweep_headless_usage(
     watermark: UsageSweepWatermark,
 ) -> None:
     """Backfill usage for headless MCP turns once. Boundary catch: a sweep
-    failure must not kill the scheduler loop — idempotent recording means the
-    next tick re-reads and records anything missed.
+    failure must not kill the scheduler — idempotent recording means the next
+    pass re-reads and records anything missed.
     """
     try:
         await sweep_headless_usage(client, sm, markup=markup, watermark=watermark)
     except (anthropic.APIError, SQLAlchemyError):
         # Named boundary: a sweep failure (upstream MA error OR a DB write that
         # trips a constraint, e.g. a stray foreign-tenant session) must not kill
-        # the tick loop. Idempotent recording means the next tick retries.
+        # the sweep loop. Idempotent recording means the next pass retries.
         log.exception("scheduler.usage_sweep.failed")
 
 
@@ -981,8 +982,10 @@ async def _close_github_app_sessions(
 async def _settle_promo_credit(sm: async_sessionmaker[AsyncSession]) -> None:
     """Grant opened timed promo windows, expire closed ones, credit back late spend.
 
-    Runs after the usage sweep, so late debits are on the ledger first.
-    Idempotent; boundary catch so a DB failure retries on the next tick.
+    The usage sweep runs on its own loop, so a session's spend can land up to
+    two passes plus one tick interval late. ``LATE_SPEND_GRACE`` assumes that
+    is well under its 15 minutes; a debit landing later counts as ordinary
+    spend. Idempotent; boundary catch so a DB failure retries on the next tick.
     """
     try:
         await settle_promo_credit(sm, now=datetime.now(UTC))
@@ -1004,6 +1007,37 @@ def _validate_mcp_settings(settings: Settings) -> None:
             "DAIMON_MCP__PUBLIC_URL is required for the scheduler — "
             "routine fires bind the daimon-mcp vault per-account"
         )
+
+
+async def _repeat_until_stopped(
+    step: Callable[[], Awaitable[None]], *, interval_s: float, stop_event: asyncio.Event
+) -> None:
+    while not stop_event.is_set():
+        await step()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+
+
+async def _run_loops(
+    *,
+    tick: Callable[[], Awaitable[None]],
+    usage_sweep: Callable[[], Awaitable[None]],
+    interval_s: float,
+    stop_event: asyncio.Event,
+) -> None:
+    """Run ticks and usage sweeps on separate loops until ``stop_event`` is set.
+
+    A usage pass lists every session in the workspace and can outlast many
+    ticks; inline, routine claims waited for it. On stop the pass in flight is
+    cancelled: each model call commits on its own and an unfinished pass leaves
+    the watermark in place. A crash in either loop ends both and propagates.
+    """
+    async with asyncio.TaskGroup() as loops:
+        sweeps = loops.create_task(
+            _repeat_until_stopped(usage_sweep, interval_s=interval_s, stop_event=stop_event)
+        )
+        await _repeat_until_stopped(tick, interval_s=interval_s, stop_event=stop_event)
+        sweeps.cancel()
 
 
 async def run(
@@ -1148,47 +1182,52 @@ async def run(
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
             return 0
 
+        async def tick() -> None:
+            await run_one_tick(
+                now=datetime.now(UTC),
+                sm=sm,
+                caps=caps,
+                fire=fire,
+                max_age=timedelta(seconds=scheduler_settings.max_age_s),
+                max_concurrent_fires=scheduler_settings.max_concurrent_fires,
+                dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
+                dispatcher=dispatcher,
+            )
+            await _sweep_pending_files(client, sm)
+            await _sweep_wizard_sessions(sm)
+            await _sweep_slack_event_dedup(sm)
+            await _sweep_retired_turn_card_intents(sm)
+            await _sweep_hub_oauth_kv(sm)
+            await _sweep_github_connect_flows(sm)
+            await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
+            await _refresh_github_app_sessions(
+                client, sm, settings=settings, fernet=push_resync_fernet
+            )
+            await _close_github_app_sessions(client, sm, fernet=push_resync_fernet)
+            await _settle_promo_credit(sm)
+            await _drain_github_push_resync(
+                engine=engine,
+                sm=sm,
+                client=client,
+                settings=settings,
+                fernet=push_resync_fernet,
+            )
+            await _drain_github_installation_reconciliations(sm=sm, settings=settings)
+
+        async def usage_sweep() -> None:
+            await _sweep_headless_usage(
+                client, sm, markup=settings.billing.markup, watermark=usage_watermark
+            )
+
         async with runtime_health(
             "scheduler", engine, settings.observability.health_interval_s, current_turn_counts
         ):
-            while not stop_event.is_set():
-                await run_one_tick(
-                    now=datetime.now(UTC),
-                    sm=sm,
-                    caps=caps,
-                    fire=fire,
-                    max_age=timedelta(seconds=scheduler_settings.max_age_s),
-                    max_concurrent_fires=scheduler_settings.max_concurrent_fires,
-                    dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
-                    dispatcher=dispatcher,
-                )
-                await _sweep_pending_files(client, sm)
-                await _sweep_headless_usage(
-                    client, sm, markup=settings.billing.markup, watermark=usage_watermark
-                )
-                await _sweep_wizard_sessions(sm)
-                await _sweep_slack_event_dedup(sm)
-                await _sweep_retired_turn_card_intents(sm)
-                await _sweep_hub_oauth_kv(sm)
-                await _sweep_github_connect_flows(sm)
-                await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
-                await _refresh_github_app_sessions(
-                    client, sm, settings=settings, fernet=push_resync_fernet
-                )
-                await _close_github_app_sessions(client, sm, fernet=push_resync_fernet)
-                await _settle_promo_credit(sm)
-                await _drain_github_push_resync(
-                    engine=engine,
-                    sm=sm,
-                    client=client,
-                    settings=settings,
-                    fernet=push_resync_fernet,
-                )
-                await _drain_github_installation_reconciliations(sm=sm, settings=settings)
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(
-                        stop_event.wait(), timeout=scheduler_settings.tick_interval_s
-                    )
+            await _run_loops(
+                tick=tick,
+                usage_sweep=usage_sweep,
+                interval_s=scheduler_settings.tick_interval_s,
+                stop_event=stop_event,
+            )
 
         return 0
     finally:

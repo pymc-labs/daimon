@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest_asyncio
 from daimon.core._models import UsageEvent
 from daimon.core.stores import usage_events
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_tenant, make_usage_event
 from daimon.testing.ma_models import ma_model_usage
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,6 +77,22 @@ async def test_record_idempotent_on_replay(
     assert result.scalar_one() == 1, (
         "duplicate (managed_session_id, event_id) must be skipped via ON CONFLICT DO NOTHING"
     )
+
+
+async def test_list_event_ids_for_session_returns_only_that_sessions_events(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    for session_id, event_id in (("s1", "evt_1"), ("s1", "evt_2"), ("s2", "evt_3")):
+        await make_usage_event(
+            db_session, tenant=tenant, managed_session_id=session_id, event_id=event_id
+        )
+
+    ids = await usage_events.list_event_ids_for_session(db_session, managed_session_id="s1")
+    missing = await usage_events.list_event_ids_for_session(db_session, managed_session_id="s9")
+
+    assert ids == {"evt_1", "evt_2"}, "only the named session's event ids are returned"
+    assert missing == frozenset(), "a session with no recorded usage has no ids"
 
 
 async def test_cost_for_user_in_tenant_since_filters_by_occurred_at(
