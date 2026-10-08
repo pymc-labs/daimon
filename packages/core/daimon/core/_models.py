@@ -556,13 +556,13 @@ class TurnCardIntent(Base):
             name="uq_turn_card_intents_tenant_token",
         ),
         CheckConstraint(
-            "status IN ('prepared', 'posted', 'retired')",
+            "status IN ('prepared', 'posted', 'retired', 'unrecoverable')",
             name="ck_turn_card_intents_status",
         ),
         CheckConstraint(
             "(status = 'prepared' AND message_id IS NULL) OR "
             "(status = 'posted' AND message_id IS NOT NULL AND message_id <> '') OR "
-            "(status = 'retired' AND (message_id IS NULL OR message_id <> ''))",
+            "(status IN ('retired', 'unrecoverable') AND (message_id IS NULL OR message_id <> ''))",
             name="ck_turn_card_intents_message_state",
         ),
         Index("ix_turn_card_intents_recovery", "platform", "status", "created_at"),

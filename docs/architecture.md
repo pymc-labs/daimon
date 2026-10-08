@@ -183,12 +183,16 @@ assigned by its ID; built-in Daimon posts use the bot. If a webhook is
 unavailable, the first answer chunk carries a bold agent name. The bot and MCP
 Discord tools resolve the webhook matching a message's webhook ID to edit or
 delete that agent's recorded post.
-Restart recovery keeps a card intent active when its webhook token is missing
-or the webhook was deleted. It does not post a replacement status card in that
-case, because the original pending card could not be cleared. A later recovery
-pass can retry the retained intent when editing is possible again.
-An unprompted turn also retains its card intent if deleting a transient card
-fails, so a later recovery pass can find the unresolved message.
+Restart recovery keeps a card intent active when a pending card cannot be
+edited. It does not post a replacement status card, because the original
+button could remain. A definite missing-webhook, missing-token, permission or
+deleted-thread failure can mark an aged intent unrecoverable. A periodic pass
+revisits aged intents without waiting for another restart. If the bot can
+manage messages, it fetches each known matching card and deletes it only while
+it still carries that turn's pending button. Answered cards without that button
+stay intact. Transient API failures and shutdown cancellation keep the intent
+active for another recovery attempt. An unprompted turn likewise retains its
+intent when its card delete fails, including an unknown-webhook error.
 
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
 `thread_participation_scopes`. In a followed thread it joins a quiet-timer
@@ -1546,7 +1550,7 @@ requesting user). Discord records the thread it opens from a mention
 (`source='auto_thread'`, with the user who mentioned it). Turn error notices,
 setup-wizard turns, Slack DM answers (which have no card intent), and session-output files are not recorded. Each post belongs
 to the turn agent's derived id. A turn post may be tidied
-only once its card intent is retired, and only for the user who started that
+only once its card intent is retired or marked unrecoverable, and only for the user who started that
 turn, the user who opened the auto-thread it is in with the same agent, or a server
 admin; a turn row must name its turn (a CHECK enforces it) and erasure clears
 the requester id;

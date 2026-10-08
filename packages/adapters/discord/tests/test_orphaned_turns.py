@@ -13,7 +13,7 @@ import asyncio
 import json
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -25,6 +25,7 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.turn_card_recovery import UnrecoverableTurnCardError
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -38,6 +39,7 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.stores.turn_card_intents import create_turn_card_intent
 from daimon.testing import build_fake_anthropic, ma_session
 from daimon.testing.factories import make_tenant
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -49,6 +51,7 @@ def _make_bot(
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 3
     discord_settings.thread_open_notice_after_s = 3.0
+    discord_settings.turn_card_unrecoverable_after_s = 86400
     settings.discord = discord_settings
     runtime = DiscordRuntime(
         settings=settings,
@@ -249,10 +252,12 @@ async def test_sweep_clears_the_row_even_when_the_embed_is_unreachable(
     )
 
 
-async def test_sweep_missing_webhook_token_does_not_block_turns(
+@pytest.mark.parametrize("failure", ["missing_token", "unknown_webhook"])
+async def test_sweep_uneditable_webhook_does_not_post_replacement(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
     await _make_orphan(db_session)
     bot = _make_bot(db_session_factory)
@@ -266,12 +271,23 @@ async def test_sweep_missing_webhook_token_does_not_block_turns(
     thread.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
     bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setattr(DiscordPostTransport, "_ours", lambda *_: True)
-    monkeypatch.setattr(DiscordPostTransport, "_webhook", AsyncMock(return_value=None))
+    if failure == "missing_token":
+        monkeypatch.setattr(DiscordPostTransport, "_webhook", AsyncMock(return_value=None))
+    else:
+        webhook = MagicMock(spec=discord.Webhook)
+        webhook.edit_message = AsyncMock(
+            side_effect=discord.NotFound(
+                MagicMock(status=404, reason="Not Found"),
+                {"code": 10015, "message": "Unknown Webhook"},
+            )
+        )
+        monkeypatch.setattr(DiscordPostTransport, "_webhook", AsyncMock(return_value=webhook))
 
     await bot._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]
     await bot._wait_for_orphan_recovery()  # pyright: ignore[reportPrivateUsage]
 
-    thread.send.assert_awaited_once()
+    thread.send.assert_not_awaited()
+    message.edit.assert_not_awaited()
     assert await list_orphaned_turns(db_session, platform="discord") == []
 
 
@@ -615,6 +631,111 @@ async def test_boot_card_recovery_bounds_worker_fanout(
         "the bounded worker pool must eventually process every snapshotted intent"
     )
     assert peak_active == 4, "only the configured fixed worker count may reconcile concurrently"
+
+
+async def test_definite_recovery_failure_reaches_age_out(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _make_bot(db_session_factory)
+    bot.wait_until_ready = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+    thread = MagicMock(spec=discord.Thread)
+    bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+    intent = TurnCardIntentRow(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        platform="discord",
+        thread_id="456",
+        turn_token=uuid.uuid4(),
+        channel_id=None,
+        message_id=None,
+        status="prepared",
+        created_at=datetime.now(UTC) - timedelta(days=2),
+        updated_at=datetime.now(UTC),
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.discord.bot.reconcile_turn_card_intent",
+        AsyncMock(
+            side_effect=UnrecoverableTurnCardError("own webhook no longer exists", {123, 124})
+        ),
+    )
+    expire = AsyncMock(return_value=True)
+    monkeypatch.setattr("daimon.adapters.discord.bot.expire_unrecoverable_turn_card", expire)
+
+    await bot._reconcile_turn_card_intent(intent)  # pyright: ignore[reportPrivateUsage]
+
+    expire.assert_awaited_once()
+    assert expire.await_args.kwargs["candidate_message_ids"] == {123, 124}
+    assert expire.await_args.kwargs["thread"] is thread
+
+
+async def test_transient_recovery_failure_and_cancellation_never_age_out(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _make_bot(db_session_factory)
+    bot.wait_until_ready = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+    thread = MagicMock(spec=discord.Thread)
+    bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+    intent = TurnCardIntentRow(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        platform="discord",
+        thread_id="456",
+        turn_token=uuid.uuid4(),
+        channel_id=None,
+        message_id="123",
+        status="posted",
+        created_at=datetime.now(UTC) - timedelta(days=2),
+        updated_at=datetime.now(UTC),
+    )
+    reconcile = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=503), "temporary"))
+    monkeypatch.setattr("daimon.adapters.discord.bot.reconcile_turn_card_intent", reconcile)
+    expire = AsyncMock()
+    monkeypatch.setattr("daimon.adapters.discord.bot.expire_unrecoverable_turn_card", expire)
+    sleep = AsyncMock()
+
+    await bot._reconcile_turn_card_intent(intent, sleep=sleep)  # pyright: ignore[reportPrivateUsage]
+    assert reconcile.await_count == 3
+    expire.assert_not_awaited()
+
+    reconcile.side_effect = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await bot._reconcile_turn_card_intent(intent, sleep=sleep)  # pyright: ignore[reportPrivateUsage]
+    expire.assert_not_awaited()
+
+
+async def test_periodic_recovery_revisits_aged_intents(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    old = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="456",
+        turn_token=uuid.uuid4(),
+    )
+    await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="457",
+        turn_token=uuid.uuid4(),
+    )
+    await db_session.execute(
+        text("UPDATE turn_card_intents SET created_at = :at WHERE id = :id"),
+        {"at": datetime.now(UTC) - timedelta(days=2), "id": old.id},
+    )
+    await db_session.commit()
+    bot = _make_bot(db_session_factory)
+    bot._reconcile_boot_turn_cards = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+
+    await bot._sweep_aged_turn_cards()  # pyright: ignore[reportPrivateUsage]
+
+    recovered = bot._reconcile_boot_turn_cards.await_args.args[0]  # pyright: ignore[reportPrivateUsage, reportUnknownMemberType, reportUnknownVariableType]
+    assert [intent.id for intent in recovered] == [old.id]
 
 
 async def test_boot_card_snapshot_excludes_intents_created_after_the_sweep(

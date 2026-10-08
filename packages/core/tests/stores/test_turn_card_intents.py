@@ -11,6 +11,7 @@ from daimon.core.stores.turn_card_intents import (
     create_turn_card_intent,
     delete_retired_turn_card_intents,
     list_recoverable_turn_card_intents,
+    mark_turn_card_intent_unrecoverable,
     record_turn_card_message,
     retire_turn_card_intent,
 )
@@ -84,6 +85,35 @@ async def test_turn_card_intent_message_update_and_retirement_are_conditional(
     assert await list_recoverable_turn_card_intents(db_session, platform="discord") == [], (
         "retired intents must leave the boot recovery listing"
     )
+
+
+async def test_unrecoverable_transition_requires_an_aged_discord_intent(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    intent = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-old",
+        turn_token=uuid.uuid4(),
+    )
+    now = datetime.now(UTC)
+    assert not await mark_turn_card_intent_unrecoverable(
+        db_session, id=intent.id, cutoff=now - timedelta(hours=24)
+    )
+    await db_session.execute(
+        update(TurnCardIntent)
+        .where(TurnCardIntent.id == intent.id)
+        .values(created_at=now - timedelta(days=2))
+    )
+    assert await mark_turn_card_intent_unrecoverable(
+        db_session, id=intent.id, cutoff=now - timedelta(hours=24)
+    )
+    assert not await mark_turn_card_intent_unrecoverable(
+        db_session, id=intent.id, cutoff=now - timedelta(hours=24)
+    )
+    assert await list_recoverable_turn_card_intents(db_session, platform="discord") == []
 
 
 async def test_turn_card_intent_database_rejects_empty_posted_message_id(

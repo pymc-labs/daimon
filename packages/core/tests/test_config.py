@@ -11,6 +11,7 @@ from daimon.core.config import (
     AnthropicSettings,
     ArtifactsSettings,
     DatabaseSettings,
+    DiscordSettings,
     HubSettings,
     McpSettings,
     Settings,
@@ -19,6 +20,12 @@ from daimon.core.config import (
     load_settings,
 )
 from pydantic import HttpUrl, PostgresDsn, SecretStr, ValidationError
+
+
+def test_discord_stale_card_age_defaults_to_one_day_and_has_floor() -> None:
+    assert DiscordSettings(bot_token=SecretStr("test")).turn_card_unrecoverable_after_s == 86400
+    with pytest.raises(ValidationError):
+        DiscordSettings(bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=3599)
 
 
 def test_agent_identity_switch_is_off_by_default_and_reads_nested_env(

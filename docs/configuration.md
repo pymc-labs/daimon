@@ -409,6 +409,14 @@ Maximum Discord agent turns running across all guilds and DMs in this process. U
 leaves deployment-wide admission unlimited. Excess turns are refused with a retry
 notice; continuation wakes keep their existing admission path.
 
+### `DAIMON_DISCORD__TURN_CARD_UNRECOVERABLE_AFTER_S`
+
+`int` · optional · default `86400`
+
+Age in seconds after which a Discord turn card that boot recovery cannot resolve becomes
+unrecoverable. Recovery attempts to delete a known stale card when the bot has Manage
+Messages permission.
+
 ### `DAIMON_DISCORD__HEALTH_PORT`
 
 `int` · optional · default `8081`

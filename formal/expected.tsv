@@ -183,9 +183,14 @@ discord_webhooks	WebhookLoad	LoadUnsafe429	violates:NoAnswerLost	20	-	dropping a
 discord_webhooks	WebhookLoad	LoadUnsafeBackoff	violates:NoBusyRetry	38	-	ignoring retry_after permits repeated 429 in one window
 discord_webhooks	WebhookLoad	LoadUnsafeBound	violates:BoundedPosting	406	-	two windows cannot carry six calls through a two-per-window hook
 discord_webhooks	CardRecovery	CardSafe	clean	17	-	durable intent and token-available recovery clear the pending card
-discord_webhooks	CardRecovery	CardMissingToken	clean	13	-	missing token retains the intent and does not claim completed recovery
+discord_webhooks	CardRecovery	CardMissingToken	clean	17	-	missing token retains the intent until a definite failure allows age-out
+discord_webhooks	CardRecovery	CardStaleUnrecoverable	clean	20	-	aged intent needs definite recovery failure before terminal state without delete permission
+discord_webhooks	CardRecovery	CardStaleDelete	clean	19	-	bot deletes only a stale pending card after definite recovery failure
+discord_webhooks	CardRecovery	CardAnsweredSafe	clean	26	-	aged recovery failure leaves a card carrying the finished answer intact
+discord_webhooks	CardRecovery	CardUnsafeAnsweredDelete	violates:NoDeletedAnswer	26	-	deleting a recorded message ID without checking its pending button loses the answer
+discord_webhooks	CardRecovery	CardUnsafeStale	violates:NoStaleActive	17	-	old behavior keeps an aged unresolved intent active forever
 discord_webhooks	CardRecovery	CardUnsafeDuplicate	violates:NoDuplicateCard	6	-	blind retry after accepted post with lost response duplicates the card
-discord_webhooks	CardRecovery	CardUnsafeRetire	violates:NoPendingAfterRetirement	14	-	replacement of uneditable card cannot justify retiring the original intent
+discord_webhooks	CardRecovery	CardUnsafeRetire	violates:NoPendingAfterRetirement	15	-	replacement of uneditable card cannot justify retiring the original intent
 discord_webhooks	WebhookLoad	LoadUnsafeDuplicateAnswer	violates:NoDuplicateAnswer	76	-	replaying a recorded answer duplicates delivery
 discord_webhooks	WebhookLoad	LoadUnsafeFallback	violates:FallbackRoute	2	-	dropping bot route when identity is off removes name-prefix fallback
 discord_webhooks	CardRecovery	CardUnsafeFinish	violates:NoPendingAfterTurnEnds	8	-	ending a turn before card edit leaves pending status
