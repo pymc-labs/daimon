@@ -12,6 +12,7 @@ from daimon.core.stores.identity import (
     get_or_create_cli_principal,
     get_or_create_platform_principal,
     get_slack_principal_for_account,
+    get_teams_principal_for_account,
     list_cli_principals_for_account,
     list_platform_principals_for_account,
 )
@@ -515,3 +516,24 @@ async def test_get_slack_principal_for_account_ignores_non_slack_principals(
     assert result is None, (
         "filter is platform='slack'; a discord principal for the same account must not be returned"
     )
+
+
+async def test_get_teams_principal_for_account_returns_only_the_teams_external_id(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="slack", external_id="U07ABC123", tenant=tenant, account=account
+    )
+    assert await get_teams_principal_for_account(db_session, account_id=account.id) is None, (
+        "a Slack principal for the same account is not its Teams id"
+    )
+    entra_id = str(uuid.UUID(int=7))
+    await make_platform_principal(
+        db_session, platform="teams", external_id=entra_id, tenant=tenant, account=account
+    )
+
+    result = await get_teams_principal_for_account(db_session, account_id=account.id)
+
+    assert result == entra_id, "the helper returns the account's Entra object id"
