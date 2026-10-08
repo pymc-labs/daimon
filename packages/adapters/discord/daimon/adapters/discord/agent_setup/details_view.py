@@ -591,15 +591,15 @@ class PictureUploadModal(discord.ui.Modal):
             )
         embed = picture_status_embed(message, success=avatar is not None)
         if avatar is None:
-            retry_view = (
-                PictureRetryView(self._view).bind_render_interaction(interaction, panel=None)
-                if message not in NONRETRYABLE_PICTURE_MESSAGES
-                else None
-            )
-            await interaction.edit_original_response(
-                embed=embed,
-                view=retry_view,
-            )
+            if message in NONRETRYABLE_PICTURE_MESSAGES:
+                await interaction.edit_original_response(embed=embed, view=None)
+            else:
+                await interaction.edit_original_response(
+                    embed=embed,
+                    view=PictureRetryView(self._view).bind_render_interaction(
+                        interaction, panel=None
+                    ),
+                )
         else:
             await interaction.edit_original_response(embed=embed)
             await self._view.refresh_after_avatar_change()
