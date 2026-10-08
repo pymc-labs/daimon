@@ -14,6 +14,7 @@ from daimon.adapters.discord.embed import (
     update,
     update_activity,
 )
+from daimon.adapters.discord.lifecycle import build_discord_embed
 from daimon.adapters.discord.theme import (
     COLOR_GREEN,
     COLOR_IN_PROGRESS,
@@ -43,6 +44,26 @@ def _make_state(
 def _call(name: str, status: Literal["pending", "complete", "failed"] = "pending") -> ToolUseBlock:
     return ToolUseBlock(
         kind="tool_use", id=f"tu_{name}", type="agent.tool_use", name=name, input={}, status=status
+    )
+
+
+def test_max_length_error_notice_keeps_all_metrics() -> None:
+    tail = "\n**Next:** Add credit.\n`rid: test`"
+    notice = "x" * (950 - len(tail)) + tail
+    assert len(notice) == 950
+    state = dataclasses.replace(
+        _make_state(phase=TurnPhase.ERROR, cost_str="$0.05"),
+        notice=notice,
+        balance_str="$9.95",
+        usage_in=1200,
+        usage_out=300,
+    )
+    embed = build_discord_embed(to_embed_data(state, now=12.0))
+
+    assert embed.description == "Add credit."
+    assert embed.fields[0].value == notice
+    assert embed.fields[1].value == (
+        "Time: 12s\nCost: $0.05\nTokens: 1.2k in / 300 out\nBalance: $9.95"
     )
 
 

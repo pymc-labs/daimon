@@ -53,6 +53,7 @@ class EmbedData:
     color: int
     footer: str | None
     details: str | None = None
+    notice: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +122,9 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
             title = "Something went wrong."
             description = "Mention me to try again."
             if state.notice:
-                details = f"{state.notice}\n\n{details}"
+                next_marker = "**Next:** "
+                if next_marker in state.notice:
+                    description = state.notice.split(next_marker, 1)[1].split("\n", 1)[0]
         else:
             footer = state.agent_name
         return EmbedData(
@@ -131,6 +134,7 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
             color=color,
             footer=footer,
             details=details,
+            notice=(state.notice or None) if state.phase is TurnPhase.ERROR else None,
         )
 
     # In progress: one embed, the headline, the tool lines, then the latest draft.
@@ -154,10 +158,7 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
 
 
 def format_termination_notice(notice: TerminationNotice) -> str:
-    """Draw the core notice as the ERROR card's body, in Discord markdown.
-
-    The headline is not repeated here: it is already the footer's reason.
-    """
+    """Draw the core notice below the ERROR card's title, in Discord markdown."""
     lines = [_escape_markdown(notice.cause)]
     if (work := notice.work_line(lambda name: f"`{name.replace('`', '')}`")) is not None:
         lines.append(work)

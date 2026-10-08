@@ -58,6 +58,14 @@ def test_a_pending_card_shows_the_write_and_two_buttons() -> None:
     assert [b.label for b in _buttons(view)] == ["Approve", "Deny"]
 
 
+def test_tool_arguments_with_markdown_stay_in_a_code_block() -> None:
+    prompt = _prompt().model_copy(update={"detail": '{"body": "*plain text*"}'})
+    view = build_confirmation_view(
+        build_confirmation_card(prompt, state="pending", token="tok_abcdefgh"), prompt
+    )
+    assert '```json\n{"body": "*plain text*"}\n```' in _texts(view)
+
+
 def test_an_answered_card_has_no_buttons() -> None:
     prompt = _prompt()
     view = build_confirmation_view(build_confirmation_card(prompt, state="denied"), prompt)

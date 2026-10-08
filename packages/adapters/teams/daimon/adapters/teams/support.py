@@ -77,7 +77,7 @@ _DM_LINK = "(sent in the 1:1 chat)"
 _MAX_PENDING = 256  # forms whose "asked in" is remembered; older ones name the 1:1 chat
 MAX_NOTE_CHARS = 4000  # Discord's support modal cap.
 TITLE = "Ask a person"
-FORM_TEXT = "What do you need help with?\n{remaining} requests left"
+FORM_TEXT = "What do you need help with?\n{remaining} {request_word} left"
 USAGE = "Write a few words first."
 # OUT_OF_CREDITS, RECEIVED and RECORDED_UNDELIVERED are the shared core copy
 # (`daimon.core.support_escalation`), re-exported for this module's callers.
@@ -132,7 +132,11 @@ def form_card(token: str, remaining: int) -> AdaptiveCard:
     return AdaptiveCard(
         body=[
             heading(TITLE),
-            *text_lines(FORM_TEXT.format(remaining=remaining)),
+            *text_lines(
+                FORM_TEXT.format(
+                    remaining=remaining, request_word="request" if remaining == 1 else "requests"
+                )
+            ),
             note,
             ActionSet(actions=[button(VERB, "Send", "send", ask=token)]),
         ],

@@ -2885,14 +2885,19 @@ class DaimonBot(commands.Bot):
             from daimon.adapters.discord.thread_handoff import hand_over_view
 
             view = hand_over_view(agent_id=agent.id, agent_name=agent.name)
-            summary, hint, request_id_line = error_text.split("\n", 2)
+            summary, separator, remaining = error_text.partition("\nNew thread → ")
+            responder, _, request_id_line = remaining.partition("\n`rid: ")
             handoff_embed = discord.Embed(
                 title="Switch agent",
                 description=summary,
                 color=discord.Color.blurple(),
             )
-            handoff_embed.add_field(name="New thread", value=hint, inline=False)
-            handoff_embed.set_footer(text=request_id_line.strip("`"))
+            if separator:
+                handoff_embed.add_field(
+                    name="New thread", value=f"New thread → {responder}", inline=False
+                )
+            if request_id_line:
+                handoff_embed.set_footer(text=f"rid: {request_id_line.rstrip('`')}")
             if lifecycle.message_ref is not None:
                 await _edit_message(
                     lifecycle.message_ref, content=None, embed=handoff_embed, view=view

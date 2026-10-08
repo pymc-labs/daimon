@@ -409,11 +409,12 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     notice = render_termination_notice(reason, state=state)
     assert notice is not None
     assert embed.title == "Something went wrong."
-    assert embed.description == "Mention me to try again."
+    assert embed.description == notice.next_step
     assert notice.cause in embed.fields[0].value
     assert notice.next_step in embed.fields[0].value, "the next step is not truncated away"
     assert "`fit_model`" in embed.fields[0].value, "work in flight is named"
     assert "`rid: " in embed.fields[0].value
+    assert "Tokens:" in embed.fields[1].value
     assert "xxx" not in str(embed.to_dict()), "raw error stays in the logs"
 
 
@@ -452,6 +453,8 @@ async def test_terminal_failure_notice_fits_discord_limits_with_many_long_names(
     assert len(embed.footer.text) <= 2048
     assert "and 42 more" in embed.fields[0].value
     assert "`rid: " in embed.fields[0].value
+    assert embed.fields[1].name == "Details"
+    assert "Tokens:" in embed.fields[1].value
 
 
 async def test_a_notice_that_fails_to_build_still_turns_the_card_red(
@@ -1116,7 +1119,7 @@ class TestTurnSummaryFooter:
         )
         state = dataclasses.replace(state, content=[TextBlock(kind="text", text="hi")])
         await lc.on_terminal_success(state)
-        details = _terminal_embed(edits).fields[0].value
+        details = _terminal_embed(edits).fields[-1].value
         assert "Cost: $" in details
 
     async def test_unpriced_model_omits_cost(self) -> None:
@@ -1134,9 +1137,9 @@ class TestTurnSummaryFooter:
             ),
         )
         await lc.on_terminal_failure(state, Exception("boom"))
-        details = _terminal_embed(edits).fields[0].value
+        details = _terminal_embed(edits).fields[-1].value
         assert "Cost:" not in details
-        assert "1k in / 200 out" in _terminal_embed(edits).fields[0].value
+        assert "1k in / 200 out" in _terminal_embed(edits).fields[-1].value
 
     async def test_merged_input_count_in_footer(self) -> None:
         lc, _sends, edits = _make_lifecycle(model_id="claude-sonnet-4-6")
@@ -1154,7 +1157,7 @@ class TestTurnSummaryFooter:
         )
         await lc.on_terminal_failure(state, Exception("boom"))
         # merged_in = 1000 + 500 + 2000 = 3500 -> "3.5k"; out = 300
-        assert "3.5k in / 300 out" in _terminal_embed(edits).fields[0].value
+        assert "3.5k in / 300 out" in _terminal_embed(edits).fields[-1].value
 
     async def test_footer_cost_equals_billing_ledger_with_cache_reads(self) -> None:
         # The whole point: footer cost == cost_of for the same 4 cache-split ints.

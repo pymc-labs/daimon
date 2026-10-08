@@ -106,8 +106,10 @@ def build_discord_embed(data: EmbedData) -> discord.Embed:
     )
     if data.footer is not None:
         embed.set_footer(text=data.footer)
+    if data.notice is not None:
+        embed.add_field(name="Notice", value=data.notice[:1024], inline=False)
     if data.details is not None:
-        embed.add_field(name="Details", value=data.details[:1024], inline=False)
+        embed.add_field(name="Details", value=data.details, inline=False)
     return embed
 
 

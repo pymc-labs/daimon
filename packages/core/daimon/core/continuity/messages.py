@@ -546,7 +546,12 @@ def render_access_changed_try_again() -> str:
 
 
 def render_responder_changed_without_handoff(
-    *, new_responder: str, owner: str, channel: str, offer_button: bool = False
+    *,
+    new_responder: str,
+    owner: str,
+    channel: str,
+    offer_button: bool = False,
+    new_thread_hint: bool = True,
 ) -> str:
     """Tell the person a new responder answers here, but the task still belongs to `owner`.
 
@@ -556,7 +561,7 @@ def render_responder_changed_without_handoff(
     """
     del channel, offer_button
     first = f"{new_responder} answers new conversations here. {owner} is still handling this one."
-    return "\n".join([first, f"New thread → {new_responder}"])
+    return "\n".join([first, f"New thread → {new_responder}"]) if new_thread_hint else first
 
 
 def render_replacement_summary(transfer_kind: TransferKind, lost: Sequence[str]) -> str:

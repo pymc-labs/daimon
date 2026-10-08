@@ -95,7 +95,7 @@ def support_prompt_embed(link: str, *, remaining: int) -> discord.Embed:
         description=f"Need help with [this answer]({link})?",
         colour=discord.Colour.blurple(),
     )
-    embed.set_footer(text=f"{remaining} requests left")
+    embed.set_footer(text=f"{remaining} {'request' if remaining == 1 else 'requests'} left")
     return embed
 
 

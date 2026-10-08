@@ -202,6 +202,16 @@ async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark()
     assert lifecycle.card_closed and lifecycle.final_message_id is None
 
 
+async def test_direct_chat_failure_says_send_a_message() -> None:
+    sender = FakeSender(fail_on={1})
+    lifecycle = await _posted(sender, direct_chat=True)
+    await lifecycle.on_terminal_success(_answer("never seen"))
+
+    failure = _card_json(sender, -1)
+    assert "Send a message to try again." in failure
+    assert "Mention me" not in failure
+
+
 async def test_a_failed_later_part_says_the_answer_may_be_cut_short() -> None:
     sender = FakeSender(fail_on={2})
     lifecycle = await _posted(sender)

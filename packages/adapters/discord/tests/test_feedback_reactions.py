@@ -35,6 +35,13 @@ _OTHER_REACTOR_ID = 100000000000000002
 _GUILD_ID = 555555555555555555
 
 
+def test_support_prompt_uses_singular_request_count() -> None:
+    embed = feedback_reactions.support_prompt_embed(
+        "https://discord.com/channels/1/2/3", remaining=1
+    )
+    assert embed.footer.text == "1 request left"
+
+
 async def test_application_webhook_post_counts_as_bot_authored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

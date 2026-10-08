@@ -104,6 +104,10 @@ async def test_the_default_allowance_is_twenty_requests(
     assert support.RECEIVED.format(remaining=19) in reply
 
 
+def test_support_form_uses_singular_request_count() -> None:
+    assert "1 request left" in support.form_card("token", 1).model_dump_json()
+
+
 async def test_a_request_asked_in_a_channel_links_back_to_it(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:

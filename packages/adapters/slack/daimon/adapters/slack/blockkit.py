@@ -10,13 +10,13 @@ with Discord; ``escape_mrkdwn`` is imported from the sibling ``mrkdwn`` module
 (same adapter package boundary; not a cross-adapter import).
 
 Phase reference:
-  THINKING     → *Thinking* · {elapsed}
-  TOOL_RUNNING → *Working* · {elapsed}  (a tool call is running)
+  THINKING     → *Working on it…*
+  TOOL_RUNNING → *Working on it…*  (a tool call is running)
   DONE         → collapsed summary (terminal)
   ERROR        → ❌ collapsed summary (terminal)
 
 Status surface shape (non-terminal):
-  section  — *Thinking* · 12s  (headline)
+  section  — *Working on it…*  (headline)
   section  — ```tool lines```  (when the turn has made tool calls)
   section  — > {escaped draft}  (when text_preview is set; expand=True)
   actions  — Cancel button (action_id="cancel_turn"; style="danger"; no value)
@@ -88,7 +88,7 @@ def _fmt_tokens(n: int) -> str:
 
 
 def to_fallback_text(state: State, *, now: float | None) -> str:
-    """The running card's headline in plain words, e.g. ``Working · 1m 5s``.
+    """The running card's headline in plain words, e.g. ``Working on it…``.
 
     Slack shows it in notifications and to screen readers instead of the blocks.
     """
@@ -124,7 +124,7 @@ def to_blocks(
         parameter. No ``slack_sdk.models.blocks`` types — pure dicts (Pitfall 5).
 
     Non-terminal (THINKING / TOOL_RUNNING):
-        - section  : ``*Thinking* · {elapsed}`` or ``*Working* · {elapsed}``
+        - section  : ``*Working on it…*``
         - section  : the tool lines in a code block  (when there are any)
         - section  : > {escaped draft}  (when text_preview is set; expand=True)
         - actions  : Cancel button  (action_id="cancel_turn", style="danger")
@@ -149,9 +149,10 @@ def to_blocks(
             blocks.append(
                 {"type": "section", "text": {"type": "mrkdwn", "text": "Something went wrong."}}
             )
-            blocks.append(
-                {"type": "section", "text": {"type": "mrkdwn", "text": "Mention me to try again."}}
-            )
+            next_step = "Mention me to try again."
+            if state.notice and "*Next:* " in state.notice:
+                next_step = state.notice.split("*Next:* ", 1)[1].split("\n", 1)[0]
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": next_step}})
             if state.notice:
                 blocks.append(
                     {
@@ -234,7 +235,7 @@ def to_interrupted_blocks() -> list[dict[str, Any]]:
     Deliberately NOT ``to_blocks(State(phase=TurnPhase.ERROR, ...))``: a fresh
     boot process has the DB row and nothing else -- no agent name, no usage,
     no monotonic start -- so the terminal collapse would render an empty
-    agent field and a misleading "0s · 0 in / 0 out" for a turn that may have
+        agent field and misleading zero usage for a turn that may have
     run 40 minutes.
 
     Takes no arguments and emits no ``actions`` block, so the Cancel button is
@@ -248,10 +249,7 @@ def to_interrupted_blocks() -> list[dict[str, Any]]:
 
 
 def format_termination_notice(notice: TerminationNotice) -> str:
-    """Draw the core notice as mrkdwn for the ERROR card.
-
-    The headline is not repeated here: it is already the summary's reason.
-    """
+    """Draw the core notice below the ERROR card's title as mrkdwn."""
     lines = [escape_mrkdwn(notice.cause)]
     work = notice.work_line(lambda name: f"`{escape_mrkdwn(name.replace('`', ''))}`")
     if work is not None:

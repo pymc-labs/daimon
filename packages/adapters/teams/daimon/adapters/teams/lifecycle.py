@@ -114,11 +114,13 @@ class TeamsTurnLifecycle:
         completion_ping: bool = False,
         requester: Account | None = None,
         agent_name_prefix: str | None = None,
+        direct_chat: bool = False,
     ) -> None:
         self._sender = sender
         self._ping = completion_ping and not unprompted
         self._requester = requester if self._ping else None
         self._agent_name_prefix = agent_name_prefix
+        self._direct_chat = direct_chat
         # Nobody asked, so nothing is owed: no card, no notice, no failure post.
         self._unprompted = unprompted
         self._request_id = request_id
@@ -304,7 +306,12 @@ class TeamsTurnLifecycle:
                 return
             # Collapse the card so it does not show a live turn forever.
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                failed = card.notice_card(_DELIVERY_FAILED if answer else _FINISH_FAILED)
+                failed_text = _DELIVERY_FAILED if answer else _FINISH_FAILED
+                if self._direct_chat:
+                    failed_text = failed_text.replace(
+                        "Mention me to try again.", "Send a message to try again."
+                    )
+                failed = card.notice_card(failed_text)
                 await self._send(failed, message_id=self._message_id)
                 self.card_closed = True
 

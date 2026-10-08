@@ -35,7 +35,7 @@ from microsoft_teams.cards import (
 # 4 000 stays under it at 4 UTF-8 bytes each, the widest (an emoji).
 TEAMS_LIMIT = 4_000
 CANCEL_VERB = "cancel_turn"
-INTERRUPTED_NOTICE = "Stopped: Daimon restarted.\nMention me to try again."
+INTERRUPTED_NOTICE = "Stopped: Daimon restarted.\nSend a message to try again."
 CANCELLED_NOTICE = "Stopped.\nSend a message to start again."
 TOOLS_DONE_NOTICE = "Done."
 _FALLBACK_MAX_CHARS = 100

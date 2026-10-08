@@ -138,7 +138,7 @@ ALREADY_REQUESTED: Final[str] = (
 )
 RECORDED_UNDELIVERED: Final[str] = "Request sent. Someone will reply."
 RECEIVED: Final[str] = "Request sent. Someone will reply."
-_OFFER: Final[str] = "Need help with this answer?\n{remaining} requests left"
+_OFFER: Final[str] = "Need help with this answer?\n{remaining} {request_word} left"
 
 
 def received_text(*, remaining: int) -> str:
@@ -148,4 +148,5 @@ def received_text(*, remaining: int) -> str:
 
 def offer_text(*, remaining: int) -> str:
     """The prompt shown before the note form: how many requests are left."""
-    return _OFFER.format(remaining=remaining)
+    word = "request" if remaining == 1 else "requests"
+    return _OFFER.format(remaining=remaining, request_word=word)

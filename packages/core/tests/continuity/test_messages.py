@@ -383,6 +383,17 @@ def test_render_responder_changed_without_a_button_offers_only_a_new_conversatio
     assert text.endswith("New thread → Nova")
 
 
+def test_responder_changed_in_direct_chat_has_no_new_thread_hint() -> None:
+    text = render_responder_changed_without_handoff(
+        new_responder="Nova",
+        owner="Ada",
+        channel="this chat",
+        offer_button=True,
+        new_thread_hint=False,
+    )
+    assert text == "Nova answers new conversations here. Ada is still handling this one."
+
+
 # --- M. planned replacement summary --------------------------------------------------
 
 

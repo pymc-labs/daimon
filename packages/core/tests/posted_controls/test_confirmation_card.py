@@ -96,6 +96,18 @@ def test_slack_blocks_carry_buttons_only_while_pending() -> None:
     assert not [b for b in approved if b["type"] == "actions"]
 
 
+def test_slack_tool_arguments_stay_in_code_formatting() -> None:
+    prompt = ConfirmationPrompt(
+        title="Approve a write?",
+        detail='{"body": "*do not render as emphasis*"}',
+        requester_platform_user_id="U1",
+        expires_at=_NOW,
+    )
+    card = build_confirmation_card(prompt, state="pending", token="tok_abcdefgh")
+    blocks = build_confirmation_blocks(card, prompt=prompt)
+    assert any(block.get("text", {}).get("text") == f"```{prompt.detail}```" for block in blocks)
+
+
 def test_button_ids_round_trip() -> None:
     assert parse_confirmation_custom_id(confirmation_custom_id("tok_abcdefgh", "approve")) == (
         "tok_abcdefgh",
