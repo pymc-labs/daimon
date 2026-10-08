@@ -189,8 +189,8 @@ button could remain. A definite missing-webhook, missing-token, permission or
 deleted-thread failure can mark an aged intent unrecoverable. A periodic pass
 revisits aged intents without waiting for another restart. If the bot can
 manage messages, it fetches each known matching card and deletes it only while
-it still carries that turn's pending button. An answered card is never deleted
-by age-out. Transient API failures and shutdown cancellation keep the intent
+it still carries that turn's pending button. Answered cards without that button
+stay intact. Transient API failures and shutdown cancellation keep the intent
 active for another recovery attempt. An unprompted turn likewise retains its
 intent when its card delete fails, including an unknown-webhook error.
 
