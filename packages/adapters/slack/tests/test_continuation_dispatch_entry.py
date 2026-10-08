@@ -27,6 +27,7 @@ import pytest
 from aioresponses import CallbackResult
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.config import TurnRenderSettings
 from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
@@ -52,6 +53,7 @@ _THREAD_ID = "9300000001.000001"
 
 def _make_app(sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id_str: str) -> SlackApp:
     settings = MagicMock()
+    settings.turn_render = TurnRenderSettings()
     settings.crypto.keys = ()
     settings.slack.max_concurrent_turns_per_tenant = 3
     settings.slack.bot_display_name = "daimon"

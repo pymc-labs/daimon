@@ -23,7 +23,7 @@ from anthropic.types import Message, TextBlock, Usage
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
-from daimon.core.config import McpSettings, ThreadNamingSettings
+from daimon.core.config import McpSettings, ThreadNamingSettings, TurnRenderSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -219,6 +219,7 @@ def _runtime(
     thread_naming: ThreadNamingSettings,
 ) -> DiscordRuntime:
     settings = MagicMock()
+    settings.turn_render = TurnRenderSettings()
     settings.mcp = McpSettings()
     settings.defaults_root = MagicMock()
     settings.billing.markup = Decimal("1.0")

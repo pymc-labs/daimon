@@ -21,7 +21,7 @@ from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import McpSettings, ThreadNamingSettings
+from daimon.core.config import McpSettings, ThreadNamingSettings, TurnRenderSettings
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig, ScopeContext
@@ -74,6 +74,7 @@ def _make_runtime(
     """
     _ = tenant_id  # runtime no longer carries tenant_id; bot.py threads it
     settings = MagicMock()
+    settings.turn_render = TurnRenderSettings()
     settings.mcp = McpSettings()
     settings.billing.markup = Decimal("1.0")
     settings.billing.signup_credit = Decimal("0")
@@ -416,7 +417,7 @@ class TestNewThreadCreation:
         mock_create_session.assert_called_once()
         mock_run_turn.assert_called_once()
         call_kwargs = mock_run_turn.call_args.kwargs
-        assert call_kwargs["render_interval_s"] == 2.0, "render interval should be 2s for Discord"
+        assert call_kwargs["render_interval_s"]() == 2.0, "render interval should be 2s for Discord"
         user_message: str = call_kwargs["user_message"]
         assert "<channel_context" in user_message, (
             "channel mention must produce a <channel_context> envelope, not raw message content"
