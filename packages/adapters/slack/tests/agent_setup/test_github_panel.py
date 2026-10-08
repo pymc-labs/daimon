@@ -298,6 +298,7 @@ async def test_slack_agent_setup_shows_saved_key_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     message = "This agent uses a saved GitHub key. Ask your Daimon operator to switch it."
+    monkeypatch.setattr(actions_module, "sync_connect_admin", AsyncMock())
     monkeypatch.setattr(actions_module, "connect_link", AsyncMock(side_effect=ValueError(message)))
     post = AsyncMock()
     monkeypatch.setattr(actions_module, "post_ephemeral", post)
