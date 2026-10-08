@@ -16,10 +16,12 @@ import asyncio
 import secrets
 
 import structlog
-from daimon.adapters.discord.theme import COLOR_AMBER
+from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREEN, COLOR_GREYPLE
 from daimon.core.confirmation import ConfirmationAnswer, ConfirmationHook, ConfirmationPrompt
 from daimon.core.posted_controls.confirmation import (
+    NOT_YOURS_MESSAGE,
     ConfirmationCard,
+    ConfirmationCardState,
     build_confirmation_card,
 )
 from daimon.core.posted_controls.lifecycle import settle_local_confirmation, wait_local_confirmation
@@ -30,18 +32,21 @@ __all__ = ["build_confirmation_view", "discord_confirmation_hook"]
 
 log = structlog.get_logger(__name__)
 
-_DETAIL_MAX = 1800
-
 #: Most time a card edit may take while retiring it.
 RETIRE_TIMEOUT_S = 2.0
 
 
 def _body(card: ConfirmationCard) -> list[str]:
-    lines = [f"**{card.headline}**"]
-    if card.fields:
-        lines.append("\n".join(f"-# {label}: `{value}`" for label, value in card.fields))
-    if card.detail:
-        lines.append(f"```json\n{card.detail[:_DETAIL_MAX]}\n```")
+    def safe(value: str) -> str:
+        return discord.utils.escape_mentions(discord.utils.escape_markdown(value))
+
+    lines = [f"**{safe(card.headline)}**"]
+    if card.body:
+        lines.append(safe(card.body))
+    if card.items:
+        lines.append("\n".join(f"• {safe(item)}" for item in card.items))
+    if card.consequence:
+        lines.append(safe(card.consequence))
     return lines
 
 
@@ -67,12 +72,18 @@ class _ConfirmationView(discord.ui.LayoutView):
         self._prompt = prompt
         self._answer = answer
         container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
-            accent_colour=discord.Colour(COLOR_AMBER)
+            accent_colour=discord.Colour(
+                COLOR_AMBER
+                if card.state == "pending"
+                else COLOR_GREEN
+                if card.state == "approved"
+                else COLOR_GREYPLE
+            )
         )
         for text in _body(card):
             container.add_item(discord.ui.TextDisplay(text))
         if card.state == "pending":
-            container.add_item(discord.ui.Separator(visible=False))
+            container.add_item(discord.ui.Separator())
             row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
             approve: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 style=discord.ButtonStyle.success, label="Approve"
@@ -80,10 +91,19 @@ class _ConfirmationView(discord.ui.LayoutView):
             deny: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 style=discord.ButtonStyle.danger, label="Deny"
             )
+            count = len(card.items)
+            if count:
+                approve.label = f"Approve all {count}"
+                deny.label = f"Deny all {count}"
+            details: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                style=discord.ButtonStyle.secondary, label="Details"
+            )
             approve.callback = self._on_approve
             deny.callback = self._on_deny
+            details.callback = self._on_details
             row.add_item(approve)
             row.add_item(deny)
+            row.add_item(details)
             container.add_item(row)
         footer = _footer(card, prompt)
         if footer is not None:
@@ -96,11 +116,18 @@ class _ConfirmationView(discord.ui.LayoutView):
     async def _on_deny(self, interaction: discord.Interaction) -> None:
         await self._settle(interaction, "denied")
 
+    async def _on_details(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(
+            "\n".join(self._prompt.detail_lines) or "No additional details.", ephemeral=True
+        )
+
     async def _settle(self, interaction: discord.Interaction, answer: ConfirmationAnswer) -> None:
         refusal = settle_local_confirmation(
             self._prompt, self._answer, str(interaction.user.id), answer
         )
         if refusal is not None:
+            if refusal == NOT_YOURS_MESSAGE:
+                refusal = refusal.format(requester=f"<@{self._prompt.requester_platform_user_id}>")
             await interaction.response.send_message(refusal, ephemeral=True)
             return
         # Answered: nothing on this card listens any more.
@@ -132,7 +159,7 @@ def discord_confirmation_hook(channel: discord.abc.Messageable) -> ConfirmationH
         view = _ConfirmationView(pending, prompt, answer)
         message = await channel.send(view=view)
 
-        async def retire(state: ConfirmationAnswer) -> None:
+        async def retire(state: ConfirmationCardState) -> None:
             await _retire(message, prompt, state)
 
         return await wait_local_confirmation(prompt, answer, stop=view.stop, retire=retire)
@@ -141,7 +168,7 @@ def discord_confirmation_hook(channel: discord.abc.Messageable) -> ConfirmationH
 
 
 async def _retire(
-    message: discord.Message, prompt: ConfirmationPrompt, state: ConfirmationAnswer
+    message: discord.Message, prompt: ConfirmationPrompt, state: ConfirmationCardState
 ) -> None:
     card = build_confirmation_card(prompt, state=state)
     try:

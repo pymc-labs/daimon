@@ -27,8 +27,9 @@ from daimon.core.confirmation import (
     ConfirmationPrompt,
 )
 from daimon.core.posted_controls.confirmation import (
-    NO_LONGER_PENDING_MESSAGE,
+    NOT_YOURS_MESSAGE,
     ConfirmationCard,
+    ConfirmationCardState,
     build_confirmation_card,
     confirmation_card_text,
 )
@@ -43,10 +44,9 @@ from microsoft_teams.cards import (
     ActionSet,
     AdaptiveCard,
     CardElement,
-    CodeBlock,
-    Fact,
-    FactSet,
+    Container,
     TextBlock,
+    ToggleVisibilityAction,
 )
 
 __all__ = ["VERB", "TeamsConfirmationCards", "confirmation_adaptive_card"]
@@ -61,13 +61,13 @@ EDIT_TIMEOUT_S = 2.0
 
 
 def _footer(card: ConfirmationCard, prompt: ConfirmationPrompt, answered_by: str | None) -> str:
-    # Core's footers name people as `<@id>`, which Teams draws literally.
+    name = prompt.requester_display_name or answered_by or "requester"
     if card.state == "pending":
         # Teams renders TIME() in the reader's own timezone.
         expires = prompt.expires_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return f"Only the person who asked can answer. Expires {{{{TIME({expires})}}}}."
-    if card.state == "approved" and answered_by:
-        return f"Approved by {answered_by}."
+        return f"Only {name} can approve or deny · expires {{{{TIME({expires})}}}}"
+    if card.state in {"approved", "denied"}:
+        return f"by {answered_by or name}"
     return ""
 
 
@@ -76,17 +76,54 @@ def confirmation_adaptive_card(
 ) -> AdaptiveCard:
     """`card` as an Adaptive Card; buttons only while pending."""
     body: list[CardElement] = [heading(card.headline)]
-    if card.fields:
-        body.append(FactSet(facts=[Fact(title=label, value=value) for label, value in card.fields]))
-    if card.detail:
-        body.append(CodeBlock(code_snippet=card.detail, language="Json"))
+    if card.body:
+        body.append(TextBlock(text=card.body, wrap=True))
+    if card.items:
+        body.append(TextBlock(text="\n".join(f"• {item}" for item in card.items), wrap=True))
+    if card.consequence:
+        body.append(TextBlock(text=card.consequence, wrap=True))
     if card.token is not None:
-        approve = button(VERB, "Approve", "approve", style="positive", token=card.token)
-        deny = button(VERB, "Deny", "deny", style="destructive", token=card.token)
-        body.append(ActionSet(actions=[approve, deny]))
+        body.append(Container(items=[], separator=True))
+        count = len(card.items)
+        approve = button(
+            VERB,
+            f"Approve all {count}" if count else "Approve",
+            "approve",
+            style="positive",
+            token=card.token,
+        )
+        deny = button(
+            VERB,
+            f"Deny all {count}" if count else "Deny",
+            "deny",
+            style="destructive",
+            token=card.token,
+        )
+        detail_lines = card.detail_lines or ("No additional details.",)
+        body.append(
+            Container(
+                id="approval-details",
+                is_visible=False,
+                items=[TextBlock(text=line, wrap=True) for line in detail_lines],
+            )
+        )
+        body.append(
+            ActionSet(
+                actions=[
+                    approve,
+                    deny,
+                    ToggleVisibilityAction(title="Details", target_elements=["approval-details"]),
+                ]
+            )
+        )
     if footer := _footer(card, prompt, answered_by):
         body.append(TextBlock(text=footer, is_subtle=True, size="Small", wrap=True))
-    return AdaptiveCard(body=body, fallback_text=confirmation_card_text(card))
+    style = (
+        "warning" if card.state == "pending" else "good" if card.state == "approved" else "emphasis"
+    )
+    return AdaptiveCard(
+        body=[Container(style=style, items=body)], fallback_text=confirmation_card_text(card)
+    )
 
 
 @dataclass(frozen=True)
@@ -104,10 +141,21 @@ class TeamsConfirmationCards:
         self._sender = sender
         self._controls = PostedConfirmations[_PostedCard]()
 
-    def hook(self, *, conversation_id: str, service_url: str | None) -> ConfirmationHook:
+    def hook(
+        self,
+        *,
+        conversation_id: str,
+        service_url: str | None,
+        requester_display_name: str | None = None,
+    ) -> ConfirmationHook:
         """A hook that posts each prompt's card into the turn's conversation."""
 
         async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+            if requester_display_name:
+                prompt = prompt.model_copy(
+                    update={"requester_display_name": requester_display_name}
+                )
+
             async def post(token: str) -> _PostedCard:
                 card = build_confirmation_card(prompt, state="pending", token=token)
                 message = MessageActivityInput().add_card(confirmation_adaptive_card(card, prompt))
@@ -130,9 +178,13 @@ class TeamsConfirmationCards:
         answer = _ANSWERS.get(str(data.get("op") or ""))
         posted = self._controls.cards.get(token)
         if posted is None or answer is None:
-            return toast(NO_LONGER_PENDING_MESSAGE)
+            return toast(self._controls.missing_message(token))
         clicker = canonical_uuid(activity.from_.aad_object_id)
         if refusal := self._controls.claim(token, clicker, answer):
+            if refusal == NOT_YOURS_MESSAGE:
+                refusal = refusal.format(
+                    requester=posted.prompt.requester_display_name or "requester"
+                )
             return toast(refusal)
         card = build_confirmation_card(
             posted.prompt, state=answer, answered_by_platform_user_id=clicker
@@ -140,7 +192,7 @@ class TeamsConfirmationCards:
         name = activity.from_.name
         return replace_card(confirmation_adaptive_card(card, posted.prompt, answered_by=name))
 
-    async def _edit(self, posted: _PostedCard, state: ConfirmationAnswer) -> None:
+    async def _edit(self, posted: _PostedCard, state: ConfirmationCardState) -> None:
         card = build_confirmation_card(posted.prompt, state=state)
         edit = MessageActivityInput(id=posted.message_id).add_card(
             confirmation_adaptive_card(card, posted.prompt)

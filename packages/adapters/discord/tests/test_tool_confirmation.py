@@ -51,11 +51,9 @@ def test_a_pending_card_shows_the_write_and_two_buttons() -> None:
         build_confirmation_card(prompt, state="pending", token="tok_abcdefgh"), prompt
     )
     texts = _texts(view)
-    assert texts[0] == "**✋ Approve a write to linear?**"
-    assert "-# Tool: `create_issue`" in texts[1]
-    assert '"title": "Bug"' in texts[2]
-    assert texts[-1].startswith("-# Only <@111> can answer. Expires <t:")
-    assert [b.label for b in _buttons(view)] == ["Approve", "Deny"]
+    assert texts[0] == '**Create issue "Bug"?**'
+    assert texts[-1].startswith("-# Only <@111> can approve or deny · expires <t:")
+    assert [b.label for b in _buttons(view)] == ["Approve", "Deny", "Details"]
 
 
 def test_tool_arguments_with_markdown_stay_in_a_code_block() -> None:
@@ -70,7 +68,7 @@ def test_an_answered_card_has_no_buttons() -> None:
     prompt = _prompt()
     view = build_confirmation_view(build_confirmation_card(prompt, state="denied"), prompt)
     assert _buttons(view) == []
-    assert _texts(view)[0] == "**🛡️ Denied — it did not run.**"
+    assert _texts(view)[0] == "**Denied**"
 
 
 async def _post_and_click(user_id: int, choice: str) -> tuple[ConfirmationAnswer, MagicMock]:
@@ -86,10 +84,12 @@ async def _post_and_click(user_id: int, choice: str) -> tuple[ConfirmationAnswer
     waiting = asyncio.create_task(hook(_prompt()))
     while not posted:
         await asyncio.sleep(0)
-    approve, deny = _buttons(posted[0])
+    approve, deny, _details = _buttons(posted[0])
     stranger = _interaction(999)
     await (approve if choice == "approve" else deny).callback(stranger)
-    stranger.response.send_message.assert_awaited_once_with(NOT_YOURS_MESSAGE, ephemeral=True)
+    stranger.response.send_message.assert_awaited_once_with(
+        NOT_YOURS_MESSAGE.format(requester="<@111>"), ephemeral=True
+    )
     assert not waiting.done(), "a stranger's click answers nothing"
     requester = _interaction(user_id)
     await (approve if choice == "approve" else deny).callback(requester)
@@ -100,7 +100,7 @@ async def test_the_requesters_approve_answers_approved_and_edits_the_card() -> N
     answer, requester = await _post_and_click(111, "approve")
     assert answer == "approved"
     edited = requester.response.edit_message.await_args.kwargs["view"]
-    assert _texts(edited)[0] == "**✅ Approved — running it.**"
+    assert _texts(edited)[0] == "**Approved**"
     assert _buttons(edited) == []
 
 
@@ -119,7 +119,7 @@ async def test_an_unanswered_card_expires() -> None:
 
     assert answer == "expired"
     view = message.edit.await_args.kwargs["view"]
-    assert _texts(view)[0].startswith("**⌛")
+    assert _texts(view)[0].startswith("**Expired")
 
 
 async def test_a_cancelled_wait_retires_the_card() -> None:
@@ -136,7 +136,7 @@ async def test_a_cancelled_wait_retires_the_card() -> None:
         await waiting
 
     view = message.edit.await_args.kwargs["view"]
-    assert _texts(view)[0] == "**🛡️ Denied — it did not run.**"
+    assert _texts(view)[0] == "**Stopped**"
     assert _buttons(view) == []
 
 
@@ -246,3 +246,24 @@ async def test_a_stalled_discord_retire_cannot_hold_the_turn_past_its_budget(
     assert elapsed < 1.5, f"took {elapsed:.2f}s"
     await asyncio.sleep(0)
     assert not [t for t in asyncio.all_tasks() if t.get_name() == "turn.decide_blocked"]
+
+
+async def test_grouped_card_and_details_are_scannable() -> None:
+    prompt = _prompt().model_copy(
+        update={
+            "title": 'Upload 3 files to notebook "memecoin-scan"?',
+            "items": ("cg_meme.csv", "launch_features.csv", "launch_curves.csv"),
+            "consequence": "Anyone with the notebook's link can open these files.",
+        }
+    )
+    view = build_confirmation_view(
+        build_confirmation_card(prompt, state="pending", token="tok_abcdefgh"), prompt
+    )
+    assert _texts(view)[1] == "• cg\\_meme.csv\n• launch\\_features.csv\n• launch\\_curves.csv"
+    assert [button.label for button in _buttons(view)] == ["Approve all 3", "Deny all 3", "Details"]
+    click = _interaction(999)
+    await _buttons(view)[2].callback(click)
+    click.response.send_message.assert_awaited_once()
+    assert click.response.send_message.await_args.kwargs["ephemeral"] is True
+    assert click.response.send_message.await_args.args[0] == "Title: Bug"
+    assert "```" not in click.response.send_message.await_args.args[0]

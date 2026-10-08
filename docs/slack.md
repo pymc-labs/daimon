@@ -120,6 +120,14 @@ takes a paste only, since Slack modals have no file input.
 
 ### Per-user Slack access (optional)
 
+Tool approvals appear as Block Kit cards in the turn's thread. The card shows
+the action, consequence and requester, with **Approve**, **Deny** and
+**Details** buttons. Details sends a few plain labelled inputs privately to
+the clicker. Only
+the requester can approve or deny. Same-target calls in one pause share a
+card, up to five calls per card. Answered, expired and stopped cards lose
+their buttons.
+
 By default daimon reads only channels the bot is invited to. Members can
 additionally **connect their Slack account** (daimon nudges them once, and
 offers a link whenever it hits a channel it can't read). A connected member's

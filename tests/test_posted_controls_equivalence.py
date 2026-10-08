@@ -92,8 +92,7 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
         trace, posted = [], []
         prompt = ConfirmationPrompt(
             title="Approve a write?",
-            fields=(("Tool", "write"),),
-            detail='{"x": 1}',
+            detail_lines=("Item: example",),
             requester_platform_user_id=USER,
             expires_at=AT + timedelta(seconds=-1 if scenario == "expired" else 600),
         )

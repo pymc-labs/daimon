@@ -7,12 +7,18 @@ on its live view. Their timeout and cancellation policies intentionally differ.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Protocol
 
 from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt, PendingConfirmations
-from daimon.core.posted_controls.confirmation import NO_LONGER_PENDING_MESSAGE, NOT_YOURS_MESSAGE
+from daimon.core.posted_controls.confirmation import (
+    EXPIRED_MESSAGE,
+    NO_LONGER_PENDING_MESSAGE,
+    NOT_YOURS_MESSAGE,
+    ConfirmationCardState,
+)
 
 
 class PromptCard(Protocol):
@@ -29,6 +35,8 @@ def settle_confirmation(
     """Requester check before the single-use settle; return the original refusal."""
     if clicker != prompt.requester_platform_user_id:
         return NOT_YOURS_MESSAGE
+    if datetime.now(UTC) >= prompt.expires_at:
+        return EXPIRED_MESSAGE
     if not resolve(answer):
         return NO_LONGER_PENDING_MESSAGE
     return None
@@ -40,13 +48,14 @@ class PostedConfirmations[Card: PromptCard]:
     def __init__(self) -> None:
         self.pending = PendingConfirmations()
         self.cards: dict[str, Card] = {}
+        self.expired_tokens: deque[str] = deque(maxlen=512)
 
     async def confirm(
         self,
         prompt: ConfirmationPrompt,
         *,
         post: Callable[[str], Awaitable[Card]],
-        retire: Callable[[Card, ConfirmationAnswer], Awaitable[None]],
+        retire: Callable[[Card, ConfirmationCardState], Awaitable[None]],
         post_errors: tuple[type[BaseException], ...],
     ) -> ConfirmationAnswer:
         token, future = self.pending.open()
@@ -62,18 +71,24 @@ class PostedConfirmations[Card: PromptCard]:
         except BaseException:
             posted = self.cards.pop(token, None)
             if posted is not None:
-                await retire(posted, "denied")
+                await retire(posted, "stopped")
             raise
         posted = self.cards.pop(token, None)
         if answer == "expired" and posted is not None:
+            self.expired_tokens.append(token)
             await retire(posted, "expired")
         return answer
+
+    def missing_message(self, token: str) -> str:
+        return EXPIRED_MESSAGE if token in self.expired_tokens else NO_LONGER_PENDING_MESSAGE
 
     def claim(self, token: str, clicker: str | None, answer: ConfirmationAnswer) -> str | None:
         """Keep the card until its requester presses; pop before resolving."""
         posted = self.cards.get(token)
         if posted is None:
-            return NO_LONGER_PENDING_MESSAGE
+            return self.missing_message(token)
+        if datetime.now(UTC) >= posted.prompt.expires_at:
+            return EXPIRED_MESSAGE
 
         def resolve(value: ConfirmationAnswer) -> bool:
             self.cards.pop(token, None)
@@ -104,7 +119,7 @@ async def wait_local_confirmation(
     future: asyncio.Future[ConfirmationAnswer],
     *,
     stop: Callable[[], None],
-    retire: Callable[[ConfirmationAnswer], Awaitable[None]],
+    retire: Callable[[ConfirmationCardState], Awaitable[None]],
 ) -> ConfirmationAnswer:
     """Discord cancels its future and stops its view before a retire edit."""
     timeout_s = max(0.0, (prompt.expires_at - datetime.now(UTC)).total_seconds())
@@ -115,7 +130,7 @@ async def wait_local_confirmation(
     except asyncio.CancelledError:
         future.cancel()
         stop()
-        await retire("denied")
+        await retire("stopped")
         raise
     if answer == "expired":
         future.cancel()

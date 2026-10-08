@@ -121,15 +121,19 @@ async def _decide_blocked(
 ) -> list[BetaManagedAgentsUserToolConfirmationEventParams]:
     """The `user.tool_confirmation` batch for `fresh` under an answering posture.
 
-    `PolicyApproval` awaits its decider once per id, concurrently: two writes
-    in one pause post two cards, and neither waits on the other's click.
+    `PolicyApproval` awaits its group decider when present. One answer may
+    cover several calls, but the returned batch still has one event per id.
     """
     match tool_confirmation:
         case AutoApprove():
             return build_confirmation_events(fresh)
-        case PolicyApproval(decide=decide):
+        case PolicyApproval(decide=decide, decide_group=decide_group):
             calls = tool_calls_for(state, fresh)
-            results = await asyncio.gather(*(decide(call) for call in calls))
+            results = (
+                await decide_group(calls)
+                if decide_group is not None
+                else await asyncio.gather(*(decide(call) for call in calls))
+            )
             return build_decision_events(zip(fresh, results, strict=True))
 
 
@@ -1358,32 +1362,9 @@ async def _finalize_success_or_error(
         #   still found no post-echo re-ask or terminal event.
         match tool_confirmation:
             case AutoApprove() | PolicyApproval():
-                unsent = pending_confirmation_ids(
-                    final_state.stop_reason, confirmed=confirmed_tool_use_ids
-                )
-                if unsent:
-                    message = (
-                        "The agent requested tool approval but the session was "
-                        "no longer accepting events, so the turn was abandoned "
-                        "without sending confirmations."
-                    )
-                elif confirmation_echo_timed_out:
-                    message = (
-                        "The agent did not confirm the sent tool approval before the turn "
-                        "timed out, so the turn ended."
-                    )
-                else:
-                    message = (
-                        "The agent re-requested approval for tool call(s) already "
-                        "confirmed — the confirmation(s) were sent but not accepted, "
-                        "so the turn was abandoned rather than spin."
-                    )
+                message = "The agent stopped because it couldn't confirm your approval."
             case RequireApproval():
-                message = (
-                    "The agent requested tool approval — not supported on this "
-                    "surface yet. Interrupt-free approval/resume UX is a future "
-                    "feature; routines auto-approve tools."
-                )
+                message = "Approvals aren't available here. Ask in Discord, Slack or Teams."
         err = TurnError(kind="requires_action", message=message)
         final_state = dataclasses.replace(
             final_state, error=err, termination=TerminationReason.REQUIRES_ACTION

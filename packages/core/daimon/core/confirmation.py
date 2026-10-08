@@ -20,11 +20,11 @@ futures, which is fine — the turn waiting on them died with the process.
 from __future__ import annotations
 
 import asyncio
-import json
+import re
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, PUBLISH_TOOLS, ToolCall
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -46,24 +46,24 @@ ConfirmationAnswer = Literal["approved", "denied", "expired"]
 #: still bounds the whole turn.
 CONFIRMATION_TIMEOUT: Final[timedelta] = timedelta(minutes=10)
 
-#: Cap on the input shown on a card. Enough to read a record's fields; a
-#: longer payload is cut with a marker rather than flooding the thread.
-MAX_DETAIL_CHARS: Final[int] = 1500
-
 
 class ConfirmationPrompt(BaseModel):
     """What a confirmation card shows, platform-neutral.
 
-    `fields` are short label/value pairs; `detail` is the exact payload, shown
-    verbatim in a code block. Only `requester_platform_user_id` may answer.
+    `detail_lines` shows short, readable inputs behind Details. Only
+    `requester_platform_user_id` may answer.
     """
 
     model_config = ConfigDict(frozen=True)
 
     title: str
-    fields: tuple[tuple[str, str], ...] = ()
-    detail: str | None = None
+    consequence: str | None = None
+    action: str | None = None
+    denied_action: str | None = None
+    items: tuple[str, ...] = ()
+    detail_lines: tuple[str, ...] = ()
     requester_platform_user_id: str
+    requester_display_name: str | None = None
     expires_at: datetime
 
     @model_validator(mode="after")
@@ -82,27 +82,135 @@ async def no_confirmation_surface(prompt: ConfirmationPrompt) -> ConfirmationAns
     return "denied"
 
 
-def _render_input(tool_input: dict[str, object]) -> str:
-    text = json.dumps(tool_input, indent=2, ensure_ascii=False, sort_keys=True, default=str)
-    if len(text) > MAX_DETAIL_CHARS:
-        return text[:MAX_DETAIL_CHARS] + "\n… (truncated)"
-    return text
+def _short(value: object, *, limit: int = 80) -> str:
+    text = str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _generic_details(tool_input: dict[str, object]) -> tuple[str, ...]:
+    lines: list[str] = []
+    for key, value in tool_input.items():
+        lower = key.lower()
+        if (
+            lower in {"origin_context_id", "server", "tool", "content_hash"}
+            or lower == "id"
+            or lower.endswith("_id")
+            or any(word in lower for word in ("token", "secret", "password"))
+            or value is None
+            or not isinstance(value, str | int | float | bool)
+            or (isinstance(value, str) and value.lstrip().startswith(("{", "[")))
+            or (isinstance(value, str) and "://" in value and len(value) > 60)
+        ):
+            continue
+        value_text = _short(str(value).replace("\n", " "))
+        lines.append(f"{key.replace('_', ' ').capitalize()}: {value_text}")
+        if len(lines) == 4:
+            break
+    return tuple(lines)
+
+
+def _recipients(value: object) -> str:
+    if not isinstance(value, list):
+        return str(value or "recipients")
+    names: list[str] = []
+    for item in cast(list[object], value):
+        if isinstance(item, dict):
+            entry = cast(dict[str, object], item)
+            names.append(str(entry.get("label") or entry.get("name") or "recipient"))
+        else:
+            names.append(str(item))
+    return ", ".join(names)
 
 
 def prompt_for_tool_call(
     call: ToolCall, *, requester_platform_user_id: str, now: datetime
 ) -> ConfirmationPrompt:
-    """The card for one gated tool write: server, tool, and the exact input."""
+    """The card for one gated write, with short product-facing details."""
     server = call.server_name or "a tool"
     publishing = call.tool_name in PUBLISH_TOOLS and server == DAIMON_SERVER_NAME
+    data = call.input
+    name = str(data.get("name") or "")
+    slug = str(data.get("slug") or "")
+    title_value = str(data.get("title") or "")
+    notebook = f'notebook "{slug}"' if slug else "notebook"
+    title: str
+    action: str
+    denied_action: str
+    consequence: str | None = None
+    detail_lines: tuple[str, ...]
+    if call.tool_name == "create_notebook_upload_url" and publishing:
+        action = f"Publish {notebook}"
+        title = f"{action}?"
+        denied_action = f"{notebook[0].upper()}{notebook[1:]} not published"
+        consequence = (
+            "Anyone with the link can open and edit it."
+            if data.get("editable")
+            else "Anyone with the link can open it."
+        )
+        days = data.get("ttl_days") or 1
+        detail_lines = (
+            f"Notebook: {slug or 'New notebook'}",
+            f"Link expires: {'Never' if data.get('permanent') else f'in {days} days'}",
+            f"Editable: {'Yes' if data.get('editable') else 'No'}",
+        )
+    elif call.tool_name == "create_attachment_upload_url" and publishing:
+        action = f'Upload "{name}" to {notebook}'
+        title = f"{action}?"
+        denied_action = f'"{name}" not uploaded'
+        consequence = "Anyone with the notebook's link can open this file."
+        detail_lines = (f"File: {_short(name)}", f"Notebook: {_short(slug)}")
+    elif call.tool_name == "publish_report" and publishing:
+        action = f'Publish report "{title_value}"'
+        title = f"{action}?"
+        denied_action = f'Report "{title_value}" not published'
+        recipients = _recipients(data.get("recipients"))
+        consequence = f"Shared with {recipients}. Anyone with the link can open it."
+        cap = data.get("cap_usd")
+        detail_lines = (
+            f"Report: {_short(title_value)}",
+            f"Shared with: {_short(recipients)}",
+            f"Spending cap: ${cap}" if cap is not None else "Spending cap: Not set",
+        )
+    elif call.tool_name == "add_skill" and server == DAIMON_SERVER_NAME:
+        agent = str(data.get("agent_name") or data.get("agent") or "agent")
+        if not name:
+            source = str(data.get("path") or data.get("attachment_url") or "")
+            name = source.rstrip("/").rsplit("/", 1)[-1].removesuffix(".md") or "skill"
+            skill_md = data.get("skill_md")
+            if name == "skill" and isinstance(skill_md, str):
+                match = re.search(r"(?m)^name:\s*['\"]?([^'\"\n]+)", skill_md)
+                if match:
+                    name = match.group(1).strip()
+        action = f'Add skill "{name}" to {agent}'
+        title = f"{action}?"
+        denied_action = f'Skill "{name}" not added'
+        consequence = f"This changes {agent} for everyone who uses it."
+        source_label = (
+            "attached file"
+            if data.get("attachment_url")
+            else "GitHub repo"
+            if data.get("repo_url")
+            else "pasted text"
+        )
+        detail_lines = (
+            f"Skill: {_short(name)}",
+            f"Agent: {_short(agent)}",
+            f"Source: {source_label}",
+        )
+    else:
+        verb = call.tool_name.replace("_", " ").capitalize()
+        subject = title_value or name
+        subject_label = f' "{subject}"' if subject else ""
+        action = f"{verb}{subject_label}"
+        title = f"{action}?"
+        denied_action = f"{verb} not completed"
+        detail_lines = _generic_details(data)
     return ConfirmationPrompt(
-        title="Approve publishing?" if publishing else f"Approve a write to {server}?",
-        fields=(
-            ("Tool", call.tool_name),
-            ("Server", server),
-            *((("Reach", "Anyone with the link, outside this channel"),) if publishing else ()),
-        ),
-        detail=_render_input(call.input),
+        title=title,
+        consequence=consequence,
+        action=action,
+        denied_action=denied_action,
+        detail_lines=detail_lines,
         requester_platform_user_id=requester_platform_user_id,
         expires_at=now + CONFIRMATION_TIMEOUT,
     )
