@@ -10,6 +10,7 @@ import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import github_connect as connect_tool
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -19,9 +20,12 @@ from daimon.core.config import (
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
+from daimon.core.stores.github_connect import digest, get_invitation
 from daimon.testing.factories import make_account, make_tenant
+from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -107,6 +111,34 @@ async def test_member_request_is_recorded_and_admin_link_goes_only_to_private_de
     assert result.status == "sent" and "http" not in result.message
     delivery.assert_awaited_once()
     content = delivery.await_args.kwargs["content"]
-    assert "Opens GitHub to pick repos for ResearchBot.\n" in content
-    assert "Nothing is shared until you confirm.\nhttps://mcp.test/oauth/github/connect/" in content
+    assert content.startswith(
+        "Connect GitHub for ResearchBot:\nhttps://mcp.test/oauth/github/connect/"
+    )
+    assert len(content.splitlines()) == 2
     assert delivery.await_args.kwargs["recipient_id"] == "123"
+    delivery.side_effect = ToolError("DM blocked")
+    blocked = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, admin, origin_context_id=str(uuid.uuid4())
+    )
+    assert blocked.status == "dm_blocked"
+    assert blocked.message == "I can't DM you. Run /github connect here."
+    blocked_url = delivery.await_args.kwargs["content"].splitlines()[1]
+    async with committing_sessionmaker() as session:
+        assert await get_invitation(session, digest(blocked_url.rsplit("/", 1)[1])) is None
+    async with committing_sessionmaker.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy.model_validate(
+                {"agent_rules": {"ResearchBot": {"runs_in": ["client-channel"]}}}
+            ),
+        )
+    delivery.reset_mock()
+    pinned = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, admin, origin_context_id=str(uuid.uuid4())
+    )
+    assert pinned.status == "client_agent"
+    assert pinned.message == (
+        "This agent uses its saved GitHub key. Ask your Daimon operator to change it."
+    )
+    delivery.assert_not_awaited()

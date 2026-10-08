@@ -18,9 +18,12 @@ from daimon.core.roster import load_roster
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_connect import (
+    CLIENT_AGENT_MESSAGE,
+    ClientAgentConnectionError,
     activate_pending_agent,
     mint_invitation,
     pending_update_for_agent,
+    require_app_eligible_agent,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
@@ -103,6 +106,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             target_ma_id = roster.answering.ma_agent_id
         agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=target_ma_id)
         async with runtime.sessionmaker() as session:
+            await require_app_eligible_agent(session, tenant_id=tenant_id, agent_name=target_name)
             pending = await pending_update_for_agent(
                 session, tenant_id=tenant_id, agent_id=agent_id
             )
@@ -152,11 +156,27 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 agent_id=agent_id,
                 agent_name=target_name,
             )
-        await reply(
-            f"Opens GitHub to pick repos for {escape_mrkdwn(target_name)}.\n"
-            "Nothing is shared until you confirm.\n"
-            f"<{root}/oauth/github/connect/{token}|Connect repos>"
+        message = (
+            f"Opens GitHub to pick repos for {target_name}.\nNothing is shared until you confirm."
         )
+        await reply(
+            message,
+            blocks=[
+                {"type": "section", "text": {"type": "mrkdwn", "text": escape_mrkdwn(message)}},
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Connect GitHub"},
+                            "url": f"{root}/oauth/github/connect/{token}",
+                        }
+                    ],
+                },
+            ],
+        )
+    except ClientAgentConnectionError:
+        await reply(CLIENT_AGENT_MESSAGE)
     except (anthropic.APIError, SlackApiError, SQLAlchemyError, ValueError):
         log.exception("slack.github_connect.failed")
         await reply("GitHub setup is unavailable. Try again.")
@@ -201,6 +221,8 @@ async def handle_github_update_click(runtime: SlackRuntime, payload: dict[str, A
             if updated
             else "Already updated."
         )
+    except ClientAgentConnectionError:
+        await reply(CLIENT_AGENT_MESSAGE)
     except (SlackApiError, SQLAlchemyError, ValueError):
         log.exception("slack.github_connect.update_failed")
         await reply("The update could not be completed. Check the agent's repos in GitHub setup.")

@@ -16,7 +16,14 @@ from daimon.adapters.mcp.tools.setup_target import (
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
-from daimon.core.stores.github_connect import mint_invitation, record_connect_request
+from daimon.core.stores.github_connect import (
+    CLIENT_AGENT_MESSAGE,
+    ClientAgentConnectionError,
+    mint_invitation,
+    record_connect_request,
+    require_app_eligible_agent,
+    revoke_invitation,
+)
 from daimon.core.stores.security_audit import append_event
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -26,7 +33,7 @@ from pydantic import BaseModel, ConfigDict
 class ConnectResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    status: Literal["sent", "ask_admin"]
+    status: Literal["sent", "ask_admin", "dm_blocked", "client_agent"]
     message: str
 
 
@@ -67,6 +74,12 @@ async def _github_connect_impl(
     )
     agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
     async with runtime.session_factory.begin() as session:
+        try:
+            await require_app_eligible_agent(
+                session, tenant_id=auth.tenant_id, agent_name=agent.name
+            )
+        except ClientAgentConnectionError:
+            return ConnectResult(status="client_agent", message=CLIENT_AGENT_MESSAGE)
         account = await get_account(session, auth.account_id)
         if account is None or account.tenant_id != auth.tenant_id or account.is_external:
             raise ToolError("GitHub setup is unavailable for this account.")
@@ -99,13 +112,32 @@ async def _github_connect_impl(
             agent_id=agent_id,
             agent_name=agent.name,
         )
+        await append_event(
+            session,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            agent_id=agent_id,
+            platform=auth.platform,
+            platform_user_id=auth.platform_user_id,
+            tool_name="github_connect",
+            operation="github_connect",
+            outcome="allowed",
+            reason="admin link minted",
+        )
     url = f"{root}/oauth/github/connect/{token}"
-    content = (
-        f"Opens GitHub to pick repos for {agent.name}.\nNothing is shared until you confirm.\n{url}"
-    )
-    await send_direct_message_impl(
-        runtime, auth, recipient_id=auth.platform_user_id, content=content
-    )
+    try:
+        await send_direct_message_impl(
+            runtime,
+            auth,
+            recipient_id=auth.platform_user_id,
+            content=f"Connect GitHub for {agent.name}:\n{url}",
+        )
+    except Exception:
+        async with runtime.session_factory.begin() as session:
+            await revoke_invitation(session, token=token)
+        return ConnectResult(
+            status="dm_blocked", message="I can't DM you. Run /github connect here."
+        )
     return ConnectResult(status="sent", message="Connect link sent privately.")
 
 

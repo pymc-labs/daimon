@@ -310,6 +310,10 @@ def connect_link(
             ),
         ),
     ],
+    agent: Annotated[
+        uuid.UUID | None, typer.Option("--agent", help="Agent UUID to connect.")
+    ] = None,
+    agent_name: Annotated[str | None, typer.Option("--agent-name", help="Agent name.")] = None,
 ) -> None:
     """Print a single-use connection invitation on a workspace admin's behalf."""
     settings = load_settings()
@@ -340,6 +344,8 @@ def connect_link(
                     tenant_id=tenant,
                     requester_account_id=account_id,
                     requester_label=requester,
+                    agent_id=agent,
+                    agent_name=agent_name,
                 )
             console.print(f"{root}/oauth/github/connect/{token}")
         finally:

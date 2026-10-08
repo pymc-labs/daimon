@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -20,6 +21,8 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.session_snapshot import SessionSnapshot, fingerprint_identity
 from daimon.core.stores import github_access, github_app_installations, github_connect
 from daimon.core.stores.accounts import set_external, set_role
 from daimon.core.stores.domain import Role
@@ -66,10 +69,12 @@ def test_routes_not_mounted_when_unconfigured(
     assert "/oauth/github/confirm" not in paths
 
 
+@pytest.mark.parametrize("agent_bound", [False, True])
 @pytest.mark.asyncio
 async def test_connection_happy_path_and_rechecks(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    agent_bound: bool,
 ) -> None:
     sessionmaker = committing_sessionmaker
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
@@ -82,6 +87,12 @@ async def test_connection_happy_path_and_rechecks(
             tenant_id=tenant_id,
             requester_account_id=account_id,
             requester_label="Alex",
+            agent_id=(
+                derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ma-agent")
+                if agent_bound
+                else None
+            ),
+            agent_name="ResearchBot" if agent_bound else None,
         )
     repo_admin = True
     repo_two_admin = False
@@ -223,6 +234,8 @@ async def test_connection_happy_path_and_rechecks(
         assert 'name="repo" value="101"' in page.text
         assert 'name="repo" value="101" checked' not in page.text
         assert '<option value="write" selected>' in page.text
+        assert "Push branches, open issues and pull requests." in page.text
+        assert "Read code, issues and pull requests." in page.text
         assert 'id="connect-repos"' in page.text
         assert 'button.textContent = "Connecting…"' in page.text
         spoof = await browser.get(
@@ -261,6 +274,20 @@ async def test_connection_happy_path_and_rechecks(
         async with sessionmaker() as session:
             assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
         installation_available = True
+        if agent_bound:
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    github_connect,
+                    "activate_confirmed_agent",
+                    AsyncMock(side_effect=ValueError("stale grant")),
+                )
+                failed = await browser.post(
+                    "/oauth/github/confirm", data={"state": state, "repo": "101"}
+                )
+            assert failed.status_code == 400
+            assert "GitHub connection" in failed.text
+            async with sessionmaker() as session:
+                assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
         confirmed = await browser.post(
             "/oauth/github/confirm",
             data={
@@ -269,10 +296,52 @@ async def test_connection_happy_path_and_rechecks(
                 "access_102": "read",
             },
         )
-        assert confirmed.status_code == 200 and "Connected: 2 repos" in confirmed.text
+        assert confirmed.status_code == 200
+        assert (
+            "Connected 2 repos to ResearchBot." if agent_bound else "Connected: 2 repos"
+        ) in confirmed.text
         async with sessionmaker() as session:
             repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
             assert {repo.repo_id: repo.max_access for repo in repos} == {101: "write", 102: "read"}
+            if agent_bound:
+                agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ma-agent")
+                grants = await github_access.list_agent_grants(
+                    session, tenant_id=tenant_id, agent_id=agent_id
+                )
+                assert {grant.repo_id: grant.ceiling_access for grant in grants} == {
+                    101: "write",
+                    102: "read",
+                }
+                assert all(not grant.staged for grant in grants)
+                assert (
+                    await github_access.get_agent_mode(
+                        session, tenant_id=tenant_id, agent_id=agent_id
+                    )
+                    == "app"
+                )
+                existing = SessionSnapshot(
+                    ma_agent_id="ma-agent",
+                    model_id="model",
+                    system_sha256=None,
+                    skills_sha256="skills",
+                    environment_id="env",
+                    repo_url=None,
+                    repo_branch=None,
+                    memory_store_id=None,
+                    vault_id="vault",
+                    tools_sha256="tools",
+                    mcp_servers_sha256="mcp",
+                    env_sha256=None,
+                    agent_version=1,
+                    agent_name="ResearchBot",
+                )
+                next_turn = existing.model_copy(
+                    update={
+                        "github_mode": "app",
+                        "repo_urls": ("example/one", "example/two"),
+                    }
+                )
+                assert fingerprint_identity(existing) != fingerprint_identity(next_turn)
             assert all(repo.installation_id == 77 for repo in repos)
             installation = await github_app_installations.get(session, installation_id=77)
             assert installation is not None
@@ -287,9 +356,9 @@ async def test_connection_happy_path_and_rechecks(
                 is None
             )
             events = await list_events(session, tenant_id=tenant_id)
-            assert len(events) == 1
-            assert events[0].operation == "github_connect"
-            assert events[0].github_repo_ids == [101, 102]
+            confirmed_events = [event for event in events if event.operation == "github_connect"]
+            assert len(confirmed_events) == 1
+            assert confirmed_events[0].github_repo_ids == [101, 102]
         reused = await browser.post("/oauth/github/confirm", data={"state": state, "repo": "101"})
         assert reused.status_code == 200
         assert "Already connected: 2 repos" in reused.text
@@ -314,4 +383,6 @@ async def test_connection_happy_path_and_rechecks(
         assert "Already connected: 2 repos" in queued_post.text
     assert any(request.url.path == "/user/installations" for request in requests)
     assert all(request.url.path != "/user/memberships/orgs" for request in requests)
-    assert sum(request.url.path == "/applications/client/token" for request in requests) == 1
+    assert sum(request.url.path == "/applications/client/token" for request in requests) == (
+        2 if agent_bound else 1
+    )

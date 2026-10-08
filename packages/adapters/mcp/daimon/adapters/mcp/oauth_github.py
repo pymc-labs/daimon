@@ -159,6 +159,20 @@ def build_oauth_github_routes(
     private_key = config.private_key.get_secret_value()
     callback_url = f"{root}/oauth/github/callback"
 
+    async def revoke_user_token(token: str) -> None:
+        try:
+            async with factory() as client:
+                revocation = await client.request(
+                    "DELETE",
+                    f"https://api.github.com/applications/{client_id}/token",
+                    auth=(client_id, secret),
+                    json={"access_token": token},
+                    headers={"Accept": "application/vnd.github+json"},
+                )
+                revocation.raise_for_status()
+        except httpx.HTTPError:
+            _log.warning("GitHub connection token revocation failed")
+
     async def already_connected(
         state: str, cookie: str, invitation_hash: str = ""
     ) -> Response | None:
@@ -376,58 +390,57 @@ def build_oauth_github_routes(
             ):
                 return _error("GitHub App installation is unavailable.", 403)
             activation_status = None
-            async with sessionmaker.begin() as session:
-                saved = await github_connect.confirm(
-                    session,
-                    state=state,
-                    cookie=cookie,
-                    github_user_id=flow.github_user_id,
-                    repos=repos,
-                )
-                if saved:
-                    for detail in details:
-                        await github_app_installations.upsert_github_app(
-                            session,
-                            installation_id=detail.installation_id,
-                            account_id=detail.account_id,
-                            account_login=detail.account_login,
-                            account_type=detail.account_type,
-                            repository_selection=detail.repository_selection,
-                            suspended_at=detail.suspended_at,
-                        )
-                    activation_status = await github_connect.activate_confirmed_agent(
-                        session, invitation=invitation, repos=repos
-                    )
-                    await append_event(
+            try:
+                async with sessionmaker.begin() as session:
+                    saved = await github_connect.confirm(
                         session,
-                        tenant_id=invitation.tenant_id,
-                        account_id=invitation.requester_account_id,
-                        agent_id=invitation.agent_id,
-                        platform=requester.platform,
-                        platform_user_id=requester.platform_user_id,
-                        tool_name="github_connect",
-                        operation="github_connect",
-                        outcome="allowed",
-                        reason="confirmed",
-                        github_repo_ids=[repo.repo_id for repo in repos],
+                        state=state,
+                        cookie=cookie,
+                        github_user_id=flow.github_user_id,
+                        repos=repos,
                     )
+                    if saved:
+                        for detail in details:
+                            await github_app_installations.upsert_github_app(
+                                session,
+                                installation_id=detail.installation_id,
+                                account_id=detail.account_id,
+                                account_login=detail.account_login,
+                                account_type=detail.account_type,
+                                repository_selection=detail.repository_selection,
+                                suspended_at=detail.suspended_at,
+                            )
+                        activation_status = await github_connect.activate_confirmed_agent(
+                            session, invitation=invitation, repos=repos
+                        )
+                        await append_event(
+                            session,
+                            tenant_id=invitation.tenant_id,
+                            account_id=invitation.requester_account_id,
+                            agent_id=invitation.agent_id,
+                            platform=requester.platform,
+                            platform_user_id=requester.platform_user_id,
+                            tool_name="github_connect",
+                            operation="github_connect",
+                            outcome="allowed",
+                            reason="confirmed",
+                            github_repo_ids=[repo.repo_id for repo in repos],
+                        )
+            except github_connect.ClientAgentConnectionError:
+                await revoke_user_token(token)
+                return _error(github_connect.CLIENT_AGENT_MESSAGE)
+            except ValueError:
+                await revoke_user_token(token)
+                return _error(
+                    "This connection could not be completed. Start a new GitHub connection."
+                )
             if not saved:
+                await revoke_user_token(token)
                 used = await already_connected(state, cookie, invitation_hash)
                 if used is not None:
                     return used
                 return _error()
-            try:
-                async with factory() as client:
-                    revocation = await client.request(
-                        "DELETE",
-                        f"https://api.github.com/applications/{client_id}/token",
-                        auth=(client_id, secret),
-                        json={"access_token": token},
-                        headers={"Accept": "application/vnd.github+json"},
-                    )
-                    revocation.raise_for_status()
-            except httpx.HTTPError:
-                _log.warning("GitHub connection token revocation failed")
+            await revoke_user_token(token)
             if activation_status == "activated":
                 name = html.escape(invitation.agent_name or "agent")
                 body = f"<h1>Connected {len(repos)} repos to {name}.</h1>"
@@ -471,8 +484,12 @@ def build_oauth_github_routes(
             "{ box.checked = true; }));</script>",
         ]
         access_options = (
-            '<option value="write" selected>Read and open issues and pull requests</option>'
+            '<option value="write" selected>Read and write</option>'
             '<option value="read">Read only</option>'
+        )
+        parts.append(
+            "<p>Read and write: Push branches, open issues and pull requests. "
+            "Read only: Read code, issues and pull requests.</p>"
         )
         for installation in installations:
             admin_repos = [repo for repo in installation.repos if repo.admin]

@@ -15,6 +15,7 @@ from daimon.core._models import (
     AgentRepoBinding,
     AgentSkillRepoCredential,
     CliPrincipal,
+    GitHubAppInstallation,
     GitHubConnectFlow,
     GitHubConnectInvitation,
     GitHubConnectRequest,
@@ -25,6 +26,7 @@ from daimon.core._models import (
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import agent_files, agent_github_binding, github_access
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.github_credentials import delete_credential_for_principal
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.thread_session_lineage import request_fresh_start
@@ -33,6 +35,31 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+
+CLIENT_AGENT_MESSAGE = (
+    "This agent uses its saved GitHub key. Ask your Daimon operator to change it."
+)
+
+
+class ClientAgentConnectionError(ValueError):
+    """A channel-pinned client agent cannot use the shared GitHub App."""
+
+
+async def require_app_eligible_agent(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_name: str
+) -> None:
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    rule = policy.agent_rules.get(agent_name)
+    if rule is not None and rule.runs_in is not None:
+        raise ClientAgentConnectionError(CLIENT_AGENT_MESSAGE)
+
+
+async def revoke_invitation(session: AsyncSession, *, token: str) -> None:
+    """Discard a link that could not be delivered privately."""
+    await session.execute(
+        delete(GitHubConnectInvitation).where(GitHubConnectInvitation.token_hash == digest(token))
+    )
+    await session.flush()
 
 
 def digest(value: str) -> str:
@@ -119,6 +146,8 @@ async def mint_invitation(
         raise ValueError("workspace not found")
     if (agent_id is None) != (agent_name is None):
         raise ValueError("agent id and name must be supplied together")
+    if agent_name is not None:
+        await require_app_eligible_agent(session, tenant_id=tenant_id, agent_name=agent_name)
     token = secrets.token_urlsafe(32)
     session.add(
         GitHubConnectInvitation(
@@ -194,13 +223,32 @@ async def activate_confirmed_agent(
     if invitation.agent_id is None:
         return None
     agent_id = invitation.agent_id
+    await require_app_eligible_agent(
+        session, tenant_id=invitation.tenant_id, agent_name=invitation.agent_name or ""
+    )
     has_pat = await agent_github_binding.get_agent_github_binding(session, agent_id=agent_id)
+    working = await session.get(AgentRepoBinding, (invitation.tenant_id, agent_id))
+    skill_repos = list(
+        await session.scalars(
+            select(AgentSkillRepoCredential).where(
+                AgentSkillRepoCredential.tenant_id == invitation.tenant_id,
+                AgentSkillRepoCredential.agent_id == agent_id,
+            )
+        )
+    )
     has_token_env = False
     for key in ("GH_TOKEN", "GITHUB_TOKEN"):
         if await session.get(AgentFile, (invitation.tenant_id, agent_id, key)) is not None:
             has_token_env = True
             break
+    staged: list[RepoConfirmation] = []
     for repo in repos:
+        authorized = await session.get(TenantGitHubRepo, (invitation.tenant_id, repo.repo_id))
+        if authorized is None or authorized.status != "active":
+            continue
+        existing = await session.get(
+            AgentGitHubGrant, (invitation.tenant_id, agent_id, repo.repo_id)
+        )
         await github_access.stage_grant(
             session,
             tenant_id=invitation.tenant_id,
@@ -209,8 +257,21 @@ async def activate_confirmed_agent(
             baseline_access=repo.max_access,
             ceiling_access=repo.max_access,
             granted_by_account_id=invitation.requester_account_id,
+            mount_path=existing.mount_path if existing is not None else None,
+            is_working_repo=existing.is_working_repo if existing is not None else False,
         )
-    if has_pat is not None or has_token_env:
+        staged.append(repo)
+    if not staged:
+        raise ValueError("No authorized repositories remain. Start a new GitHub connection.")
+    await _drop_stale_grants(session, tenant_id=invitation.tenant_id, agent_id=agent_id)
+    await _check_required_repos(
+        session,
+        tenant_id=invitation.tenant_id,
+        agent_id=agent_id,
+        working=working,
+        skill_repos=skill_repos,
+    )
+    if has_pat is not None or has_token_env or working is not None or skill_repos:
         status: Literal["activated", "update_pending"] = "update_pending"
     else:
         await github_access.activate_agent(
@@ -263,33 +324,17 @@ async def activate_pending_agent(
     )
     if invitation is None:
         return False
-    grants = list(
-        await session.scalars(
-            select(AgentGitHubGrant).where(
-                AgentGitHubGrant.tenant_id == tenant_id,
-                AgentGitHubGrant.agent_id == agent_id,
-            )
-        )
+    await require_app_eligible_agent(
+        session, tenant_id=tenant_id, agent_name=invitation.agent_name or ""
     )
-    connected: dict[str, AgentGitHubGrant] = {}
-    for grant in grants:
-        repo = await session.get(TenantGitHubRepo, (tenant_id, grant.repo_id))
-        if repo is not None and repo.status == "active":
-            connected[repo.repo_full_name.casefold()] = grant
-    working = await session.get(AgentRepoBinding, (tenant_id, agent_id))
-    if working is not None:
-        grant = connected.get(working.repo_url.casefold())
-        if grant is None or grant.ceiling_access != "write":
-            raise ValueError("Connect the working repo with write access first.")
-    skill_repos = await session.scalars(
-        select(AgentSkillRepoCredential).where(
-            AgentSkillRepoCredential.tenant_id == tenant_id,
-            AgentSkillRepoCredential.agent_id == agent_id,
-        )
-    )
-    for skill in skill_repos:
-        if skill.proof_kind != "public" and skill.repo_url.casefold() not in connected:
-            raise ValueError("Connect the agent's skill repo first.")
+    await _drop_stale_grants(session, tenant_id=tenant_id, agent_id=agent_id)
+    await _check_required_repos(session, tenant_id=tenant_id, agent_id=agent_id)
+    if not await session.scalar(
+        select(AgentGitHubGrant.repo_id)
+        .where(AgentGitHubGrant.tenant_id == tenant_id, AgentGitHubGrant.agent_id == agent_id)
+        .limit(1)
+    ):
+        raise ValueError("No authorized repositories remain. Start a new GitHub connection.")
     await github_access.activate_agent(
         session, tenant_id=tenant_id, agent_id=agent_id, changed_by_account_id=account_id
     )
@@ -337,6 +382,74 @@ async def activate_pending_agent(
     )
     await session.flush()
     return True
+
+
+async def _drop_stale_grants(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> None:
+    grants = await session.scalars(
+        select(AgentGitHubGrant).where(
+            AgentGitHubGrant.tenant_id == tenant_id, AgentGitHubGrant.agent_id == agent_id
+        )
+    )
+    for grant in grants:
+        repo = await session.get(TenantGitHubRepo, (tenant_id, grant.repo_id))
+        installation = (
+            await session.get(GitHubAppInstallation, repo.installation_id)
+            if repo is not None
+            else None
+        )
+        if (
+            repo is None
+            or repo.status != "active"
+            or installation is None
+            or installation.suspended_at is not None
+            or (grant.ceiling_access == "write" and repo.max_access != "write")
+        ):
+            await session.delete(grant)
+    await session.flush()
+
+
+async def _check_required_repos(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    working: AgentRepoBinding | None = None,
+    skill_repos: list[AgentSkillRepoCredential] | None = None,
+) -> None:
+    """Ensure switching credentials will not strand working or private skill repos."""
+    grants = list(
+        await session.scalars(
+            select(AgentGitHubGrant).where(
+                AgentGitHubGrant.tenant_id == tenant_id,
+                AgentGitHubGrant.agent_id == agent_id,
+            )
+        )
+    )
+    connected: dict[str, AgentGitHubGrant] = {}
+    for grant in grants:
+        repo = await session.get(TenantGitHubRepo, (tenant_id, grant.repo_id))
+        if repo is not None and repo.status == "active":
+            connected[repo.repo_full_name.casefold()] = grant
+    if working is None:
+        working = await session.get(AgentRepoBinding, (tenant_id, agent_id))
+    if working is not None:
+        grant = connected.get(working.repo_url.casefold())
+        if grant is None or grant.ceiling_access != "write":
+            raise ValueError("Connect the working repo with write access first.")
+    if skill_repos is None:
+        skill_repos = list(
+            await session.scalars(
+                select(AgentSkillRepoCredential).where(
+                    AgentSkillRepoCredential.tenant_id == tenant_id,
+                    AgentSkillRepoCredential.agent_id == agent_id,
+                )
+            )
+        )
+    for skill in skill_repos:
+        if skill.proof_kind != "public" and skill.repo_url.casefold() not in connected:
+            raise ValueError("Connect the agent's skill repo first.")
 
 
 async def pending_update_for_agent(

@@ -1143,7 +1143,9 @@ admission before any of this runs.
   or Read Message History permission, including on an otherwise empty read.
 
 - **GitHub connection invitations** are issued with `daimon github connect-link`
-  for a tenant admin. When the separate `DAIMON_GITHUB_APP__*` credentials and
+  for a tenant admin, `/github connect` on Discord and Slack, or the
+  `github_connect` MCP tool from a conversation. They can target one agent;
+  agents pinned to client channels keep their saved GitHub key. When the separate `DAIMON_GITHUB_APP__*` credentials and
   encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,
   `/oauth/github/callback`, `/oauth/github/setup` and GET/POST
   `/oauth/github/confirm`. The browser flow checks the confirming person's

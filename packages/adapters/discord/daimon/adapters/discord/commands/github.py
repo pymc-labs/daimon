@@ -16,9 +16,12 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_connect import (
+    CLIENT_AGENT_MESSAGE,
+    ClientAgentConnectionError,
     activate_pending_agent,
     mint_invitation,
     pending_update_for_agent,
+    require_app_eligible_agent,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
 
@@ -76,6 +79,8 @@ class PendingUpdateView(discord.ui.View):
                 ),
                 view=None,
             )
+        except ClientAgentConnectionError:
+            await interaction.response.send_message(CLIENT_AGENT_MESSAGE, ephemeral=True)
         except ValueError:
             await interaction.response.send_message(
                 "The update could not be completed. Check the agent's repos in GitHub setup.",
@@ -147,6 +152,9 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                 target_name, target_ma_id = matches[0].name, str(matches[0].id)
             agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=target_ma_id)
             async with runtime.sessionmaker() as session:
+                await require_app_eligible_agent(
+                    session, tenant_id=tenant_id, agent_name=target_name
+                )
                 pending = await pending_update_for_agent(
                     session, tenant_id=tenant_id, agent_id=agent_id
                 )
@@ -182,10 +190,19 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                 )
             await interaction.followup.send(
                 f"Opens GitHub to pick repos for {target_name}.\n"
-                f"Nothing is shared until you confirm.\n{root}/oauth/github/connect/{token}",
+                "Nothing is shared until you confirm.",
+                view=discord.ui.View().add_item(
+                    discord.ui.Button(
+                        label="Connect GitHub",
+                        style=discord.ButtonStyle.link,
+                        url=f"{root}/oauth/github/connect/{token}",
+                    )
+                ),
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+        except ClientAgentConnectionError:
+            await interaction.followup.send(CLIENT_AGENT_MESSAGE, ephemeral=True)
         except (anthropic.APIError, discord.HTTPException, ValueError):
             await interaction.followup.send(
                 "GitHub setup is unavailable. Try again.", ephemeral=True
