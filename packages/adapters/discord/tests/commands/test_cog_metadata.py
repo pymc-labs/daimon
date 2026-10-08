@@ -14,6 +14,7 @@ import inspect
 import pytest
 from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
 from daimon.adapters.discord.commands.billing import BillingCog
+from daimon.adapters.discord.commands.github import GitHubCog
 from daimon.adapters.discord.commands.help import HelpCog
 from daimon.adapters.discord.commands.here import HereCog
 from daimon.adapters.discord.commands.privacy import PrivacyCog
@@ -29,6 +30,7 @@ from discord.ext import commands
         pytest.param("AgentSetupCog", id="agent_setup"),
         pytest.param("RoutinesCog", id="routines"),
         pytest.param("BillingCog", id="billing"),
+        pytest.param("GitHubCog", id="github"),
     ],
 )
 def test_guild_only_on_all_cogs(cog_cls: str) -> None:
@@ -38,6 +40,7 @@ def test_guild_only_on_all_cogs(cog_cls: str) -> None:
         "AgentSetupCog": AgentSetupCog,
         "RoutinesCog": RoutinesCog,
         "BillingCog": BillingCog,
+        "GitHubCog": GitHubCog,
     }[cog_cls]
 
     assert getattr(cls, "__discord_app_commands_guild_only__", False) is True, (  # type: ignore[attr-defined]
@@ -90,6 +93,11 @@ def test_routines_cog_registers_routines_slash() -> None:
 def test_here_cog_registers_guild_only_slash() -> None:
     assert getattr(HereCog, "__discord_app_commands_guild_only__", False) is True
     assert "here" in _all_app_command_names(HereCog)
+
+
+def test_github_cog_registers_connect() -> None:
+    assert "connect" in _all_app_command_names(GitHubCog)
+    assert GitHubCog.__cog_group_name__ == "github"
 
 
 def test_routines_slash_is_admin_gated() -> None:

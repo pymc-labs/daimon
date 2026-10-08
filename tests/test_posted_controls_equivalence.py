@@ -13,7 +13,7 @@ from uuid import UUID
 
 import discord
 import pytest
-from daimon.core.confirmation import ConfirmationPrompt, PendingConfirmations
+from daimon.core.confirmation import ApprovedConfirmation, ConfirmationPrompt, PendingConfirmations
 from daimon.core.posted_controls import lifecycle
 from daimon.core.posted_controls.confirmation import NO_LONGER_PENDING_MESSAGE, NOT_YOURS_MESSAGE
 from slack_sdk.errors import SlackApiError
@@ -47,6 +47,8 @@ def _base(module, name):
 
 
 def _json(value):
+    if isinstance(value, discord.AllowedMentions):
+        return value.to_dict()
     if isinstance(value, discord.ui.LayoutView):
         components = value.to_components()
         # Discord generates fresh random ids for live, non-persistent buttons.
@@ -92,8 +94,7 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
         trace, posted = [], []
         prompt = ConfirmationPrompt(
             title="Approve a write?",
-            fields=(("Tool", "write"),),
-            detail='{"x": 1}',
+            detail_lines=("Item: example",),
             requester_platform_user_id=USER,
             expires_at=AT + timedelta(seconds=-1 if scenario == "expired" else 600),
         )
@@ -109,7 +110,7 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
             trace.append(("edit", {k: _json(v) for k, v in kwargs.items()}))
 
         async def ephemeral(**kwargs):
-            trace.append(("refusal", kwargs))
+            trace.append(("refusal", {k: _json(v) for k, v in kwargs.items()}))
 
         if platform == "discord":
             hook = implementation.discord_confirmation_hook(SimpleNamespace(send=send))
@@ -157,7 +158,9 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
             if platform == "discord":
                 response = SimpleNamespace(
                     send_message=AsyncMock(
-                        side_effect=lambda text, **kw: trace.append(("refusal", text, kw))
+                        side_effect=lambda text, **kw: trace.append(
+                            ("refusal", text, {k: _json(v) for k, v in kw.items()})
+                        )
                     ),
                     edit_message=edit,
                 )
@@ -200,7 +203,13 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
                 with pytest.raises(asyncio.CancelledError):
                     await waiting
             else:
-                trace.append(("answer", await waiting))
+                result = await waiting
+                trace.append(
+                    (
+                        "answer",
+                        result.answer if isinstance(result, ApprovedConfirmation) else result,
+                    )
+                )
             await click()
         else:
             if scenario == "stranger":
@@ -222,7 +231,13 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
                     await waiting
             else:
                 gate.set()
-                trace.append(("answer", await waiting))
+                result = await waiting
+                trace.append(
+                    (
+                        "answer",
+                        result.answer if isinstance(result, ApprovedConfirmation) else result,
+                    )
+                )
             if scenario == "replay":
                 await click(answer="denied")
         monkeypatch.setattr(asyncio, "wait_for", original_wait)

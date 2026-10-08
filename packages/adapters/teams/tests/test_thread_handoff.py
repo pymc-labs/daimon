@@ -121,7 +121,7 @@ async def test_the_responder_changed_notice_offers_hand_over(
     ]
     assert_card_renders(content)
     notice = json.dumps(content)
-    assert "Press Hand over" in notice, "the notice says what the button does"
+    assert "Switch to" in notice, "the button names the supported action"
     assert f'"verb": "{VERB}"' in notice, "the button routes to the hand-over handler"
 
 

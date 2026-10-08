@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 116 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 117 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -204,13 +204,21 @@ GitHub App install-link tool: post_github_app_install_link.
 | --- | --- | --- |
 | `post_github_app_install_link` | Discord callers, Slack callers, Teams callers | Install the GitHub App: post a link inviting the user to grant repository access. |
 
-## `here`
+## `github_connect`
 
-Current-place status tool, sharing the slash commands' fixed card.
+Private, agent-bound GitHub setup from an active conversation.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `where_am_i` | all callers | Return the fixed /here card with structured facts and rendered text. |
+| `github_connect` | Discord callers, Slack callers | Connect this agent to GitHub when someone asks to set up GitHub. |
+
+## `here`
+
+Current-place status tool with short text and complete structured facts.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `where_am_i` | all callers | Return short /here text and full structured facts. |
 
 ## `media`
 

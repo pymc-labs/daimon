@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The Discord webhook capacity model now accounts for lifecycle edit debounce; its overload cases distinguish cold bursts from the removed-debounce counterfactual.
+- Discord keeps a pending turn-card intent when recovery cannot edit its webhook card or an unprompted turn cannot delete its card, instead of retiring an unresolved card.
+- Discord picture upload retry expires cleanly, and a completed upload still succeeds if its setup panel was dismissed.
 ### Added
 
+- Agents can offer an admin a private GitHub connect link bound to the current agent; members can record a setup request. `/github connect` is available in Discord and Slack with a private button. Self-serve links activate only agents with no saved GitHub key, working repo or skill repo, and no channel pin. An operator can issue an agent-bound CLI link for a saved-key agent; it stages an update that requires **Update and restart chats**. New selections default to **Read and write**: push branches, open issues and pull requests. **Read only** reads code, issues and pull requests.
 - Agent identity now has a deployment switch, `DAIMON_AGENT_IDENTITY__ENABLED`,
   off by default. When off, Slack and Discord post as the app, Discord replies
   need a mention, Teams omits the agent name prefix, and setup panels hide
@@ -24,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acknowledged. Only people who could start a turn at the answer can vote.
   `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` now covers Teams: a submitted form is
   posted once to the support channel, spending no credit. With support set
-  up, answers carry an Ask a human button that opens the support form for
+  up, answers carry an Ask a person button that opens the support form for
   that answer. Turns that only ran tools get both on their finished card;
   cancelled turns get neither.
 - **Teams support requests reach a channel's own admins first.** As on Slack
@@ -55,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file elsewhere, is still listed by name. Links last about an hour and only
   come with messages the read already returns, so a sealed thread's files
   stay out. Each file is now an object with `name` and `url`, not a name.
+- Agent setup uses short Picture labels on Slack and Discord. Discord Change opens a file upload form; the attachment option on `/agent-setup` remains available.
+- Status cards and follow-up prompts use short labels on Discord, Slack and Teams. Working cards show Stop, tool steps sit under Details, and finished Discord and Slack cards show time, cost, tokens and balance under Details for everyone. Error, stop, restart and post-failure notices show a clear next step. Feedback and help forms use the same short wording across platforms. Threads whose channel responder changed offer Switch to the new agent and a new-thread hint; staying with the old agent in that thread is not a supported action.
 - **Teams files in private and shared channels, turned on by asking.** The
   Enable files sign-in now starts from a channel and grants daimon that
   channel's own SharePoint site: the team's for a standard channel, a site of
@@ -73,15 +81,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Slack 👎 asks what went wrong, every time.** The form opens as soon as 👎 is clicked, with optional reasons (wrong or inaccurate, didn't do what I asked, incomplete or cut off, too slow, something else) and optional text. A repeat 👎 opens it again so details can be added later. If Slack doesn't open the form, the person gets a private button that does. Reasons are stored on the feedback row (`message_feedback.feedback_reasons`), next to the text. Only people who could start a turn there can vote.
 - GitHub App grants can be staged and activated per agent. App sessions use per-turn repository tokens and a session-owned vault; legacy agents retain their existing GitHub path. The GitHub connection page offers Select all for repos the confirmer administers, and the default environment includes `gh`.
 
-- `/here` on Discord and Slack shows a fixed, caller-filtered card for channel access, stored channel and agent rules, their effective limits here, and credential names. It points to the answering agent and routing tier in one line. The `where_am_i` MCP tool returns the same card for conversational questions. Discord read and scoped search tools explain when the bot lacks channel view or message history access.
+- `/here` on Discord and Slack shows a compact, private status card: which agent answers here, its reading scope and whether publishing needs approval. When nothing can answer (no channel access, replies disabled, no agent selected) the card shows only that reason. Credential names and routing details stay off the card; the `where_am_i` MCP tool returns the same short summary for conversational questions, with the full structured facts alongside. Discord read and scoped search tools explain when the bot lacks channel view or message history access.
 - **`here` on Teams.** Typed in a channel post, `here` answers in the 1:1
-  chat with the same card as Discord and Slack for that post's thread: who
-  answers and why, the channel and agent rules and their effect there, what
-  the agent can read and the credential names it holds. Typed in the chat it
-  describes the chat, or the setup conversation it is in. Only the place it
-  was typed in counts as one the caller can see, so an agent rule's other
-  channels stay unnamed. The `where_am_i` MCP tool now answers in Teams
-  channel turns too, and the card names a Teams setter by stored name.
+  chat with the same compact card as Discord and Slack for that post's
+  thread: who answers, what it can read and whether publishing needs
+  approval. Typed in the chat it describes the chat, or the setup
+  conversation it is in. Only the place it was typed in counts as one the
+  caller can see. The `where_am_i` MCP tool now answers in Teams channel
+  turns too, and its facts name a Teams setter by stored name.
 - **Teams `memory` shows the agent where it was typed.** Typed in a channel
   post, `memory` now lists what that post's agent remembers, following a
   thread handed to another agent, instead of the 1:1 chat's agent. The answer
@@ -113,9 +120,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Sonnet 5.5 cache reads are billed at $0.10 per million tokens**, Anthropic's price since 2026-10-07. Daimon still charged the old $0.20, so the default model's cache reads cost tenants twice the list price in estimates and ledger debits.
 - Approving a tool call no longer fails the turn with "re-requested approval for tool call(s) already confirmed". The approved call now runs inside the turn, so a notebook or attachment publish is no longer refused after Approve.
 - Allow-listed Discord QA bots can start a turn by replying without a mention to a recorded agent post, as they already can by mentioning Daimon.
 - Slack keeps the agent name in answer footers when it accepts custom header fields but posts with the bot's header.
+- GitHub App tokens now refresh during running turns before they expire. Repository resources and vault credentials update in place; a superseded token keeps working until its natural expiry, and is revoked early only when the installation, link, grant or repository authorization is removed or staged, or a later refresh narrows its access. A failed refresh keeps the session open and retries after one minute, doubling up to 30 minutes. A session that has been running continuously for more than 12 hours stops refreshing; seeing it idle resets that clock.
 - **Notebook names work for every account.** Each notebook slug starts with a 12-character tag derived from the account, and about 1 account in 64 has a tag beginning with `-`. The notebook host refuses slugs that start with `-`, so every named notebook from those accounts failed at upload with a 400. One in 64 unnamed notebooks failed the same way. Those tags and random slugs now get an `x` in front; every other account keeps its tag, so existing notebooks stay where they are.
 - **Discord's help button says "🙋 Ask the team" too.** The button in the direct message after a 🙋 reaction, and its form, use the same name as Slack; the form's text box says "Someone from the team will reply."
 - **Slack's Ask a human button is now "🙋 Ask the team"**, with an emoji like the 👍/👎 beside it. Its form, notices and refusal say "the team" too ("What do you need help with? Someone from the team will reply."), and the support wording shared with Discord no longer says "a human".
@@ -195,6 +204,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compatible session preparation releases its Postgres connection during vault I/O, and the detached turn outcome writer allows ten seconds for a busy pool before logging a failed write.
 
 ### Changed
+
+- Tool approval cards on Discord, Slack and Teams now name the action and consequence, show plain labelled inputs in Details, and collapse after a decision. Each blocked call gets its own card and confirmation event.
+- If a turn stops after an approval click but before its confirmation is sent, the answered card now shows Stopped.
 
 - `/billing` (`billing` on Teams) names its top spenders, never as `User 1234` and without pinging anyone. Discord fetches the member when the cache lacks them; Slack asks `users.info` and shows the name as plain text; Teams reads the rosters of the teams the bot is installed in. Someone who has left, or whose lookup is slow, shows the name daimon last saw for them: it now remembers the names Discord, Slack and Teams send with messages, clicks and lookups (`platform_user_names`, removed by a privacy deletion). Discord also asks for a departed person's account name. Someone never seen at all is a mention the Discord or Slack client names, or `Name unavailable` on Teams. Teams names channel budgets by channel name instead of the `19:…` id.
 - `/billing` drops its `·` separators: the admin subtitle is two lines, expiry dates read `$20.00 on Oct 12`, and top-up amounts show `about 100 turns` under the amount.

@@ -57,18 +57,18 @@ def evaluate_avatar_submission(payload: dict[str, Any]) -> AvatarSubmission:
     files: object = item.get("files")
     if not isinstance(files, list):
         return AvatarSubmission(
-            {"response_action": "errors", "errors": {AVATAR_FILE_INPUT_ID: "Choose one image."}}
+            {"response_action": "errors", "errors": {AVATAR_FILE_INPUT_ID: "Choose a picture."}}
         )
     files = cast(list[object], files)
     if len(files) != 1 or not isinstance(files[0], dict):
         return AvatarSubmission(
-            {"response_action": "errors", "errors": {AVATAR_FILE_INPUT_ID: "Choose one image."}}
+            {"response_action": "errors", "errors": {AVATAR_FILE_INPUT_ID: "Choose a picture."}}
         )
     file = cast(dict[str, object], files[0])
     file_id = file.get("id")
     if not isinstance(file_id, str) or not file_id:
         return AvatarSubmission(
-            {"response_action": "errors", "errors": {AVATAR_FILE_INPUT_ID: "Choose one image."}}
+            {"response_action": "errors", "errors": {AVATAR_FILE_INPUT_ID: "Choose a picture."}}
         )
     try:
         size = int(str(file.get("size") or 0))
@@ -78,7 +78,7 @@ def evaluate_avatar_submission(payload: dict[str, Any]) -> AvatarSubmission:
         return AvatarSubmission(
             {
                 "response_action": "errors",
-                "errors": {AVATAR_FILE_INPUT_ID: "Choose an image of at most 2 MB."},
+                "errors": {AVATAR_FILE_INPUT_ID: "That picture is too big. Choose one up to 2 MB."},
             }
         )
     external_id = f"agent-avatar-{uuid.uuid4().hex}"
@@ -86,7 +86,7 @@ def evaluate_avatar_submission(payload: dict[str, Any]) -> AvatarSubmission:
         {
             "response_action": "update",
             "view": build_avatar_status_view(
-                meta=meta, message="Checking image…", external_id=external_id
+                meta=meta, message="Checking the picture…", external_id=external_id
             ),
         },
         meta=meta,
@@ -195,7 +195,7 @@ async def _audit(
 
 
 async def _show_status(
-    client: AsyncWebClient, *, submission: AvatarSubmission, message: str
+    client: AsyncWebClient, *, submission: AvatarSubmission, message: str, retry: bool = False
 ) -> None:
     if submission.external_id is None or submission.meta is None:
         return
@@ -204,7 +204,10 @@ async def _show_status(
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 external_id=submission.external_id,
                 view=build_avatar_status_view(
-                    meta=submission.meta, message=message, external_id=submission.external_id
+                    meta=submission.meta,
+                    message=message,
+                    external_id=submission.external_id,
+                    retry=retry,
                 ),
             )
             return
@@ -219,7 +222,12 @@ async def _show_status(
 
 
 async def _refresh_details(
-    runtime: SlackRuntime, client: AsyncWebClient, *, tenant_id: uuid.UUID, meta: PanelMetadata
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    *,
+    tenant_id: uuid.UUID,
+    meta: PanelMetadata,
+    notice: str | None = None,
 ) -> None:
     if not meta.root_view_id or not meta.agent_name:
         return
@@ -229,6 +237,10 @@ async def _refresh_details(
         runtime, tenant_id=tenant_id, meta=meta, agent_name=meta.agent_name, is_admin=True
     )
     if view is not None:
+        if notice is not None:
+            view["blocks"].insert(
+                0, {"type": "section", "text": {"type": "mrkdwn", "text": notice}}
+            )
         await client.views_update(view_id=meta.root_view_id, view=view)  # pyright: ignore[reportUnknownMemberType]
 
 
@@ -286,6 +298,7 @@ async def reset_agent_avatar(
         client,
         tenant_id=tenant_id,
         meta=meta.with_view("details", agent_name=meta.agent_name, root_view_id=view_id),
+        notice="Default picture restored.",
     )
 
 
@@ -300,7 +313,7 @@ async def run_avatar_submission(
     meta, file_id = submission.meta, submission.file_id
     if meta is None or file_id is None or not meta.agent_name or meta.team_id != team_id:
         await _show_status(
-            client, submission=submission, message="Reopen agent setup and try again."
+            client, submission=submission, message="This panel has expired. Open agent setup."
         )
         return
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
@@ -320,7 +333,7 @@ async def run_avatar_submission(
             client,
             submission=submission,
             message=(
-                "Only an admin can change this agent's avatar."
+                "Only admins can change this agent's picture. Ask an admin to change it."
                 if runtime.settings.agent_identity.enabled
                 else "Agent pictures are turned off."
             ),
@@ -344,11 +357,18 @@ async def run_avatar_submission(
             reason="invalid_image",
             agent_name=meta.agent_name,
         )
-        await _show_status(
-            client,
-            submission=submission,
-            message="I could not use that image. Upload one PNG, JPG, GIF, or WebP under 2 MB.",
-        )
+        error = str(exc)
+        if "shared file" in error or "uploaded privately" in error:
+            message = "We can't use that shared file. Upload the picture here."
+        elif "2 MB" in error:
+            message = "That picture is too big. Choose one up to 2 MB."
+        elif "Animated" in error:
+            message = "We couldn't use that picture. Use a still picture."
+        elif isinstance(exc, (httpx.HTTPError, TimeoutError)) or "read" in error:
+            message = "We couldn't read that file. Upload it again."
+        else:
+            message = "We couldn't use that picture. Use PNG, JPG, GIF or WebP."
+        await _show_status(client, submission=submission, message=message, retry=True)
         return
     if not await may_edit_avatar(
         runtime, client, tenant_id=tenant_id, user_id=user_id, agent_name=meta.agent_name
@@ -363,7 +383,7 @@ async def run_avatar_submission(
             agent_name=meta.agent_name,
         )
         await _show_status(
-            client, submission=submission, message="That agent is no longer available."
+            client, submission=submission, message="This agent is no longer available."
         )
         return
     async with runtime.sessionmaker.begin() as session:
@@ -387,7 +407,5 @@ async def run_avatar_submission(
         reason="completed",
         agent_name=meta.agent_name,
     )
-    await _show_status(
-        client, submission=submission, message="Avatar changed. You can close this window."
-    )
+    await _show_status(client, submission=submission, message="Picture changed.")
     await _refresh_details(runtime, client, tenant_id=tenant_id, meta=meta)

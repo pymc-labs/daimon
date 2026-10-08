@@ -147,7 +147,7 @@ async def test_submitting_from_a_different_user_writes_nothing(
     )
     assert stored_text is None, "a click carrying someone else's row id must write nothing"
     message = interaction.followup.send.call_args.args[0]
-    assert "no longer available" in message.lower(), (
+    assert "expired" in message.lower(), (
         "a foreign-row submission must report unavailability, not distinguish it from a missing row"
     )
 
@@ -162,7 +162,7 @@ async def test_submitting_for_a_missing_feedback_id_reports_unavailable_and_writ
     await modal.on_submit(interaction)
 
     message = interaction.followup.send.call_args.args[0]
-    assert "no longer available" in message.lower(), (
+    assert "expired" in message.lower(), (
         "a missing row must report the same unavailability message as a foreign row"
     )
 
@@ -187,7 +187,7 @@ async def test_submitting_whitespace_only_text_writes_nothing(
     )
     assert stored_text is None, "whitespace-only text must never be written"
     message = interaction.followup.send.call_args.args[0]
-    assert "empty" in message.lower(), "the reply must say the feedback cannot be empty"
+    assert message == "Write a few words first."
 
 
 async def test_second_submission_overwrites_the_first(

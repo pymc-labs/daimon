@@ -694,6 +694,7 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
         from daimon.adapters.discord.commands.billing import BillingCog
         from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
+        from daimon.adapters.discord.commands.github import GitHubCog
         from daimon.adapters.discord.commands.help import HelpCog
         from daimon.adapters.discord.commands.here import HereCog
         from daimon.adapters.discord.commands.memory import MemoryCog
@@ -703,6 +704,7 @@ class DaimonBot(commands.Bot):
 
         await self.add_cog(HelpCog(self))
         await self.add_cog(HereCog(self))
+        await self.add_cog(GitHubCog(self))
         await self.add_cog(DirectMessageCog(self))
         await self.add_cog(AgentSetupCog(self))
         await self.add_cog(RoutinesCog(self))
@@ -1054,11 +1056,8 @@ class DaimonBot(commands.Bot):
                     )
                     embed = discord.Embed(
                         color=theme.COLOR_RED,
-                        description=(
-                            "❌ This turn was interrupted by a restart and cannot be "
-                            "resumed. Nothing was lost on your side — mention me again "
-                            "to retry."
-                        ),
+                        title="Stopped: Daimon restarted.",
+                        description="Mention me to try again.",
                     )
                     if transport._destination() is not None:  # pyright: ignore[reportPrivateUsage]
                         await transport.edit(message, embed=embed, view=None)
@@ -2452,7 +2451,7 @@ class DaimonBot(commands.Bot):
                 async with self.runtime.sessionmaker() as session:
                     await clear_active_turn(session, id=done_id)
                     await session.commit()
-            if outcome is not None:
+            if outcome is not None and not lifecycle_holder[0].card_discard_failed:
                 await retire_terminal_turn_card(
                     self.runtime.sessionmaker,
                     intent_id=turn_card_intent.id,
@@ -2888,12 +2887,25 @@ class DaimonBot(commands.Bot):
             from daimon.adapters.discord.thread_handoff import hand_over_view
 
             view = hand_over_view(agent_id=agent.id, agent_name=agent.name)
+            summary, separator, remaining = error_text.partition("\nNew thread → ")
+            responder, _, request_id_line = remaining.partition("\n`rid: ")
+            handoff_embed = discord.Embed(
+                title="Switch agent",
+                description=summary,
+                color=discord.Color.blurple(),
+            )
+            if separator:
+                handoff_embed.add_field(
+                    name="New thread", value=f"New thread → {responder}", inline=False
+                )
+            if request_id_line:
+                handoff_embed.set_footer(text=f"rid: {request_id_line.rstrip('`')}")
             if lifecycle.message_ref is not None:
                 await _edit_message(
-                    lifecycle.message_ref, content=error_text, embed=None, view=view
+                    lifecycle.message_ref, content=None, embed=handoff_embed, view=view
                 )
             else:
-                await turn_send(error_text, view=view)
+                await turn_send(embed=handoff_embed, view=view)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -3298,7 +3310,7 @@ class DaimonBot(commands.Bot):
                 async with self.runtime.sessionmaker() as _ct_session:
                     await clear_active_turn(_ct_session, id=_done_id)
                     await _ct_session.commit()
-            if outcome is not None:
+            if outcome is not None and not lifecycle_holder[0].card_discard_failed:
                 await retire_terminal_turn_card(
                     self.runtime.sessionmaker,
                     intent_id=turn_card_intent.id,

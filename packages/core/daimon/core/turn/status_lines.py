@@ -72,9 +72,9 @@ def format_duration(seconds: float) -> str:
 def format_headline(
     *, is_working: bool, elapsed_seconds: float | None, bold: Callable[[str], str]
 ) -> str:
-    """``Thinking · 12s`` or ``Working · 1m 5s``, the word bolded by the adapter."""
-    label = bold("Working" if is_working else "Thinking")
-    return label if elapsed_seconds is None else f"{label} · {format_duration(elapsed_seconds)}"
+    """One short working label; timing belongs in card details."""
+    del is_working, elapsed_seconds
+    return bold("Working on it…")
 
 
 def format_draft(text: str) -> str:

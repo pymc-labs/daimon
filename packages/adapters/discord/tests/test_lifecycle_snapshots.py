@@ -71,6 +71,7 @@ def _embed_snapshot(embed: Any) -> dict[str, Any]:
         "description": embed.description,
         "color": embed.colour.value if embed.colour is not None else None,
         "footer": embed.footer.text if embed.footer else None,
+        "fields": [(field.name, field.value.splitlines()) for field in embed.fields],
     }
 
 

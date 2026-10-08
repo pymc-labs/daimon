@@ -7,6 +7,19 @@ turn	TurnLifecycle	TurnLifecycle	violates:TerminalExclusive	39	-	adversarial ter
 turn	TurnLifecycle	TurnLifecycleReplay	clean	6926	-	stale replay with the merge fix: RenderAnchorBound holds
 turn	TurnLifecycle	TurnLifecycleBounded	clean	2646	-	adversarial conditions off: all safety invariants
 turn	TurnProgress	TurnProgress	clean	57	-	liveness: turn finalizes, periodic render resolves (weak fairness)
+# ---- tool approval and Managed Agents pauses ----
+approvals	Approvals	ApprovalsSingle	clean	5489	-	three single cards: safety through duplicate pauses and queued echoes
+approvals	Approvals	ApprovalsBatched	clean	593	-	one card for three calls: same MA batch and safety invariants
+approvals	Approvals	ApprovalsProgress	clean	935	-	weak-fair termination with single cards
+approvals	Approvals	ApprovalsPreFix	violates:NoFalseNotAccepted	162	-	pre-#446 duplicate pause ends turn before confirmation echo
+approvals	Approvals	ApprovalsPreFixLateRun	violates:ApprovedRunsInTurn	346	-	pre-#446 queued allow runs after turn end
+approvals	Approvals	ApprovalsReAsk	clean	413	-	genuine post-echo re-ask safely ends not accepted
+approvals	Approvals	ApprovalsDroppedConfirm	clean	629	-	dropped queue terminates via quiet-stream timeout
+approvals	Approvals	ApprovalsQuietEarly	violates:ApprovedRunsInTurn	143	-	pre-fix eventless early exit while allow remains queued
+approvals	Approvals	ApprovalsQuietBounded	clean	836	-	two extra idle cycles; assuming MA consumes or drops queued confirmation within the bound, safety and progress hold
+approvals	Approvals	ApprovalsQuietLateBeyondBound	violates:ApprovedRunsInTurn	420	-	residual if MA takes a queued allow after the two-cycle bound
+approvals	Approvals	ApprovalsEarlyCard	clean	1034	-	retiring an unsent approval on refusal restores eventual card truth
+approvals	Approvals	ApprovalsEarlyCardOld	violates:EventualCardTruth	1061	-	old refusal path leaves an unsent approved card after turn end
 # ---- scheduler ----
 scheduler	RoutineScheduler	RoutineScheduler	clean	110	-	two schedulers, one lock: one dispatch per occurrence
 scheduler	RoutineScheduler	RoutineSchedulerProgress	clean	110	-	liveness under fairness: pending completes, first occurrence advances
@@ -161,3 +174,32 @@ skill_sync	BindingIdentity	BindingIdentitySafe	clean	17	-	exact MA identity, dup
 skill_sync	BindingIdentity	BindingIdentityNameSubstitution	violates:NoWrongAgentAttach	18	-	pre-fix: same-name B appears after A bridge resolution, name-only attach selects B
 skill_sync	BindingIdentity	BindingIdentityTitleRace	violates:NoAmbiguousTitleWrite	13	-	residual: same-name B is present when A's shared-name title is written; collision risk only
 skill_sync	RetryDeadline	RetryDeadline	clean	6	-	provider not-before time dominates ordinary queue backoff before a retry claim
+# ---- Discord webhook posting and card recovery ----
+discord_webhooks	WebhookLoad	LoadSafe	clean	1475	-	three requests per turn, one hook, two turns, retry-after and three-window bound
+discord_webhooks	WebhookLoad	LoadBotFallback	clean	33	-	identity off uses bot route with its own window quota
+discord_webhooks	WebhookLoad	LoadTwoChannels	clean	390	-	two parent channels drain independently
+discord_webhooks	WebhookLoad	LoadPoolThreeHooks	clean	156	-	three thread-selected hooks remain below the 15-per-channel cap
+discord_webhooks	WebhookLoad	LoadUnsafe429	violates:NoAnswerLost	20	-	dropping an exhausted 429 loses an answer; final 429 propagation is tested
+discord_webhooks	WebhookLoad	LoadUnsafeBackoff	violates:NoBusyRetry	38	-	ignoring retry_after permits repeated 429 in one window
+discord_webhooks	WebhookLoad	LoadUnsafeBound	violates:BoundedPosting	406	-	two windows cannot carry six calls through a two-per-window hook
+discord_webhooks	CardRecovery	CardSafe	clean	17	-	durable intent and token-available recovery clear the pending card
+discord_webhooks	CardRecovery	CardMissingToken	clean	13	-	missing token retains the intent and does not claim completed recovery
+discord_webhooks	CardRecovery	CardUnsafeDuplicate	violates:NoDuplicateCard	6	-	blind retry after accepted post with lost response duplicates the card
+discord_webhooks	CardRecovery	CardUnsafeRetire	violates:NoPendingAfterRetirement	14	-	replacement of uneditable card cannot justify retiring the original intent
+discord_webhooks	WebhookLoad	LoadUnsafeDuplicateAnswer	violates:NoDuplicateAnswer	76	-	replaying a recorded answer duplicates delivery
+discord_webhooks	WebhookLoad	LoadUnsafeFallback	violates:FallbackRoute	2	-	dropping bot route when identity is off removes name-prefix fallback
+discord_webhooks	CardRecovery	CardUnsafeFinish	violates:NoPendingAfterTurnEnds	8	-	ending a turn before card edit leaves pending status
+discord_webhooks	CardRecovery	CardUnsafeRecovery	violates:NoPendingAfterRecovery	15	-	marking recovery complete before edits leaves pending card
+discord_webhooks	WebhookLoad	LoadDiscordQuota	clean	193	-	production hook and bot quota values with six requests in one parent
+discord_webhooks	CardRecovery	CardDeleteFailed	clean	21	-	failed discard keeps original intent active for later recovery
+discord_webhooks	CardRecovery	CardUnsafeDeleteRetire	violates:NoPendingAfterRetirement	9	-	retiring after failed delete hides a pending card
+discord_webhooks	Cadence	CadenceExpected	clean	11	-	15 active turns obey the Discord ten-second debounce over two-second render ticks
+discord_webhooks	Cadence	CadenceWebhookRoutes	clean	11	-	200 cold posts over 40 parents fit three balanced hooks; first progress edits wait five ticks
+discord_webhooks	Cadence	CadenceSixtyFiveRoutes	clean	11	-	200 cold posts over 65 parents fit one hook per parent when edits wait five ticks
+discord_webhooks	Cadence	CadenceWebhookGlobalSafe	clean	11	-	staggered 200-turn webhook edits plus six other requests per tick stay below the modeled global limit
+discord_webhooks	Cadence	CadenceBotGlobalSafe	clean	11	-	staggered 200-turn bot edits plus six other requests per tick stay below the modeled global limit
+discord_webhooks	Cadence	CadenceSlackDebounce	clean	11	-	Slack five-second debounce permits at most one edit per turn in three two-second ticks
+discord_webhooks	Cadence	CadenceWebhookNoDebounceUnsafe	violates:NoGlobalBacklog	2	-	counterfactual no-debounce webhook edits overload the modeled global bucket
+discord_webhooks	Cadence	CadenceBotNoDebounceUnsafe	violates:NoGlobalBacklog	2	-	counterfactual no-debounce bot edits overload the modeled global bucket
+discord_webhooks	Cadence	CadenceColdBurstGlobalUnsafe	violates:NoGlobalBacklog	2	-	200 simultaneous initial posts can exceed one modeled two-second global window
+discord_webhooks	Cadence	CadenceWebhookSkewUnsafe	violates:NoHookBacklog	2	-	counterfactual no-debounce posts and edits collide on one hook

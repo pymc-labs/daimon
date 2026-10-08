@@ -47,10 +47,10 @@ from discord.ext import commands
 
 _log = structlog.get_logger()
 
-_EMPTY_TEXT = "Feedback cannot be empty -- try again."
-_NO_LONGER_AVAILABLE = "This feedback request is no longer available."
-_SUBMIT_FAILED = "Something went wrong submitting your feedback -- please try again."
-_THANKS = "Thanks -- your feedback has been recorded."
+_EMPTY_TEXT = "Write a few words first."
+_NO_LONGER_AVAILABLE = "This request has expired."
+_SUBMIT_FAILED = "That didn't work. Try again."
+_THANKS = "Thanks for the feedback."
 
 
 class FeedbackModal(discord.ui.Modal, title="What went wrong?"):

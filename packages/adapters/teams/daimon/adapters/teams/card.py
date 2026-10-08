@@ -15,6 +15,7 @@ import dataclasses
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from daimon.core.support_escalation import ASK_THE_TEAM, ESCALATE
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
@@ -40,13 +41,10 @@ from microsoft_teams.cards import (
 # 4 000 stays under it at 4 UTF-8 bytes each, the widest (an emoji).
 TEAMS_LIMIT = 4_000
 CANCEL_VERB = "cancel_turn"
-INTERRUPTED_NOTICE = (
-    "❌ This turn was interrupted by a restart and cannot be resumed. "
-    "Nothing was lost on your side — message me again to retry."
-)
-CANCELLED_NOTICE = "Turn cancelled."
-TOOLS_DONE_NOTICE = "✅ Done."
-ASK_HUMAN = "🙋 Ask a human"
+INTERRUPTED_NOTICE = "Stopped: Daimon restarted.\nSend a message to try again."
+CANCELLED_NOTICE = "Stopped.\nSend a message to start again."
+TOOLS_DONE_NOTICE = "Done."
+ASK_HUMAN = f"{ESCALATE} {ASK_THE_TEAM}"
 ASK_HUMAN_DIALOG = "ask_human"
 _FALLBACK_MAX_CHARS = 100
 
@@ -104,6 +102,7 @@ def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActi
     body: list[CardElement] = [TextBlock(text=headline, wrap=True)]
     if state.tool_lines:
         lines = "\n\n".join(state.tool_lines)
+        body.append(TextBlock(text="Details", size="Small", wrap=True))
         body.append(TextBlock(text=lines, font_type="Monospace", size="Small", wrap=True))
     if state.draft:
         body.append(TextBlock(text=state.draft, is_subtle=True, wrap=True))
@@ -111,7 +110,7 @@ def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActi
         ActionSet(
             actions=[
                 ExecuteAction(
-                    title="Cancel",
+                    title="Stop",
                     verb=CANCEL_VERB,
                     data={"action": CANCEL_VERB, "turn": cancel_key},
                     style="destructive",
@@ -152,7 +151,7 @@ def notice_card(text: str, *, actions: Sequence[Action] = ()) -> MessageActivity
     return _card(elements, fallback=fallback)
 
 
-ANSWERED_BELOW = "✅ Done. The answer is below."
+ANSWERED_BELOW = "Done."
 
 
 def ask_human_action() -> SubmitAction:

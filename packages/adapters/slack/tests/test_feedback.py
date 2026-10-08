@@ -510,7 +510,7 @@ async def test_submission_records_the_down_vote_with_text_and_reasons(
     assert row["feedback_text"] == "the numbers were wrong"
     assert row["feedback_reasons"] == ["inaccurate", "incomplete"]
     (ephemeral,) = _calls(fake_slack_web_client, _EPHEMERAL_URL)
-    assert ephemeral["text"] == "Thanks — your feedback has been recorded."
+    assert ephemeral["text"] == "Thanks for the feedback."
     assert ephemeral["thread_ts"] == "1.0"
 
 

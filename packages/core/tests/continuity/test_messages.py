@@ -281,23 +281,21 @@ def test_render_handoff_acknowledged_without_requested_work() -> None:
     assert render_handoff_acknowledged(
         target_name="Ada", from_name="Rex", channel="#data", requested_work=None
     ) == (
-        "Ada takes over this task from your next message here.\n"
-        "Your conversation, decisions and working files come with it.\n"
-        "Ada uses its own keys, connections and memory, not Rex's.\n"
-        "Who answers in #data is unchanged."
-    ), "with no requested work there should be exactly four lines"
+        "Ada will handle your next message.\n"
+        "Send a message to continue.\n"
+        "Your conversation and files carry over. Ada uses its own connections and memory."
+    )
 
 
 def test_render_handoff_acknowledged_appends_requested_work_line() -> None:
     assert render_handoff_acknowledged(
         target_name="Ada", from_name="Rex", channel="#data", requested_work="finish the report"
     ) == (
-        "Ada takes over this task from your next message here.\n"
-        "Your conversation, decisions and working files come with it.\n"
-        "Ada uses its own keys, connections and memory, not Rex's.\n"
-        "Who answers in #data is unchanged.\n"
-        "It will pick up with: finish the report."
-    ), "requested_work should append a fifth line verbatim"
+        "Ada will handle your next message.\n"
+        "Send a message to continue.\n"
+        "Your conversation and files carry over. Ada uses its own connections and memory.\n"
+        "Next: finish the report."
+    )
 
 
 # --- H. fresh start --------------------------------------------------------------
@@ -372,9 +370,7 @@ def test_render_responder_changed_without_handoff() -> None:
     assert render_responder_changed_without_handoff(
         new_responder="Nova", owner="Ada", channel="#data", offer_button=True
     ) == (
-        "Nova now answers in #data, but this conversation's work belongs to Ada.\n"
-        "Press Hand over to move this conversation and its working files to Nova.\n"
-        "Or start a new conversation to begin fresh with Nova."
+        "Nova answers new conversations here. Ada is still handling this one.\nNew thread → Nova"
     ), "the notice points at its button, the one way on in this thread"
 
 
@@ -384,7 +380,18 @@ def test_render_responder_changed_without_a_button_offers_only_a_new_conversatio
         new_responder="Nova", owner="Ada", channel="#data"
     )
     assert "take over" not in text
-    assert text.endswith("Start a new conversation to talk to Nova.")
+    assert text.endswith("New thread → Nova")
+
+
+def test_responder_changed_in_direct_chat_has_no_new_thread_hint() -> None:
+    text = render_responder_changed_without_handoff(
+        new_responder="Nova",
+        owner="Ada",
+        channel="this chat",
+        offer_button=True,
+        new_thread_hint=False,
+    )
+    assert text == "Nova answers new conversations here. Ada is still handling this one."
 
 
 # --- M. planned replacement summary --------------------------------------------------
@@ -930,7 +937,7 @@ def test_handoff_acknowledged_does_not_double_the_full_stop_when_the_work_ends_a
         channel="#data",
         requested_work="add a second line and show the file.",
     )
-    assert rendered.endswith("It will pick up with: add a second line and show the file."), (
+    assert rendered.endswith("Next: add a second line and show the file."), (
         "a trailing period in the person's words must not produce '..'"
     )
     assert ".." not in rendered, "no doubled full stop anywhere in the confirmation"

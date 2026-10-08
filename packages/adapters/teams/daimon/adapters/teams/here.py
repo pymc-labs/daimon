@@ -20,7 +20,7 @@ from daimon.adapters.teams.card_actions import heading
 from daimon.adapters.teams.commands import CommandContext
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.errors import DaimonError
-from daimon.core.here_card import HereCard, load_here_card
+from daimon.core.here_card import HereCard, load_here_card, render_here_card
 from daimon.core.stores.identity import find_platform_principal
 from microsoft_teams.cards import AdaptiveCard, CardElement, TextBlock
 
@@ -31,9 +31,16 @@ _FAILED = "Something went wrong reading this place's settings. Try again later."
 
 
 def here_card(card: HereCard) -> AdaptiveCard:
-    """One line per fact, as literal text: names cannot format or mention."""
-    lines = card.text.removeprefix("**Here**\n").splitlines()
-    body: list[CardElement] = [heading(TITLE)]
+    """The shared compact card, as literal text: names cannot format or mention."""
+    shown = render_here_card(card)
+    lines = [
+        # The shared copy names Slack and Discord's command; Teams' is `setup`.
+        *([shown.subline.replace("/agent-setup", "setup")] if shown.subline else []),
+        *([f"Reading: {shown.reading}"] if shown.reading else []),
+        *([f"Publishing: {shown.publishing}"] if shown.publishing else []),
+        *shown.extras,
+    ]
+    body: list[CardElement] = [heading(plain_name(shown.title))]
     body += [TextBlock(text=plain_name(line), spacing="Small", wrap=True) for line in lines]
     return AdaptiveCard(body=body, fallback_text=TITLE)
 

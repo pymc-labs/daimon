@@ -67,7 +67,7 @@ restart runs again.
 
 The last part of an answer carries Teams' thumbs up/down. 👍 records the vote;
 👎 opens a "What went wrong?" form with optional reasons and text, at least one
-required. When support is set up the answer also has an Ask a human button
+required. When support is set up the answer also has an Ask a person button
 that opens the `support` form for it, spending a credit, and the post links
 to the answer; asking again about the same answer spends nothing. A turn that only ran tools gets both on its finished card; a
 cancelled turn gets neither. Only people who could start a turn at that
@@ -143,12 +143,12 @@ the agent. None of them runs an agent turn.
 | `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
 | `help` | List the commands. |
 | `setup` | Agents, their details and who answers where; create an agent, add a skill to one, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
-| `here` | Who answers where it was typed (a channel post's thread, or the 1:1 chat), its rules, what the agent can read and the credential names it holds. Only that place counts as one you can see, so an agent rule's other channels stay unnamed. |
+| `here` | The status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. Typed in a channel whose readers are limited, it says so instead, since the answer would leave the channel. |
 | `privacy` | See, export or delete what daimon stores about you. |
 | `billing` | Your usage this month and the credit left, with when timed credit expires, and, typed in a channel with a budget, that budget; admins also see the month's spend, the top spenders and channel budgets, add credit, redeem promo codes and look up one person's spend with the people picker. |
-| `support` | Ask a person for help: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked; one from a channel with channel admins goes to them first (above). |
+| `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked; one from a channel with channel admins goes to them first (above). |
 
 A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
 setup conversation for the chosen agent, with its own session. The chat's
@@ -276,6 +276,12 @@ panel is outside every channel, so a pinned agent needs an admin of every
 channel it is pinned to.
 
 ### Channel files (optional)
+
+Tool approvals appear as Adaptive Cards in the conversation. The card shows
+the action, consequence and requester's display name, with **Approve**,
+**Deny** and a **Details** expander for plain labelled inputs. Only the requester can
+approve or deny. Each call gets its own card. Answered, expired and stopped
+cards lose their buttons.
 
 Grant the app `Sites.Selected`, which reaches only the sites granted to it,
 then grant each channel's site. The manifest does not change and no restart is

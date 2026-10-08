@@ -182,6 +182,12 @@ assigned by its ID; built-in Daimon posts use the bot. If a webhook is
 unavailable, the first answer chunk carries a bold agent name. The bot and MCP
 Discord tools resolve the webhook matching a message's webhook ID to edit or
 delete that agent's recorded post.
+Restart recovery keeps a card intent active when its webhook token is missing
+or the webhook was deleted. It does not post a replacement status card in that
+case, because the original pending card could not be cleared. A later recovery
+pass can retry the retained intent when editing is possible again.
+An unprompted turn also retains its card intent if deleting a transient card
+fails, so a later recovery pass can find the unresolved message.
 
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
 `thread_participation_scopes`. In a followed thread it joins a quiet-timer
@@ -386,7 +392,7 @@ project agent a rule. Beyond the rule, whatever an agent can reach (its repo,
 keys, connectors and memory) is also guarded where a member could otherwise
 borrow it:
 
-- `hand_off_task` and the Hand over button let a member hand a thread only
+- `hand_off_task` and the Switch to agent button let a member hand a thread only
   to an agent of that channel: the one it answers with, one whose rule names
   it, or one of the channel's own agents. Any other destination needs a
   server admin, or a channel admin of the parent channel when the thread's
@@ -806,7 +812,10 @@ the requester to press Approve on a confirmation card. The card is a platform
 hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
 (`packages/core/daimon/core/confirmation.py`), Discord, Slack and Teams each draw the
 shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
-and an adapter that passes no hook gets `no_confirmation_surface`, which
+with action-specific copy and a Details control with plain labelled inputs.
+A pause shows one card per blocked call, and the driver sends one
+`user.tool_confirmation` event per call after its answer. An adapter that
+passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call
 the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep
 their `operation_policy` checks), except `add_skill`: its confirming call, the
@@ -1082,7 +1091,7 @@ A thread can move to another agent without a new thread. Two triggers:
   Teams.
 - When a channel's agent changes, a thread whose session belongs to the old
   agent can't run a turn, and its next mention gets a notice instead. On
-  Discord, Slack and Teams the notice has a Hand over button that moves the
+  Discord, Slack and Teams the notice has a Switch to agent button that moves the
   thread to the channel's agent for whoever clicks it.
 
 Asking the agent is the default because it is how every other thread change
@@ -1112,28 +1121,36 @@ admission before any of this runs.
 
 ## Entry points that are not a chat message
 
+- **Agent setup picture controls** show the current agent picture in Details.
+  Admins can open a Slack upload form or a Discord file modal from Change;
+  Discord's attachment option remains a fallback. The upload path checks
+  platform file URLs, size, and image content before replacing the public
+  picture. Details keeps visibility and cache guidance off the main row.
+
 - **`/here`** in Discord and Slack, and `here` in Teams (answered in the 1:1
-  chat), reads access policy and credential names, then renders one private
-  card through `daimon.core.here_card`.
-  `where_am_i` in the MCP adapter returns that same card and structured facts
-  when the agent is asked about its identity, reach or credentials. The model
-  does not compose the card. A single line identifies the answering agent and
-  routing tier; `/agent-setup` and `explain_agent_resolution` provide routing
-  detail. The card shows the channel's stored reader/writer
-  rule, a stricter thread or category rule, and the resulting rule here. It
-  shows the responding agent's visible `runs_in` channels and home, who may
-  answer, whether that agent can read here, whether reads stay inside and memory is
-  writable, and whether publishing needs the requester's approval. These
-  answers use `daimon.core.permissions` and `authorize`. Its channel-turn view
-  uses member visibility even for an admin, because the model's answer may be
+  chat), reads routing and access policy, then shows a private card built from
+  `daimon.core.here_card`: who answers here,
+  reading scope, and whether publishing needs approval. Discord uses an embed;
+  Slack uses Block Kit with a state colour and notes that threads can differ;
+  Teams uses an Adaptive Card.
+  The card omits credential names, rule provenance, memory and session details.
+  `where_am_i` returns the same short text plus the complete structured facts.
+  The model does not compose either summary. `/agent-setup` and
+  `explain_agent_resolution` provide routing detail. The facts use
+  `daimon.core.permissions` and `authorize`. The MCP channel-turn view uses
+  member visibility even for an admin, because the model's answer may be
   posted to the channel. Slack slash commands have no thread identifier, so
-  Slack `/here` reports channel routing and says when thread routing could not
-  be checked.
+  Slack `/here` reports channel routing only.
   Discord read and scoped search tools explain when the bot lacks View Channel
   or Read Message History permission, including on an otherwise empty read.
 
 - **GitHub connection invitations** are issued with `daimon github connect-link`
-  for a tenant admin. When the separate `DAIMON_GITHUB_APP__*` credentials and
+  for a tenant admin, `/github connect` on Discord and Slack, or the
+  `github_connect` MCP tool from a conversation. They can target one agent;
+  self-serve links are refused for agents with a saved GitHub key, working or
+  skill repo credential, or a channel pin. An operator-issued agent link may
+  stage a saved-key update for explicit confirmation. When the separate
+  `DAIMON_GITHUB_APP__*` credentials and
   encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,
   `/oauth/github/callback`, `/oauth/github/setup` and GET/POST
   `/oauth/github/confirm`. The browser flow checks the confirming person's
@@ -1325,7 +1342,7 @@ do not get a completion marker. Continuations without a trigger message skip
 reactions.
 
 A cancelled prompted Discord or Slack turn keeps any partial answer and appends
-"Turn cancelled."; a turn cancelled after only tool calls shows that notice in its
+"Stopped. Send a message to start again."; a turn cancelled after only tool calls shows that notice in its
 status card. A cancelled turn sends no completion ping and no feedback controls.
 An unprompted Discord turn cancelled before it has an answer stays silent.
 
@@ -1334,7 +1351,7 @@ Set `DAIMON_COMPLETION_PINGS` to a JSON object keyed by tenant UUID, for example
 answer as a fresh thread reply mentioning only the requester. Missing or false
 entries keep the existing in-place answer and reactions (none on Discord; Slack keeps its admission eyes). Slack admission adds eyes once; the lifecycle only replaces it on opted-in completion. Recovery lifecycles retain this policy;
 continuity notices and feedback target the new answer. Teams posts the answer fresh (with
-an @mention in a channel), then sets its card to "Done. The answer is below."; bots cannot
+an @mention in a channel), then sets its card to "Done."; bots cannot
 react there.
 
 ### Routine dispatch

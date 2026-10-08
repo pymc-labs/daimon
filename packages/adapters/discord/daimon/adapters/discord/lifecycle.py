@@ -106,7 +106,19 @@ def build_discord_embed(data: EmbedData) -> discord.Embed:
     )
     if data.footer is not None:
         embed.set_footer(text=data.footer)
+    if data.notice is not None:
+        embed.add_field(name="Notice", value=data.notice[:1024], inline=False)
+    if data.details is not None:
+        embed.add_field(name="Details", value=data.details, inline=False)
     return embed
+
+
+def _split_with_name_prefix(text: str, agent_name: str) -> list[str]:
+    """Keep the fallback sender label attached to the first answer chunk."""
+    prefix = fallback_name_prefix(agent_name, "")
+    chunks = split_for_discord_safe(text, limit=1900 - len(prefix))
+    chunks[0] = prefix + chunks[0]
+    return chunks
 
 
 class DiscordTurnLifecycle:
@@ -170,6 +182,7 @@ class DiscordTurnLifecycle:
         self._unprompted = unprompted
         self._agent_name = agent_name
         self._fallback_active = fallback_active
+        self._name_prefix_sent = False
         self._model_id = model_id
         self._clock = clock
         self._state = EmbedState(
@@ -186,6 +199,7 @@ class DiscordTurnLifecycle:
         # into the real answer, so a recovered turn looks like a normal one.
         self._message_ref: discord.Message | None = adopt_message_ref
         self._card_message_ref: discord.Message | None = adopt_message_ref
+        self._card_discard_failed = False
         self._last_flush: float = 0.0
         self._terminal: bool = False
         self._cancel_view = cancel_view
@@ -317,10 +331,10 @@ class DiscordTurnLifecycle:
 
         Reconstructs a per-turn ``BetaManagedAgentsSpanModelUsage`` from the four
         cache-split totals and prices it through the same ``cost_of`` the billing
-        ledger uses, so the footer cost matches the ledger to the cent. The
+        ledger uses, so the Details cost matches the ledger to the cent. The
         displayed input count stays merged (input + cache_creation + cache_read);
         only the cost math is stage-split, inside ``cost_of``. An unpriced model
-        yields ``cost_of`` -> None -> ``cost_str`` None -> footer omits the cost.
+        yields ``cost_of`` -> None -> ``cost_str`` None -> Details omits the cost.
         """
         t = state.usage_totals
         usage = BetaManagedAgentsSpanModelUsage(
@@ -377,9 +391,19 @@ class DiscordTurnLifecycle:
             if index in self._persisted_sealed_indices:
                 continue
             self._persisted_sealed_indices.add(index)
-            if self._fallback_active is not None and self._fallback_active():
-                text = fallback_name_prefix(self._agent_name, text)
-            for chunk in split_for_discord_safe(text):
+            use_name_prefix = (
+                self._fallback_active is not None
+                and self._fallback_active()
+                and not self._name_prefix_sent
+            )
+            if use_name_prefix:
+                self._name_prefix_sent = True
+            chunks = (
+                _split_with_name_prefix(text, self._agent_name)
+                if use_name_prefix
+                else split_for_discord_safe(text)
+            )
+            for chunk in chunks:
                 await self._send_message(
                     content=chunk, allowed_mentions=discord.AllowedMentions.none()
                 )
@@ -405,17 +429,26 @@ class DiscordTurnLifecycle:
         if cancelled:
             if not response_text:
                 await self._edit_message(
-                    self._message_ref, content="Turn cancelled.", embed=None, view=None
+                    self._message_ref,
+                    content="Stopped.\nSend a message to start again.",
+                    embed=None,
+                    view=None,
                 )
                 log.info("turn.terminal_success", has_text=False, cancelled=True)
                 return
-            response_text = f"{response_text}\n\nTurn cancelled."
+            response_text = f"{response_text}\n\nStopped.\nSend a message to start again."
         if not response_text:
             # If tools ran but no final text, leave done embed visible.
             # If content is entirely empty, show "Turn cancelled."
             has_tool_activity = any(isinstance(block, ToolUseBlock) for block in state.content)
             if has_tool_activity:
                 self._was_answered = True
+                done_data = dataclasses.replace(
+                    to_embed_data(self._state, now=self._clock()), description="Done."
+                )
+                await self._edit_message(
+                    self._message_ref, embed=build_discord_embed(done_data), view=None
+                )
                 # #79: a tool-only turn has no reply to hang the notice under,
                 # so a dropped server is named on its own line.
                 tool_only_notice = render_degraded_notice(state.mcp_failures)
@@ -426,7 +459,10 @@ class DiscordTurnLifecycle:
                 log.info("turn.terminal_success", has_text=False, tool_only=True)
                 return
             await self._edit_message(
-                self._message_ref, content="Turn cancelled.", embed=None, view=None
+                self._message_ref,
+                content="Stopped.\nSend a message to start again.",
+                embed=None,
+                view=None,
             )
             log.info("turn.terminal_success", has_text=False)
             return
@@ -440,8 +476,13 @@ class DiscordTurnLifecycle:
         degraded_notice = render_degraded_notice(state.mcp_failures)
         if degraded_notice is not None:
             response_text = f"{response_text}\n\n{degraded_notice}"
-        if self._fallback_active is not None and self._fallback_active():
-            response_text = fallback_name_prefix(self._agent_name, response_text)
+        use_name_prefix = (
+            self._fallback_active is not None
+            and self._fallback_active()
+            and not self._name_prefix_sent
+        )
+        if use_name_prefix:
+            self._name_prefix_sent = True
         notify = (
             self._notify_on_completion
             and self._requester_id is not None
@@ -462,7 +503,11 @@ class DiscordTurnLifecycle:
         response_text, table_files = await render_discord_tables(
             response_text, enabled=self._render_tables
         )
-        chunks = split_for_discord_safe(response_text)
+        chunks = (
+            _split_with_name_prefix(response_text, self._agent_name)
+            if use_name_prefix
+            else split_for_discord_safe(response_text)
+        )
 
         async def deliver_first(content: str, files: list[discord.File]) -> None:
             if notify:
@@ -486,7 +531,11 @@ class DiscordTurnLifecycle:
             if not table_files:
                 raise
             log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
-            chunks = split_for_discord_safe(original_response_text)
+            chunks = (
+                _split_with_name_prefix(original_response_text, self._agent_name)
+                if use_name_prefix
+                else split_for_discord_safe(original_response_text)
+            )
             await deliver_first(chunks[0], [])
         self._revealed_first_chunk = chunks[0]
         # Overflow: subsequent chunks posted as new messages
@@ -596,8 +645,9 @@ class DiscordTurnLifecycle:
         try:
             await self._delete(self._message_ref)
         except discord.HTTPException:
-            # Already gone, or no permission: a stale embed beats failing a
-            # turn that otherwise ended cleanly.
+            # Keep the durable intent so a later recovery pass can resolve a
+            # card whose pending button may still be visible.
+            self._card_discard_failed = True
             log.info("turn.embed_discard_failed", exc_info=True)
         self._message_ref = None
 
@@ -614,6 +664,11 @@ class DiscordTurnLifecycle:
     def card_message_id(self) -> str | None:
         """Original status card ID, used to retire its durable intent."""
         return str(self._card_message_ref.id) if self._card_message_ref is not None else None
+
+    @property
+    def card_discard_failed(self) -> bool:
+        """Whether deleting an unprompted turn's pending card failed."""
+        return self._card_discard_failed
 
     @property
     def final_message_id(self) -> str | None:

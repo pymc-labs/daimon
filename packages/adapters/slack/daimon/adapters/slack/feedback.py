@@ -89,20 +89,17 @@ __all__ = [
 
 log = structlog.get_logger()
 
-_THANKS_VOTE: Final = "Thanks — noted."
-_THANKS_TEXT: Final = "Thanks — your feedback has been recorded."
-_NO_LONGER_AVAILABLE: Final = "This feedback request is no longer available."
+_THANKS_VOTE: Final = "Thanks."
+_THANKS_TEXT: Final = "Thanks for the feedback."
+_NO_LONGER_AVAILABLE: Final = "This request has expired."
 _NOT_ALLOWED: Final = "You can't leave feedback on this answer."
 _POLICY_UNREADABLE: Final = (
     "This workspace's access policy could not be read, so your feedback wasn't recorded. "
     "Ask an admin to check it."
 )
-_FORM_DID_NOT_OPEN: Final = "Slack didn't open the form in time. Click the button again."
-_FORM_EXPIRED: Final = (
-    "This form has expired, so its details weren't saved. Your vote was. "
-    "Click \N{THUMBS DOWN SIGN} again to tell us what went wrong."
-)
-_TELL_US_PROMPT: Final = "Thanks — noted. Want to tell us what went wrong?"
+_FORM_DID_NOT_OPEN: Final = "That didn't work. Try again."
+_FORM_EXPIRED: Final = "This request has expired."
+_TELL_US_PROMPT: Final = "What went wrong with this answer?"
 _SHARED_HINT: Final = (
     "What you send here also goes to the support team, with a link to this answer "
     "(not its content)."
@@ -239,7 +236,7 @@ def _details_prompt_blocks(place: _AnswerPlace) -> list[dict[str, Any]]:
                 {
                     "type": "button",
                     "action_id": FEEDBACK_DETAILS_ACTION_ID,
-                    "text": {"type": "plain_text", "text": "Tell us what went wrong"},
+                    "text": {"type": "plain_text", "text": "Give feedback"},
                     "value": place.metadata(),
                 }
             ],
@@ -329,7 +326,7 @@ def evaluate_feedback_text_submission(payload: dict[str, Any]) -> FeedbackTextDe
             decision,
             response_payload={
                 "response_action": "errors",
-                "errors": {_TEXT_BLOCK_ID: "Pick a reason or tell us what went wrong."},
+                "errors": {_TEXT_BLOCK_ID: "Write a few words first."},
             },
         )
     if is_external_interactive(payload):

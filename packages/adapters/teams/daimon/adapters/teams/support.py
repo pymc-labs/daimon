@@ -134,13 +134,10 @@ _DISCORD_API = "https://discord.com/api/v10"
 _DM_LINK = "(sent in the 1:1 chat)"
 _MAX_PENDING = 256  # forms whose "asked in" is remembered; older ones name the 1:1 chat
 MAX_NOTE_CHARS = 4000  # Discord's support modal cap.
-TITLE = "🙋 Human support"
-FORM_TEXT = (
-    "Tell us what you need help with and a person will follow up. "
-    "You have {remaining} requests left."
-)
-USAGE = "Write what you need help with first."
-NOT_ALLOWED_THERE = "You can't ask the agent in that channel, so you can't ask for a human there."
+TITLE = "Ask a person"
+FORM_TEXT = "What do you need help with?\n{remaining} {request_word} left"
+USAGE = "Write a few words first."
+NOT_ALLOWED_THERE = "You can't ask the agent in that channel, so you can't ask a person there."
 SEALED_HINT = (
     "Only turns inside that channel read it. Your note goes to the support team outside it, "
     "so don't paste anything that has to stay there. They get a link, not the conversation."
@@ -220,6 +217,12 @@ class _Asked:
         return "\n".join(lines) + f"\n\n{note}"
 
 
+def form_text(remaining: int) -> str:
+    return FORM_TEXT.format(
+        remaining=remaining, request_word="request" if remaining == 1 else "requests"
+    )
+
+
 def _sealed_hint(sealed: bool) -> list[CardElement]:
     return [TextBlock(text=SEALED_HINT, is_subtle=True, size="Small", wrap=True)] if sealed else []
 
@@ -234,7 +237,7 @@ def form_card(token: str, remaining: int, *, sealed: bool = False) -> AdaptiveCa
     return AdaptiveCard(
         body=[
             heading(TITLE),
-            *text_lines(FORM_TEXT.format(remaining=remaining)),
+            *text_lines(form_text(remaining)),
             *_sealed_hint(sealed),
             _note(),
             ActionSet(actions=[button(VERB, "Send", "send", ask=token)]),
@@ -253,7 +256,7 @@ def ask_form(
 ) -> AdaptiveCard:
     """The same form in Ask a human's dialog, which carries the answer it was opened on."""
     body: list[CardElement] = [error_text(error)] if error else []
-    body += [*text_lines(FORM_TEXT.format(remaining=remaining)), *_sealed_hint(sealed)]
+    body += [*text_lines(form_text(remaining)), *_sealed_hint(sealed)]
     body.append(_note(note))
     send = SubmitAction(title="Send", data=SubmitData(ASK_HUMAN_DIALOG, {"message": message_id}))
     return AdaptiveCard(body=body, actions=[send], fallback_text=TITLE)

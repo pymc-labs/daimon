@@ -108,6 +108,7 @@ from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import channel_admins as channel_admins_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
+from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_credentials as github_credentials_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_links as github_links_store
@@ -146,6 +147,7 @@ class PurgeReport(BaseModel):
     accounts: int = 0
     user_skills: int = 0
     github_credentials: int = 0
+    github_connect_requests: int = 0
     github_user_links: int = 0
     github_oauth_states: int = 0
     mcp_tokens: int = 0
@@ -171,6 +173,7 @@ class PurgeReport(BaseModel):
             accounts=self.accounts + other.accounts,
             user_skills=self.user_skills + other.user_skills,
             github_credentials=self.github_credentials + other.github_credentials,
+            github_connect_requests=self.github_connect_requests + other.github_connect_requests,
             github_user_links=self.github_user_links + other.github_user_links,
             github_oauth_states=self.github_oauth_states + other.github_oauth_states,
             mcp_tokens=self.mcp_tokens + other.mcp_tokens,
@@ -511,6 +514,9 @@ async def purge_account(
         mcp_tokens_count = await mcp_tokens_store.delete_tokens_for_account(
             session, account_id=account_id
         )
+        github_connect_requests_count = await github_connect_store.delete_requests_for_account(
+            session, account_id=account_id
+        )
         # message_feedback: account-id-keyed OR'd with the account's
         # (tenant, platform-user) keys — a vote cast before the person had an
         # accounts row carries a null account_id and is only reachable via the
@@ -557,6 +563,7 @@ async def purge_account(
         db_report = report.merge(
             PurgeReport(
                 mcp_tokens=mcp_tokens_count,
+                github_connect_requests=github_connect_requests_count,
                 message_feedback=message_feedback_count,
                 support_escalations=support_escalations_count,
                 user_configs=user_cfg_count,

@@ -198,10 +198,13 @@ async def test_auto_approve_dedups_across_a_reconnect() -> None:
     ]
     fa.beta.sessions.events.stream_scripts = [
         [YieldEvent(pre), YieldEvent(ra_idle)],  # confirms -> clean close
-        [YieldEvent(ra_idle)],  # reopened stream re-delivers the SAME idle live
+        [
+            YieldEvent(ra_idle),  # reopened stream re-delivers the SAME old idle
+            YieldEvent(make_status_idle(event_id="sevt_done", stop_reason=make_end_turn())),
+        ],
     ]
-    # The replay shows MA took both confirmations, so the re-delivered idle
-    # is a real re-ask.
+    # Replay shows both echoes after the original idle. That same event ID
+    # arriving again on the stream is still the old pause, not a re-ask.
     fa.beta.sessions.events.replay_events = [pre, ra_idle, *took]
     fa.beta.sessions.retrieve_statuses = ["running"]
     lc = RecordingLifecycle()
@@ -224,9 +227,8 @@ async def test_auto_approve_dedups_across_a_reconnect() -> None:
     # requires_action idle must not re-send a confirmation for ids already
     # confirmed before the reconnect.
     assert len(fa.beta.sessions.events.sent_events) == 2
-    # No fresh ids on the reopened stream's idle -> exhausted -> actionable failure.
-    assert final.error is not None
-    assert final.error.kind == "requires_action"
+    assert final.error is None
+    assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
 
 
 async def test_default_posture_still_ends_requires_action_turn_as_failure_and_sends_nothing() -> (
@@ -381,20 +383,91 @@ async def test_auto_approve_confirms_a_requires_action_discovered_via_a_read_tim
     assert len(lc.terminal_success) == 1
 
 
+async def test_auto_approve_reconnects_when_queued_confirmation_is_taken_later() -> None:
+    fa = FakeAnthropic()
+    pause = make_status_idle(
+        event_id="sevt_pause", stop_reason=make_requires_action(event_ids=["tu_1"])
+    )
+    echo = make_tool_confirmation(event_id="sevt_echo", tool_use_id="tu_1")
+    done = make_status_idle(event_id="sevt_done", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(pause), RaiseReadTimeout()],
+        [YieldEvent(echo), YieldEvent(done)],
+    ]
+    fa.beta.sessions.events.replay_events = [pause]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+    lifecycle = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lifecycle,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=AutoApprove(),
+    )
+
+    assert final.error is None
+    assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
+    assert fa.beta.sessions.events.stream_calls == 2
+    assert lifecycle.reconnects == ["read_timeout"]
+    assert len(fa.beta.sessions.events.sent_events) == 2, "the allow was sent only once"
+
+
 async def test_auto_approve_does_not_re_confirm_on_the_idle_branch_ids_already_confirmed_live() -> (
     None
 ):
-    """An id confirmed by the LIVE consume loop, then re-seen on the
-    eventless-cycle idle branch's replay fold, must not be re-confirmed --
-    the per-turn dedup set spans both call sites."""
+    """An unechoed live allow gets two more cycles, then the existing
+    requires-action failure; no cycle sends that allow a second time."""
     fa = FakeAnthropic()
     ra_idle = make_status_idle(
         event_id="sevt_1", stop_reason=make_requires_action(event_ids=["tu_1"])
     )
     fa.beta.sessions.events.stream_scripts = [
-        [YieldEvent(ra_idle)],  # confirms tu_1 live, then exhausts -> clean close
+        [YieldEvent(ra_idle), RaiseReadTimeout()],
+        [RaiseReadTimeout()],
+        [RaiseReadTimeout()],
     ]
     fa.beta.sessions.events.replay_events = [ra_idle]
+    fa.beta.sessions.retrieve_statuses = ["idle", "idle", "idle"]
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=AutoApprove(),
+    )
+
+    assert fa.beta.sessions.events.stream_calls == 3
+    assert fa.beta.sessions.retrieve_calls == ["sess_1"] * 3
+    assert len(fa.beta.sessions.events.sent_events) == 2, (
+        "one user.message plus exactly one confirmation batch -- the live confirm, not a second"
+    )
+    assert final.error is not None
+    assert final.error.kind == "requires_action"
+    assert final.error.message == "The agent stopped because it couldn't confirm your approval."
+
+
+async def test_auto_approve_replay_echo_after_stale_pause_is_not_a_reask() -> None:
+    fa = FakeAnthropic()
+    pause = make_status_idle(
+        event_id="sevt_pause", stop_reason=make_requires_action(event_ids=["tu_1"])
+    )
+    echo = make_tool_confirmation(event_id="sevt_echo", tool_use_id="tu_1")
+    done = make_status_idle(event_id="sevt_done", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(pause), RaiseReadTimeout()],
+        [YieldEvent(pause), YieldEvent(done)],
+    ]
+    fa.beta.sessions.events.replay_events = [pause, echo]
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
     final = await run_turn(
@@ -409,13 +482,41 @@ async def test_auto_approve_does_not_re_confirm_on_the_idle_branch_ids_already_c
         tool_confirmation=AutoApprove(),
     )
 
-    assert fa.beta.sessions.events.stream_calls == 1, "no fresh ids on the idle branch -> no reopen"
-    assert len(fa.beta.sessions.events.sent_events) == 2, (
-        "one user.message plus exactly one confirmation batch -- the live confirm, not a second"
+    assert final.error is None
+    assert fa.beta.sessions.events.stream_calls == 2
+    assert len(fa.beta.sessions.events.sent_events) == 2
+
+
+async def test_auto_approve_replay_echo_followed_by_reask_stops() -> None:
+    fa = FakeAnthropic()
+    pause = make_status_idle(
+        event_id="sevt_pause", stop_reason=make_requires_action(event_ids=["tu_1"])
     )
+    echo = make_tool_confirmation(event_id="sevt_echo", tool_use_id="tu_1")
+    reask = make_status_idle(
+        event_id="sevt_reask", stop_reason=make_requires_action(event_ids=["tu_1"])
+    )
+    fa.beta.sessions.events.stream_scripts = [[YieldEvent(pause), RaiseReadTimeout()]]
+    fa.beta.sessions.events.replay_events = [pause, echo, reask]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=AutoApprove(),
+    )
+
+    assert fa.beta.sessions.events.stream_calls == 1
+    assert len(fa.beta.sessions.events.sent_events) == 2
     assert final.error is not None
     assert final.error.kind == "requires_action"
-    assert "already" in final.error.message, "these ids really were confirmed, live"
+    assert final.error.message == "The agent stopped because it couldn't confirm your approval."
 
 
 async def test_auto_approve_never_sends_confirmations_into_a_terminated_session() -> None:
@@ -491,7 +592,7 @@ async def test_require_approval_still_finalizes_a_requires_action_found_on_the_i
     ], "no confirmation payload should ever be sent under RequireApproval"
     assert final.error is not None
     assert final.error.kind == "requires_action"
-    assert "not supported on this surface" in final.error.message
+    assert "Approvals aren't available here" in final.error.message
 
 
 async def test_auto_approve_eventless_reconnect_keeps_pre_approval_content_when_an_event_follows_the_pause() -> (

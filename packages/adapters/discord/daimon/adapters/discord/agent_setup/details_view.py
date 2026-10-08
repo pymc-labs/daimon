@@ -13,7 +13,9 @@ only; key values are never part of the rendered model.
 
 from __future__ import annotations
 
+import contextlib
 import functools
+from typing import cast
 from urllib.parse import quote
 
 import anthropic
@@ -23,9 +25,15 @@ from daimon.adapters.discord.agent_setup.add_skill import (
     AddSkillModal,
     skill_change_refusal,
 )
-from daimon.adapters.discord.agent_setup.avatar import avatar_public_url, reset_agent_avatar
+from daimon.adapters.discord.agent_setup.avatar import (
+    NONRETRYABLE_PICTURE_MESSAGES,
+    avatar_public_url,
+    reset_agent_avatar,
+    upload_agent_avatar,
+)
 from daimon.adapters.discord.agent_setup.budget import LAYOUT_TEXT_BUDGET
 from daimon.adapters.discord.agent_setup.conversations import open_setup_conversation
+from daimon.adapters.discord.agent_setup.expiry import ExpiringView
 from daimon.adapters.discord.agent_setup.mcp_access import send_coding_tools_access
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
@@ -66,6 +74,31 @@ AVATAR_CHANGE_ID = "agent-setup:avatar-change"
 AVATAR_RESET_ID = "agent-setup:avatar-reset"
 AVATAR_RESET_CONFIRM_ID = "agent-setup:avatar-reset-confirm"
 AVATAR_RESET_CANCEL_ID = "agent-setup:avatar-reset-cancel"
+AVATAR_DETAILS_ID = "agent-setup:avatar-details"
+
+
+def picture_details_embed() -> discord.Embed:
+    embed = discord.Embed(title="Picture", colour=discord.Colour.blurple())
+    embed.add_field(
+        name="Visibility", value="Anyone who sees a message can open the picture.", inline=False
+    )
+    embed.add_field(
+        name="After change", value="The old picture may still appear for a while.", inline=False
+    )
+    embed.set_footer(text="Agent setup")
+    return embed
+
+
+def picture_status_embed(message: str, *, success: bool) -> discord.Embed:
+    embed = discord.Embed(
+        title=message.split(".", 1)[0] + ".",
+        colour=discord.Colour.green() if success else discord.Colour.orange(),
+    )
+    remainder = message.partition(". ")[2]
+    if remainder:
+        embed.add_field(name="Next", value=remainder, inline=False)
+    embed.set_footer(text="Agent setup")
+    return embed
 
 
 def _answers_line(places: tuple[AnsweringPlace, ...]) -> str:
@@ -259,10 +292,7 @@ def build_details_container(
         )
     if identity_enabled and not is_builtin:
         avatar_url = state.avatar_urls.get(details.name)
-        avatar_copy = (
-            "**Avatar**\nAvatars are public: anyone who sees a message can open its image, "
-            "and platform caches can keep it after a change."
-        )
+        avatar_copy = "**Picture**\nShown next to this agent's messages."
         if avatar_url:
             avatar_text: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
                 avatar_copy
@@ -277,19 +307,29 @@ def build_details_container(
             avatar_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
             avatar_row.add_item(
                 discord.ui.Button(
-                    label="Change avatar",
+                    label="Change",
                     custom_id=AVATAR_CHANGE_ID,
                     style=discord.ButtonStyle.secondary,
                 )
             )
             avatar_row.add_item(
                 discord.ui.Button(
-                    label="Reset avatar",
+                    label="Use default",
                     custom_id=AVATAR_RESET_ID,
                     style=discord.ButtonStyle.secondary,
                 )
             )
             container.add_item(avatar_row)
+        if is_admin:
+            details_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+            details_row.add_item(
+                discord.ui.Button(
+                    label="Details",
+                    custom_id=AVATAR_DETAILS_ID,
+                    style=discord.ButtonStyle.secondary,
+                )
+            )
+            container.add_item(details_row)
     container.add_item(hairline())
     return container
 
@@ -370,6 +410,8 @@ class DetailsView(PanelViewBase):
                 child.callback = self._on_change_avatar  # type: ignore[method-assign]
             elif isinstance(child, discord.ui.Button) and child.custom_id == AVATAR_RESET_ID:
                 child.callback = self._on_reset_avatar  # type: ignore[method-assign]
+            elif isinstance(child, discord.ui.Button) and child.custom_id == AVATAR_DETAILS_ID:
+                child.callback = self._on_avatar_details  # type: ignore[method-assign]
 
         action_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
         coding_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
@@ -419,10 +461,34 @@ class DetailsView(PanelViewBase):
         )
 
     async def _on_change_avatar(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(PictureUploadModal(self))
+
+    async def refresh_after_avatar_change(self) -> None:
+        """Redraw the live Details panel with its new picture thumbnail."""
+        panel_interaction = self._render_interaction
+        if panel_interaction is None or self._is_superseded():
+            return
+        refreshed = DetailsView(
+            self.state,
+            runtime=self.runtime,
+            allowed_user_id=self.allowed_user_id,
+            details=self.details,
+            agent=self.agent,
+        )
+        try:
+            await panel_interaction.edit_original_response(
+                view=refreshed.bind_render_interaction(panel_interaction, panel=self.state),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.NotFound:
+            return
+        except discord.HTTPException as exc:
+            if exc.status != 401 or exc.code != 50027:
+                raise
+
+    async def _on_avatar_details(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
-            f"Run `/agent-setup agent:{self.details.name} avatar:<image>` and attach one PNG, "
-            "JPG, GIF, or WebP under 2 MB. Avatars are public and platform caches can "
-            "keep old images.",
+            embed=picture_details_embed(),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -488,6 +554,95 @@ class DetailsView(PanelViewBase):
         )
 
 
+class PictureUploadModal(discord.ui.Modal):
+    """One file field; submission reuses the slash command's validation path."""
+
+    def __init__(self, view: DetailsView) -> None:
+        super().__init__(title="Change picture")
+        self._view = view
+        self.add_item(discord.ui.TextDisplay("Choose a picture. Up to 2 MB."))
+        label: discord.ui.Label[PictureUploadModal] = discord.ui.Label(
+            text="Picture",
+            description="PNG, JPG, GIF or WebP",
+            component=discord.ui.FileUpload(required=True, min_values=1, max_values=1),
+        )
+        self.file_input = cast("discord.ui.FileUpload[PictureUploadModal]", label.component)
+        self.add_item(label)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        # A channel-message defer gives this modal its own original response.
+        # The retry view may then expire without replacing the setup panel.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if interaction.user.id != self._view.allowed_user_id:
+            await interaction.edit_original_response(
+                content="This panel has expired. Open agent setup."
+            )
+            return
+        uploads = self.file_input.values
+        if not uploads:
+            await interaction.edit_original_response(content="Choose a picture.")
+            return
+        tenant_id = derive_tenant_uuid(
+            platform="discord", workspace_id=str(self._view.state.guild_id)
+        )
+        message, avatar = await upload_agent_avatar(
+            interaction,
+            self._view.runtime,
+            tenant_id=tenant_id,
+            agent_name=self._view.details.name,
+            attachment=uploads[0],
+        )
+        if avatar is not None:
+            self._view.state.avatar_urls[self._view.details.name] = avatar_public_url(
+                self._view.runtime, avatar
+            )
+        embed = picture_status_embed(message, success=avatar is not None)
+        if avatar is None:
+            if message in NONRETRYABLE_PICTURE_MESSAGES:
+                await interaction.edit_original_response(embed=embed, view=None)
+            else:
+                await interaction.edit_original_response(
+                    embed=embed,
+                    view=PictureRetryView(self._view).bind_render_interaction(
+                        interaction, panel=None
+                    ),
+                )
+        else:
+            await interaction.edit_original_response(embed=embed)
+            await self._view.refresh_after_avatar_change()
+
+
+class PictureRetryView(ExpiringView, discord.ui.View):
+    """Let a rejected file be replaced from the same panel."""
+
+    def __init__(self, details: DetailsView) -> None:
+        super().__init__(timeout=600)
+        self._details = details
+        button: discord.ui.Button[PictureRetryView] = discord.ui.Button(
+            label="Choose picture", style=discord.ButtonStyle.secondary
+        )
+        button.callback = self._on_retry  # type: ignore[method-assign]
+        self.add_item(button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self._details.allowed_user_id
+
+    async def _on_retry(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(PictureUploadModal(self._details))
+
+    async def on_timeout(self) -> None:
+        """Expire the retry button while keeping the response as an embed."""
+        interaction = self._render_interaction
+        if interaction is None:
+            return
+        with contextlib.suppress(discord.NotFound):
+            await interaction.edit_original_response(
+                embed=picture_status_embed("Panel expired. Open agent setup.", success=False),
+                view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+
 class AvatarResetConfirmView(PanelViewBase):
     """Ask for a second click before rotating a public avatar URL."""
 
@@ -504,14 +659,11 @@ class AvatarResetConfirmView(PanelViewBase):
         self.details = details
         self.agent = agent
         container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
-            discord.ui.TextDisplay(
-                f"Reset **{details.name}** to its generated avatar? The current public URL "
-                "will change, but platform caches can keep the previous image."
-            )
+            discord.ui.TextDisplay("Use the default picture?")
         )
         row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
         confirm: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
-            label="Reset avatar",
+            label="Use default",
             custom_id=AVATAR_RESET_CONFIRM_ID,
             style=discord.ButtonStyle.danger,
         )
@@ -551,4 +703,6 @@ class AvatarResetConfirmView(PanelViewBase):
         if avatar is not None:
             self.state.avatar_urls[self.details.name] = avatar_public_url(self.runtime, avatar)
             await self.swap_to(interaction, self._details_view())
-        await interaction.followup.send(message, ephemeral=True)
+        await interaction.followup.send(
+            embed=picture_status_embed(message, success=avatar is not None), ephemeral=True
+        )

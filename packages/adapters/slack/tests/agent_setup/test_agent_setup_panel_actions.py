@@ -35,6 +35,7 @@ from daimon.adapters.slack.agent_setup.actions import (
 from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_ADD_SKILL,
     ACTION_AVATAR_CHANGE,
+    ACTION_AVATAR_DETAILS,
     ACTION_AVATAR_RESET,
     ACTION_CHANNEL_ADMINS,
     ACTION_CODING_TOOLS,
@@ -1021,6 +1022,49 @@ async def test_avatar_buttons_dispatch_to_upload_and_reset(
         runtime, _action_payload(ACTION_AVATAR_RESET, meta=meta, view_id="V_DETAILS")
     )
     reset.assert_awaited_once()
+
+
+async def test_picture_details_button_routes_to_its_modal(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    _tenant_id, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
+    meta = _meta(view="details", agent_name=_OTHER_AGENT)
+
+    await handle_agent_setup_action(runtime, _action_payload(ACTION_AVATAR_DETAILS, meta=meta))
+
+    (pushed,) = _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY)
+    assert pushed["view"]["title"]["text"] == "Picture details"
+    assert "Anyone who sees a message can open the picture." in str(pushed["view"]["blocks"])
+
+
+async def test_picture_retry_replaces_status_modal_instead_of_pushing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.slack.agent_setup import actions as actions_module
+
+    _tenant_id, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
+    monkeypatch.setattr(actions_module, "resolve_is_admin", AsyncMock(return_value=True))
+    meta = _meta(view="avatar_upload", agent_name=_OTHER_AGENT, root_view_id="V_DETAILS")
+
+    await handle_agent_setup_action(
+        runtime, _action_payload(ACTION_AVATAR_CHANGE, meta=meta, view_id="V_STATUS")
+    )
+
+    assert not _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY)
+    (updated,) = _sent(fake_slack_web_client.mock, _VIEWS_UPDATE_KEY)
+    assert updated["view_id"] == "V_STATUS"
+    assert updated["view"]["callback_id"] == CALLBACK_AVATAR_UPLOAD
+    upload_meta = decode_panel_metadata(updated["view"]["private_metadata"])
+    assert upload_meta is not None and upload_meta.root_view_id == "V_DETAILS"
 
 
 async def test_add_skill_opens_the_form_or_refuses_by_where_the_agent_answers(

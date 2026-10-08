@@ -67,7 +67,7 @@ def _replayed(messages: list[dict[str, Any]], *, status_ts: str | None) -> list[
     """Thread messages minus this turn's own status card.
 
     The card is posted before history is fetched, so a replay would show the
-    model a fresh bot message (`Thinking · 0s`) from the account it answers
+    model a fresh bot message (`Working on it…`) from the account it answers
     through, which it reads as another agent already handling the request.
     Only the bot message at exactly that ts is dropped: earlier answers from
     the same account stay, since they may belong to a different agent.

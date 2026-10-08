@@ -257,7 +257,7 @@ async def test_sweep_edits_the_frozen_card_and_clears_the_marker(
     body = update_calls[0].kwargs["json"]
     assert body["channel"] == "C_REACHABLE", "must edit the row's own channel"
     assert body["ts"] == "1111.1", "must edit the row's own message ts"
-    assert "interrupted" in body["blocks"][0]["text"]["text"], (
+    assert body["blocks"][0]["text"]["text"] == "Stopped: Daimon restarted.", (
         "the card must say the turn was interrupted"
     )
 

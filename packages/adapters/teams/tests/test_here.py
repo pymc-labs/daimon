@@ -77,10 +77,11 @@ async def test_here_typed_in_a_channel_describes_that_channel_in_the_chat(
     ]
     in_channel, in_chat = await _cards_in_chat(db_session_factory, teams_api_fake, activities)
 
-    assert "Who answers: daimon" in in_channel, "the card names the answering agent"
-    assert "Channel rule: readers inside" in in_channel, "typed in a channel: that channel's rule"
-    assert "Channel rule: readers any" in in_chat, "typed in the chat: the chat's own rule"
-    assert "Can view here: bot yes; you yes" in in_channel, "both heard the message there"
+    assert "daimon answers" in in_channel, "the card names the answering agent"
+    assert "Reading: Conversations here only" in in_channel, (
+        "typed in a channel: that channel's reader rule"
+    )
+    assert "Reading: Any conversation" in in_chat, "typed in the chat: the chat's own rule"
 
 
 def test_the_here_card_shows_names_as_literal_text() -> None:

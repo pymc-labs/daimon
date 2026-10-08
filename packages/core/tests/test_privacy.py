@@ -35,6 +35,7 @@ from daimon.core.privacy import (
 from daimon.core.purge import PurgeReport, purge_account
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
 from daimon.core.stores import credential_requests as credential_requests_store
+from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_credentials as github_credentials_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
@@ -150,6 +151,7 @@ async def test_collect_purge_preview_returns_zero_counts_when_account_has_no_dat
     assert preview.user_skills.example is None, "example must be None when count==0"
     assert preview.github_credentials.count == 0, "no github_credentials seeded"
     assert preview.github_credentials.example is None
+    assert preview.github_connect_requests.count == 0
     assert preview.github_oauth_states.count == 0, "no github_oauth_states seeded"
     assert preview.github_oauth_states.example is None
 
@@ -782,6 +784,27 @@ async def test_a_vote_in_a_tenant_without_a_principal_is_erased_by_a_purge_run_t
     assert remaining == 0, "no residue may survive the documented remediation path"
 
 
+async def test_github_connect_request_is_previewed_and_purged(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await github_connect_store.record_connect_request(
+        db_session,
+        tenant_id=tenant.id,
+        requester_account_id=account.id,
+        agent_id=uuid.uuid4(),
+        agent_name="ResearchBot",
+    )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    assert preview.github_connect_requests.count == 1
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+    assert report.db.github_connect_requests == 1
+
+
 async def test_collect_purge_preview_matches_purge_account_coverage_field_for_field() -> None:
     """If `PurgeReport` grows a new int field, `PurgePreview` MUST mirror it.
 
@@ -804,6 +827,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "accounts": "account",
         "user_skills": "user_skills",
         "github_credentials": "github_credentials",
+        "github_connect_requests": "github_connect_requests",
         "github_user_links": "github_user_links",
         "github_oauth_states": "github_oauth_states",
         "mcp_tokens": "mcp_tokens",
@@ -858,6 +882,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "user_config": "account_id PK/FK -> accounts.id",
         "user_skills": "principal_id",
         "github_credentials": "principal_id",
+        "github_connect_requests": "requester_account_id FK -> accounts.id",
         "agent_github_binding": "principal_id",
         "mcp_tokens": "account_id FK -> accounts.id",
         "wizard_session": "account_id FK -> accounts.id",

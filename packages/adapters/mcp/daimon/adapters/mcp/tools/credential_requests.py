@@ -1119,6 +1119,8 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
     ) -> RequestCredentialResult:
         """Let an agent read a GitHub working repo or repository, public or private.
 
+        For requests to set up or hook up GitHub for an agent, use
+        ``github_connect`` instead.
         For a private skill repo use ``request_skill_repo_token``. If the user has
         no working token, ``post_github_app_install_link`` offers a GitHub App install;
         installing alone does not bind the repo or verify this tenant's access.

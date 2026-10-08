@@ -1,4 +1,4 @@
-"""Current-place status tool, sharing the slash commands' fixed card."""
+"""Current-place status tool with short text and complete structured facts."""
 
 from __future__ import annotations
 
@@ -158,7 +158,7 @@ def register_here_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def where_am_i(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, channel_id: str | None = None, thread_id: str | None = None
     ) -> HereCard:
-        """Return the fixed /here card with structured facts and rendered text.
+        """Return short /here text and full structured facts.
         Use this when someone asks which agent you are, who answers here, whether
         you can see a channel, which channel or agent rule applies, whether
         publishing needs approval, or whose token or sign-in you hold. Never

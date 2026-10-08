@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import cast
 
-from daimon.adapters.discord import layout
 from daimon.adapters.discord.checks import (
     is_guild_admin,
     require_registered_guild,
@@ -14,7 +13,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.errors import DaimonError
-from daimon.core.here_card import load_here_card
+from daimon.core.here_card import HereCard, load_here_card, render_here_card
 from daimon.core.stores.identity import find_platform_principal
 
 import discord
@@ -24,10 +23,21 @@ from discord.ext import commands
 BotInteraction = Interaction[commands.Bot]
 
 
-def build_here_view(card_text: str) -> discord.ui.LayoutView:
-    """Stay below the total Components V2 text limit."""
-    text = card_text if len(card_text) <= 3900 else card_text[:3899] + "…"
-    return layout.static_view(discord.ui.Container(discord.ui.TextDisplay(text)))
+def build_here_embed(card: HereCard) -> discord.Embed:
+    """Render the shared card as a compact Discord embed."""
+    shown = render_here_card(card)
+    embed = discord.Embed(
+        title=shown.title,
+        description=shown.subline,
+        colour=discord.Colour(int(shown.colour.removeprefix("#"), 16)),
+    )
+    if shown.reading is not None:
+        embed.add_field(name="Reading", value=shown.reading, inline=True)
+    if shown.publishing is not None:
+        embed.add_field(name="Publishing", value=shown.publishing, inline=True)
+    if shown.extras:
+        embed.add_field(name="\u200b", value="\n".join(shown.extras), inline=False)
+    return embed
 
 
 @app_commands.guild_only()
@@ -38,7 +48,7 @@ class HereCog(commands.Cog):
         super().__init__()
         self.bot = bot
 
-    @app_commands.command(name="here", description="Who answers here, what it can read and holds")
+    @app_commands.command(name="here", description="Who answers here and what they can do")
     @require_registered_guild
     async def here(self, interaction: BotInteraction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -125,7 +135,7 @@ class HereCog(commands.Cog):
                     category_channels_bot_can_view=category_visible,
                 )
             await interaction.edit_original_response(
-                view=build_here_view(card.text),
+                embed=build_here_embed(card),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except (DaimonError, discord.HTTPException) as exc:

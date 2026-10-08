@@ -3,6 +3,15 @@
 This page documents how daimon's Slack adapter handles per-user access and
 what operators should understand about the resulting trust model.
 
+### `/here` card
+
+`/here` sends only the caller a compact channel card. Its title names the agent
+that answers here or the reason replies are unavailable. When an agent answers,
+Reading and Publishing show the effective scope and whether approval is
+required; a card that only gives a reason has no fields. The footer says
+`Channel setting. Threads can differ.` because Slack slash commands have no
+thread context. Credential names and values are absent from the card.
+
 ### Session output files
 
 Files an agent saves under `/mnt/session/outputs` are uploaded to the Slack
@@ -111,6 +120,14 @@ takes a paste only, since Slack modals have no file input.
 
 ### Per-user Slack access (optional)
 
+Tool approvals appear as Block Kit cards in the turn's thread. The card shows
+the action, consequence and requester, with **Approve**, **Deny** and
+**Details** buttons. Details sends a few plain labelled inputs privately to
+the clicker. Only
+the requester can approve or deny. Each call gets its own card. Answered,
+expired and stopped cards lose
+their buttons.
+
 By default daimon reads only channels the bot is invited to. Members can
 additionally **connect their Slack account** (daimon nudges them once, and
 offers a link whenever it hits a channel it can't read). A connected member's
@@ -134,6 +151,13 @@ Trust model notes for operators:
   daimon will only surface in a DM with you, never in a channel.
 
 `/agent-setup` opens the Agents roster, which pushes into either an agent's Details view or Who answers where. Setup conversations can be opened with **⚙️ Manage agents** from the Agents roster or from Details; creating a new agent lands on its Details view rather than a separate confirmation screen, and Details also offers **🧰 Use from your coding tools** to connect that agent over MCP. The channel gets a short launcher with a **Reply to Daimon** button; Daimon's welcome appears inside the shared thread. The panel also provides the reply button immediately after opening setup. Follow it, reply in that thread, and mention the bot. Daimon answers while the named agent is configured. Opening setup does not run a billed turn or change channel defaults. Each participant keeps a separate session.
+
+`/github connect` sends a workspace admin a private link for the agent answering
+in that channel. Use `/github connect AgentName` to choose another agent. The
+link lets the admin pick repos, then activates them for that agent. If the
+agent still has a saved GitHub key, `/github connect` shows the **Update and
+restart chats** confirmation instead. Existing Slack installations need the
+`/github` command added from `docs/slack-app-manifest.yaml` and reinstallation.
 
 Existing Slack apps must update **Event Subscriptions → Subscribe to bot events** to match `docs/slack-app-manifest.yaml`, including `message.channels`, `message.groups`, channel/group archive, unarchive, and deletion events. These subscriptions track setup lifecycle only; messages still trigger conversation only through `app_mention`. An `app_mention` runs a turn only when the message actually contains `@daimon`, so follow-ups in a thread need the mention too; Slack has been reported to deliver the event for un-mentioned thread replies, and those are dropped. Root deletion is delivered as the [`message_deleted` message subtype](https://docs.slack.dev/reference/events/message/message_deleted/).
 
@@ -208,9 +232,9 @@ to `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`.
 Emoji reactions (a :-1: on the message) are not read: that would need the
 `reactions:read` scope and a reinstall of every workspace.
 
-### Ask the team
+### Ask a person
 
-Set `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` to show a **🙋 Ask the team** button
+Set `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` to show an **Ask a person** button
 next to the 👍/👎 buttons on every final answer (and on a tool-only turn's status card). It opens a short form; sending it
 spends one of the person's support requests (`DAIMON_SUPPORT__CREDITS_PER_USER`,
 default 20, counted per person per workspace and shared with Discord's ledger) and
@@ -308,10 +332,10 @@ header until it is reinstalled.
 Restart the Slack and MCP services after reinstalling to clear any remembered
 missing-scope result immediately; otherwise the result expires within 15 minutes.
 
-Workspace admins can open `/agent-setup`, select an agent, then use the Avatar
+Workspace admins can open `/agent-setup`, select an agent, then use the Picture
 row's **Change** button to upload one PNG, JPG, GIF, or WebP image (up to 2 MB).
 The image is center-cropped to a 256×256 PNG. **Reset** restores the generated
-initials avatar. Each change gets a new URL. Avatars are public: anyone who
+initials picture. Each change gets a new URL. Pictures are public: anyone who
 sees a message can open its image, and platform caches can keep a copy after
 the avatar changes. Uploaded files stay in the uploader's Slack files until
 that person removes them from Slack.

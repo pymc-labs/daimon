@@ -20,8 +20,9 @@ from decimal import Decimal
 from types import SimpleNamespace
 from typing import Literal
 
+import httpx
 import pytest
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, NotFoundError
 from cryptography.fernet import Fernet
 from daimon.adapters.scheduler.main import (
     _build_fire,  # pyright: ignore[reportPrivateUsage]  # test seam for balance gate + debit binding
@@ -169,6 +170,8 @@ async def test_mcp_app_session_refreshes_before_token_expiry(
     rotate = unittest.mock.AsyncMock()
     monkeypatch.setattr("daimon.adapters.scheduler.main.effective_repo_state", desired)
     monkeypatch.setattr("daimon.adapters.scheduler.main.rotate_live_app_tokens", rotate)
+    checks: dict[str, datetime] = {}
+    monkeypatch.setattr("daimon.adapters.scheduler.main._last_app_access_checks", checks)
     retrieve = unittest.mock.AsyncMock(return_value=SimpleNamespace(status="idle"))
     anthropic = SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace(retrieve=retrieve)))
     await _refresh_github_app_sessions(
@@ -185,6 +188,433 @@ async def test_mcp_app_session_refreshes_before_token_expiry(
     rotate.assert_awaited_once()
     assert rotate.await_args.kwargs["session_id"] == "mcp-refresh"
     assert rotate.await_args.kwargs["resource_ids"] == {"https://github.com/acme/repo": "res-1"}
+    checks.clear()
+    rotate.reset_mock()
+    rotate.side_effect = RuntimeError("mint failed")
+    for _ in range(2):
+        await _refresh_github_app_sessions(
+            anthropic,
+            db_session_factory,
+            settings=Settings.model_validate(
+                {
+                    "database": {"url": "postgresql+asyncpg://localhost/test"},
+                    "anthropic": {"api_key": "test"},
+                }
+            ),
+            fernet=fernet,
+        )
+    assert rotate.await_count == 1
+    assert "mcp-refresh" in checks
+
+
+async def test_running_mcp_turn_refreshes_across_three_token_expiries(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    agent_id = uuid.uuid4()
+    session_id = f"mcp-long-turn-{uuid.uuid4()}"
+    started = datetime.now(UTC)
+    await github_issued_tokens.register_app_session_vault(
+        db_session,
+        session_id=session_id,
+        tenant_id=tenant.id,
+        vault_id="long-turn-vault",
+        is_unmapped=True,
+        is_mcp=True,
+        agent_id=agent_id,
+        account_id=account.id,
+        repo_urls=("https://github.com/acme/repo",),
+        repo_resource_ids={"https://github.com/acme/repo": "res-1"},
+    )
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    pending = await github_issued_tokens.create_pending(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        session_id=session_id,
+        installation_id=1,
+        repo_ids=[11],
+        permissions={"contents": "read"},
+        grant_versions={"grant:11": 1, "authorization:11": 1},
+        expires_at=started + timedelta(hours=1),
+    )
+    await github_issued_tokens.store_token(
+        db_session, token_id=pending.token_id, token="test-token", fernet=fernet
+    )
+    await github_issued_tokens.mark_delivered(db_session, token_id=pending.token_id)
+    await db_session.commit()
+
+    clock = {"now": started}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            return clock["now"]
+
+    monkeypatch.setattr("daimon.adapters.scheduler.main.datetime", Clock)
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.effective_repo_state",
+        unittest.mock.AsyncMock(
+            return_value=(("https://github.com/acme/repo",), {11: {"contents": "read"}})
+        ),
+    )
+    rotations: list[datetime] = []
+
+    async def rotate(*args: object, **kwargs: object) -> None:
+        assert kwargs["active_turn"] is True
+        rotations.append(clock["now"])
+        async with db_session_factory.begin() as session:
+            await session.execute(
+                text("UPDATE github_issued_tokens SET expires_at = :expires WHERE token_id = :id"),
+                {"expires": clock["now"] + timedelta(hours=1), "id": pending.token_id},
+            )
+
+    monkeypatch.setattr("daimon.adapters.scheduler.main.rotate_live_app_tokens", rotate)
+    archive = unittest.mock.AsyncMock()
+    anthropic = SimpleNamespace(
+        beta=SimpleNamespace(
+            sessions=SimpleNamespace(
+                retrieve=unittest.mock.AsyncMock(return_value=SimpleNamespace(status="running")),
+                archive=archive,
+            ),
+            vaults=SimpleNamespace(archive=archive),
+        )
+    )
+    settings = Settings.model_validate(
+        {
+            "database": {"url": "postgresql+asyncpg://localhost/test"},
+            "anthropic": {"api_key": "test"},
+        }
+    )
+    for minutes in (0, 50, 105, 160, 180):
+        clock["now"] = started + timedelta(minutes=minutes)
+        await _refresh_github_app_sessions(
+            anthropic, db_session_factory, settings=settings, fernet=fernet
+        )
+        await _close_github_app_sessions(anthropic, db_session_factory, fernet=fernet)
+    assert rotations == [started + timedelta(minutes=offset) for offset in (50, 105, 160)]
+    archive.assert_not_awaited()
+    async with db_session_factory() as session:
+        assert await github_issued_tokens.list_closed_app_sessions(session, now=clock["now"]) == []
+
+
+def _mapped_app_session(
+    *, active_turn: bool = True, started_ago: timedelta = timedelta(hours=1)
+) -> SimpleNamespace:
+    url = "https://github.com/acme/repo"
+    return SimpleNamespace(
+        mapping=SimpleNamespace(
+            id=uuid.UUID(int=1),
+            tenant_id=uuid.UUID(int=2),
+            account_id=uuid.UUID(int=3),
+            ma_session_id="mapped-active-turn",
+            active_turn_message_id="turn-1" if active_turn else None,
+            active_turn_started_at=datetime.now(UTC) - started_ago if active_turn else None,
+            effective_config=SimpleNamespace(
+                vault_id="mapped-vault", repo_urls=(url,), repo_resource_ids={url: "res-1"}
+            ),
+        ),
+        agent_id=uuid.UUID(int=4),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        permissions_by_repo={11: {"contents": "read"}},
+    )
+
+
+async def _refresh_mapped(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    listed: list[list[SimpleNamespace]],
+    *,
+    rotate: unittest.mock.AsyncMock | None = None,
+    desired: tuple[tuple[str, ...], dict[int, dict[str, str]]] = (
+        ("https://github.com/acme/other",),
+        {11: {"contents": "none"}},
+    ),
+) -> tuple[unittest.mock.AsyncMock, unittest.mock.AsyncMock, unittest.mock.AsyncMock]:
+    """Run the mapped refresh; ``listed`` is the pre-fence then in-fence mapping read.
+
+    The closing prune read sees the pre-fence listing again.
+    """
+    lister = unittest.mock.AsyncMock(side_effect=[*listed, listed[0]])
+    monkeypatch.setattr("daimon.adapters.scheduler.main.list_live_app_sessions", lister)
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.list_live_mcp_app_sessions",
+        unittest.mock.AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.effective_repo_state",
+        unittest.mock.AsyncMock(return_value=desired),
+    )
+    monkeypatch.setattr("daimon.adapters.scheduler.main.mark_dead", unittest.mock.AsyncMock())
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.revoke_session_tokens", unittest.mock.AsyncMock()
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.archive_app_vault", unittest.mock.AsyncMock()
+    )
+    rotate = rotate or unittest.mock.AsyncMock()
+    monkeypatch.setattr("daimon.adapters.scheduler.main.rotate_live_app_tokens", rotate)
+    archive = unittest.mock.AsyncMock()
+    anthropic = SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace(archive=archive)))
+    await _refresh_github_app_sessions(
+        anthropic,
+        db_session_factory,
+        settings=Settings.model_validate(
+            {
+                "database": {"url": "postgresql+asyncpg://localhost/test"},
+                "anthropic": {"api_key": "test"},
+            }
+        ),
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+    )
+    return lister, rotate, archive
+
+
+@pytest.fixture
+def fresh_refresh_state(monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[int, datetime]]:
+    failures: dict[str, tuple[int, datetime]] = {}
+    monkeypatch.setattr("daimon.adapters.scheduler.main._last_app_access_checks", {})
+    monkeypatch.setattr("daimon.adapters.scheduler.main._app_refresh_failures", failures)
+    monkeypatch.setattr("daimon.adapters.scheduler.main._mcp_running_since", {})
+    return failures
+
+
+async def test_mapped_active_turn_rotates_without_archiving(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session()
+    lister, rotate, archive = await _refresh_mapped(
+        db_session_factory, monkeypatch, [[item], [item]]
+    )
+    rotate.assert_awaited_once()
+    assert rotate.await_args.kwargs["active_turn"] is True
+    archive.assert_not_awaited()
+    assert lister.await_args_list[1].kwargs == {"session_id": "mapped-active-turn"}
+
+
+async def test_mapped_refresh_rereads_turn_state_inside_the_fence(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    # The turn finished between the sweep's listing and the fence: the moved
+    # repos now archive the session instead of rotating it as an active turn.
+    _, rotate, archive = await _refresh_mapped(
+        db_session_factory,
+        monkeypatch,
+        [[_mapped_app_session()], [_mapped_app_session(active_turn=False)]],
+    )
+    rotate.assert_not_awaited()
+    archive.assert_awaited_once_with("mapped-active-turn")
+
+
+async def test_mapped_turn_older_than_twelve_hours_stops_refreshing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session(started_ago=timedelta(hours=12, minutes=1))
+    _, rotate, archive = await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]])
+    rotate.assert_not_awaited()
+    archive.assert_not_awaited()
+
+
+async def test_failed_refresh_backs_off_exponentially(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session()
+    rotate = unittest.mock.AsyncMock(side_effect=RuntimeError("mint failed"))
+
+    async def failing_tick(delay: timedelta) -> None:
+        before = datetime.now(UTC)
+        await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+        _, retry_at = fresh_refresh_state["mapped-active-turn"]
+        assert before + delay <= retry_at <= datetime.now(UTC) + delay
+
+    await failing_tick(timedelta(minutes=1))
+    assert fresh_refresh_state["mapped-active-turn"][0] == 1
+    # Still backing off: the next tick neither reads nor mints.
+    await _refresh_mapped(db_session_factory, monkeypatch, [[item]], rotate=rotate)
+    assert rotate.await_count == 1
+    for expected in (2, 4, 8, 16, 30, 30):
+        fresh_refresh_state["mapped-active-turn"] = (
+            fresh_refresh_state["mapped-active-turn"][0],
+            datetime.now(UTC) - timedelta(seconds=1),
+        )
+        await failing_tick(timedelta(minutes=expected))
+    rotate.side_effect = None
+    fresh_refresh_state["mapped-active-turn"] = (7, datetime.now(UTC) - timedelta(seconds=1))
+    await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
+    assert "mapped-active-turn" not in fresh_refresh_state
+
+
+async def test_access_check_with_nothing_to_rotate_clears_the_backoff(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session()
+    item.expires_at = datetime.now(UTC) + timedelta(minutes=50)
+    fresh_refresh_state["mapped-active-turn"] = (4, datetime.now(UTC) - timedelta(seconds=1))
+    _, rotate, _ = await _refresh_mapped(
+        db_session_factory,
+        monkeypatch,
+        [[item], [item]],
+        desired=(("https://github.com/acme/repo",), {11: {"contents": "read"}}),
+    )
+    rotate.assert_not_awaited()
+    assert "mapped-active-turn" not in fresh_refresh_state
+
+
+async def test_refresh_state_is_pruned_for_sessions_no_longer_live(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    import daimon.adapters.scheduler.main as scheduler_main
+
+    checks = scheduler_main._last_app_access_checks  # pyright: ignore[reportPrivateUsage]
+    checks["dead-session"] = datetime.now(UTC)
+    fresh_refresh_state["dead-session"] = (2, datetime.now(UTC) + timedelta(minutes=2))
+    item = _mapped_app_session()
+    await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]])
+    assert "dead-session" not in checks
+    assert "dead-session" not in fresh_refresh_state
+    assert "mapped-active-turn" in checks
+
+
+@pytest.mark.parametrize("missing", [False, True])
+async def test_terminated_mcp_session_is_closed_instead_of_kept_active(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    missing: bool,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    session_id = f"mcp-terminated-{uuid.uuid4()}"
+    await github_issued_tokens.register_app_session_vault(
+        db_session,
+        session_id=session_id,
+        tenant_id=tenant.id,
+        vault_id="terminated-vault",
+        is_unmapped=True,
+        is_mcp=True,
+        agent_id=uuid.uuid4(),
+        account_id=account.id,
+    )
+    await db_session.execute(
+        text(
+            "UPDATE github_app_session_vaults SET last_started_at = :started WHERE session_id = :id"
+        ),
+        {"started": datetime.now(UTC) - timedelta(minutes=47), "id": session_id},
+    )
+    await db_session.commit()
+    archive = unittest.mock.AsyncMock()
+    retrieve = unittest.mock.AsyncMock(return_value=SimpleNamespace(status="terminated"))
+    if missing:
+        retrieve.side_effect = NotFoundError(
+            "session missing",
+            response=httpx.Response(
+                404,
+                request=httpx.Request("GET", f"https://api.anthropic.com/v1/sessions/{session_id}"),
+            ),
+            body=None,
+        )
+    anthropic = SimpleNamespace(
+        beta=SimpleNamespace(
+            sessions=SimpleNamespace(retrieve=retrieve),
+            vaults=SimpleNamespace(archive=archive),
+        )
+    )
+    await _close_github_app_sessions(anthropic, db_session_factory, fernet=None)
+    archive.assert_awaited_once_with("terminated-vault")
+    async with db_session_factory() as session:
+        assert (
+            await github_issued_tokens.list_closed_app_sessions(session, now=datetime.now(UTC))
+            == []
+        )
+
+
+async def test_mcp_refresh_cap_counts_continuous_running_not_session_age(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    import daimon.adapters.scheduler.main as scheduler_main
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    session_id = f"mcp-old-session-{uuid.uuid4()}"
+    await github_issued_tokens.register_app_session_vault(
+        db_session,
+        session_id=session_id,
+        tenant_id=tenant.id,
+        vault_id="old-vault",
+        is_unmapped=True,
+        is_mcp=True,
+        agent_id=uuid.uuid4(),
+        account_id=account.id,
+    )
+    await db_session.execute(
+        text("UPDATE github_app_session_vaults SET created_at = :created WHERE session_id = :id"),
+        {"created": datetime.now(UTC) - timedelta(hours=13), "id": session_id},
+    )
+    await db_session.commit()
+    desired = unittest.mock.AsyncMock(return_value=((), {}))
+    monkeypatch.setattr("daimon.adapters.scheduler.main.effective_repo_state", desired)
+    archive = unittest.mock.AsyncMock()
+    retrieve = unittest.mock.AsyncMock(return_value=SimpleNamespace(status="running"))
+    anthropic = SimpleNamespace(
+        beta=SimpleNamespace(
+            sessions=SimpleNamespace(retrieve=retrieve),
+            vaults=SimpleNamespace(archive=archive),
+        )
+    )
+    settings = Settings.model_validate(
+        {
+            "database": {"url": "postgresql+asyncpg://localhost/test"},
+            "anthropic": {"api_key": "test"},
+        }
+    )
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+
+    async def refresh() -> None:
+        scheduler_main._last_app_access_checks.clear()  # pyright: ignore[reportPrivateUsage]
+        await _refresh_github_app_sessions(
+            anthropic, db_session_factory, settings=settings, fernet=fernet
+        )
+
+    # A 13-hour-old session that has just started running still refreshes and stays open.
+    scheduler_main._app_refresh_failures["gone-session"] = (1, datetime.now(UTC))  # pyright: ignore[reportPrivateUsage]
+    scheduler_main._mcp_running_since["gone-session"] = datetime.now(UTC)  # pyright: ignore[reportPrivateUsage]
+    await refresh()
+    assert desired.await_count == 1
+    running = scheduler_main._mcp_running_since  # pyright: ignore[reportPrivateUsage]
+    assert set(running) == {session_id}
+    assert "gone-session" not in scheduler_main._app_refresh_failures  # pyright: ignore[reportPrivateUsage]
+    await _close_github_app_sessions(anthropic, db_session_factory, fernet=None)
+    archive.assert_not_awaited()
+
+    # Twelve hours of continuous running stops the refresh.
+    running[session_id] = datetime.now(UTC) - timedelta(hours=12, minutes=1)
+    await refresh()
+    assert desired.await_count == 1
+
+    # Seen idle, the running clock resets; the next run refreshes again.
+    retrieve.return_value = SimpleNamespace(status="idle")
+    await refresh()
+    assert session_id not in running
+    retrieve.return_value = SimpleNamespace(status="running")
+    await refresh()
+    assert desired.await_count == 3
 
 
 async def test_mcp_app_session_with_erased_requester_is_retired(

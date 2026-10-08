@@ -381,7 +381,7 @@ async def test_tool_use_edits_the_status_card_before_the_answer_replaces_it(
     targets = {(r.method, _path(r).rsplit("/", 1)[-1]) for r in [*edits, answer]}
     assert targets == {("PUT", "m-1")}, "every edit lands on the card"
     progress = next(r for r in edits if _RUNNING_BASH in _texts(r))
-    assert _texts(progress)[0].startswith("**Working** · "), "the phase follows the turn"
+    assert _texts(progress)[0].startswith("**Working on it…**"), "the card shows active work"
     assert [a["verb"] for a in _actions(progress)] == [card.CANCEL_VERB], "Cancel stays"
     assert str(answer.body["text"]).startswith(AGENT_TEXT), "then the answer replaces it"
 

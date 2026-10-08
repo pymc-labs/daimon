@@ -33,21 +33,24 @@ HAND_OVER_ACTION_ID: Final = "thread_hand_over"
 
 
 def build_hand_over_blocks(*, text: str, agent_id: str, agent_name: str) -> list[dict[str, Any]]:
-    """The notice text plus one Hand over button carrying the agent's MA id."""
+    """Separate the thread state, supported action, and new-thread hint."""
+    summary, _, hint = text.partition("\n")
     return [
-        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": summary}},
+        {"type": "divider"},
         {
             "type": "actions",
             "elements": [
                 {
                     "type": "button",
                     "action_id": HAND_OVER_ACTION_ID,
-                    "text": {"type": "plain_text", "text": f"Hand over to {agent_name}"[:75]},
+                    "text": {"type": "plain_text", "text": f"Switch to {agent_name}"[:75]},
                     "value": agent_id,
                     "style": "primary",
                 }
             ],
         },
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": hint}]},
     ]
 
 

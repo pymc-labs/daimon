@@ -75,8 +75,8 @@ from discord.ext import commands
 
 _log = structlog.get_logger()
 
-_CALLBACK_FAILED = "Something went wrong opening the form -- please try again."
-_SUBMIT_FAILED = "Something went wrong sending your request -- please try again."
+_CALLBACK_FAILED = "That didn't work. Try again."
+_SUBMIT_FAILED = "That didn't work. Try again."
 # The person-facing copy is shared with Slack (`daimon.core.support_escalation`).
 _EMPTY_NOTE = EMPTY_NOTE
 _MALFORMED = UNAVAILABLE
@@ -157,7 +157,7 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
         self.note_input: discord.ui.TextInput[SupportModal] = discord.ui.TextInput(
             label="What do you need help with?",
             # Discord caps a label at 45 characters; Slack says this in its label.
-            placeholder="Someone from the team will reply.",
+            placeholder="Write a few words.",
             style=discord.TextStyle.paragraph,
             required=True,
             max_length=4000,

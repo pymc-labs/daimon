@@ -98,7 +98,7 @@ class TestBuildHelpView:
         """Lines starting with '-# /' must match '-# /command — description' pattern."""
         view = build_help_view()
         texts = _collect_text_display_content(view)
-        pattern = re.compile(r"^-# /[a-z-]+ — ")
+        pattern = re.compile(r"^-# /[a-z-]+(?: [a-z-]+)? — ")
         for text in texts:
             for line in text.splitlines():
                 if line.startswith("-# /"):

@@ -940,6 +940,7 @@ class TeamsApp:
                     default_name=self.runtime.deployment_default.agent_name,
                 ),
                 ask_human=self._ask_human,
+                direct_chat=inbound.kind == "dm",
             )
             holder.append(attempt)
             return attempt
@@ -995,6 +996,8 @@ class TeamsApp:
         self,
         error: SessionPreparationFailed | SessionBusyError | SessionAgentMismatch,
         agent: BetaManagedAgentsAgent,
+        *,
+        direct_chat: bool,
     ) -> tuple[str, tuple[ExecuteAction, ...]]:
         """The notice for a refused bind, and the Hand over button when the agent changed."""
         name = agent.name
@@ -1006,7 +1009,11 @@ class TeamsApp:
         with contextlib.suppress(anthropic.APIStatusError):
             owner = (await self.runtime.anthropic.beta.agents.retrieve(error.source_agent_id)).name
         text = render_responder_changed_without_handoff(
-            new_responder=name, owner=owner, channel="this chat", offer_button=True
+            new_responder=name,
+            owner=owner,
+            channel="this chat",
+            offer_button=True,
+            new_thread_hint=not direct_chat,
         )
         return text, (hand_over_button(agent_id=agent.id, agent_name=name),)
 
@@ -1043,7 +1050,9 @@ class TeamsApp:
                 deadline=deadline,
             )
         except _BIND_REFUSALS as error:
-            text, actions = await self._refusal(error, admission.agent)
+            text, actions = await self._refusal(
+                error, admission.agent, direct_chat=inbound.kind == "dm"
+            )
             await lifecycle.close_with_notice(text, actions=actions)
             if reraise:
                 raise
@@ -1153,7 +1162,9 @@ class TeamsApp:
                 image_blocks=attachments.image_blocks or None,
                 deadline=deadline,
                 confirm_write=self.confirmations.hook(
-                    conversation_id=inbound.conversation_id, service_url=inbound.service_url
+                    conversation_id=inbound.conversation_id,
+                    service_url=inbound.service_url,
+                    requester_display_name=inbound.user_name,
                 ),
             )
         if outcome.mapping_id is not None:

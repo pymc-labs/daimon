@@ -13,6 +13,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.cli.errors import run_cli
 from daimon.core.config import load_settings
 from daimon.core.db import build_engine, build_session_factory
+from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.github_app_session import (
     archive_app_vault,
     effective_repo_urls,
@@ -20,6 +21,8 @@ from daimon.core.github_app_session import (
     rotate_live_app_tokens,
 )
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
@@ -36,7 +39,10 @@ from daimon.core.stores.github_connect import (
     cli_account_id,
     mint_invitation,
 )
+from daimon.core.stores.security_audit import append_event
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import (
+    get_thread_session_by_id,
     list_live_sessions_for_agent,
     mark_dead,
     record_app_token_refresh,
@@ -46,6 +52,19 @@ from rich.console import Console
 github_app = typer.Typer(help="GitHub App connection commands.")
 grants_app = typer.Typer(help="Stage and activate agent GitHub grants.")
 github_app.add_typer(grants_app, name="grants")
+
+
+async def _require_tenant_agent(
+    anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, agent_name: str
+) -> None:
+    """Verify both CLI agent arguments against a live MA agent in this tenant."""
+    rows = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+    if not any(
+        derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(row.id)) == agent_id
+        and row.name == agent_name
+        for row in rows
+    ):
+        raise ValueError("agent must be a current agent in this workspace")
 
 
 def _grant_session_action(
@@ -190,25 +209,37 @@ def _run_grant_command(
                                     fernet=fernet,
                                 )
                                 if _grant_session_action(action, snapshot, urls) == "rotate":
-                                    await rotate_live_app_tokens(
-                                        anthropic,
-                                        sessionmaker,
-                                        session_id=mapped.ma_session_id,
-                                        tenant_id=tenant,
-                                        agent_id=agent,
-                                        account_id=mapped.account_id,
-                                        is_external=False,
-                                        vault_id=snapshot.vault_id,
-                                        resource_ids=snapshot.repo_resource_ids,
-                                        config=settings.github_app,
-                                        fernet=fernet,
-                                    )
-                                    async with sessionmaker.begin() as session:
-                                        await record_app_token_refresh(
-                                            session,
-                                            ma_session_id=mapped.ma_session_id,
-                                            issued_at=int(datetime.now(UTC).timestamp()),
-                                        )
+                                    # The scheduler refresh and turn start/finish take the
+                                    # same fence; read the turn state only once inside it.
+                                    async with session_mutation_fence(
+                                        sessionmaker, mapped.ma_session_id, check=False
+                                    ):
+                                        async with sessionmaker() as session:
+                                            current = await get_thread_session_by_id(
+                                                session, id=mapped.id
+                                            )
+                                        if current is not None and current.status == "live":
+                                            await rotate_live_app_tokens(
+                                                anthropic,
+                                                sessionmaker,
+                                                session_id=mapped.ma_session_id,
+                                                tenant_id=tenant,
+                                                agent_id=agent,
+                                                account_id=mapped.account_id,
+                                                is_external=False,
+                                                vault_id=snapshot.vault_id,
+                                                resource_ids=snapshot.repo_resource_ids,
+                                                config=settings.github_app,
+                                                fernet=fernet,
+                                                active_turn=current.active_turn_message_id
+                                                is not None,
+                                            )
+                                            async with sessionmaker.begin() as session:
+                                                await record_app_token_refresh(
+                                                    session,
+                                                    ma_session_id=mapped.ma_session_id,
+                                                    issued_at=int(datetime.now(UTC).timestamp()),
+                                                )
                                     rotated_ids.add(mapped.ma_session_id)
                                     continue
                             if mapped.ma_session_id not in archived_ids:
@@ -296,6 +327,10 @@ def connect_link(
             ),
         ),
     ],
+    agent: Annotated[
+        uuid.UUID | None, typer.Option("--agent", help="Agent UUID to connect.")
+    ] = None,
+    agent_name: Annotated[str | None, typer.Option("--agent-name", help="Agent name.")] = None,
 ) -> None:
     """Print a single-use connection invitation on a workspace admin's behalf."""
     settings = load_settings()
@@ -317,6 +352,16 @@ def connect_link(
         engine = build_engine(str(settings.database.url))
         try:
             sessionmaker = build_session_factory(engine)
+            if (agent is None) != (agent_name is None):
+                raise ValueError("agent id and name must be supplied together")
+            if agent is not None and agent_name is not None:
+                async with AsyncAnthropic(
+                    api_key=settings.anthropic.api_key.get_secret_value(),
+                    base_url=str(settings.anthropic.base_url),
+                ) as anthropic:
+                    await _require_tenant_agent(
+                        anthropic, tenant_id=tenant, agent_id=agent, agent_name=agent_name
+                    )
             async with sessionmaker.begin() as session:
                 account_id = await admin_account_for_platform_user(
                     session, tenant_id=tenant, external_id=requester
@@ -326,6 +371,22 @@ def connect_link(
                     tenant_id=tenant,
                     requester_account_id=account_id,
                     requester_label=requester,
+                    agent_id=agent,
+                    agent_name=agent_name,
+                    operator_issued=True,
+                )
+                workspace = await get_tenant(session, tenant)
+                await append_event(
+                    session,
+                    tenant_id=tenant,
+                    account_id=account_id,
+                    agent_id=agent,
+                    platform=workspace.platform if workspace is not None else None,
+                    platform_user_id=requester,
+                    tool_name="github_connect",
+                    operation="github_connect",
+                    outcome="allowed",
+                    reason="admin link minted",
                 )
             console.print(f"{root}/oauth/github/connect/{token}")
         finally:
