@@ -128,6 +128,9 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
         )
     else:
         state, title, colour, subline = "channel", f"{name} answers here", "#2ECC71", None
+    if state in {"no_view", "no_replies", "no_agent"}:
+        # Nothing answers here, so reading and publishing scope would mislead.
+        return HereCardPresentation(state=state, title=title, colour=colour, subline=subline)
     reading = {
         "any": "Any conversation",
         "inside": "Conversations here only",

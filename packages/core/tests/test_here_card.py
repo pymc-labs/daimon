@@ -33,25 +33,15 @@ NOW = datetime(2026, 1, 1, tzinfo=UTC)
     [
         (
             "no_view",
-            [
-                "No channel access",
-                "Ask an admin to check Daimon's access.",
-                "Reading: Any conversation",
-                "Publishing: No approval",
-            ],
+            ["No channel access", "Ask an admin to check Daimon's access."],
         ),
         (
             "no_replies",
-            ["Replies disabled here", "Reading: Any conversation", "Publishing: No approval"],
+            ["Replies disabled here"],
         ),
         (
             "no_agent",
-            [
-                "No agent selected",
-                "Ask an admin: /agent-setup",
-                "Reading: Any conversation",
-                "Publishing: No approval",
-            ],
+            ["No agent selected", "Ask an admin: /agent-setup"],
         ),
         (
             "blocked",
@@ -100,6 +90,26 @@ def test_mcp_plain_text_states(state: str, expected_lines: list[str]) -> None:
     assert "ghp_fake_value" not in text
     assert "Channel setting. Threads can differ." not in text
     assert " · " not in text
+
+
+def test_unknown_reading_publishing_and_history_drop_their_lines() -> None:
+    card = HereCard(
+        channel_rule=ChannelRule(),
+        who_may_answer="",
+        reads_kept_inside=False,
+        agent_name="ResearchBot",
+        tier="channel",
+        bot_can_view=True,
+        effective_writers="any",
+        agent_can_answer_here=True,
+        effective_readers="unknown",
+        publishing_needs_approval=None,
+        bot_can_read_history=None,
+        text="",
+    )
+    shown = here_card_module.render_here_card(card)
+    assert (shown.reading, shown.publishing, shown.extras) == (None, None, ())
+    assert render_here_card_text(card).splitlines() == ["ResearchBot answers here"]
 
 
 def test_card_title_fits_discord_and_slack_limits() -> None:

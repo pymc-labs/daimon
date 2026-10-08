@@ -13,7 +13,7 @@ from daimon.adapters.slack.here import (  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import ChannelRule
 from daimon.core.errors import DaimonError
-from daimon.core.here_card import HereCard, render_here_card_text
+from daimon.core.here_card import CredentialStatus, HereCard, render_here_card_text
 from slack_sdk.errors import SlackApiError
 
 
@@ -58,6 +58,18 @@ async def test_setter_uses_plain_display_name() -> None:
     assert await _setter_display_name(client, "U123") == "Alex"
 
 
+CREDENTIALS = (
+    CredentialStatus(name="OPENAI_API_KEY", kind="agent key", configured=True),
+    CredentialStatus(name="sk-live-fake-value", kind="MCP token", configured=True),
+    CredentialStatus(
+        name="GitHub (https://github.com/acme/private-repo)",
+        kind="GitHub installation token",
+        configured=True,
+    ),
+)
+ANSWERING = {"blocked", "channel", "thread"}
+
+
 def _card(state: str) -> HereCard:
     card = HereCard(
         channel_rule=ChannelRule(),
@@ -71,6 +83,7 @@ def _card(state: str) -> HereCard:
         effective_readers="any",
         publishing_needs_approval=False,
         bot_can_read_history=True,
+        credentials=CREDENTIALS,
         text="",
     )
     return card.model_copy(update={"text": render_here_card_text(card)})
@@ -91,6 +104,7 @@ def test_slack_block_kit_states(state: str, title: str, colour: str, subline: st
     attachment = build_here_attachment(_card(state))
     blocks = attachment["blocks"]
     assert attachment["color"] == colour
+    assert attachment["fallback"] == _card(state).text
     assert blocks[0] == {"type": "header", "text": {"type": "plain_text", "text": title}}
     assert [
         block["text"]["text"] for block in blocks if block["type"] == "section" and "text" in block
@@ -100,12 +114,19 @@ def test_slack_block_kit_states(state: str, title: str, colour: str, subline: st
         for block in blocks
         if block["type"] == "section"
         for field in block.get("fields", [])
-    } == {"*Reading*\nAny conversation", "*Publishing*\nNo approval"}
+    } == (
+        {"*Reading*\nAny conversation", "*Publishing*\nNo approval"}
+        if state in ANSWERING
+        else set()
+    )
     assert blocks[-1] == {
         "type": "context",
         "elements": [{"type": "plain_text", "text": "Channel setting. Threads can differ."}],
     }
     assert " · " not in str(blocks)
+    for credential in CREDENTIALS:
+        assert credential.name not in str(attachment)
+        assert credential.kind not in str(attachment)
 
 
 def test_slack_extra_lines_and_no_credentials() -> None:
@@ -122,7 +143,19 @@ def test_slack_extra_lines_and_no_credentials() -> None:
             }
         ],
     }
-    assert "SECRET_NAME" not in str(blocks)
+    for credential in CREDENTIALS:
+        assert credential.name not in str(blocks)
+
+
+def test_slack_unknown_publishing_and_history_drop_their_lines() -> None:
+    card = _card("channel").model_copy(
+        update={"publishing_needs_approval": None, "bot_can_read_history": None}
+    )
+    blocks = build_here_attachment(card)["blocks"]
+    assert [field["text"] for block in blocks for field in block.get("fields", [])] == [
+        "*Reading*\nAny conversation"
+    ]
+    assert "No access to earlier messages" not in str(blocks)
 
 
 async def test_here_posts_ephemeral_card() -> None:
@@ -158,7 +191,7 @@ async def test_here_posts_ephemeral_card() -> None:
     client.chat_postEphemeral.assert_awaited_once_with(
         channel="C1",
         user="U1",
-        text=_card("channel").text,
+        text="Channel status",
         attachments=[build_here_attachment(_card("channel"))],
         parse="none",
         link_names=False,
@@ -181,7 +214,7 @@ async def test_private_channel_without_bot_membership_returns_card_by_response_u
     runtime.sessionmaker.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
     runtime.sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
     webhook = MagicMock()
-    webhook.send = AsyncMock()
+    webhook.send_dict = AsyncMock()
     with (
         patch("daimon.adapters.slack.here.resolve_web_client", new=AsyncMock(return_value=client)),
         patch("daimon.adapters.slack.here.resolve_is_admin", new=AsyncMock(return_value=False)),
@@ -204,8 +237,15 @@ async def test_private_channel_without_bot_membership_returns_card_by_response_u
             },
         )
     assert load.await_args.kwargs["bot_can_view"] is False
-    webhook.send.assert_awaited_once()
-    assert webhook.send.await_args.kwargs["attachments"][0]["color"] == "#ED4245"
+    webhook.send_dict.assert_awaited_once_with(
+        {
+            "text": "Channel status",
+            "attachments": [build_here_attachment(_card("no_view"))],
+            "response_type": "ephemeral",
+            "parse": "none",
+        }
+    )
+    assert build_here_attachment(_card("no_view"))["color"] == "#ED4245"
     client.chat_postEphemeral.assert_not_awaited()
 
 

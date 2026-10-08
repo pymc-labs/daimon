@@ -5,7 +5,18 @@ from __future__ import annotations
 import pytest
 from daimon.adapters.discord.commands.here import build_here_embed
 from daimon.core.access_policy import ChannelRule
-from daimon.core.here_card import HereCard
+from daimon.core.here_card import CredentialStatus, HereCard
+
+CREDENTIALS = (
+    CredentialStatus(name="OPENAI_API_KEY", kind="agent key", configured=True),
+    CredentialStatus(name="sk-live-fake-value", kind="MCP token", configured=True),
+    CredentialStatus(
+        name="GitHub (https://github.com/acme/private-repo)",
+        kind="GitHub installation token",
+        configured=True,
+    ),
+)
+ANSWERING = {"blocked", "channel", "thread"}
 
 
 def _card(state: str) -> HereCard:
@@ -21,6 +32,7 @@ def _card(state: str) -> HereCard:
         effective_readers="any",
         publishing_needs_approval=False,
         bot_can_read_history=True,
+        credentials=CREDENTIALS,
         text="",
     )
 
@@ -41,11 +53,18 @@ def test_discord_embed_states(state: str, title: str, colour: int, subline: str 
     assert embed["title"] == title
     assert embed["color"] == colour
     assert embed.get("description") == subline
-    assert embed["fields"] == [
-        {"name": "Reading", "value": "Any conversation", "inline": True},
-        {"name": "Publishing", "value": "No approval", "inline": True},
-    ]
+    assert embed.get("fields", []) == (
+        [
+            {"name": "Reading", "value": "Any conversation", "inline": True},
+            {"name": "Publishing", "value": "No approval", "inline": True},
+        ]
+        if state in ANSWERING
+        else []
+    )
     assert "footer" not in embed
+    for credential in CREDENTIALS:
+        assert credential.name not in str(embed)
+        assert credential.kind not in str(embed)
 
 
 def test_discord_embed_extra_lines_and_no_credentials() -> None:
@@ -58,4 +77,13 @@ def test_discord_embed_extra_lines_and_no_credentials() -> None:
         "value": "Only own agents answer here\nNo access to earlier messages",
         "inline": False,
     }
-    assert "SECRET_NAME" not in str(embed)
+    for credential in CREDENTIALS:
+        assert credential.name not in str(embed)
+
+
+def test_discord_unknown_publishing_and_history_drop_their_fields() -> None:
+    card = _card("channel").model_copy(
+        update={"publishing_needs_approval": None, "bot_can_read_history": None}
+    )
+    embed = build_here_embed(card).to_dict()
+    assert embed["fields"] == [{"name": "Reading", "value": "Any conversation", "inline": True}]

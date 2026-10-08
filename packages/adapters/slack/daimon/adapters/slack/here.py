@@ -17,6 +17,8 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.webhook.async_client import AsyncWebhookClient
 
+NOTIFICATION_TEXT = "Channel status"
+
 
 async def _channels(client: AsyncWebClient, *, user_id: str | None, types: str) -> dict[str, bool]:
     """Collect every channel in a bot or caller membership listing."""
@@ -80,7 +82,7 @@ def build_here_attachment(card: HereCard) -> dict[str, Any]:
             "elements": [{"type": "plain_text", "text": "Channel setting. Threads can differ."}],
         }
     )
-    return {"color": shown.colour, "blocks": blocks}
+    return {"color": shown.colour, "fallback": card.text, "blocks": blocks}
 
 
 async def _setter_display_name(client: AsyncWebClient, external_id: str) -> str | None:
@@ -149,17 +151,22 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 caller_can_view=caller_view,
             )
         response_url = str(payload.get("response_url") or "")
+        # The attachment carries the card; top-level text is only the notification
+        # line, so Slack does not render the card twice.
         if not bot_view and response_url:
-            await AsyncWebhookClient(response_url).send(
-                text=card.text,
-                attachments=[build_here_attachment(card)],
-                response_type="ephemeral",
+            await AsyncWebhookClient(response_url).send_dict(
+                {
+                    "text": NOTIFICATION_TEXT,
+                    "attachments": [build_here_attachment(card)],
+                    "response_type": "ephemeral",
+                    "parse": "none",
+                }
             )
         else:
             await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id,
                 user=user_id,
-                text=card.text,
+                text=NOTIFICATION_TEXT,
                 attachments=[build_here_attachment(card)],
                 parse="none",
                 link_names=False,
