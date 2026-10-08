@@ -79,7 +79,7 @@ class PurgePreview(BaseModel):
     account: PurgePreviewRow  # singular: 1 if row exists else 0
     user_skills: PurgePreviewRow
     github_credentials: PurgePreviewRow
-    github_connect_requests: PurgePreviewRow
+    github_connect_requests: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     github_user_links: PurgePreviewRow
     github_oauth_states: PurgePreviewRow
     mcp_tokens: PurgePreviewRow
