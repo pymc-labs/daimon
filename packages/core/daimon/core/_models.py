@@ -2506,6 +2506,9 @@ class GitHubConnectInvitation(Base):
     requester_label: Mapped[str] = mapped_column(Text)
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     agent_name: Mapped[str | None] = mapped_column(Text)
+    operator_issued: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     activation_status: Mapped[str | None] = mapped_column(Text)
     connected_repo_count: Mapped[int | None] = mapped_column(Integer)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

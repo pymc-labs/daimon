@@ -152,9 +152,6 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                 target_name, target_ma_id = matches[0].name, str(matches[0].id)
             agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=target_ma_id)
             async with runtime.sessionmaker() as session:
-                await require_app_eligible_agent(
-                    session, tenant_id=tenant_id, agent_name=target_name
-                )
                 pending = await pending_update_for_agent(
                     session, tenant_id=tenant_id, agent_id=agent_id
                 )
@@ -172,6 +169,10 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
+            async with runtime.sessionmaker() as session:
+                await require_app_eligible_agent(
+                    session, tenant_id=tenant_id, agent_id=agent_id, agent_name=target_name
+                )
             async with runtime.sessionmaker.begin() as session:
                 principal = await get_or_create_platform_principal(
                     session,

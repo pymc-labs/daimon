@@ -448,7 +448,7 @@ def build_oauth_github_routes(
                 name = html.escape(invitation.agent_name or "This agent")
                 body = (
                     f"<h1>Connected {len(repos)} repos.</h1>"
-                    f"<p>{name} still uses a saved key. "
+                    f"<p>{name} still uses a saved key. This operator-issued link "
                     "An admin must run /github connect in Discord or Slack, then confirm "
                     "Update and restart chats.</p>"
                 )

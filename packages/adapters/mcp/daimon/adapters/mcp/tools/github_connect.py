@@ -76,7 +76,7 @@ async def _github_connect_impl(
     async with runtime.session_factory.begin() as session:
         try:
             await require_app_eligible_agent(
-                session, tenant_id=auth.tenant_id, agent_name=agent.name
+                session, tenant_id=auth.tenant_id, agent_id=agent_id, agent_name=agent.name
             )
         except ClientAgentConnectionError:
             return ConnectResult(status="client_agent", message=CLIENT_AGENT_MESSAGE)

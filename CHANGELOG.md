@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Agents can offer an admin a private GitHub connect link bound to the current agent; members can record a setup request. `/github connect` is available in Discord and Slack with a private button. Client channel agents keep their saved GitHub key. Confirmed repos activate automatically for agents without saved keys; saved-key agents require **Update and restart chats**. New selections default to **Read and write**: push branches, open issues and pull requests. **Read only** reads code, issues and pull requests.
+- Agents can offer an admin a private GitHub connect link bound to the current agent; members can record a setup request. `/github connect` is available in Discord and Slack with a private button. Self-serve links activate only agents with no saved GitHub key, working repo or skill repo, and no channel pin. An operator can issue an agent-bound CLI link for a saved-key agent; it stages an update that requires **Update and restart chats**. New selections default to **Read and write**: push branches, open issues and pull requests. **Read only** reads code, issues and pull requests.
 - Agent identity now has a deployment switch, `DAIMON_AGENT_IDENTITY__ENABLED`,
   off by default. When off, Slack and Discord post as the app, Discord replies
   need a mention, Teams omits the agent name prefix, and setup panels hide

@@ -139,6 +139,6 @@ async def test_member_request_is_recorded_and_admin_link_goes_only_to_private_de
     )
     assert pinned.status == "client_agent"
     assert pinned.message == (
-        "This agent uses its saved GitHub key. Ask your Daimon operator to change it."
+        "This agent uses a saved GitHub key. Ask your Daimon operator to switch it."
     )
     delivery.assert_not_awaited()

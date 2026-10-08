@@ -106,7 +106,6 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             target_ma_id = roster.answering.ma_agent_id
         agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=target_ma_id)
         async with runtime.sessionmaker() as session:
-            await require_app_eligible_agent(session, tenant_id=tenant_id, agent_name=target_name)
             pending = await pending_update_for_agent(
                 session, tenant_id=tenant_id, agent_id=agent_id
             )
@@ -140,6 +139,10 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 ],
             )
             return
+        async with runtime.sessionmaker() as session:
+            await require_app_eligible_agent(
+                session, tenant_id=tenant_id, agent_id=agent_id, agent_name=target_name
+            )
         async with runtime.sessionmaker.begin() as session:
             principal = await get_or_create_platform_principal(
                 session,

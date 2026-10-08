@@ -187,8 +187,12 @@ tokens. Run it alongside the MCP service.
 
 Ask an agent to connect GitHub, or run `/github connect` in Discord or Slack.
 The admin gets a private, agent-bound link; the selected repos activate for
-that agent when confirmed. An agent with a saved GitHub key waits for an admin
-to confirm **Update and restart chats** in `/github connect` before switching.
+that agent when confirmed. Self-serve links refuse agents with a saved GitHub
+key, working repo or skill repo credential, or a channel pin. An operator can
+issue an agent-bound link with `daimon github connect-link --tenant <workspace-uuid>
+--requester <platform-user-id> --agent <agent-uuid> --agent-name <agent-name>`.
+That link stages a saved-key update; an admin then confirms **Update and restart
+chats** in `/github connect` before switching.
 Members can request setup; their request is recorded for an admin. For an
 operator fallback, print a seven-day, single-use invitation with
 `daimon github connect-link --tenant <workspace-uuid> --requester <platform-user-id>`.

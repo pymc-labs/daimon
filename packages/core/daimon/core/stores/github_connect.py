@@ -36,22 +36,45 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
-CLIENT_AGENT_MESSAGE = (
-    "This agent uses its saved GitHub key. Ask your Daimon operator to change it."
-)
+CLIENT_AGENT_MESSAGE = "This agent uses a saved GitHub key. Ask your Daimon operator to switch it."
 
 
 class ClientAgentConnectionError(ValueError):
-    """A channel-pinned client agent cannot use the shared GitHub App."""
+    """Self-serve GitHub setup cannot switch an agent's saved GitHub state."""
 
 
 async def require_app_eligible_agent(
-    session: AsyncSession, *, tenant_id: uuid.UUID, agent_name: str
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, agent_name: str
 ) -> None:
     policy = await load_access_policy(session, tenant_id=tenant_id)
     rule = policy.agent_rules.get(agent_name)
     if rule is not None and rule.runs_in is not None:
         raise ClientAgentConnectionError(CLIENT_AGENT_MESSAGE)
+    if await has_saved_github_state(session, tenant_id=tenant_id, agent_id=agent_id):
+        raise ClientAgentConnectionError(CLIENT_AGENT_MESSAGE)
+
+
+async def has_saved_github_state(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> bool:
+    if await agent_github_binding.get_agent_github_binding(session, agent_id=agent_id):
+        return True
+    for key in ("GH_TOKEN", "GITHUB_TOKEN"):
+        if await session.get(AgentFile, (tenant_id, agent_id, key)) is not None:
+            return True
+    if await session.get(AgentRepoBinding, (tenant_id, agent_id)) is not None:
+        return True
+    return (
+        await session.scalar(
+            select(AgentSkillRepoCredential.repo_url)
+            .where(
+                AgentSkillRepoCredential.tenant_id == tenant_id,
+                AgentSkillRepoCredential.agent_id == agent_id,
+            )
+            .limit(1)
+        )
+        is not None
+    )
 
 
 async def revoke_invitation(session: AsyncSession, *, token: str) -> None:
@@ -107,6 +130,7 @@ class Invitation(BaseModel):
     requester_label: str
     agent_id: uuid.UUID | None
     agent_name: str | None
+    operator_issued: bool
     activation_status: Literal["activated", "update_pending"] | None
     connected_repo_count: int | None
     expires_at: datetime
@@ -132,6 +156,7 @@ async def mint_invitation(
     requester_label: str | None = None,
     agent_id: uuid.UUID | None = None,
     agent_name: str | None = None,
+    operator_issued: bool = False,
 ) -> str:
     account = await session.get(Account, requester_account_id)
     if (
@@ -146,8 +171,10 @@ async def mint_invitation(
         raise ValueError("workspace not found")
     if (agent_id is None) != (agent_name is None):
         raise ValueError("agent id and name must be supplied together")
-    if agent_name is not None:
-        await require_app_eligible_agent(session, tenant_id=tenant_id, agent_name=agent_name)
+    if agent_name is not None and agent_id is not None and not operator_issued:
+        await require_app_eligible_agent(
+            session, tenant_id=tenant_id, agent_id=agent_id, agent_name=agent_name
+        )
     token = secrets.token_urlsafe(32)
     session.add(
         GitHubConnectInvitation(
@@ -158,6 +185,7 @@ async def mint_invitation(
             requester_label=requester_label or str(requester_account_id),
             agent_id=agent_id,
             agent_name=agent_name,
+            operator_issued=operator_issued,
             expires_at=datetime.now(UTC) + timedelta(days=7),
         )
     )
@@ -223,9 +251,13 @@ async def activate_confirmed_agent(
     if invitation.agent_id is None:
         return None
     agent_id = invitation.agent_id
-    await require_app_eligible_agent(
-        session, tenant_id=invitation.tenant_id, agent_name=invitation.agent_name or ""
-    )
+    if not invitation.operator_issued:
+        await require_app_eligible_agent(
+            session,
+            tenant_id=invitation.tenant_id,
+            agent_id=agent_id,
+            agent_name=invitation.agent_name or "",
+        )
     has_pat = await agent_github_binding.get_agent_github_binding(session, agent_id=agent_id)
     working = await session.get(AgentRepoBinding, (invitation.tenant_id, agent_id))
     skill_repos = list(
@@ -317,6 +349,7 @@ async def activate_pending_agent(
             GitHubConnectInvitation.tenant_id == tenant_id,
             GitHubConnectInvitation.agent_id == agent_id,
             GitHubConnectInvitation.activation_status == "update_pending",
+            GitHubConnectInvitation.operator_issued.is_(True),
         )
         .order_by(GitHubConnectInvitation.used_at.desc())
         .limit(1)
@@ -324,9 +357,13 @@ async def activate_pending_agent(
     )
     if invitation is None:
         return False
-    await require_app_eligible_agent(
-        session, tenant_id=tenant_id, agent_name=invitation.agent_name or ""
-    )
+    if not invitation.operator_issued:
+        await require_app_eligible_agent(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            agent_name=invitation.agent_name or "",
+        )
     await _drop_stale_grants(session, tenant_id=tenant_id, agent_id=agent_id)
     await _check_required_repos(session, tenant_id=tenant_id, agent_id=agent_id)
     if not await session.scalar(
@@ -461,6 +498,7 @@ async def pending_update_for_agent(
             GitHubConnectInvitation.tenant_id == tenant_id,
             GitHubConnectInvitation.agent_id == agent_id,
             GitHubConnectInvitation.activation_status == "update_pending",
+            GitHubConnectInvitation.operator_issued.is_(True),
         )
         .order_by(GitHubConnectInvitation.used_at.desc())
         .limit(1)

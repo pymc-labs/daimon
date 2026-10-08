@@ -346,6 +346,7 @@ def connect_link(
                     requester_label=requester,
                     agent_id=agent,
                     agent_name=agent_name,
+                    operator_issued=True,
                 )
             console.print(f"{root}/oauth/github/connect/{token}")
         finally:
