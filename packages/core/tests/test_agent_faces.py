@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from io import BytesIO
 
 import numpy as np
 import pytest
+from daimon.core import agent_faces
 from daimon.core.agent_faces import (
     CLASSIC,
     FaceCombo,
     assign,
+    choose,
     decode_combo,
     encode_combo,
     render,
@@ -48,6 +51,18 @@ def test_props_reach_inside_the_circular_header_crop() -> None:
         assert float(delta[inside].mean()) > 2, "the prop must be visible inside a circular header"
 
 
+def test_assignment_prefers_underused_colour_before_expression_distance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous: FaceCombo = (0, "happy", "laugh", 0, False, "default")
+    same_colour: FaceCombo = (0, "angry", "angry", 0, False, "default")
+    fresh_colour: FaceCombo = (1, "happy", "laugh", 0, False, "default")
+    pictures = {previous: 0, same_colour: 20, fresh_colour: 6}
+    monkeypatch.setattr(agent_faces, "candidates", lambda _key, _count: [same_colour, fresh_colour])
+    monkeypatch.setattr(agent_faces, "thumbnail", lambda combo: np.array([pictures[combo]]))
+    assert choose("analyst", [previous], count=2) == fresh_colour
+
+
 def test_five_hundred_faces_are_distinct_at_twenty_pixels() -> None:
     names = [f"agent_{i:04d}" for i in range(500)]
     faces = assign(names)
@@ -58,8 +73,20 @@ def test_five_hundred_faces_are_distinct_at_twenty_pixels() -> None:
     assert not np.any(distances < 4), "near-identical faces remain at 20 px"
     hats = sum(combo[3] != 0 for combo in faces.values())
     shades = sum(combo[4] for combo in faces.values())
+    colours = Counter(combo[0] for combo in faces.values())
+    eyes = Counter(combo[1] for combo in faces.values())
+    mouths = Counter(combo[2] for combo in faces.values())
+    classic = sum(
+        combo[1:3] == ("happy", "laugh") and combo[3] == 0 and not combo[4]
+        for combo in faces.values()
+    )
     assert 75 <= hats <= 150, "headwear should remain a minority of assigned faces"
     assert 25 <= shades <= 75, "shades should remain a minority of assigned faces"
+    assert len(colours) == 36
+    assert max(colours.values()) - min(colours.values()) <= 3
+    assert classic >= 20, "the production face should be a common draw"
+    assert sum(eyes[name] for name in ("pointing", "waving", "typing", "shrug", "turn-front")) < 50
+    assert mouths["wink"] < 30, "the tongue-out expression should be uncommon"
 
 
 @pytest.mark.asyncio

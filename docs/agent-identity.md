@@ -179,8 +179,11 @@ Named-agent routing is tracked separately from this identity work.
   once at first use. The production mascot supplies the base face and the
   canonical expression sprites supply traced eyes and mouths. Five brow shapes,
   a background palette, headwear and shades provide further variation. Weighted
-  candidates are compared as 20 px circular thumbnails against existing faces
-  in the tenant; a plain face is preferred when it is sufficiently distinct.
+  candidates favour the canonical expressions, including the production face's
+  happy eyes and laugh mouth. Novel expressions are rare. Candidates are
+  compared as 20 px circular thumbnails against existing faces in the tenant;
+  among sufficiently distinct plain faces, the least-used background colour
+  wins before expression distance.
   The selected combination and PNG are stored together, so later agents do not
   change earlier assignments. Reset renders the same combination with a new
   token. The built-in agent keeps its fixed classic platform avatar.

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 from typing import cast
@@ -74,6 +75,11 @@ _EXPRESSIONS = (
     "shrug",
     "turn-front",
 )
+_CANON_EYES = ("happy", "excited", "wink", "angry", "sleepy", "thinking", "sad")
+_CANON_MOUTHS = ("laugh", "happy", "excited", "angry", "sleepy", "thinking", "sad")
+_NOVEL_EYES = tuple(name for name in _EXPRESSIONS if name not in _CANON_EYES)
+_NOVEL_MOUTHS = tuple(name for name in _EXPRESSIONS if name not in _CANON_MOUTHS)
+_VALID_MOUTHS = (*_EXPRESSIONS, "laugh")
 _BROWS = ("default", "raised", "angry", "worried", "flat")
 _HATS: tuple[tuple[str | None, str | None], ...] = (
     (None, None),
@@ -94,6 +100,7 @@ _MOUTH_WIDTH = {
     "angry": 0.26,
     "excited": 0.42,
     "happy": 0.33,
+    "laugh": 0.40,
     "sad": 0.26,
     "sleepy": 0.42,
     "thinking": 0.27,
@@ -104,7 +111,7 @@ _MOUTH_WIDTH = {
     "shrug": 0.32,
     "turn-front": 0.32,
 }
-CLASSIC: FaceCombo = (0, "happy", "happy", 0, False, "default")
+CLASSIC: FaceCombo = (0, "happy", "laugh", 0, False, "default")
 HAT_SHARE = 0.20
 SHADES_SHARE = 0.10
 
@@ -127,7 +134,7 @@ def decode_combo(raw: str) -> FaceCombo:
         or not isinstance(eyes, str)
         or eyes not in _EXPRESSIONS
         or not isinstance(mouth, str)
-        or mouth not in _EXPRESSIONS
+        or mouth not in _VALID_MOUTHS
         or type(hat) is not int
         or not 0 <= hat < len(_HATS)
         or type(shades) is not bool
@@ -279,7 +286,7 @@ def thumbnail(combo: FaceCombo) -> np.ndarray:
 
 
 def candidates(agent_key: str, count: int = 32) -> list[FaceCombo]:
-    """Stable weighted choices: most draws have no headwear or shades."""
+    """Stable draws favour canonical faces; props and novelty stay uncommon."""
     result: list[FaceCombo] = []
     attempt = 0
     while len(result) < count:
@@ -287,10 +294,23 @@ def candidates(agent_key: str, count: int = 32) -> list[FaceCombo]:
         attempt += 1
         hat = 0 if digest[4] / 256 >= HAT_SHARE else 1 + digest[5] % (len(_HATS) - 1)
         shades = digest[6] / 256 < SHADES_SHARE
+        expression_roll = digest[7]
+        if expression_roll < 64:
+            eyes, mouth = "happy", "laugh"
+        elif expression_roll < 176:
+            expression = _CANON_EYES[digest[1] % len(_CANON_EYES)]
+            eyes = expression
+            mouth = "happy" if expression == "wink" else expression
+        elif expression_roll < 253:
+            eyes = _CANON_EYES[digest[1] % len(_CANON_EYES)]
+            mouth = _CANON_MOUTHS[digest[2] % len(_CANON_MOUTHS)]
+        else:
+            eyes = _NOVEL_EYES[digest[1] % len(_NOVEL_EYES)]
+            mouth = _NOVEL_MOUTHS[digest[2] % len(_NOVEL_MOUTHS)]
         combo: FaceCombo = (
             digest[0] % len(_PALETTE),
-            _EXPRESSIONS[digest[1] % len(_EXPRESSIONS)],
-            _EXPRESSIONS[digest[2] % len(_EXPRESSIONS)],
+            eyes,
+            mouth,
             hat,
             shades,
             _BROWS[digest[3] % len(_BROWS)],
@@ -301,17 +321,19 @@ def candidates(agent_key: str, count: int = 32) -> list[FaceCombo]:
 
 
 def choose(
-    agent_key: str, existing: list[FaceCombo], *, count: int = 32, min_plain: float = 5.25
+    agent_key: str, existing: list[FaceCombo], *, count: int = 32, min_plain: float = 5.0
 ) -> FaceCombo:
-    """Prefer the furthest plain face; admit a prop only if plain faces are too close."""
+    """Balance colours first, then prefer distinct plain canonical faces."""
     used = set(existing)
     options = [combo for combo in candidates(agent_key, count) if combo not in used]
     if not options:
         raise ValueError("no unused face candidates")
     plain = [combo for combo in options if combo[3] == 0 and not combo[4]]
+    colour_uses = Counter(combo[0] for combo in existing)
     if not existing:
-        return plain[0] if plain else options[0]
+        return min(plain or options, key=lambda combo: (not _is_classic(combo), combo[0]))
     previous = np.stack([thumbnail(combo) for combo in existing])
+    prefer_classic = hashlib.sha256(f"{agent_key}|classic".encode()).digest()[0] < 128
     distances: dict[FaceCombo, float] = {}
 
     def distance(combo: FaceCombo) -> float:
@@ -319,10 +341,26 @@ def choose(
             distances[combo] = float(np.abs(previous - thumbnail(combo)).mean(axis=1).min())
         return distances[combo]
 
-    plain_best = max(plain, key=distance) if plain else None
-    if plain_best is not None and distance(plain_best) >= min_plain:
-        return plain_best
-    return max(options, key=distance)
+    def pick(pool: list[FaceCombo]) -> FaceCombo:
+        return min(
+            pool,
+            key=lambda combo: (
+                colour_uses[combo[0]],
+                prefer_classic and not _is_classic(combo),
+                combo[1] in _NOVEL_EYES or combo[2] in _NOVEL_MOUTHS,
+                -distance(combo),
+            ),
+        )
+
+    distinct_plain = [combo for combo in plain if distance(combo) >= min_plain]
+    if distinct_plain:
+        return pick(distinct_plain)
+    distinct = [combo for combo in options if distance(combo) >= 4]
+    return pick(distinct) if distinct else max(options, key=distance)
+
+
+def _is_classic(combo: FaceCombo) -> bool:
+    return combo[1:3] == ("happy", "laugh") and combo[3] == 0 and not combo[4]
 
 
 def assign(agent_keys: list[str]) -> dict[str, FaceCombo]:
