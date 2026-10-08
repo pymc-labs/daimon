@@ -82,6 +82,7 @@ from daimon.core.config import (
     DatabaseSettings,
     Settings,
     SlackSettings,
+    TurnRenderSettings,
 )
 from daimon.core.credential_requests import SLACK_ACTION_ID
 from daimon.core.defaults.provisioning import teardown_slack_install
@@ -322,6 +323,7 @@ class SlackDriver:
         billing_config: object | None = None,
     ) -> SlackRuntime:
         settings = MagicMock()
+        settings.turn_render = TurnRenderSettings()
         settings.crypto.keys = (SecretStr(fernet_key),)
         settings.slack = SlackSettings(
             signing_secret=SecretStr("parity-signing-secret"),

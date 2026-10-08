@@ -61,6 +61,7 @@ from daimon.core.config import (
     McpSettings,
     Settings,
     ThreadNamingSettings,
+    TurnRenderSettings,
 )
 from daimon.core.credential_requests import CUSTOM_ID_PATTERN, CUSTOM_ID_PREFIX
 from daimon.core.github_credentials import build_multifernet
@@ -304,6 +305,7 @@ class DiscordDriver:
         billing_config: object | None = None,
     ) -> DiscordRuntime:
         settings = MagicMock()
+        settings.turn_render = TurnRenderSettings()
         settings.mcp = McpSettings()
         settings.billing.markup = Decimal("1.0")
         settings.billing.signup_credit = Decimal("0")

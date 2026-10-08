@@ -28,6 +28,7 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.config import TurnRenderSettings
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
@@ -70,6 +71,7 @@ _ENV_ID = "env_continuity_test"
 
 def _make_app(sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id_str: str) -> SlackApp:
     settings = MagicMock()
+    settings.turn_render = TurnRenderSettings()
     settings.crypto.keys = ()
     settings.slack.max_concurrent_turns_per_tenant = 3
     settings.slack.bot_display_name = "daimon"
