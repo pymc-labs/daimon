@@ -25,6 +25,7 @@ from daimon.adapters.discord.agent_setup.add_skill import (
     skill_change_refusal,
 )
 from daimon.adapters.discord.agent_setup.avatar import (
+    NONRETRYABLE_PICTURE_MESSAGES,
     avatar_public_url,
     reset_agent_avatar,
     upload_agent_avatar,
@@ -318,13 +319,16 @@ def build_details_container(
                 )
             )
             container.add_item(avatar_row)
-        details_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
-        details_row.add_item(
-            discord.ui.Button(
-                label="Details", custom_id=AVATAR_DETAILS_ID, style=discord.ButtonStyle.secondary
+        if is_admin:
+            details_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+            details_row.add_item(
+                discord.ui.Button(
+                    label="Details",
+                    custom_id=AVATAR_DETAILS_ID,
+                    style=discord.ButtonStyle.secondary,
+                )
             )
-        )
-        container.add_item(details_row)
+            container.add_item(details_row)
     container.add_item(hairline())
     return container
 
@@ -458,6 +462,23 @@ class DetailsView(PanelViewBase):
     async def _on_change_avatar(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(PictureUploadModal(self))
 
+    async def refresh_after_avatar_change(self) -> None:
+        """Redraw the live Details panel with its new picture thumbnail."""
+        panel_interaction = self._render_interaction
+        if panel_interaction is None or self._is_superseded():
+            return
+        refreshed = DetailsView(
+            self.state,
+            runtime=self.runtime,
+            allowed_user_id=self.allowed_user_id,
+            details=self.details,
+            agent=self.agent,
+        )
+        await panel_interaction.edit_original_response(
+            view=refreshed.bind_render_interaction(panel_interaction, panel=self.state),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     async def _on_avatar_details(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
             embed=picture_details_embed(),
@@ -542,15 +563,17 @@ class PictureUploadModal(discord.ui.Modal):
         self.add_item(label)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
+        # A channel-message defer gives this modal its own original response.
+        # The retry view may then expire without replacing the setup panel.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         if interaction.user.id != self._view.allowed_user_id:
-            await interaction.followup.send(
-                "This panel has expired. Open agent setup.", ephemeral=True
+            await interaction.edit_original_response(
+                content="This panel has expired. Open agent setup."
             )
             return
         uploads = self.file_input.values
         if not uploads:
-            await interaction.followup.send("Choose a picture.", ephemeral=True)
+            await interaction.edit_original_response(content="Choose a picture.")
             return
         tenant_id = derive_tenant_uuid(
             platform="discord", workspace_id=str(self._view.state.guild_id)
@@ -568,13 +591,18 @@ class PictureUploadModal(discord.ui.Modal):
             )
         embed = picture_status_embed(message, success=avatar is not None)
         if avatar is None:
-            await interaction.followup.send(
+            retry_view = (
+                PictureRetryView(self._view).bind_render_interaction(interaction, panel=None)
+                if message not in NONRETRYABLE_PICTURE_MESSAGES
+                else None
+            )
+            await interaction.edit_original_response(
                 embed=embed,
-                view=PictureRetryView(self._view).bind_render_interaction(interaction, panel=None),
-                ephemeral=True,
+                view=retry_view,
             )
         else:
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.edit_original_response(embed=embed)
+            await self._view.refresh_after_avatar_change()
 
 
 class PictureRetryView(ExpiringView, discord.ui.View):

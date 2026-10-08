@@ -18,6 +18,13 @@ from daimon.core.stores.identity import get_or_create_platform_principal
 
 import discord
 
+PICTURE_DISABLED = "Agent pictures are turned off."
+PICTURE_NEEDS_ADMIN = "Only admins can change this agent's picture. Ask an admin to change it."
+PICTURE_AGENT_GONE = "This agent is no longer available."
+NONRETRYABLE_PICTURE_MESSAGES = frozenset(
+    {PICTURE_DISABLED, PICTURE_NEEDS_ADMIN, PICTURE_AGENT_GONE}
+)
+
 
 def _trusted_attachment_url(url: str) -> bool:
     try:
@@ -106,11 +113,11 @@ async def upload_agent_avatar(
         await _may_edit(
             interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=True
         )
-        return "Agent pictures are turned off.", None
+        return PICTURE_DISABLED, None
     if not await _may_edit(
         interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=True
     ):
-        return "Only admins can change this agent's picture. Ask an admin to change it.", None
+        return PICTURE_NEEDS_ADMIN, None
     if attachment.size > MAX_UPLOAD_BYTES:
         await _audit(
             runtime,
@@ -162,13 +169,18 @@ async def upload_agent_avatar(
             reason="invalid_image",
             agent_name=agent_name,
         )
-        if "2 MB" in str(exc):
+        error = str(exc)
+        if "2 MB" in error:
             return "That picture is too big. Choose one up to 2 MB.", None
+        if "Animated" in error:
+            return "We couldn't use that picture. Use a still picture.", None
+        if "read" in error:
+            return "We couldn't read that file. Upload it again.", None
         return "We couldn't use that picture. Use PNG, JPG, GIF or WebP.", None
     if not await _may_edit(
         interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=True
     ):
-        return "This agent is no longer available.", None
+        return PICTURE_AGENT_GONE, None
     async with runtime.sessionmaker.begin() as session:
         actor = await get_or_create_platform_principal(
             session,
@@ -208,11 +220,11 @@ async def reset_agent_avatar(
         await _may_edit(
             interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=False
         )
-        return "Agent pictures are turned off.", None
+        return PICTURE_DISABLED, None
     if not await _may_edit(
         interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=False
     ):
-        return "Only admins can change this agent's picture. Ask an admin to change it.", None
+        return PICTURE_NEEDS_ADMIN, None
     async with runtime.sessionmaker.begin() as session:
         actor = await get_or_create_platform_principal(
             session,

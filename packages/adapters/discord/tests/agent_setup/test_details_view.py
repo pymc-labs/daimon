@@ -17,6 +17,7 @@ import discord
 import jwt as pyjwt
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.adapters.discord.agent_setup import details_view as details_view_mod
 from daimon.adapters.discord.agent_setup import hydrate as hydrate_mod
 from daimon.adapters.discord.agent_setup import mcp_access as mcp_access_mod
 from daimon.adapters.discord.agent_setup.budget import (
@@ -49,6 +50,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import AnsweringPlace, DeploymentDefault
 from daimon.core.setup_conversations import setup_target_label, shared_keys_sentence
+from daimon.core.stores.agent_avatars import AvatarRow
 from daimon.core.stores.domain import AccountRow, TenantRow
 from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
 from daimon.testing import ma_agent
@@ -228,7 +230,7 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
         identity_enabled=True,
     )
     assert not any(
-        isinstance(item, discord.ui.Button) and item.label in {"Change", "Use default"}
+        isinstance(item, discord.ui.Button) and item.label in {"Change", "Use default", "Details"}
         for item in _walk(member)
     )
     built_in = build_details_container(
@@ -256,6 +258,72 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
         isinstance(item, discord.ui.Button) and item.label in {"Change", "Use default", "Details"}
         for item in _walk(disabled)
     )
+
+
+async def test_picture_upload_refreshes_live_panel_without_expiring_it(
+    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    details = _details()
+    state = _state(details, account_id=account_id)
+    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
+    panel_interaction = _admin_interaction()
+    view.bind_render_interaction(panel_interaction, panel=state)
+    modal = PictureUploadModal(view)
+    attachment = MagicMock(spec=discord.Attachment)
+    modal.file_input._values = [attachment]
+    avatar = AvatarRow(token="new-token", sha256="abcdef123456more", png=b"", source="upload")
+    monkeypatch.setattr(
+        details_view_mod,
+        "upload_agent_avatar",
+        AsyncMock(return_value=("Picture changed.", avatar)),
+    )
+    interaction = _admin_interaction()
+
+    await modal.on_submit(interaction)
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    panel_interaction.edit_original_response.assert_awaited_once()
+    refreshed = panel_interaction.edit_original_response.await_args.kwargs["view"]
+    assert isinstance(refreshed, DetailsView)
+    assert any(isinstance(item, discord.ui.Thumbnail) for item in _walk(refreshed))
+    await view.on_timeout()
+    assert panel_interaction.edit_original_response.await_count == 1
+
+
+@pytest.mark.parametrize(
+    ("message", "retry"),
+    [
+        ("Agent pictures are turned off.", False),
+        ("Only admins can change this agent's picture. Ask an admin to change it.", False),
+        ("This agent is no longer available.", False),
+        ("We couldn't read that file. Upload it again.", True),
+    ],
+)
+async def test_picture_upload_retry_owns_modal_response(
+    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch, message: str, retry: bool
+) -> None:
+    details = _details()
+    state = _state(details, account_id=account_id)
+    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
+    panel_interaction = _admin_interaction()
+    view.bind_render_interaction(panel_interaction, panel=state)
+    modal = PictureUploadModal(view)
+    modal.file_input._values = [MagicMock(spec=discord.Attachment)]
+    monkeypatch.setattr(
+        details_view_mod, "upload_agent_avatar", AsyncMock(return_value=(message, None))
+    )
+    interaction = _admin_interaction()
+
+    await modal.on_submit(interaction)
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    retry_view = interaction.edit_original_response.await_args.kwargs["view"]
+    assert (retry_view is not None) is retry
+    if retry:
+        assert retry_view._render_interaction is interaction
+        await retry_view.on_timeout()
+        assert interaction.edit_original_response.await_count == 2
+        panel_interaction.edit_original_response.assert_not_awaited()
 
 
 async def test_load_details_for_skips_avatar_with_identity_off(

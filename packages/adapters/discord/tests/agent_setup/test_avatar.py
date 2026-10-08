@@ -214,6 +214,41 @@ async def test_upload_handles_attachment_network_error(monkeypatch: pytest.Monke
     assert audit.await_args.kwargs["outcome"] == "error"
 
 
+@pytest.mark.parametrize(
+    "body, expected", [(b"", "We couldn't read that file."), (b"animated", "Use a still picture.")]
+)
+async def test_upload_explains_empty_and_animated_files(
+    monkeypatch: pytest.MonkeyPatch, body: bytes, expected: str
+) -> None:
+    monkeypatch.setattr(avatar_module, "is_guild_admin", lambda _interaction: True)
+    monkeypatch.setattr(
+        avatar_module,
+        "find_agent_by_daimon_tag",
+        AsyncMock(return_value=SimpleNamespace(name="analyst", metadata={})),
+    )
+    monkeypatch.setattr(avatar_module, "_audit", AsyncMock())
+    attachment = _attachment(size=len(body))
+    if body == b"animated":
+        output = io.BytesIO()
+        first = Image.new("RGB", (20, 20), "red")
+        second = Image.new("RGB", (20, 20), "blue")
+        first.save(output, format="GIF", save_all=True, append_images=[second])
+        body = output.getvalue()
+        attachment.size = len(body)
+    attachment.read.return_value = body
+
+    message, avatar = await upload_agent_avatar(
+        _interaction(),
+        _runtime(),
+        tenant_id=uuid.uuid4(),
+        agent_name="analyst",
+        attachment=attachment,
+    )
+
+    assert avatar is None
+    assert expected in message
+
+
 async def test_upload_and_reset_rotate_tokens_and_sources(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:

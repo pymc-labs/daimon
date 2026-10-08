@@ -280,6 +280,7 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
     {
         panel_views.ACTION_DETAILS,
         panel_views.ACTION_AVATAR_CHANGE,
+        panel_views.ACTION_AVATAR_DETAILS,
         panel_views.ACTION_AVATAR_RESET,
         panel_views.ACTION_ROUTING,
         panel_views.ACTION_PAGE_NEXT,
@@ -674,16 +675,17 @@ async def _dispatch_panel_action(
                     ),
                 )
             return
-        await client.views_push(  # pyright: ignore[reportUnknownMemberType]
-            trigger_id=trigger_id,
-            view=panel_views.build_avatar_upload_form(
-                meta=meta.with_view(
-                    "avatar_upload",
-                    agent_name=meta.agent_name,
-                    root_view_id=meta.root_view_id or view_id,
-                )
-            ),
+        form = panel_views.build_avatar_upload_form(
+            meta=meta.with_view(
+                "avatar_upload",
+                agent_name=meta.agent_name,
+                root_view_id=meta.root_view_id or view_id,
+            )
         )
+        if meta.view == "avatar_upload":
+            await client.views_update(view_id=view_id, view=form)  # pyright: ignore[reportUnknownMemberType]
+        else:
+            await client.views_push(trigger_id=trigger_id, view=form)  # pyright: ignore[reportUnknownMemberType]
         return
 
     if action_id == panel_views.ACTION_AVATAR_DETAILS:

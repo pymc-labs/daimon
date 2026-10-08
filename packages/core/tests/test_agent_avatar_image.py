@@ -84,6 +84,11 @@ def test_animated_image_rejected() -> None:
         normalize_avatar_image(output.getvalue())
 
 
+def test_empty_image_is_a_read_error() -> None:
+    with pytest.raises(ValueError, match="could not be read"):
+        normalize_avatar_image(b"")
+
+
 def test_pixel_cap_rejected_before_decode() -> None:
     image = Image.new("1", (5001, 5000))
     with pytest.raises(ValueError, match="dimensions"):

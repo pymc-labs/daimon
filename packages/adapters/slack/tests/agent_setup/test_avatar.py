@@ -316,6 +316,34 @@ async def test_upload_failure_updates_modal_without_ephemeral(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("animated", [False, True])
+async def test_upload_explains_empty_and_animated_files(
+    monkeypatch: pytest.MonkeyPatch, animated: bool
+) -> None:
+    body = b""
+    if animated:
+        output = io.BytesIO()
+        first = Image.new("RGB", (20, 20), "red")
+        second = Image.new("RGB", (20, 20), "blue")
+        first.save(output, format="GIF", save_all=True, append_images=[second])
+        body = output.getvalue()
+    runtime = SimpleNamespace(sessionmaker=MagicMock())
+    client = AsyncMock()
+    client.token = "xoxb-test"
+    monkeypatch.setattr(avatar_module, "may_edit_avatar", AsyncMock(return_value=True))
+    monkeypatch.setattr(avatar_module, "fetch_avatar_file", AsyncMock(return_value=body))
+    monkeypatch.setattr(avatar_module, "_audit", AsyncMock())
+    decision = evaluate_avatar_submission(_payload([{"id": "F1", "size": len(body)}]))
+
+    await run_avatar_submission(
+        runtime, client, team_id="T1", user_id="U_ADMIN", submission=decision
+    )  # type: ignore[arg-type]
+
+    expected = "Use a still picture." if animated else "We couldn't read that file."
+    assert expected in str(client.views_update.await_args.kwargs["view"])
+
+
+@pytest.mark.asyncio
 async def test_upload_rechecks_agent_after_download(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = SimpleNamespace(sessionmaker=MagicMock())
     client = AsyncMock()

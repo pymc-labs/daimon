@@ -362,6 +362,8 @@ async def run_avatar_submission(
             message = "We can't use that shared file. Upload the picture here."
         elif "2 MB" in error:
             message = "That picture is too big. Choose one up to 2 MB."
+        elif "Animated" in error:
+            message = "We couldn't use that picture. Use a still picture."
         elif isinstance(exc, (httpx.HTTPError, TimeoutError)) or "read" in error:
             message = "We couldn't read that file. Upload it again."
         else:
