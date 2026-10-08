@@ -3,6 +3,15 @@
 This page documents how daimon's Slack adapter handles per-user access and
 what operators should understand about the resulting trust model.
 
+### `/here` card
+
+`/here` sends only the caller a compact channel card. Its title names the agent
+that answers here or the reason replies are unavailable. When an agent answers,
+Reading and Publishing show the effective scope and whether approval is
+required; a card that only gives a reason has no fields. The footer says
+`Channel setting. Threads can differ.` because Slack slash commands have no
+thread context. Credential names and values are absent from the card.
+
 ### Session output files
 
 Files an agent saves under `/mnt/session/outputs` are uploaded to the Slack

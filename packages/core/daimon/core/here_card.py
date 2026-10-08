@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from datetime import datetime
+from typing import Literal
 
 from anthropic import AsyncAnthropic
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
@@ -59,7 +60,9 @@ class HereCard(BaseModel):
     agent_name: str | None
     tier: str | None
     set_at: datetime | None = None
+    set_by_label: str | None = None
     configuration_target_name: str | None = None
+    channel_level_only: bool = False
     channel_rule: ChannelRule
     thread_rule: ChannelRule | None = None
     category_rule: ChannelRule | None = None
@@ -80,6 +83,93 @@ class HereCard(BaseModel):
     category_channels_bot_can_view: tuple[str, ...] = ()
     credentials: tuple[CredentialStatus, ...] = ()
     text: str
+
+
+class HereCardPresentation(BaseModel):
+    """The small set of strings every /here surface renders."""
+
+    model_config = ConfigDict(frozen=True)
+    state: Literal["no_view", "no_replies", "no_agent", "blocked", "channel", "thread"]
+    title: str
+    colour: str
+    subline: str | None = None
+    reading: str | None = None
+    publishing: str | None = None
+    extras: tuple[str, ...] = ()
+
+
+def render_here_card(card: HereCard) -> HereCardPresentation:
+    """Choose the approved card copy from existing facts, in priority order."""
+    name = " ".join((card.agent_name or "").split())[:100]
+    if card.bot_can_view is False:
+        state, title, colour, subline = (
+            "no_view",
+            "No channel access",
+            "#ED4245",
+            "Ask an admin to check Daimon's access.",
+        )
+    elif card.effective_writers == "none":
+        state, title, colour, subline = "no_replies", "Replies disabled here", "#ED4245", None
+    elif card.agent_name is None:
+        state, title, colour, subline = (
+            "no_agent",
+            "No agent selected",
+            "#95A5A6",
+            "Ask an admin: /agent-setup",
+        )
+    elif card.agent_can_answer_here is False:
+        state, title, colour, subline = ("blocked", f"{name} can't answer here", "#F0B429", None)
+    elif card.tier == "thread":
+        state, title, colour, subline = (
+            "thread",
+            f"{name} answers in this thread",
+            "#2ECC71",
+            None,
+        )
+    else:
+        state, title, colour, subline = "channel", f"{name} answers here", "#2ECC71", None
+    if state in {"no_view", "no_replies", "no_agent"}:
+        # Nothing answers here, so reading and publishing scope would mislead.
+        return HereCardPresentation(state=state, title=title, colour=colour, subline=subline)
+    reading = {
+        "any": "Any conversation",
+        "inside": "Conversations here only",
+        "own": "Own agents only",
+    }.get(card.effective_readers)
+    publishing = (
+        "Approval required"
+        if card.publishing_needs_approval is True
+        else "No approval"
+        if card.publishing_needs_approval is False
+        else None
+    )
+    extras = (
+        *(("Only own agents answer here",) if card.effective_writers == "own" else ()),
+        *(("No access to earlier messages",) if card.bot_can_read_history is False else ()),
+    )
+    return HereCardPresentation(
+        state=state,
+        title=title,
+        colour=colour,
+        subline=subline,
+        reading=reading,
+        publishing=publishing,
+        extras=extras,
+    )
+
+
+def render_here_card_text(card: HereCard) -> str:
+    """Plain MCP text; the structured HereCard keeps all existing facts."""
+    rendered = render_here_card(card)
+    lines = [rendered.title]
+    if rendered.subline is not None:
+        lines.append(rendered.subline)
+    if rendered.reading is not None:
+        lines.append(f"Reading: {rendered.reading}")
+    if rendered.publishing is not None:
+        lines.append(f"Publishing: {rendered.publishing}")
+    lines.extend(rendered.extras)
+    return "\n".join(lines)
 
 
 def assemble_here_card(
@@ -251,88 +341,13 @@ def assemble_here_card(
                             usable_in_session=None,
                         )
                     )
-    routing = f"Who answers: {_short(agent_name or 'No agent')} ({tier or 'unconfigured'}"
-    if configuration_target_name is not None:
-        routing += f"; configuring {_short(configuration_target_name)}"
-    if set_by is not None or set_at is not None:
-        when = set_at.isoformat() if set_at else "unknown"
-        routing += f"; set by {set_by_label or 'unknown'} at {when}"
-    lines = ["**Here**", routing + ")."]
-    if channel_level_only:
-        lines.append(
-            "Slack /here shows channel-level routing; slash commands provide no thread context."
-        )
-    publication = (
-        "approval required"
-        if needs_approval
-        else "allowed without approval"
-        if needs_approval is False
-        else "unknown"
-    )
-    lines.extend(
-        [
-            f"Channel rule: readers {stored_channel_rule.readers}; "
-            f"writers {stored_channel_rule.writers}.",
-            f"Effective here: readers {here.readers}; writers {here.writers}.",
-            f"Who may answer: {who_may_answer}.",
-            f"Agent rule: runs_in (visible) {_runs_in_label(shown_runs_in)}; "
-            f"home {permissions.home or 'none'}.",
-            f"Reads kept inside: {_yes(here.readers != 'any')}; "
-            f"memory writable: {_yes(can_write_memory)}.",
-            f"Publishing: {publication}.",
-            f"Can view here: bot {_yes(bot_can_view)}; you {_yes(caller_can_view)}.",
-            f"Agent can read here: {_yes(can_read)} (Daimon rule; platform access separate).",
-        ]
-    )
-    if bot_can_read_history is not None or caller_can_read_history is not None:
-        lines.append(
-            f"Can read history: bot {_yes(bot_can_read_history)}; "
-            f"you {_yes(caller_can_read_history)}."
-        )
-    if stored_thread_rule is not None and (
-        _reader_rank(stored_thread_rule.readers) > _reader_rank(stored_channel_rule.readers)
-        or stored_thread_rule.writers == "none"
-        and stored_channel_rule.writers != "none"
-    ):
-        lines.append(
-            f"Thread rule: readers {stored_thread_rule.readers}; "
-            f"writers {stored_thread_rule.writers}."
-        )
-    if (
-        stored_category_rule is not None
-        and stored_category_rule.writers == "none"
-        and stored_channel_rule.writers != "none"
-    ):
-        lines.append(
-            f"Category rule: readers {stored_category_rule.readers}; "
-            f"writers {stored_category_rule.writers}."
-        )
-    if category_channels_bot_can_view:
-        lines.append(
-            "Bot view in other category channels: " + _summary(category_channels_bot_can_view) + "."
-        )
-    lines.append(
-        "Credentials (names only): "
-        + (
-            _summary(
-                tuple(
-                    f"{item.name} [{item.kind}; "
-                    f"{'configured' if item.configured else 'not configured'}]"
-                    for item in credentials
-                ),
-                separator="; ",
-            )
-            if credentials
-            else "none known"
-        )
-        + "."
-    )
-    lines.append("Credential session usability: unknown (live mount status is unavailable).")
-    return HereCard(
+    card = HereCard(
         agent_name=agent_name,
         tier=tier,
         set_at=set_at,
+        set_by_label=(set_by_label or "unknown") if set_by is not None else None,
         configuration_target_name=configuration_target_name,
+        channel_level_only=channel_level_only,
         channel_rule=stored_channel_rule,
         thread_rule=stored_thread_rule,
         category_rule=stored_category_rule,
@@ -352,40 +367,13 @@ def assemble_here_card(
         agent_can_read_here=can_read,
         category_channels_bot_can_view=tuple(category_channels_bot_can_view),
         credentials=tuple(credentials),
-        text="\n".join(lines)[:3900],
+        text="",
     )
-
-
-def _yes(value: bool | None) -> str:
-    return "yes" if value is True else "no" if value is False else "unknown"
-
-
-def _reader_rank(value: str) -> int:
-    return {"any": 0, "inside": 1, "own": 2}[value]
-
-
-def _runs_in_label(channels: tuple[str, ...] | None) -> str:
-    if channels is None:
-        return "any channel"
-    return _summary(channels) if channels else "no visible channels"
+    return card.model_copy(update={"text": render_here_card_text(card)})
 
 
 def _short(value: str, limit: int = 120) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
-
-
-def _summary(values: Sequence[str], *, separator: str = ", ") -> str:
-    """Bound one rendered list while preserving the omitted count."""
-    shown: list[str] = []
-    length = 0
-    for value in values:
-        item = _short(value, 100)
-        if len(shown) == 8 or length + len(item) + len(separator) > 320:
-            break
-        shown.append(item)
-        length += len(item) + len(separator)
-    omitted = len(values) - len(shown)
-    return separator.join(shown) + (f"{separator}+{omitted} more" if omitted else "")
 
 
 async def load_here_card(
