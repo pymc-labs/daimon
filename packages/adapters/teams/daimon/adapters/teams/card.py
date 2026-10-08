@@ -4,8 +4,9 @@ The status card says what Discord's and Slack's say, in the words of
 `daimon.core.turn.status_lines`: a Thinking or Working headline with the
 elapsed time, the turn's tool lines, the latest draft, and a Cancel button.
 The answer replaces the card as plain markdown messages: a card TextBlock
-renders no code blocks, a message does. Its last message carries Teams' 👍/👎
-(`rated`, answered by `feedback`).
+renders no code blocks, a message does. Its last message, and a tool-only
+turn's ✅ Done, carry Teams' 👍/👎 (`rated`, answered by `feedback`) and, when
+support is on, an Ask a human button in a one-button card below the text.
 """
 
 from __future__ import annotations
@@ -24,11 +25,14 @@ from daimon.core.turn.status_lines import (
 )
 from microsoft_teams.api import Account, MentionEntity, MessageActivityInput
 from microsoft_teams.cards import (
+    Action,
     ActionSet,
     AdaptiveCard,
     CardElement,
     ExecuteAction,
+    OpenDialogData,
     OpenUrlAction,
+    SubmitAction,
     TextBlock,
 )
 
@@ -42,6 +46,8 @@ INTERRUPTED_NOTICE = (
 )
 CANCELLED_NOTICE = "Turn cancelled."
 TOOLS_DONE_NOTICE = "✅ Done."
+ASK_HUMAN = "🙋 Ask a human"
+ASK_HUMAN_DIALOG = "ask_human"
 _FALLBACK_MAX_CHARS = 100
 
 
@@ -133,7 +139,7 @@ def termination_text(notice: TerminationNotice) -> str:
     return fit_notice(["\n\n".join(lines)], tail=tail, limit=TEAMS_LIMIT)
 
 
-def notice_card(text: str, *, actions: Sequence[ExecuteAction] = ()) -> MessageActivityInput:
+def notice_card(text: str, *, actions: Sequence[Action] = ()) -> MessageActivityInput:
     """A terminal card: bailouts, failures, restarts; `actions` are its buttons, if any.
 
     Clipped as Slack clips its notices; the fallback repeats it, so it gets less.
@@ -149,6 +155,11 @@ def notice_card(text: str, *, actions: Sequence[ExecuteAction] = ()) -> MessageA
 ANSWERED_BELOW = "✅ Done. The answer is below."
 
 
+def ask_human_action() -> SubmitAction:
+    """Opens Ask a human's dialog; an Action.Submit, since Action.Execute opens none."""
+    return SubmitAction(title=ASK_HUMAN, data=OpenDialogData(ASK_HUMAN_DIALOG))
+
+
 def rated(message: MessageActivityInput) -> MessageActivityInput:
     """Teams' 👍/👎 on `message`. Custom mode: a click asks daimon for the dialog,
     so a 👎 gets the reasons Teams' built-in form has no room for."""
@@ -156,9 +167,10 @@ def rated(message: MessageActivityInput) -> MessageActivityInput:
 
 
 def answer_message(
-    text: str, *, is_last: bool, mention: Account | None = None
+    text: str, *, is_last: bool, mention: Account | None = None, ask_human: bool = False
 ) -> MessageActivityInput:
-    """One chunk of the answer; the last carries the feedback buttons.
+    """One chunk of the answer; the last carries the feedback buttons and, with
+    `ask_human`, the Ask a human button.
 
     A completion ping leads with `mention` (an AAD object id is enough).
     """
@@ -167,4 +179,10 @@ def answer_message(
         tag = f"<at>{(mention.name or 'you').replace('<', '').replace('>', '')}</at>"
         message.text = f"{tag}\n\n{text}"
         message.add_entity(MentionEntity(mentioned=mention, text=tag))
-    return rated(message) if is_last else message
+    if not is_last:
+        return message
+    if ask_human:
+        # Beside the text, not in place of it: a card renders no code blocks.
+        buttons = ActionSet(actions=[ask_human_action()])
+        message.add_card(AdaptiveCard(body=[buttons], fallback_text=ASK_HUMAN))
+    return rated(message)

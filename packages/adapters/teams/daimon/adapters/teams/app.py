@@ -268,6 +268,7 @@ class TeamsApp:
         installs: TeamInstalls | None = None,
         direct: DirectChats | None = None,
         routine_poster: RoutinePoster | None = None,
+        ask_human: bool = False,
     ) -> None:
         teams = runtime.settings.teams
         if teams is None:
@@ -289,6 +290,8 @@ class TeamsApp:
         self._direct = direct
         # Posts routine results to their channels; None leaves them pending.
         self._routine_poster = routine_poster
+        # Support is on: answers carry an Ask a human button.
+        self._ask_human = ask_human
         self.outputs = TeamsOutputDelivery(
             runtime=runtime, sender=self._sender, spawn=self.spawn, files=channel_files
         )
@@ -936,6 +939,7 @@ class TeamsApp:
                     metadata=admission.agent.metadata,
                     default_name=self.runtime.deployment_default.agent_name,
                 ),
+                ask_human=self._ask_human,
             )
             holder.append(attempt)
             return attempt

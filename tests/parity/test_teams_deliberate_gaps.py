@@ -20,7 +20,7 @@ spent (Discord and Slack spend it first, then say so privately; the Teams
 adapter's credential tests assert the unspent request). Removing the app from a
 team forgets that team and archives no tenant: a deployment serves one
 organisation. A bot cannot react, so a completion ping is an @mention alone and
-human support is the `support` form; a post_wizard form has no step images. An agent edits or deletes its own
+Ask a human is a button on the answer (and the `support` form); a post_wizard form has no step images. An agent edits or deletes its own
 posts but closes no thread (`delete_thread`, `archive_thread`).
 Thread participation shares Discord's gates
 (`test_thread_participation_platforms.py`) but needs Graph, so without the

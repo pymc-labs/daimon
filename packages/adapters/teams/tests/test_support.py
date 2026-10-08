@@ -12,24 +12,32 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from daimon.adapters.teams import support
+from daimon.adapters.teams import card, support
+from daimon.adapters.teams.answer_access import IN_DIRECT_CHAT, NOT_ALLOWED
 from daimon.adapters.teams.commands import parse_command
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.support import SupportCommand
 from daimon.core._models import SupportEscalation
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import SupportSettings
+from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.access_policy import set_access_policy
 from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    CONVERSATION_ID,
+    ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     THREAD_ID,
     TeamsApiFake,
+    assert_card_renders,
     build_teams_runtime,
     make_card_action,
     make_channel_activity,
+    make_invoke,
     make_message_activity,
     post_activity,
     running_service,
@@ -37,6 +45,7 @@ from .conftest import (
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
 OPS = "19:ops@thread.tacv2"
+TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 
 
 def _running(
@@ -217,3 +226,52 @@ def test_the_command_exists_only_when_a_request_can_reach_someone(
         discord=object() if discord else None,
     )
     assert support.enabled(settings) is on
+
+
+def _ask(op: str, **data: object) -> dict[str, object]:
+    """Ask a human on the answer `m-7`: the dialog's fetch, or its submit."""
+    if op == "open":
+        value: dict[str, object] = {"data": {"dialog_id": card.ASK_HUMAN_DIALOG}}
+        return make_invoke("task/fetch", value)
+    return make_invoke("task/submit", {"data": {"action": card.ASK_HUMAN_DIALOG} | data})
+
+
+async def test_ask_a_human_on_an_answer_spends_a_credit_and_links_the_answer(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with _running(db_session_factory, teams_api_fake) as service:
+        opened = await post_activity(service, _ask("open"))
+        form = opened["task"]["value"]["card"]["content"]
+        [send] = form["actions"]
+        sent = await post_activity(service, _ask("send", **send["data"], note="wrong totals"))
+
+    assert_card_renders(form)
+    assert "You have 3 requests left" in json.dumps(form), "the support form, in a dialog"
+    assert send["data"]["message"] == "m-7", "the form carries the answer it was opened on"
+    assert sent["task"]["value"] == support.RECEIVED.format(remaining=2)
+    [posted] = _posts_to(teams_api_fake, OPS)
+    assert "wrong totals" in posted and IN_DIRECT_CHAT in posted, "the note, and where it was"
+    [row] = await _rows(db_session_factory)
+    assert (row.message_id, row.channel_id) == ("m-7", CONVERSATION_ID)
+
+
+async def test_ask_a_human_with_no_note_shows_the_form_again(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with _running(db_session_factory, teams_api_fake) as service:
+        again = await post_activity(service, _ask("send", message="m-7", note=" "))
+    assert support.USAGE in json.dumps(again["task"]["value"]["card"]), "fixable, not lost"
+    assert await _rows(db_session_factory) == []
+
+
+async def test_ask_a_human_is_refused_to_someone_who_could_not_ask_there(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    policy = TenantAccessPolicy(invoker_user_ids=(OTHER_AAD_OBJECT_ID,))
+    async with db_session_factory.begin() as session:
+        await set_access_policy(session, tenant_id=TENANT, policy=policy)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        opened = await post_activity(service, _ask("open"))
+        sent = await post_activity(service, _ask("send", message="m-7", note="help"))
+    assert opened["task"]["value"] == sent["task"]["value"] == NOT_ALLOWED
+    assert await _rows(db_session_factory) == [] and _posts_to(teams_api_fake, OPS) == []

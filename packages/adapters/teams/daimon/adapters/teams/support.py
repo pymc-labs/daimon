@@ -9,8 +9,11 @@ once the post lands, so a failed post loses nothing. Requests go to
 from this bot, any other id is a Discord channel posted to with the Discord
 bot token. `enabled` decides whether the command is registered at all.
 
-The same post path carries a tenant's routed 👎 forms (`routes_feedback`,
-`feedback`), which spend no credit.
+When it is, every answer also carries an Ask a human button (`card.ASK_HUMAN_DIALOG`),
+Slack's: it opens the same form in a dialog only the clicker sees, for the
+people who could have asked the agent there (`answer_access`), and the request
+links to that answer. The same post path carries a tenant's routed 👎 forms
+(`routes_feedback`, `feedback`), which spend no credit.
 """
 
 from __future__ import annotations
@@ -21,11 +24,15 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 import structlog
-from daimon.adapters.teams.answer_access import AnswerPlace
+from daimon.adapters.teams.answer_access import AnswerPlace, check_answer_access, refusal_text
+from daimon.adapters.teams.card import ASK_HUMAN_DIALOG
 from daimon.adapters.teams.card_actions import (
     FAILED,
     button,
     card_actor,
+    dialog,
+    dialog_message,
+    error_text,
     guarded,
     heading,
     replace_card,
@@ -58,9 +65,19 @@ from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
     MessageActivityInput,
+    TaskFetchInvokeActivity,
+    TaskModuleResponse,
+    TaskSubmitInvokeActivity,
 )
 from microsoft_teams.apps import ActivityContext
-from microsoft_teams.cards import ActionSet, AdaptiveCard, TextInput
+from microsoft_teams.cards import (
+    ActionSet,
+    AdaptiveCard,
+    CardElement,
+    SubmitAction,
+    SubmitData,
+    TextInput,
+)
 
 __all__ = [
     "OUT_OF_CREDITS",
@@ -145,17 +162,32 @@ class _Asked:
         )
 
 
+def _note(value: str = "") -> TextInput:
+    return TextInput(
+        id=NOTE_INPUT, is_multiline=True, max_length=MAX_NOTE_CHARS, value=value or None
+    )
+
+
 def form_card(token: str, remaining: int) -> AdaptiveCard:
-    note = TextInput(id=NOTE_INPUT, is_multiline=True, max_length=MAX_NOTE_CHARS)
     return AdaptiveCard(
         body=[
             heading(TITLE),
             *text_lines(FORM_TEXT.format(remaining=remaining)),
-            note,
+            _note(),
             ActionSet(actions=[button(VERB, "Send", "send", ask=token)]),
         ],
         fallback_text=TITLE,
     )
+
+
+def ask_form(
+    message_id: str, remaining: int, *, note: str = "", error: str | None = None
+) -> AdaptiveCard:
+    """The same form in Ask a human's dialog, which carries the answer it was opened on."""
+    body: list[CardElement] = [error_text(error)] if error else []
+    body += [*text_lines(FORM_TEXT.format(remaining=remaining)), _note(note)]
+    send = SubmitAction(title="Send", data=SubmitData(ASK_HUMAN_DIALOG, {"message": message_id}))
+    return AdaptiveCard(body=body, actions=[send], fallback_text=TITLE)
 
 
 class SupportCommand:
@@ -204,6 +236,63 @@ class SupportCommand:
         else:
             del self._asked[token]
         return replace_card(text_card(TITLE, await self._escalate(actor.tenant_id, asked, note)))
+
+    async def on_ask_open(
+        self, ctx: ActivityContext[TaskFetchInvokeActivity]
+    ) -> TaskModuleResponse:
+        """Ask a human on an answer: the form, for someone who could have asked there."""
+        return await guarded(
+            self._ask_open(ctx.activity), dialog_message(FAILED), "teams.support.failed"
+        )
+
+    async def on_ask_submit(
+        self, ctx: ActivityContext[TaskSubmitInvokeActivity]
+    ) -> TaskModuleResponse:
+        return await guarded(
+            self._ask_submit(ctx.activity), dialog_message(FAILED), "teams.support.failed"
+        )
+
+    async def _ask_open(self, activity: TaskFetchInvokeActivity) -> TaskModuleResponse:
+        actor = await card_actor(self._runtime, activity)
+        if actor is None or not activity.reply_to_id:
+            return dialog_message(DENIED)
+        place = AnswerPlace.of(activity, activity.reply_to_id)
+        if (access := await check_answer_access(self._runtime, actor, place)) != "allowed":
+            return dialog_message(refusal_text(access))
+        remaining = await self._remaining(actor.tenant_id, actor.user_id)
+        if remaining <= 0:
+            return dialog_message(OUT_OF_CREDITS)
+        return dialog(TITLE, ask_form(place.message_id, remaining))
+
+    async def _ask_submit(self, activity: TaskSubmitInvokeActivity) -> TaskModuleResponse:
+        """Decided again here: the policy may have changed while the dialog was open.
+
+        The answer's id rides in the form; a forged one only points the
+        submitter's own request at another message in the same conversation.
+        """
+        actor = await card_actor(self._runtime, activity)
+        data = submitted_fields(activity.value.data)
+        message_id = str(data.get("message") or "")
+        if actor is None or not message_id:
+            return dialog_message(DENIED)
+        note = str(data.get(NOTE_INPUT) or "").strip()[:MAX_NOTE_CHARS]
+        if not note:
+            remaining = await self._remaining(actor.tenant_id, actor.user_id)
+            return dialog(TITLE, ask_form(message_id, remaining, error=USAGE))
+        place = AnswerPlace.of(activity, message_id)
+        if (access := await check_answer_access(self._runtime, actor, place)) != "allowed":
+            return dialog_message(refusal_text(access))
+        teams = self._runtime.settings.teams
+        link = place.link(teams.tenant_id) if teams is not None else place.message_id
+        asked = _Asked(
+            actor.user_id,
+            activity.from_.name,
+            place.conversation_id,
+            place.conversation_id,
+            message_id,
+            link,
+        )
+        return dialog_message(await self._escalate(actor.tenant_id, asked, note))
 
     async def _remaining(self, tenant_id: uuid.UUID, user_id: str) -> int:
         async with self._runtime.sessionmaker() as session:

@@ -363,6 +363,7 @@ def create_teams_http_service(
         channel_files=files,
         installs=installs,
         direct=direct,
+        ask_human=support is not None,
         routine_poster=make_teams_routine_poster(
             runtime.sessionmaker,
             direct,
@@ -390,6 +391,8 @@ def create_teams_http_service(
     teams_app.on_card_action_execute(wizard.VERB, wizards.on_action)
     if support is not None:
         teams_app.on_card_action_execute(SUPPORT_VERB, support.on_action)
+        teams_app.on_dialog_open(card.ASK_HUMAN_DIALOG, support.on_ask_open)
+        teams_app.on_dialog_submit(card.ASK_HUMAN_DIALOG, support.on_ask_submit)
     teams_app.on_dialog_open(setup_card.CREATE_DIALOG, setup.on_create_open)
     teams_app.on_dialog_submit(setup_card.CREATE_DIALOG, setup.on_create_submit)
     teams_app.on_dialog_open(setup_card.TOKEN_DIALOG, setup.on_token_open)
