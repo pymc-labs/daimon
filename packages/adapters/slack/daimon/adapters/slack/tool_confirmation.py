@@ -98,6 +98,8 @@ class SlackConfirmationCards:
                     thread_ts=thread_ts,
                     text=confirmation_card_text(card),
                     attachments=_attachment(card, prompt),
+                    mrkdwn=False,
+                    parse="none",
                 )
                 ts = str(response.get("ts") or "")  # pyright: ignore[reportUnknownMemberType]
                 if record_post is not None and ts:
@@ -160,6 +162,8 @@ async def _edit(
                 ts=posted.ts,
                 text=confirmation_card_text(card),
                 attachments=_attachment(card, posted.prompt),
+                mrkdwn=False,
+                parse="none",
             ),
             timeout=EDIT_TIMEOUT_S,
         )
@@ -170,7 +174,7 @@ async def _edit(
 async def _ephemeral(posted: _PostedCard, user: str, text: str) -> None:
     try:
         await posted.client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=posted.channel, user=user, text=text
+            channel=posted.channel, user=user, text=text, mrkdwn=False, parse="none"
         )
     except SlackApiError as err:
         log.warning("slack.tool_confirmation.ephemeral_failed", error=str(err))

@@ -10,12 +10,17 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from daimon.adapters.teams.tool_confirmation import VERB, TeamsConfirmationCards
+from daimon.adapters.teams.tool_confirmation import (
+    VERB,
+    TeamsConfirmationCards,
+    confirmation_adaptive_card,
+)
 from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt, prompt_for_tool_call
 from daimon.core.posted_controls.confirmation import (
     EXPIRED_MESSAGE,
     NO_LONGER_PENDING_MESSAGE,
     NOT_YOURS_MESSAGE,
+    build_confirmation_card,
 )
 from daimon.core.tool_safety import ToolCall
 from microsoft_teams.api import AdaptiveCardActionCardResponse, AdaptiveCardInvokeActivity
@@ -47,6 +52,21 @@ def _click(token: str, op: str, user: str) -> Any:
 
 def _json(sender: FakeSender, index: int) -> str:
     return sender.activities[index].model_dump_json(by_alias=True)
+
+
+def test_tool_words_stay_literal_in_title_and_details() -> None:
+    value = "*x* `x` @everyone <@123456789012345678>"
+    prompt = _prompt().model_copy(
+        update={"title": f'Publish "{value}"?', "detail_lines": (f"File: {value}",)}
+    )
+    card = confirmation_adaptive_card(
+        build_confirmation_card(prompt, state="pending", token="tok_abcdefgh"), prompt
+    )
+    payload = card.model_dump(by_alias=True, exclude_none=True)
+    items = payload["body"][0]["items"]
+    assert items[0]["text"] == prompt.title
+    details = next(item for item in items if item.get("id") == "approval-details")
+    assert details["items"][0]["text"] == f"File: {value}"
 
 
 async def _post(

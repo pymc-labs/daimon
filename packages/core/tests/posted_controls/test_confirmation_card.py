@@ -114,16 +114,21 @@ def test_slack_blocks_carry_buttons_only_while_pending() -> None:
     assert not [b for b in approved if b["type"] == "actions"]
 
 
-def test_slack_tool_arguments_stay_in_code_formatting() -> None:
+def test_slack_tool_words_use_plain_text_blocks() -> None:
+    value = "*x* `x` @everyone <@123456789012345678>"
     prompt = ConfirmationPrompt(
-        title="Approve a write?",
-        detail='{"body": "*do not render as emphasis*"}',
+        title=f'Publish "{value}"?',
+        consequence=f"Anyone with the link can open {value}.",
+        detail_lines=(f"File: {value}",),
         requester_platform_user_id="U1",
         expires_at=_NOW,
     )
     card = build_confirmation_card(prompt, state="pending", token="tok_abcdefgh")
     blocks = build_confirmation_blocks(card, prompt=prompt)
-    assert any(block.get("text", {}).get("text") == f"```{prompt.detail}```" for block in blocks)
+    assert blocks[0]["text"] == {"type": "plain_text", "text": prompt.title}
+    assert blocks[1]["text"] == {"type": "plain_text", "text": prompt.consequence}
+    assert all(line not in str(blocks) for line in prompt.detail_lines)
+    assert confirmation_card_text(card) == f"{prompt.title}\n{prompt.consequence}"
 
 
 def test_button_ids_round_trip() -> None:

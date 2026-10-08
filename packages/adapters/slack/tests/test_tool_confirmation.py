@@ -36,9 +36,13 @@ def _click(action_id: str, user: str) -> dict[str, Any]:
     return {"actions": [{"action_id": action_id}], "user": {"id": user}}
 
 
-async def _post(cards: SlackConfirmationCards, client: MagicMock) -> tuple[asyncio.Task[Any], str]:
+async def _post(
+    cards: SlackConfirmationCards,
+    client: MagicMock,
+    prompt: ConfirmationPrompt | None = None,
+) -> tuple[asyncio.Task[Any], str]:
     hook = cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9")
-    waiting = asyncio.create_task(hook(_prompt()))
+    waiting = asyncio.create_task(hook(prompt or _prompt()))
     while not client.chat_postMessage.await_count:
         await asyncio.sleep(0)
     await asyncio.sleep(0)
@@ -57,7 +61,11 @@ async def test_the_requesters_approve_answers_approved_and_edits_the_card() -> N
 
     await cards.handle_click(_click(approve_id, "U2"))
     client.chat_postEphemeral.assert_awaited_once_with(
-        channel="C1", user="U2", text=NOT_YOURS_MESSAGE.format(requester="<@U1>")
+        channel="C1",
+        user="U2",
+        text=NOT_YOURS_MESSAGE.format(requester="<@U1>"),
+        mrkdwn=False,
+        parse="none",
     )
     assert not waiting.done(), "a stranger's click answers nothing"
 
@@ -78,6 +86,31 @@ async def test_the_requesters_deny_answers_denied() -> None:
     await cards.handle_click(_click(approve_id.replace(":approve", ":deny"), "U1"))
 
     assert await asyncio.wait_for(waiting, timeout=1) == "denied"
+
+
+async def test_tool_words_are_literal_in_card_fallback_and_private_details() -> None:
+    value = "*x* `x` @everyone <@123456789012345678>"
+    prompt = _prompt().model_copy(
+        update={"title": f'Publish "{value}"?', "detail_lines": (f"File: {value}",)}
+    )
+    cards = SlackConfirmationCards()
+    client = _client()
+    waiting, approve_id = await _post(cards, client, prompt)
+    kwargs = client.chat_postMessage.await_args.kwargs
+    assert kwargs["mrkdwn"] is False and kwargs["parse"] == "none"
+    assert kwargs["text"] == prompt.title
+    assert kwargs["attachments"][0]["blocks"][0]["text"] == {
+        "type": "plain_text",
+        "text": prompt.title,
+    }
+
+    await cards.handle_click(_click(approve_id.replace(":approve", ":details"), "U2"))
+    details = client.chat_postEphemeral.await_args.kwargs
+    assert details["text"] == f"File: {value}"
+    assert details["mrkdwn"] is False and details["parse"] == "none"
+    waiting.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await waiting
 
 
 async def test_an_unanswered_card_expires_and_is_retired() -> None:

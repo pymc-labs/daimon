@@ -37,15 +37,17 @@ RETIRE_TIMEOUT_S = 2.0
 
 
 def _body(card: ConfirmationCard) -> list[str]:
-    def safe(value: str) -> str:
-        return discord.utils.escape_mentions(discord.utils.escape_markdown(value))
-
-    lines = [f"**{safe(card.headline)}**"]
+    lines = [f"**{_safe_text(card.headline)}**"]
     if card.body:
-        lines.append(safe(card.body))
+        lines.append(_safe_text(card.body))
     if card.consequence:
-        lines.append(safe(card.consequence))
+        lines.append(_safe_text(card.consequence))
     return lines
+
+
+def _safe_text(value: str) -> str:
+    """Keep tool-provided words literal in Discord text displays and replies."""
+    return discord.utils.escape_mentions(discord.utils.escape_markdown(value))
 
 
 def _footer(card: ConfirmationCard, prompt: ConfirmationPrompt) -> str | None:
@@ -113,7 +115,10 @@ class _ConfirmationView(discord.ui.LayoutView):
 
     async def _on_details(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
-            "\n".join(self._prompt.detail_lines) or "No additional details.", ephemeral=True
+            "\n".join(_safe_text(line) for line in self._prompt.detail_lines)
+            or "No additional details.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     async def _settle(self, interaction: discord.Interaction, answer: ConfirmationAnswer) -> None:
@@ -123,7 +128,9 @@ class _ConfirmationView(discord.ui.LayoutView):
         if refusal is not None:
             if refusal == NOT_YOURS_MESSAGE:
                 refusal = refusal.format(requester=f"<@{self._prompt.requester_platform_user_id}>")
-            await interaction.response.send_message(refusal, ephemeral=True)
+            await interaction.response.send_message(
+                refusal, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+            )
             return
         # Answered: nothing on this card listens any more.
         self.stop()
@@ -131,7 +138,8 @@ class _ConfirmationView(discord.ui.LayoutView):
             self._prompt, state=answer, answered_by_platform_user_id=str(interaction.user.id)
         )
         await interaction.response.edit_message(
-            view=_ConfirmationView(answered, self._prompt, answer=None)
+            view=_ConfirmationView(answered, self._prompt, answer=None),
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
 
@@ -152,7 +160,7 @@ def discord_confirmation_hook(channel: discord.abc.Messageable) -> ConfirmationH
         answer: asyncio.Future[ConfirmationAnswer] = loop.create_future()
         pending = build_confirmation_card(prompt, state="pending", token=secrets.token_urlsafe(12))
         view = _ConfirmationView(pending, prompt, answer)
-        message = await channel.send(view=view)
+        message = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
 
         async def retire(state: ConfirmationCardState) -> None:
             await _retire(message, prompt, state)
@@ -170,7 +178,10 @@ async def _retire(
         # Bounded: retiring is cosmetic, and runs while a turn is being
         # stopped or timed out — a slow Discord must not hold that up.
         await asyncio.wait_for(
-            message.edit(view=_ConfirmationView(card, prompt, answer=None)),
+            message.edit(
+                view=_ConfirmationView(card, prompt, answer=None),
+                allowed_mentions=discord.AllowedMentions.none(),
+            ),
             timeout=RETIRE_TIMEOUT_S,
         )
     except (discord.HTTPException, TimeoutError) as err:
