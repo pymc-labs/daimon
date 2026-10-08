@@ -545,8 +545,13 @@ timeout:
    the bot is installed in, within 2 seconds.
 2. **The name stored when we last saw them.** Whenever an adapter already holds
    a name it is kept in `platform_user_names`, one row per (tenant, platform,
-   user), in the background so it never delays or fails a turn
-   (`packages/core/daimon/core/platform_names.py`): the author of a Discord
+   user), for anyone with an account in that tenant
+   (`packages/core/daimon/core/platform_names.py`). The name joins a bounded
+   in-process queue (5,000 people; a later name replaces a queued one, and
+   past the cap new ones are dropped and logged) that one background task
+   writes 50 rows at a time, so it never delays or fails a turn and a burst
+   of new people holds one database connection. The names come from the
+   author of a Discord
    mention and the user of any Discord interaction (server display name and
    username), the `user_profile` on a Slack message and the username on a
    Slack slash command or click, the sender of every Teams message and card
@@ -573,7 +578,12 @@ The panel has no `·` separators: the admin subtitle is two lines (`October
 and a top-up amount is `$10` with `about 100 turns` under it.
 
 A privacy deletion removes the person's stored name with the rest of their
-records; deleting a tenant removes its stored names.
+records, in every tenant their account has a principal in, and drops any name
+of theirs still queued. A name is only written while the person has a
+principal there, and the deletion removes it after the principal, so a write
+racing the deletion, from any process, cannot bring it back; someone with no
+account has no stored name, so `/privacy` saying "no data on file" stays true.
+Deleting a tenant removes its stored names.
 
 Two things those numbers are not. They are pre-markup, as above. And tenant
 aggregates exclude rows with no platform user attached, so spend recovered by

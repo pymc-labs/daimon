@@ -36,6 +36,7 @@ from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenants, usage_events
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import KnownName, upsert_user_names
 from daimon.testing import ma_model_usage
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
@@ -243,6 +244,10 @@ async def test_load_billing_snapshot_names_rows_from_the_stored_names(
     db_session: AsyncSession,
 ) -> None:
     tenant_id = await _tenant_with_usage(db_session)
+    for platform, user_id in (("slack", _OTHER_ID), ("discord", _CALLER_ID)):
+        await get_or_create_platform_principal(
+            db_session, tenant_id=tenant_id, platform=platform, external_id=user_id
+        )
     await upsert_user_names(
         db_session,
         tenant_id=tenant_id,

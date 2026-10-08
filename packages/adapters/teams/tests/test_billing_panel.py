@@ -39,6 +39,7 @@ from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, nor
 from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores.domain import ChannelBudgetRow
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import (
     KnownName,
     get_channel_names,
@@ -277,6 +278,10 @@ async def test_the_admin_card_names_top_spenders_and_channels(
             await make_usage_event(
                 session, tenant=tenant, platform_user_id=user, input_tokens=tokens
             )
+            # Spenders took turns, so each has a principal; only they get a stored name.
+            await get_or_create_platform_principal(
+                session, tenant_id=tenant_id, platform="teams", external_id=user
+            )
         await upsert_user_names(
             session, tenant_id=tenant_id, platform="teams", names={gone: KnownName("Priya N.")}
         )
@@ -324,6 +329,10 @@ async def test_a_message_remembers_its_senders_name(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with db_session_factory.begin() as session:
+        await get_or_create_platform_principal(
+            session, tenant_id=tenant_id, platform="teams", external_id=AAD_OBJECT_ID
+        )
     activity = make_message_activity(text="billing")
     activity["from"] = {**cast(dict[str, Any], activity["from"]), "name": "Maya Chen"}
 

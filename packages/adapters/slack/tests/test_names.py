@@ -13,6 +13,7 @@ from daimon.adapters.slack.names import payload_name, remember_payload_names
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core import platform_names
 from daimon.core.platform_names import KnownName
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import get_user_names
 from daimon.testing.factories import make_tenant
 from pydantic import SecretStr
@@ -47,6 +48,9 @@ async def test_a_payloads_name_is_stored(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T1")
+    await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U0MAYA"
+    )
     await db_session.commit()
 
     remember_payload_names(db_session_factory, "events_api", _MESSAGE)

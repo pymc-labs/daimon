@@ -10,11 +10,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core import platform_names
+from daimon.core._models import PlatformPrincipal
 from daimon.core.platform_names import (
     KnownName,
     remember_channel_names,
@@ -24,8 +26,8 @@ from daimon.core.platform_names import (
     settle,
 )
 from daimon.core.privacy import collect_purge_preview
-from daimon.core.purge import purge_principal
-from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.purge import purge_account, purge_principal
+from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.platform_names import (
     count_user_names_for_platform_user,
     delete_user_names_for_platform_user,
@@ -51,10 +53,19 @@ def _fresh_memo() -> Iterator[None]:
 # ---- the store ----
 
 
+async def _people(session: AsyncSession, tenant_id: uuid.UUID, platform: str, *ids: str) -> None:
+    """Give each id a principal: a name is only stored for someone who has one."""
+    for external_id in ids:
+        await get_or_create_platform_principal(
+            session, tenant_id=tenant_id, platform=platform, external_id=external_id
+        )
+
+
 async def test_upsert_keeps_the_stored_part_a_later_sighting_leaves_out(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session, platform="slack")
+    await _people(db_session, tenant.id, "slack", "U1")
     names = {"U1": KnownName(display_name="Maya Chen", handle="maya")}
     await upsert_user_names(db_session, tenant_id=tenant.id, platform="slack", names=names)
     await upsert_user_names(
@@ -70,6 +81,7 @@ async def test_upsert_keeps_the_stored_part_a_later_sighting_leaves_out(
 
 async def test_upsert_flattens_names_and_skips_blank_ones(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session, platform="discord")
+    await _people(db_session, tenant.id, "discord", "1", "2")
     await upsert_user_names(
         db_session,
         tenant_id=tenant.id,
@@ -84,9 +96,33 @@ async def test_upsert_flattens_names_and_skips_blank_ones(db_session: AsyncSessi
     assert known == {"1": KnownName(display_name="Ann Lee")}, "one line; a blank name is skipped"
 
 
+async def test_no_name_is_stored_for_someone_without_a_principal(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session, platform="discord")
+    await _people(db_session, tenant.id, "discord", "1")
+    other = await make_tenant(db_session, platform="discord")
+    await _people(db_session, other.id, "discord", "2")
+
+    stored = await upsert_user_names(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        names={"1": KnownName("Ann"), "2": KnownName("Bo"), "3": KnownName("Cy")},
+    )
+
+    assert stored == 1
+    known = await get_user_names(
+        db_session, tenant_id=tenant.id, platform="discord", user_ids=["1", "2", "3"]
+    )
+    assert known == {"1": KnownName("Ann")}, (
+        "no principal here (none at all, or only in another tenant): nothing stored"
+    )
+
+
 async def test_a_name_is_kept_per_tenant_and_platform(db_session: AsyncSession) -> None:
     one = await make_tenant(db_session, platform="slack")
     two = await make_tenant(db_session, platform="slack")
+    for tenant in (one, two):
+        await _people(db_session, tenant.id, "slack", "U1")
     await upsert_user_names(
         db_session, tenant_id=one.id, platform="slack", names={"U1": KnownName("One")}
     )
@@ -101,6 +137,7 @@ async def test_a_name_is_kept_per_tenant_and_platform(db_session: AsyncSession) 
 
 async def test_delete_and_count_reach_one_persons_row(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session, platform="slack")
+    await _people(db_session, tenant.id, "slack", "U1", "U2")
     await upsert_user_names(
         db_session,
         tenant_id=tenant.id,
@@ -146,6 +183,7 @@ async def test_channel_names_are_replaced_by_the_latest(db_session: AsyncSession
 
 async def test_deleting_a_tenant_deletes_its_names(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session, platform="teams")
+    await _people(db_session, tenant.id, "teams", "u")
     await upsert_user_names(
         db_session, tenant_id=tenant.id, platform="teams", names={"u": KnownName("A")}
     )
@@ -171,6 +209,7 @@ async def test_a_privacy_purge_previews_and_deletes_the_persons_name(
     principal = await get_or_create_platform_principal(
         db_session, tenant_id=tenant.id, platform="discord", external_id="111"
     )
+    await _people(db_session, tenant.id, "discord", "222")
     await upsert_user_names(
         db_session,
         tenant_id=tenant.id,
@@ -192,13 +231,115 @@ async def test_a_privacy_purge_previews_and_deletes_the_persons_name(
     assert left == {"222": KnownName("Bo")}, "someone else's name stays"
 
 
-# ---- the background recorder ----
+async def test_an_account_purge_deletes_its_names_in_every_tenant(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    one = await make_tenant(db_session, platform="discord")
+    two = await make_tenant(db_session, platform="discord")
+    first = await get_or_create_platform_principal(
+        db_session, tenant_id=one.id, platform="discord", external_id="111"
+    )
+    # The same account holding a principal in a second tenant.
+    db_session.add(
+        PlatformPrincipal(
+            tenant_id=two.id, platform="discord", external_id="111", account_id=first.account_id
+        )
+    )
+    await db_session.flush()
+    for tenant in (one, two):
+        await upsert_user_names(
+            db_session, tenant_id=tenant.id, platform="discord", names={"111": KnownName("Ann")}
+        )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=first.account_id)
+    report = await purge_account(sm=db_session_factory, account_id=first.account_id)
+
+    assert preview.platform_user_names.count == 2 and report.db.platform_user_names == 2
+    for tenant in (one, two):
+        known = await get_user_names(
+            db_session, tenant_id=tenant.id, platform="discord", user_ids=["111"]
+        )
+        assert known == {}, "the name goes in every tenant the account has a principal in"
 
 
-async def test_remember_writes_in_the_background_and_skips_a_repeat(
+async def test_someone_with_no_principal_has_no_name_and_privacy_says_so(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A first-time `/privacy` user: the click is remembered, but nothing is stored."""
+    tenant = await make_tenant(db_session, platform="discord")
+    await db_session.commit()
+
+    remember_user_name(
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="discord",
+        user_id="999",
+        display_name="First Timer",
+    )
+    await settle()
+
+    async with db_session_factory() as session:
+        principal = await find_platform_principal(
+            session, tenant_id=tenant.id, platform="discord", external_id="999"
+        )
+        count = await count_user_names_for_platform_user(
+            session, tenant_id=tenant.id, platform="discord", platform_user_id="999"
+        )
+    assert principal is None, "remembering a name never mints a principal"
+    assert count == 0, "so `/privacy`'s 'no data on file' is true: no name was stored"
+
+
+async def test_a_purge_drops_a_queued_name_so_it_is_not_written_after(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session, platform="discord")
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="discord", external_id="111"
+    )
+    await db_session.commit()
+    remember_user_name(
+        db_session_factory, tenant_id=tenant.id, platform="discord", user_id="111", display_name="A"
+    )
+    assert platform_names.pending_count() == 1
+
+    await purge_principal(sm=db_session_factory, principal_id=principal.id, kind="platform")
+    await settle()
+
+    assert platform_names.pending_count() == 0, "the purge dropped the queued name"
+    count = await count_user_names_for_platform_user(
+        db_session, tenant_id=tenant.id, platform="discord", platform_user_id="111"
+    )
+    assert count == 0
+
+
+async def test_a_write_racing_a_purge_cannot_put_the_name_back(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Even from another process: with the principal gone, the write stores nothing."""
+    tenant = await make_tenant(db_session, platform="discord")
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="discord", external_id="111"
+    )
+    await db_session.commit()
+    await purge_principal(sm=db_session_factory, principal_id=principal.id, kind="platform")
+
+    async with db_session_factory() as session, session.begin():
+        stored = await upsert_user_names(
+            session, tenant_id=tenant.id, platform="discord", names={"111": KnownName("A")}
+        )
+
+    assert stored == 0
+
+
+# ---- the background writer ----
+
+
+async def test_remember_writes_once_and_skips_a_repeat(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord")
+    await _people(db_session, tenant.id, "discord", "1")
     await db_session.commit()
     opened: list[int] = []
 
@@ -217,7 +358,7 @@ async def test_remember_writes_in_the_background_and_skips_a_repeat(
         )
     await settle()
 
-    assert len(opened) == 1, "the same name is written once per process"
+    assert len(opened) == 1, "the same name is written once"
     known = await get_user_names(
         db_session, tenant_id=tenant.id, platform="discord", user_ids=["1"]
     )
@@ -244,31 +385,78 @@ async def test_remember_writes_in_the_background_and_skips_a_repeat(
     assert len(opened) == 2, "a new name is written"
 
 
-async def test_outside_tests_a_write_starts_at_once_without_being_awaited(
+async def test_a_later_sighting_replaces_a_queued_one(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session, platform="discord")
+    await _people(db_session, tenant.id, "discord", "1")
     await db_session.commit()
-    platform_names.defer_writes(False)
-    try:
+
+    for name in ("A", "B"):
         remember_user_name(
             db_session_factory,
             tenant_id=tenant.id,
             platform="discord",
             user_id="1",
-            display_name="Ann",
+            display_name=name,
         )
-        assert platform_names._pending, "a task is running; the caller did not wait"  # pyright: ignore[reportPrivateUsage]
-        await settle()
-    finally:
-        platform_names.defer_writes()
+    assert platform_names.pending_count() == 1, "one key, latest value"
+    await settle()
+
     known = await get_user_names(
         db_session, tenant_id=tenant.id, platform="discord", user_ids=["1"]
     )
-    assert known == {"1": KnownName("Ann")}
+    assert known == {"1": KnownName("B")}, "the latest name is the one written"
 
 
-async def test_remember_channel_names_writes_in_the_background(
+async def test_a_burst_of_people_is_bounded_and_written_by_one_consumer_in_batches(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord")
+    ids = [str(n) for n in range(130)]
+    await _people(db_session, tenant.id, "discord", *ids)
+    await db_session.commit()
+    monkeypatch.setattr(platform_names, "MAX_PENDING", 120)
+    sessions: list[int] = []
+    rows_per_batch: list[int] = []
+    real = platform_names.upsert_user_names
+
+    async def counting_upsert(session: AsyncSession, **kwargs: Any) -> int:
+        rows_per_batch.append(len(kwargs["names"]))
+        return await real(session, **kwargs)
+
+    monkeypatch.setattr(platform_names, "upsert_user_names", counting_upsert)
+
+    def counting() -> Any:
+        sessions.append(1)
+        return db_session_factory()
+
+    platform_names.defer_writes(False)
+    try:
+        for user_id in ids:
+            remember_user_name(
+                counting,  # type: ignore[arg-type]
+                tenant_id=tenant.id,
+                platform="discord",
+                user_id=user_id,
+                display_name=f"p{user_id}",
+            )
+        assert platform_names.pending_count() == 120, "keys past the cap are dropped"
+        consumers = [t for t in asyncio.all_tasks() if t.get_name() == "platform_names.writer"]
+        assert len(consumers) == 1, "one consumer, however many people"
+        await settle()
+    finally:
+        platform_names.defer_writes()
+
+    assert rows_per_batch == [50, 50, 20], "batches of at most 50 rows"
+    assert len(sessions) == 3, "one session per batch"
+    known = await get_user_names(db_session, tenant_id=tenant.id, platform="discord", user_ids=ids)
+    assert len(known) == 120
+
+
+async def test_remember_channel_names_are_written(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session, platform="teams")
@@ -285,10 +473,11 @@ async def test_remember_channel_names_writes_in_the_background(
     assert names == {"19:a": "General"}
 
 
-async def test_a_failed_write_is_logged_and_tried_again_next_time(
+async def test_a_failed_write_is_not_remembered_so_the_next_sighting_retries(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session, platform="slack")
+    await _people(db_session, tenant.id, "slack", "U1")
     await db_session.commit()
 
     @asynccontextmanager
@@ -296,14 +485,23 @@ async def test_a_failed_write_is_logged_and_tried_again_next_time(
         raise OperationalError("INSERT", {}, Exception("connection refused"))
         yield
 
-    remember_user_name(
-        broken,  # type: ignore[arg-type]
-        tenant_id=tenant.id,
-        platform="slack",
-        user_id="U1",
-        display_name="Ann",
-    )
-    await settle()  # no raise: the failure stays in the background task
+    for kind in ("user", "channel"):
+        if kind == "user":
+            remember_user_name(
+                broken,  # type: ignore[arg-type]
+                tenant_id=tenant.id,
+                platform="slack",
+                user_id="U1",
+                display_name="Ann",
+            )
+        else:
+            remember_channel_names(
+                broken,  # type: ignore[arg-type]
+                tenant_id=tenant.id,
+                platform="slack",
+                names={"C1": "general"},
+            )
+    await settle()  # no raise: the failure stays in the writer
 
     remember_user_name(
         db_session_factory,
@@ -312,22 +510,27 @@ async def test_a_failed_write_is_logged_and_tried_again_next_time(
         user_id="U1",
         display_name="Ann",
     )
+    remember_channel_names(
+        db_session_factory, tenant_id=tenant.id, platform="slack", names={"C1": "general"}
+    )
+    assert platform_names.pending_count() == 2, "neither was remembered as written"
     await settle()
     known = await get_user_names(db_session, tenant_id=tenant.id, platform="slack", user_ids=["U1"])
     assert known == {"U1": KnownName("Ann")}, "the failed name is written on the next sighting"
+    channels = await get_channel_names(
+        db_session, tenant_id=tenant.id, platform="slack", channel_ids=["C1"]
+    )
+    assert channels == {"C1": "general"}
 
 
 async def test_remember_ignores_what_is_not_a_name() -> None:
-    def never() -> Any:
-        raise AssertionError("nothing to write")
-
     remember_user_names(
-        never,  # type: ignore[arg-type]
+        MagicMock(side_effect=AssertionError("nothing to write")),
         tenant_id=uuid.uuid4(),
         platform="discord",
         names={"1": KnownName(None, None), "": KnownName("A"), "2": KnownName(object(), " ")},  # type: ignore[arg-type]
     )
-    await settle()
+    assert platform_names.pending_count() == 0
 
 
 # ---- the panel's resolution order ----
@@ -428,6 +631,8 @@ async def test_the_migration_round_trips(db_session: AsyncSession) -> None:
         "platform_channel_names",
     }, "upgrade creates both"
     tenant = await make_tenant(db_session, platform="slack")
-    await upsert_user_names(
+    await _people(db_session, tenant.id, "slack", "U1")
+    stored = await upsert_user_names(
         db_session, tenant_id=tenant.id, platform="slack", names={"U1": KnownName("Ann")}
     )
+    assert stored == 1, "the upgraded table takes a name"

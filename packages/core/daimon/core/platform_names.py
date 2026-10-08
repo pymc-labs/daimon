@@ -2,10 +2,21 @@
 
 Adapters call `remember_user_names` / `remember_channel_names` with names they
 already hold: an inbound message's author, a click's user, a lookup that
-succeeded. Each call is fire-and-forget: it never blocks or fails the caller,
-and a name already written by this process is not written again. The billing
-panel reads the stored names back (`daimon.core.stores.platform_names`) when
-the platform cannot answer live.
+succeeded. A call never waits and never raises: it puts the name in a bounded
+in-process queue, keyed by (tenant, platform, person or channel), where a later
+sighting replaces an earlier one that has not been written yet. One consumer
+task per process drains the queue in batches of at most ``BATCH_SIZE`` rows,
+one session per batch, so a burst of new people never holds more than one pool
+connection. A name is remembered as written only once its batch commits; a
+failed batch is logged and dropped, and the next sighting tries again. With
+``MAX_PENDING`` keys queued, further new keys are dropped and logged.
+
+A person's name is only stored while they have a principal in that tenant
+(`daimon.core.stores.platform_names`), and a privacy purge deletes it after the
+principal, so a write racing the purge, from any process, cannot put it back.
+The purge also calls `forget_users`, which drops their queued names and what
+this process remembers writing for them. The billing panel reads the stored names back
+(`daimon.core.stores.platform_names`) when the platform cannot answer live.
 
 `resolve_names` is the panel's resolution order, shared by every adapter: a
 live lookup, else the stored name, else a handle lookup for someone never seen,
@@ -15,10 +26,9 @@ each person concurrently under one timeout.
 from __future__ import annotations
 
 import asyncio
-import functools
 import uuid
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Collection, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from typing import Literal
 
 import structlog
@@ -27,10 +37,15 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
+    "BATCH_SIZE",
+    "MAX_PENDING",
     "KnownName",
     "LiveLookup",
+    "UserKey",
     "defer_writes",
     "forget_all",
+    "forget_users",
+    "pending_count",
     "remember_channel_names",
     "remember_user_name",
     "remember_user_names",
@@ -40,23 +55,136 @@ __all__ = [
 
 log = structlog.get_logger(__name__)
 
-# Names written by this process, so a busy channel writes each person once.
+# Rows written per batch, in one session.
+BATCH_SIZE = 50
+# Keys waiting to be written; a new key past this is dropped.
+MAX_PENDING = 5_000
+# Names this process has written, so a busy channel writes each person once.
 _MEMO_SIZE = 10_000
-# What a failed write may raise; anything else is a bug and surfaces.
+# What a failed write may raise; anything else is a bug and surfaces in the log.
 _WRITE_ERRORS = (SQLAlchemyError, OSError, TimeoutError)
 
-_Key = tuple[uuid.UUID, str, Literal["user", "channel"], str]
+Kind = Literal["user", "channel"]
+_Key = tuple[uuid.UUID, str, Kind, str]
+UserKey = tuple[uuid.UUID, str, str]
+"""(tenant id, platform, platform user id): whose name a privacy deletion forgets."""
+Sessionmaker = async_sessionmaker[AsyncSession]
+
 _memo: OrderedDict[_Key, KnownName] = OrderedDict()
-_pending: set[asyncio.Task[None]] = set()
-# Writes held for `settle` instead of started; see `defer_writes`.
-_deferred: list[Callable[[], Awaitable[None]]] | None = None
+# Latest unwritten value per key, oldest first, with the sessionmaker to write it with.
+_pending: OrderedDict[_Key, tuple[Sessionmaker, KnownName]] = OrderedDict()
+_consumer: asyncio.Task[None] | None = None
+# Tests hold writes for `settle` rather than start the consumer; see `defer_writes`.
+_held = False
+_dropped = 0
 
 
-def _remembered(key: _Key) -> KnownName | None:
-    known = _memo.get(key)
-    if known is not None:
-        _memo.move_to_end(key)
-    return known
+def _clean(value: object) -> str | None:
+    """One line of text, or None for a blank name or anything that is not text."""
+    text = " ".join(value.split()) if isinstance(value, str) else ""
+    return text or None
+
+
+def _merge(new: KnownName, old: KnownName | None) -> KnownName:
+    if old is None:
+        return new
+    return KnownName(new.display_name or old.display_name, new.handle or old.handle)
+
+
+def _enqueue(
+    sessionmaker: Sessionmaker,
+    tenant_id: uuid.UUID,
+    platform: str,
+    kind: Kind,
+    names: Mapping[str, KnownName],
+) -> None:
+    global _dropped
+    added = False
+    for item_id, name in names.items():
+        given = KnownName(_clean(name.display_name), _clean(name.handle))
+        if not item_id or given.label is None:
+            continue
+        key: _Key = (tenant_id, platform, kind, item_id)
+        queued = _pending.get(key)
+        if queued is not None:
+            # Latest wins; a part this sighting lacks keeps the queued one.
+            _pending[key] = (sessionmaker, _merge(given, queued[1]))
+            added = True
+            continue
+        written = _memo.get(key)
+        merged = _merge(given, written)
+        if merged == written:
+            _memo.move_to_end(key)
+            continue
+        if len(_pending) >= MAX_PENDING:
+            _dropped += 1
+            log.warning("platform_names.queue_full", dropped=_dropped, pending=len(_pending))
+            continue
+        _pending[key] = (sessionmaker, merged)
+        added = True
+    if added:
+        _start_consumer()
+
+
+def _start_consumer() -> None:
+    global _consumer
+    if _held or (_consumer is not None and not _consumer.done()):
+        return
+    _consumer = asyncio.get_running_loop().create_task(_consume(), name="platform_names.writer")
+
+
+async def _consume() -> None:
+    """Write queued names a batch at a time until the queue is empty."""
+    while _pending:
+        await _write_next_batch()
+
+
+async def _write_next_batch() -> None:
+    try:
+        await _write_batch()
+    except Exception:
+        # Nobody awaits these writes for a result: log what escaped the batch's
+        # own catch rather than lose the rest of the queue to it.
+        log.exception("platform_names.writer_crashed")
+
+
+def _take_batch() -> tuple[Sessionmaker, dict[_Key, KnownName]]:
+    first = next(iter(_pending))
+    sessionmaker = _pending[first][0]
+    batch: dict[_Key, KnownName] = {}
+    for key in list(_pending):
+        if len(batch) == BATCH_SIZE:
+            break
+        maker, name = _pending[key]
+        if maker is sessionmaker:
+            batch[key] = name
+            del _pending[key]
+    return sessionmaker, batch
+
+
+async def _write_batch() -> None:
+    sessionmaker, batch = _take_batch()
+    groups: dict[tuple[uuid.UUID, str, Kind], dict[str, KnownName]] = {}
+    for (tenant_id, platform, kind, item_id), name in batch.items():
+        groups.setdefault((tenant_id, platform, kind), {})[item_id] = name
+    try:
+        async with sessionmaker() as session, session.begin():
+            for (tenant_id, platform, kind), names in groups.items():
+                if kind == "user":
+                    await upsert_user_names(
+                        session, tenant_id=tenant_id, platform=platform, names=names
+                    )
+                else:
+                    labels = {cid: n.label for cid, n in names.items() if n.label is not None}
+                    await upsert_channel_names(
+                        session, tenant_id=tenant_id, platform=platform, names=labels
+                    )
+    except _WRITE_ERRORS as exc:
+        # Not remembered as written: the next sighting queues it again.
+        log.warning("platform_names.write_failed", count=len(batch), error=type(exc).__name__)
+        return
+    for key, name in batch.items():
+        _note(key, name)
 
 
 def _note(key: _Key, name: KnownName) -> None:
@@ -66,118 +194,35 @@ def _note(key: _Key, name: KnownName) -> None:
         _memo.popitem(last=False)
 
 
-def _clean(value: object) -> str | None:
-    """One line of text, or None for a blank name or anything that is not text."""
-    text = " ".join(value.split()) if isinstance(value, str) else ""
-    return text or None
+def forget_users(keys: Iterable[UserKey]) -> None:
+    """Drop these people's queued names and what this process remembers writing.
 
-
-def _news(
-    tenant_id: uuid.UUID,
-    platform: str,
-    kind: Literal["user", "channel"],
-    names: Mapping[str, KnownName],
-) -> dict[str, KnownName]:
-    """The names that would change what this process last wrote, noted as written."""
-    news: dict[str, KnownName] = {}
-    for item_id, name in names.items():
-        given = KnownName(_clean(name.display_name), _clean(name.handle))
-        if not item_id or given.label is None:
-            continue
-        key: _Key = (tenant_id, platform, kind, item_id)
-        last = _remembered(key)
-        merged = (
-            given
-            if last is None
-            else KnownName(given.display_name or last.display_name, given.handle or last.handle)
-        )
-        if merged != last:
-            news[item_id] = given
-            _note(key, merged)
-    return news
-
-
-def _forget(
-    tenant_id: uuid.UUID, platform: str, kind: Literal["user", "channel"], ids: Collection[str]
-) -> None:
-    for item_id in ids:
-        _memo.pop((tenant_id, platform, kind, item_id), None)
-
-
-def _spawn(write: Callable[[], Awaitable[None]]) -> None:
-    async def run() -> None:
-        # Nothing awaits this task, so whatever escapes the write's own catch
-        # would only surface as asyncio's "never retrieved" line; log it here.
-        try:
-            await write()
-        except Exception:
-            log.exception("platform_names.write_crashed")
-
-    if _deferred is not None:
-        _deferred.append(run)
-        return
-    task = asyncio.get_running_loop().create_task(run())
-    _pending.add(task)
-    task.add_done_callback(_pending.discard)
-
-
-async def _write_users(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    tenant_id: uuid.UUID,
-    platform: str,
-    names: dict[str, KnownName],
-) -> None:
-    try:
-        async with sessionmaker() as session, session.begin():
-            await upsert_user_names(session, tenant_id=tenant_id, platform=platform, names=names)
-    except _WRITE_ERRORS as exc:
-        _forget(tenant_id, platform, "user", names)
-        log.warning(
-            "platform_names.user_write_failed",
-            platform=platform,
-            count=len(names),
-            error=type(exc).__name__,
-        )
-
-
-async def _write_channels(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    tenant_id: uuid.UUID,
-    platform: str,
-    names: dict[str, str],
-) -> None:
-    try:
-        async with sessionmaker() as session, session.begin():
-            await upsert_channel_names(session, tenant_id=tenant_id, platform=platform, names=names)
-    except _WRITE_ERRORS as exc:
-        _forget(tenant_id, platform, "channel", names)
-        log.warning(
-            "platform_names.channel_write_failed",
-            platform=platform,
-            count=len(names),
-            error=type(exc).__name__,
-        )
+    A privacy purge calls it with the rows it deletes, so a name queued before
+    the purge is not written after it, and a later sighting is written afresh.
+    """
+    for tenant_id, platform, user_id in keys:
+        key: _Key = (tenant_id, platform, "user", user_id)
+        _pending.pop(key, None)
+        _memo.pop(key, None)
 
 
 def remember_user_names(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: Sessionmaker,
     *,
     tenant_id: uuid.UUID,
     platform: str,
     names: Mapping[str, KnownName],
 ) -> None:
-    """Store these people's names in the background. Never raises, never waits.
+    """Queue these people's names to be stored. Never raises, never waits.
 
     A part left None keeps the stored one. A name this process already wrote is
     skipped; a failed write is logged and tried again the next time it is seen.
     """
-    news = _news(tenant_id, platform, "user", names)
-    if news:
-        _spawn(functools.partial(_write_users, sessionmaker, tenant_id, platform, news))
+    _enqueue(sessionmaker, tenant_id, platform, "user", names)
 
 
 def remember_user_name(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: Sessionmaker,
     *,
     tenant_id: uuid.UUID,
     platform: str,
@@ -195,43 +240,52 @@ def remember_user_name(
 
 
 def remember_channel_names(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: Sessionmaker,
     *,
     tenant_id: uuid.UUID,
     platform: str,
     names: Mapping[str, str],
 ) -> None:
-    """Store these channels' names in the background, as `remember_user_names` does."""
-    news = _news(
-        tenant_id, platform, "channel", {cid: KnownName(name) for cid, name in names.items()}
+    """Queue these channels' names to be stored, as `remember_user_names` does."""
+    _enqueue(
+        sessionmaker,
+        tenant_id,
+        platform,
+        "channel",
+        {cid: KnownName(name) for cid, name in names.items()},
     )
-    if news:
-        labels = {cid: name.label for cid, name in news.items() if name.label is not None}
-        _spawn(functools.partial(_write_channels, sessionmaker, tenant_id, platform, labels))
+
+
+def pending_count() -> int:
+    """Keys waiting to be written."""
+    return len(_pending)
 
 
 def defer_writes(enabled: bool = True) -> None:
-    """Hold writes until `settle` runs them one at a time, instead of starting them.
+    """Hold queued writes until `settle` instead of starting the consumer.
 
-    For tests, whose sessions share one connection that a background write
-    would use concurrently with the code under test.
+    For tests, whose sessions share one connection that the consumer would use
+    concurrently with the code under test.
     """
-    global _deferred
-    _deferred = [] if enabled else None
+    global _held
+    _held = enabled
 
 
 async def settle() -> None:
-    """Run held writes, then wait for every pending one on this loop; for tests and shutdown."""
-    while _deferred:
-        await _deferred.pop(0)()
+    """Write everything queued and wait for the consumer; for tests and shutdown."""
     loop = asyncio.get_running_loop()
-    while tasks := [task for task in _pending if task.get_loop() is loop and not task.done()]:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    if _consumer is not None and not _consumer.done() and _consumer.get_loop() is loop:
+        await _consumer
+    while _pending:
+        await _write_next_batch()
 
 
 def forget_all() -> None:
-    """Drop what this process remembers having written; for tests."""
+    """Drop the queue and what this process remembers writing; for tests."""
+    global _dropped
     _memo.clear()
+    _pending.clear()
+    _dropped = 0
 
 
 LiveLookup = Callable[[str], Awaitable[KnownName | None]]

@@ -26,6 +26,7 @@ from daimon.core.billing_panel import BillingPanelState, MemberRow, load_billing
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores.domain import ChannelBudgetRow
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -624,6 +625,10 @@ async def test_spenders_are_named_from_users_info_and_remembered(
     from daimon.core.stores.platform_names import KnownName, get_user_names
 
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_NAMES")
+    for user_id in ("U001", "U002", "U003"):
+        await get_or_create_platform_principal(
+            db_session, tenant_id=tenant.id, platform="slack", external_id=user_id
+        )
     await db_session.commit()
     client = _UsersInfo(
         {

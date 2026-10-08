@@ -1,5 +1,12 @@
 """Last-known names of a tenant's people and channels, as their platform gave them.
 
+A person's name is only stored while they have a platform principal in that
+tenant: the write locks their principal row, and a privacy purge deletes the
+name after the principal, so a write racing the purge either lands first and is
+deleted with it or finds no principal and stores nothing. Someone with no
+principal (no account here, or one erased) therefore never has a stored name,
+which keeps `/privacy`'s "no data on file" true.
+
 No try/except: exceptions propagate to the caller, which for a name is the
 best-effort recorder in `daimon.core.platform_names`. Callers own the
 transaction; every write ends with `await session.flush()`.
@@ -13,7 +20,7 @@ from collections.abc import Collection, Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from daimon.core._models import PlatformChannelName, PlatformUserName
+from daimon.core._models import PlatformChannelName, PlatformPrincipal, PlatformUserName
 from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,16 +51,33 @@ async def upsert_user_names(
     tenant_id: uuid.UUID,
     platform: str,
     names: Mapping[str, KnownName],
-) -> None:
-    """Store each person's name; a part not given (None) keeps the stored one.
+) -> int:
+    """Store the name of each person who has a principal here; return how many were stored.
 
-    Blank names are dropped, and a person with neither part is skipped.
+    A part not given (None) keeps the stored one. Blank names are dropped, a
+    person with neither part is skipped, and so is anyone without a principal
+    in this tenant on this platform (see the module docstring).
     """
+    wanted = sorted(user_id for user_id in names if user_id)
+    if not wanted:
+        return 0
+    known = set(
+        await session.scalars(
+            select(PlatformPrincipal.external_id)
+            .where(
+                PlatformPrincipal.tenant_id == tenant_id,
+                PlatformPrincipal.platform == platform,
+                PlatformPrincipal.external_id.in_(wanted),
+            )
+            .with_for_update(read=True)
+        )
+    )
     now = datetime.now(UTC)
     values: list[dict[str, object]] = []
-    for user_id, name in sorted(names.items()):
+    for user_id in wanted:
+        name = names[user_id]
         display, handle = _clean(name.display_name), _clean(name.handle)
-        if user_id and (display is not None or handle is not None):
+        if user_id in known and (display is not None or handle is not None):
             values.append(
                 {
                     "tenant_id": tenant_id,
@@ -65,7 +89,7 @@ async def upsert_user_names(
                 }
             )
     if not values:
-        return
+        return 0
     stmt = pg_insert(PlatformUserName).values(values)
     stmt = stmt.on_conflict_do_update(
         index_elements=[
@@ -83,6 +107,7 @@ async def upsert_user_names(
     )
     await session.execute(stmt)
     await session.flush()
+    return len(values)
 
 
 async def get_user_names(

@@ -11,6 +11,7 @@ from daimon.adapters.discord.names import remember_guild_user
 from daimon.core import platform_names
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.platform_names import KnownName
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import get_user_names
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -34,7 +35,10 @@ async def _stored(session: AsyncSession, user_id: str) -> dict[str, KnownName]:
 async def test_a_guild_users_names_are_remembered(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    await make_tenant(db_session, platform="discord", workspace_id=str(GUILD))
+    tenant = await make_tenant(db_session, platform="discord", workspace_id=str(GUILD))
+    await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="discord", external_id="100000000000000042"
+    )
     await db_session.commit()
 
     remember_guild_user(db_session_factory, guild_id=GUILD, user=_user())
@@ -65,7 +69,10 @@ async def test_a_failed_write_never_reaches_the_event() -> None:
 async def test_every_interaction_remembers_the_clickers_name(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    await make_tenant(db_session, platform="discord", workspace_id=str(GUILD))
+    tenant = await make_tenant(db_session, platform="discord", workspace_id=str(GUILD))
+    await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="discord", external_id="100000000000000043"
+    )
     await db_session.commit()
     bot = MagicMock()
     bot.runtime.sessionmaker = db_session_factory

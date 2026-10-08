@@ -30,6 +30,7 @@ from daimon.core import platform_names
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.platform_names import KnownName
 from daimon.core.stores import tenant_ledger, usage_events
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import get_user_names, upsert_user_names
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import (
@@ -226,6 +227,9 @@ async def test_the_admin_snapshot_names_spenders_and_remembers_live_names(
     tenant = await make_tenant(db_session, platform="discord", workspace_id="777000000000000001")
     for uid, tokens in (("100000000000000011", 3000), ("100000000000000012", 2000)):
         await make_usage_event(db_session, tenant=tenant, platform_user_id=uid, input_tokens=tokens)
+        await get_or_create_platform_principal(
+            db_session, tenant_id=tenant.id, platform="discord", external_id=uid
+        )
     await upsert_user_names(
         db_session,
         tenant_id=tenant.id,
