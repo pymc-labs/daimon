@@ -154,8 +154,8 @@ async def test_both_views_show_the_invoking_channels_budget_only_when_it_has_one
             )
             blocks = build_billing_container(state, now=_NOW, since=_SINCE)
             texts[channel_id] = str(blocks)
-        assert "*Channel budget*\\n$1.20 of $5.00 used this month" in texts["C1"]
-        assert "*Channel budget*" not in texts["C2"], "no budget, no section"
+        assert "*This channel*\\n$1.20 of $5.00 used this month" in texts["C1"]
+        assert "*This channel*" not in texts["C2"], "no budget, no section"
 
 
 def test_build_billing_container_empty_period_renders_cleanly() -> None:
@@ -308,7 +308,7 @@ def test_the_admin_panel_is_month_credit_channel_and_actions_apart() -> None:
         "section: *$50.00* total credit left",
         "context: Includes $25.00 that expires. It's used first.",
         "divider",
-        "section: *Channel budget*\n$1.20 of $5.00 used this month",
+        "section: *This channel*\n$1.20 of $5.00 used this month",
         "divider",
         "section: *Top spenders*\n1. <@U0123ABCD>  $2.00",
         "divider",

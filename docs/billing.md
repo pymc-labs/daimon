@@ -248,7 +248,7 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 Members can read a channel's budget with `get_channel_budget`; listing,
 setting and clearing are for server admins only, never a channel's own admins
 (`daimon.core.authz`, `SET_CHANNEL_BUDGET`); each change is recorded in `security_audit_events`, from the CLI too. `/billing` in a channel with a budget
-shows it in a **Channel budget** section under the credit, worded from its
+shows it in a **This channel** section under the credit, worded from its
 window (`$1.20 of $5.00 used this month`, `… used since 2026-07-01`, `$5.00
 budget from 2026-07-01` before it starts). An admin's `/billing` also lists,
 under **Channel budgets** after the top spenders, the five most used budgets
