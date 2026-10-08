@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn in that channel can ask from it. A channel read only from inside
   is marked in the request and in a routed 👎 form, and the form warns that
   the note leaves the channel.
+- **Add skill in the Teams setup panel.** An agent's Details in `setup` now
+  has an Add skill button, as on Discord and Slack. Its dialog takes a pasted
+  SKILL.md, previews its name, description, files and any scripts, and adds
+  it as the agent's own skill when sent again unchanged. The same people may
+  add as on the other platforms, re-checked on every step. Teams dialogs take
+  no files, so a `.zip` is attached in a message and added from chat.
 - **Teams files in private and shared channels, turned on by asking.** The
   Enable files sign-in now starts from a channel and grants daimon that
   channel's own SharePoint site: the team's for a standard channel, a site of

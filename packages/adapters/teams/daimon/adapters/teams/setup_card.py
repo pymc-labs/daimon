@@ -1,8 +1,8 @@
 """Pure Adaptive Card builders for the `setup` panel and setup conversations. No I/O.
 
 Panel buttons are `Action.Execute` carrying `{"action": VERB, "op": ..., ...}`, so a
-click replaces the card in place. New agent and coding tools open dialogs: a dialog
-is never written to chat history, which keeps a minted token out of it.
+click replaces the card in place. New agent, Add skill and coding tools open dialogs:
+a dialog is never written to chat history, which keeps a minted token out of it.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from daimon.core.setup_conversations import (
     setup_thread_name,
     shared_keys_sentence,
 )
+from daimon.core.skills.ingest import SkillPreview
 from daimon.core.stores.domain import McpTokenRow
 from microsoft_teams.cards import (
     Action,
@@ -55,6 +56,10 @@ VERB = "agent_setup"
 CREATE_DIALOG = "agent_create"
 TOKEN_DIALOG = "agent_coding_tools"
 OPERATOR_DIALOG = "operator_tokens"
+SKILL_DIALOG = "agent_add_skill"
+MAX_SKILL_PASTE_CHARS = 4000  # Discord's paste cap; a longer skill goes through chat as a file.
+_SHOWN_FILES = 15
+_PATH_CHARS = 80
 PAGE_SIZE = 20
 MAX_ENVIRONMENT_LINES = 10
 """Channel environment lines on Who answers where; the rest fold into "and N more"."""
@@ -223,6 +228,9 @@ def details_card(
         body.append(_text(f"**Branch:** `{details.repo.default_branch}`"))
     body += _detail_lists(details, page=page, expanded=expanded)
     actions: list[Action] = []
+    if not details.daimon_managed:
+        add = OpenDialogData(SKILL_DIALOG, {"agent": details.name})
+        actions.append(SubmitAction(title="➕ Add skill", data=add))
     if coding_tools:
         data = OpenDialogData(TOKEN_DIALOG, {"agent": details.name})
         actions.append(SubmitAction(title="🧰 Use from your coding tools", data=data))
@@ -325,6 +333,61 @@ def new_agent_form(
     ]
     submit = SubmitAction(title="Create", data=SubmitData(CREATE_DIALOG))
     return AdaptiveCard(body=body, actions=[submit], fallback_text="New agent")
+
+
+def _paths(paths: Sequence[str]) -> str:
+    shown = [f"`{path[:_PATH_CHARS]}`" for path in paths[:_SHOWN_FILES]]
+    if len(paths) > _SHOWN_FILES:
+        shown.append(f"+{len(paths) - _SHOWN_FILES} more")
+    return ", ".join(shown)
+
+
+def add_skill_form(
+    agent_name: str,
+    *,
+    text: str = "",
+    preview: SkillPreview | None = None,
+    error: str | None = None,
+) -> AdaptiveCard:
+    """Paste a SKILL.md; with `preview`, show what it holds and submit to add it.
+
+    The previewed hash rides in the submit, so changed text previews again
+    rather than adding. A dialog takes no files, so a `.zip` goes through chat.
+    """
+    body: list[CardElement] = [_text(error)] if error else []
+    data = {"agent": agent_name}
+    if preview is None:
+        body.append(_text("Paste a SKILL.md. You see what it holds before anything is added."))
+    else:
+        data["hash"] = preview.content_hash
+        body.append(_text(f"**Add {preview.name} to {agent_name}?**"))
+        body.append(_text(clip(preview.description, _PURPOSE_MAX_CHARS)))
+        body.append(_text(f"**Files:** {_paths(preview.files)}"))
+        if preview.scripts:
+            body.append(_text(f"⚠️ **{agent_name} could run:** {_paths(preview.scripts)}"))
+    body.append(
+        TextInput(
+            id="skill",
+            label="SKILL.md",
+            is_multiline=True,
+            is_required=True,
+            max_length=MAX_SKILL_PASTE_CHARS,
+            placeholder="---\nname: my-skill\ndescription: What it does\n---",
+            value=text or None,
+        )
+    )
+    note = (
+        f"Send it again to add it as {agent_name}'s own skill; shared skills are not "
+        "changed. Changed text is previewed again."
+        if preview is not None
+        else f"For a .zip or a longer file, attach it in a message and ask me to add it to "
+        f"{agent_name}."
+    )
+    body.append(_text(note, subtle=True))
+    submit = SubmitAction(
+        title="Add" if preview is not None else "Preview", data=SubmitData(SKILL_DIALOG, data)
+    )
+    return AdaptiveCard(body=body, actions=[submit], fallback_text=f"Add a skill to {agent_name}")
 
 
 UNBOUND = "none"

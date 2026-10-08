@@ -399,6 +399,8 @@ def create_teams_http_service(
     teams_app.on_dialog_submit(setup_card.TOKEN_DIALOG, setup.on_token_submit)
     teams_app.on_dialog_open(setup_card.OPERATOR_DIALOG, setup.on_operator_open)
     teams_app.on_dialog_submit(setup_card.OPERATOR_DIALOG, setup.on_operator_submit)
+    teams_app.on_dialog_open(setup_card.SKILL_DIALOG, setup.on_skill_open)
+    teams_app.on_dialog_submit(setup_card.SKILL_DIALOG, setup.on_skill_submit)
     teams_app.on_dialog_open(CHANNEL_DIALOG, channel_settings.on_open)
     teams_app.on_dialog_submit(CHANNEL_DIALOG, channel_settings.on_submit)
     teams_app.on_dialog_open(CREDENTIAL_DIALOG, turns.credentials.on_dialog_open)

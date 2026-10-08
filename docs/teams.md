@@ -140,7 +140,7 @@ longer goes to the agent. None of them runs an agent turn.
 | --- | --- |
 | `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
 | `help` | List the commands. |
-| `setup` | Agents, their details and who answers where; create an agent, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
+| `setup` | Agents, their details and who answers where; create an agent, add a skill to one, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
 | `privacy` | See, export or delete what daimon stores about you. |
@@ -262,7 +262,13 @@ A shared `.md` or `.zip` can become a skill: `add_skill(attachment_url=…)`
 takes its download link only over https from a SharePoint, OneDrive or Graph
 host, sends no token, refuses a redirect off those hosts, and checks the
 file's name before reading its capped body, with the usual preview and
-confirmation card.
+confirmation card. **Add skill** on an agent's Details in `setup` takes a
+pasted SKILL.md (up to 4,000 characters; a dialog has no file input), shows
+what it holds, and adds it on a second Send as the agent's own skill, under
+Discord's and Slack's rule: an admin for any agent, a channel admin for one
+that answers only in their channels, anyone for one nobody else uses. The
+panel is outside every channel, so a pinned agent needs an admin of every
+channel it is pinned to.
 
 ### Channel files (optional)
 
