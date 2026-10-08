@@ -38,6 +38,7 @@ def test_reply_to_recorded_agent_post_is_addressed() -> None:
         author_id=HUMAN_ID,
         bot_mentioned=False,
         reply_to_recorded_post=True,
+        identity_enabled=True,
         guild_id="g1",
     )
     assert not should_process_message(
@@ -45,6 +46,14 @@ def test_reply_to_recorded_agent_post_is_addressed() -> None:
         author_id=HUMAN_ID,
         bot_mentioned=False,
         reply_to_recorded_post=False,
+        guild_id="g1",
+    )
+    assert not should_process_message(
+        author_is_bot=False,
+        author_id=HUMAN_ID,
+        bot_mentioned=False,
+        reply_to_recorded_post=True,
+        identity_enabled=False,
         guild_id="g1",
     )
 
@@ -57,6 +66,7 @@ def test_only_allow_listed_qa_bot_can_reply_to_recorded_post() -> None:
                 author_id=author_id,
                 bot_mentioned=False,
                 reply_to_recorded_post=True,
+                identity_enabled=True,
                 guild_id="g1",
                 self_user_id=DAIMON_ID,
                 qa_bot_user_ids=(QA_BOT_ID,),

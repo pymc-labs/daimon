@@ -14,9 +14,12 @@ import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from daimon.adapters.slack.agent_setup import actions as setup_actions
 from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_AVATAR_CHANGE,
     ACTION_AVATAR_RESET,
@@ -525,6 +528,36 @@ def test_details_avatar_row_and_admin_controls() -> None:
     assert "*Avatar*" not in _joined(built_in)
     assert "Avatars are public" not in _joined(built_in)
     assert ACTION_AVATAR_CHANGE not in json.dumps(built_in)
+
+
+async def test_load_details_view_omits_avatar_when_identity_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = AsyncMock()
+    sessionmaker = MagicMock()
+    sessionmaker.return_value.__aenter__ = AsyncMock(return_value=session)
+    sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
+    runtime = SimpleNamespace(
+        sessionmaker=sessionmaker,
+        anthropic=MagicMock(),
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+        settings=SimpleNamespace(agent_identity=SimpleNamespace(enabled=False)),
+    )
+    monkeypatch.setattr(setup_actions, "load_panel_roster", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(setup_actions, "load_panel_details", AsyncMock(return_value=_details()))
+    monkeypatch.setattr(setup_actions, "resolve_attributions", AsyncMock(return_value={}))
+    monkeypatch.setattr(setup_actions, "coding_tools_available", lambda _runtime: True)
+    avatar_lookup = AsyncMock()
+    monkeypatch.setattr(setup_actions, "get_or_create_avatar", avatar_lookup)
+
+    view = await setup_actions.load_details_view(  # type: ignore[arg-type]
+        runtime, tenant_id=uuid.uuid4(), meta=_meta(), agent_name="research-bot", is_admin=True
+    )
+
+    assert view is not None
+    assert "*Avatar*" not in _joined(view)
+    assert ACTION_AVATAR_CHANGE not in json.dumps(view)
+    avatar_lookup.assert_not_awaited()
 
 
 def test_details_view_when_short_name_does_not_repeat_it_in_the_body() -> None:

@@ -182,7 +182,9 @@ async def test_avatar_edit_requires_admin_and_non_builtin_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = SimpleNamespace(
-        anthropic=MagicMock(), deployment_default=DeploymentDefault(agent_name="Main")
+        anthropic=MagicMock(),
+        deployment_default=DeploymentDefault(agent_name="Main"),
+        settings=SimpleNamespace(agent_identity=SimpleNamespace(enabled=True)),
     )
     client = AsyncMock()
     admin = AsyncMock(return_value=False)
@@ -201,6 +203,10 @@ async def test_avatar_edit_requires_admin_and_non_builtin_agent(
     lookup.return_value = SimpleNamespace(name="Main", metadata={})
     assert not await may_edit_avatar(
         runtime, client, tenant_id=tenant_id, user_id="U", agent_name="Main"
+    )  # type: ignore[arg-type]
+    runtime.settings.agent_identity.enabled = False
+    assert not await may_edit_avatar(
+        runtime, client, tenant_id=tenant_id, user_id="U", agent_name="Ada"
     )  # type: ignore[arg-type]
 
 

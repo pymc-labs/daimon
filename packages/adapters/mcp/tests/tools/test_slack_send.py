@@ -6,8 +6,9 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import httpx
@@ -108,6 +109,16 @@ def _auth(**overrides: object) -> AuthIdentity:
     }
     base.update(overrides)
     return AuthIdentity(**base)  # type: ignore[arg-type]  # test kwargs are shape-correct
+
+
+async def test_identity_off_skips_slack_agent_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(agent_identity=SimpleNamespace(enabled=False))
+    )
+    lookup = AsyncMock()
+    monkeypatch.setattr(_send, "find_agent_by_derived_uuid", lookup)
+    assert await _send._agent_identity_kwargs(runtime, _auth()) is None  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+    lookup.assert_not_awaited()
 
 
 _FILE_PROXY_SECRET = "file-proxy-secret"

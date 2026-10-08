@@ -242,6 +242,16 @@ def _admission_refusal(
     return admission_refusal_text(err.reason, TEAMS_REFUSAL_NOUNS)
 
 
+def _agent_name_prefix(
+    *, enabled: bool, name: str, metadata: Mapping[str, str] | None, default_name: str | None
+) -> str | None:
+    if not enabled or is_builtin_agent(
+        name=name, metadata=metadata, default_agent_name=default_name
+    ):
+        return None
+    return name
+
+
 class TeamsApp:
     """Handlers the SDK app routes to, plus the turn state they share."""
 
@@ -917,14 +927,11 @@ class TeamsApp:
                 unprompted=inbound.unprompted,
                 completion_ping=self.runtime.settings.completion_pings.get(tenant_id) is True,
                 requester=requester,
-                agent_name_prefix=(
-                    None
-                    if is_builtin_agent(
-                        name=admission.agent.name,
-                        metadata=admission.agent.metadata,
-                        default_agent_name=self.runtime.deployment_default.agent_name,
-                    )
-                    else admission.agent.name
+                agent_name_prefix=_agent_name_prefix(
+                    enabled=self.runtime.settings.agent_identity.enabled,
+                    name=admission.agent.name,
+                    metadata=admission.agent.metadata,
+                    default_name=self.runtime.deployment_default.agent_name,
                 ),
             )
             holder.append(attempt)

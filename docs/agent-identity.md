@@ -4,6 +4,16 @@ Status: delivery in progress; Slack identity merged, Slack avatar panel and Team
 prefix in PR 3, Discord avatar panel in PR 4. Owner: the
 agent-identity effort.
 
+## Switch
+
+`DAIMON_AGENT_IDENTITY__ENABLED` defaults to `false`. With it off, agents
+post as the platform bot: Slack keeps the agent name in the footer, Discord
+uses ordinary bot posts and requires a mention to start a turn, Teams adds no
+name prefix, and setup panels hide avatar controls. No default avatar row is
+created. Set it to `true` for the per-agent behavior described below, after
+configuring the platform permissions. The setting applies to one deployment,
+not to individual tenants; restart its services after changing it.
+
 ## Problem
 
 Every agent in an install speaks as the one Daimon bot. The only cue to

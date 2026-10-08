@@ -22,12 +22,10 @@ from daimon.core.errors import SlackOAuthError
 _AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
 _TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 
-# Full v3.0 day-1 bot scope set, hardcoded module-level constant.
-# NOT a config field — operators cannot change this without a code change.
+# Bot scopes shared by all deployments. Identity adds customize only when enabled.
 SLACK_BOT_SCOPES: tuple[str, ...] = (
     "app_mentions:read",
     "chat:write",
-    "chat:write.customize",
     "im:write",  # agent-initiated direct messages to verified workspace members
     "commands",
     "im:history",  # opt-in private message events
@@ -41,6 +39,14 @@ SLACK_BOT_SCOPES: tuple[str, ...] = (
     "groups:read",  # channel tools: private channel metadata + membership checks
     "usergroups:read",  # channel admin grants that name a user group
 )
+
+
+def slack_bot_scopes(*, identity_enabled: bool = False) -> tuple[str, ...]:
+    """Request header customization only where agent identity is enabled."""
+    if identity_enabled:
+        return (*SLACK_BOT_SCOPES, "chat:write.customize")
+    return SLACK_BOT_SCOPES
+
 
 # Full user-token scope set: one grant covers hybrid reads,
 # DMs, and search — later features never force a per-user re-authorization.

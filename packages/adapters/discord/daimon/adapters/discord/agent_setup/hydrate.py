@@ -219,7 +219,7 @@ async def load_details_for(
             channel_label=_channel_label(state),
         )
         state.avatar_urls[agent.name] = None
-        if not is_builtin_agent(
+        if runtime.settings.agent_identity.enabled and not is_builtin_agent(
             name=details.name,
             metadata={MA_METADATA_KEY_MANAGED: "true"} if details.daimon_managed else None,
             default_agent_name=runtime.deployment_default.agent_name,

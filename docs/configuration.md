@@ -24,6 +24,7 @@ typo is silent — check the spelling here.
 - [Ops](#ops)
 - [MCP Server](#mcp-server)
 - [Hub](#hub)
+- [Agent Identity](#agent-identity)
 - [Discord](#discord)
 - [Thread Participation](#thread-participation)
 - [Slack](#slack)
@@ -353,6 +354,18 @@ client you operate.
 Base64url 32-byte key that signs hub login tokens. Required when any hub mount is
 configured, and rejected at boot unless it decodes to exactly 32 bytes. Generate with
 Fernet.generate_key().
+
+## Agent Identity
+
+Read from `daimon.core.config.AgentIdentitySettings`. Prefix `DAIMON_AGENT_IDENTITY__`.
+
+### `DAIMON_AGENT_IDENTITY__ENABLED`
+
+`bool` · optional · default `False`
+
+Enable per-agent display names and avatars on Slack and Discord, agent name prefixes on
+Teams, and reply-to-agent routing on Discord. Off by default; set
+DAIMON_AGENT_IDENTITY__ENABLED=true after platform setup is ready.
 
 ## Discord
 

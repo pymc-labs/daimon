@@ -21,6 +21,17 @@ from daimon.core.config import (
 from pydantic import HttpUrl, PostgresDsn, SecretStr, ValidationError
 
 
+def test_agent_identity_switch_is_off_by_default_and_reads_nested_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_AGENT_IDENTITY__ENABLED", raising=False)
+    assert not load_settings(_env_file=None).agent_identity.enabled
+    monkeypatch.setenv("DAIMON_AGENT_IDENTITY__ENABLED", "true")
+    assert load_settings(_env_file=None).agent_identity.enabled
+
+
 def test_load_settings_parses_nested_delimiter_when_env_provided(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

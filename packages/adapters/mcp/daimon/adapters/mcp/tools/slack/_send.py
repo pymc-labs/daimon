@@ -221,6 +221,8 @@ async def _post_with_identity(
 
 
 async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dict[str, str] | None:
+    if not runtime.settings.agent_identity.enabled:
+        return None
     agent_id = auth.chat_agent_id or auth.agent_id
     if agent_id is None:
         return None
@@ -241,6 +243,7 @@ async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dic
                     default_agent_name=runtime.deployment_default.agent_name,
                 ),
                 public_base_url=runtime.settings.mcp.app_root_url,
+                enabled=runtime.settings.agent_identity.enabled,
             )
     except (anthropic.APIError, SQLAlchemyError) as exc:
         log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)

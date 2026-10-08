@@ -1175,6 +1175,17 @@ class DirectMessagePolicy(BaseModel):
         )
 
 
+class AgentIdentitySettings(BaseModel):
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable per-agent display names and avatars on Slack and Discord, agent name "
+            "prefixes on Teams, and reply-to-agent routing on Discord. Off by default; "
+            "set DAIMON_AGENT_IDENTITY__ENABLED=true after platform setup is ready."
+        ),
+    )
+
+
 class Settings(BaseSettings):
     security_audit_retention_days: int = Field(
         default=90,
@@ -1240,6 +1251,7 @@ class Settings(BaseSettings):
     ops: OpsSettings = Field(default_factory=OpsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
+    agent_identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
     discord: DiscordSettings | None = None
     thread_participation: ThreadParticipationSettings = Field(
         default_factory=ThreadParticipationSettings,

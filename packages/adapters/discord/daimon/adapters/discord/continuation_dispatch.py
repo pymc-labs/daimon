@@ -47,6 +47,7 @@ async def dispatch_pending_continuations(
     may_post: MayPost,
     client: discord.Client | None = None,
     public_base_url: str | None = None,
+    identity_enabled: bool = False,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
     """Dispatch under the caller's existing thread guard."""
@@ -76,6 +77,7 @@ async def dispatch_pending_continuations(
                             agent_name=row.target_name,
                             is_builtin=row.target_name.casefold() == "daimon",
                             public_base_url=public_base_url,
+                            enabled=identity_enabled,
                         )
                 except Exception as exc:
                     log.warning(
@@ -88,6 +90,7 @@ async def dispatch_pending_continuations(
                     name=identity.name,
                     avatar_url=identity.avatar_url,
                     builtin=identity.builtin,
+                    identity_enabled=identity_enabled,
                 )
                 await transport.send(text)
         else:

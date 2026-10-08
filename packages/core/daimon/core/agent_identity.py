@@ -34,12 +34,13 @@ async def resolve_agent_identity(
     agent_name: str,
     is_builtin: bool,
     public_base_url: str | None,
+    enabled: bool = False,
 ) -> AgentIdentity:
     """Resolve the identity once when a turn admits an agent.
 
     Built-in turns keep the platform app's own name and icon.
     """
-    if is_builtin:
+    if is_builtin or not enabled:
         return AgentIdentity(name=agent_name, avatar_url=None, builtin=True)
     avatar = await get_or_create_avatar(session, tenant_id=tenant_id, agent_name=agent_name)
     base = public_base_url.rstrip("/") if public_base_url else None

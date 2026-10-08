@@ -168,9 +168,14 @@ async def send_agent_message(
     content: str,
     files: list[discord.File] | None = None,
     extra_messages: list[discord.Message] | None = None,
+    identity_enabled: bool = False,
 ) -> discord.Message:
     fallback_files = _fresh_files(files or [])
-    hook = None if identity.builtin else await own_webhook(client, channel, create=True)
+    hook = (
+        None
+        if identity.builtin or not identity_enabled
+        else await own_webhook(client, channel, create=True)
+    )
     if hook is not None:
         kwargs: dict[str, Any] = {}
         if isinstance(channel, discord.Thread):
@@ -191,7 +196,11 @@ async def send_agent_message(
                 raise
     if not isinstance(channel, discord.abc.Messageable):
         raise TypeError("channel does not support messages")
-    fallback_content = content if identity.builtin else fallback_name_prefix(identity.name, content)
+    fallback_content = (
+        content
+        if identity.builtin or not identity_enabled
+        else fallback_name_prefix(identity.name, content)
+    )
     chunks = [fallback_content[i : i + 2000] for i in range(0, len(fallback_content), 2000)] or [""]
     sent = await channel.send(content=chunks[0], files=fallback_files)
     for chunk in chunks[1:]:
@@ -206,6 +215,7 @@ async def edit_own_message(
     channel: discord.abc.GuildChannel | discord.Thread,
     message: discord.Message,
     extra_messages: list[discord.Message] | None = None,
+    identity_enabled: bool = False,
     **kwargs: Any,  # noqa: ANN401
 ) -> discord.Message | None:
     await ensure_application_id(client)
@@ -238,6 +248,7 @@ async def edit_own_message(
             AgentIdentity(name=message.author.name, avatar_url=None, builtin=False),
             content=content,
             extra_messages=extra_messages,
+            identity_enabled=identity_enabled,
         )
     await message.edit(**kwargs)
     return None

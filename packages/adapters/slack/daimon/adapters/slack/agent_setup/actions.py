@@ -541,7 +541,11 @@ async def load_details_view(
             account_ids=[details.created_by_account_id] if details.created_by_account_id else [],
         )
         avatar_url: str | None = None
-        if not details.daimon_managed and details.name != runtime.deployment_default.agent_name:
+        if (
+            runtime.settings.agent_identity.enabled
+            and not details.daimon_managed
+            and details.name != runtime.deployment_default.agent_name
+        ):
             avatar = await get_or_create_avatar(
                 session, tenant_id=tenant_id, agent_name=details.name
             )
@@ -560,7 +564,9 @@ async def load_details_view(
         else None,
         avatar_url=avatar_url,
         avatar_editable=(
-            not details.daimon_managed and details.name != runtime.deployment_default.agent_name
+            runtime.settings.agent_identity.enabled
+            and not details.daimon_managed
+            and details.name != runtime.deployment_default.agent_name
         ),
     )
     return view
@@ -649,7 +655,7 @@ async def _dispatch_panel_action(
     is_admin = await resolve_is_admin(client, user_id=user_id)
 
     if action_id == panel_views.ACTION_AVATAR_CHANGE:
-        if not meta.agent_name or not is_admin:
+        if not runtime.settings.agent_identity.enabled or not meta.agent_name or not is_admin:
             await record_panel_write(
                 runtime.sessionmaker,
                 tenant_id=tenant_id,
@@ -660,6 +666,13 @@ async def _dispatch_panel_action(
                 reason="needs_admin_or_agent_gone",
                 agent_name=meta.agent_name,
             )
+            if not runtime.settings.agent_identity.enabled and view_id:
+                await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+                    view_id=view_id,
+                    view=panel_views.build_avatar_status_view(
+                        meta=meta, message="Agent pictures are turned off."
+                    ),
+                )
             return
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]
             trigger_id=trigger_id,

@@ -160,6 +160,8 @@ async def may_edit_avatar(
     user_id: str,
     agent_name: str,
 ) -> bool:
+    if not runtime.settings.agent_identity.enabled:
+        return False
     if not await resolve_is_admin(client, user_id=user_id):
         return False
     agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=agent_name)
@@ -254,6 +256,11 @@ async def reset_agent_avatar(
             reason="needs_admin_or_agent_gone",
             agent_name=meta.agent_name,
         )
+        if not runtime.settings.agent_identity.enabled:
+            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+                view_id=view_id,
+                view=build_avatar_status_view(meta=meta, message="Agent pictures are turned off."),
+            )
         return
     async with runtime.sessionmaker.begin() as session:
         actor = await get_or_create_platform_principal(
@@ -310,7 +317,13 @@ async def run_avatar_submission(
             agent_name=meta.agent_name,
         )
         await _show_status(
-            client, submission=submission, message="Only an admin can change this agent's avatar."
+            client,
+            submission=submission,
+            message=(
+                "Only an admin can change this agent's avatar."
+                if runtime.settings.agent_identity.enabled
+                else "Agent pictures are turned off."
+            ),
         )
         return
     try:

@@ -374,6 +374,11 @@ async def run_new_agent_submission(
                     attribution=attributions.get(details.created_by_account_id)
                     if details.created_by_account_id
                     else None,
+                    avatar_editable=(
+                        runtime.settings.agent_identity.enabled
+                        and not details.daimon_managed
+                        and details.name != runtime.deployment_default.agent_name
+                    ),
                 ),
             )
 

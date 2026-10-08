@@ -379,6 +379,7 @@ def build_teams_runtime(
     Outbound HTTP never reaches the network: it answers 404 unless given.
     """
     settings = MagicMock()
+    settings.agent_identity.enabled = False
     settings.teams = teams or teams_settings()
     settings.crypto.keys = ()
     settings.mcp.public_url = None

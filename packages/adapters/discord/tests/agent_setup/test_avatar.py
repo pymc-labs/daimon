@@ -51,6 +51,7 @@ def _runtime(factory: async_sessionmaker[AsyncSession] | None = None) -> MagicMo
     runtime.sessionmaker = factory
     runtime.deployment_default.agent_name = "daimon"
     runtime.settings.mcp.app_root_url = "https://mcp.example.com"
+    runtime.settings.agent_identity.enabled = True
     return runtime
 
 
@@ -61,6 +62,24 @@ def test_avatar_url_uses_app_root_not_mcp_endpoint() -> None:
     assert avatar_module.avatar_public_url(runtime, avatar) == (
         "https://mcp.example.com/avatars/token/abcdef123456.png"
     )
+
+
+async def test_upload_refuses_when_agent_pictures_are_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime()
+    runtime.settings.agent_identity.enabled = False
+    lookup = AsyncMock()
+    monkeypatch.setattr(avatar_module, "find_agent_by_daimon_tag", lookup)
+    monkeypatch.setattr(avatar_module, "_audit", AsyncMock())
+    attachment = _attachment()
+    message, avatar = await upload_agent_avatar(
+        _interaction(), runtime, tenant_id=uuid.uuid4(), agent_name="Ada", attachment=attachment
+    )
+    assert message == "Agent pictures are turned off."
+    assert avatar is None
+    lookup.assert_not_awaited()
+    attachment.read.assert_not_awaited()
 
 
 @pytest.mark.parametrize("is_admin", [False, True])

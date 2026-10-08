@@ -285,12 +285,19 @@ not erase existing transcripts. Drain active turns before changing versions.
 
 ### Agent names and avatars
 
+This feature is off by default. Set `DAIMON_AGENT_IDENTITY__ENABLED=true`
+and restart the Slack and MCP services to show per-agent headers and the
+Avatar control. With it off, the app posts as itself and keeps agent names in
+answer footers.
+
 Each non-built-in agent posts turn messages with its own Slack message name and
 avatar. The built-in Daimon agent keeps the app's name and icon. Files uploaded
 by a turn still appear as the app. The avatar URL is public to anyone who sees
 the message; cached copies can remain after an avatar is changed or deleted.
 
-The app needs the `chat:write.customize` bot scope. To add it, first open the
+When identity is enabled, new OAuth installs request `chat:write.customize`;
+with it off, they use the previous consent screen. The app needs that scope
+to show agent headers. To add it, first open the
 **staging** app at [api.slack.com/apps](https://api.slack.com/apps). Under
 **OAuth & Permissions → Bot Token Scopes**, add `chat:write.customize`. Open
 **Install App** and click **Reinstall to Workspace**, then approve the new

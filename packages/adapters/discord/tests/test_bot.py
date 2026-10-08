@@ -36,6 +36,7 @@ def _make_runtime(
     max_concurrent_turns_per_tenant: int = 3,
 ) -> DiscordRuntime:
     settings = MagicMock()
+    settings.agent_identity.enabled = True
     settings.mcp = McpSettings()
     settings.defaults_root = MagicMock()
     discord_settings = MagicMock()
@@ -178,6 +179,27 @@ async def test_reply_to_recorded_agent_post_starts_turn(
         bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
     else:
         bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+
+
+async def test_identity_off_ignores_reply_without_mention(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = _make_runtime(db_session_factory)
+    runtime.settings.agent_identity.enabled = False
+    bot = make_bot(runtime)
+    bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue,reportMethodAssign]
+    message = _make_channel_message(guild_id=801000099)
+    message.mentions = []
+    message.webhook_id = None
+    message.reference = discord.MessageReference(message_id=123, channel_id=789, guild_id=801000099)
+    resolved = MagicMock(spec=discord.Message)
+    resolved.author.id = bot.user.id
+    resolved.webhook_id = None
+    message.reference.resolved = resolved
+    with patch("daimon.adapters.discord.bot.get_post", new_callable=AsyncMock) as get_post:
+        await bot.on_message(message)
+    get_post.assert_not_awaited()
+    bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
 
 
 async def test_reply_to_unrecorded_post_does_not_start_turn(

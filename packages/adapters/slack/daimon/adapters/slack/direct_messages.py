@@ -251,6 +251,8 @@ async def handle_direct_message(
 
         async def on_agent(name: str) -> None:
             nonlocal identity
+            if not runtime.settings.agent_identity.enabled:
+                return
             try:
                 agent = await find_agent_by_daimon_tag(
                     runtime.anthropic, tenant_id=conversation.tenant_id, name=name
@@ -266,6 +268,7 @@ async def handle_direct_message(
                             default_agent_name=runtime.deployment_default.agent_name,
                         ),
                         public_base_url=runtime.settings.mcp.app_root_url,
+                        enabled=runtime.settings.agent_identity.enabled,
                     )
             except (anthropic.APIError, SQLAlchemyError) as exc:
                 log.warning("slack.dm.identity_lookup_failed", error_type=type(exc).__name__)

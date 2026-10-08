@@ -55,11 +55,54 @@ async def test_agent_send_uses_webhook_identity_and_wait(
         channel,
         AgentIdentity("Research", "https://example.com/a.png", False),
         content="answer",
+        identity_enabled=True,
     )
     assert sent is message
     assert hook.send.call_args.kwargs["wait"] is True
     assert hook.send.call_args.kwargs["username"] == "Research"
     assert hook.send.call_args.kwargs["avatar_url"] == "https://example.com/a.png"
+
+
+async def test_disabled_agent_send_uses_plain_bot_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock(spec=discord.Client)
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
+    lookup = AsyncMock()
+    monkeypatch.setattr(_post_transport, "own_webhook", lookup)
+    await _post_transport.send_agent_message(
+        client,
+        channel,
+        AgentIdentity("Research", "https://example.com/a.png", False),
+        content="answer",
+        identity_enabled=False,
+    )
+    channel.send.assert_awaited_once_with(content="answer", files=[])
+    lookup.assert_not_awaited()
+
+
+async def test_disabled_webhook_edit_replacement_uses_plain_bot_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock(spec=discord.Client)
+    client.application_id = 10
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
+    message = MagicMock(spec=discord.Message)
+    message.webhook_id = 30
+    message.application_id = 10
+    message.author.name = "Research"
+    lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(_post_transport, "ensure_application_id", AsyncMock())
+    monkeypatch.setattr(_post_transport, "own_webhook", lookup)
+
+    await _post_transport.edit_own_message(
+        client, channel, message, content="replacement", identity_enabled=False
+    )
+
+    channel.send.assert_awaited_once_with(content="replacement", files=[])
+    lookup.assert_awaited_once()
 
 
 async def test_missing_webhook_uses_one_name_prefix(
@@ -75,6 +118,7 @@ async def test_missing_webhook_uses_one_name_prefix(
         channel,
         AgentIdentity("Research", None, False),
         content="answer",
+        identity_enabled=True,
     )
     channel.send.assert_awaited_once_with(content="**Research** answer", files=[])
 
@@ -95,6 +139,7 @@ async def test_fallback_resplits_when_name_pushes_content_over_discord_limit(
         AgentIdentity("Research", None, False),
         content="x" * 1995,
         extra_messages=extra,
+        identity_enabled=True,
     )
     assert sent is first
     assert extra == [second]
@@ -269,7 +314,12 @@ async def test_mcp_failed_webhook_upload_rebuilds_file_for_fallback(
     channel.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
     file = discord.File(io.BytesIO(b"payload"), filename="a.txt")
     await _post_transport.send_agent_message(
-        client, channel, AgentIdentity("Research", None, False), content="answer", files=[file]
+        client,
+        channel,
+        AgentIdentity("Research", None, False),
+        content="answer",
+        files=[file],
+        identity_enabled=True,
     )
     sent_files = channel.send.call_args.kwargs["files"]
     assert sent_files[0].fp.read() == b"payload"

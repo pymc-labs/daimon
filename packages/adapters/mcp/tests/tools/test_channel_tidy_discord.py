@@ -41,6 +41,7 @@ from daimon.adapters.mcp.tools.discord._tidy import (
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.channel_tidy import content_hash, derive_content_key
 from daimon.core.config import (
+    AgentIdentitySettings,
     AnthropicSettings,
     DatabaseSettings,
     DiscordSettings,
@@ -377,6 +378,7 @@ async def _world(
     ]
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response(agents))
     settings = Settings(
+        agent_identity=AgentIdentitySettings(enabled=True),
         database=DatabaseSettings(url="postgresql+asyncpg://x/y"),  # pyright: ignore[reportArgumentType]
         anthropic=AnthropicSettings(api_key=SecretStr("k")),
         discord=DiscordSettings(bot_token=SecretStr("test-bot-token")),
