@@ -101,19 +101,19 @@ def _buttons(view: BillingPanelView) -> list[str | None]:
 
 def test_only_the_admin_view_offers_redemption() -> None:
     """Only the admin panel shows the redeem-code button, and only while a code is redeemable."""
-    assert _buttons(_view(is_admin=True)) == ["🎟️ Redeem code", "🔄 Refresh", "Done"], (
+    assert _buttons(_view(is_admin=True)) == ["Redeem code", "Refresh", "Done"], (
         "the admin view should offer redemption first"
     )
     assert _buttons(_view(is_admin=True, has_redeemable_promo_code=False)) == [
-        "🔄 Refresh",
+        "Refresh",
         "Done",
     ], "without a redeemable code the admin view should not offer redemption"
-    assert "🎟️ Redeem code" not in _buttons(_view(is_admin=False)), (
+    assert "Redeem code" not in _buttons(_view(is_admin=False)), (
         "a member view should not offer redemption"
     )
 
 
-def test_timed_credit_shows_under_server_credit_in_both_views() -> None:
+def test_timed_credit_shows_under_the_total_in_both_views() -> None:
     """Live timed credit shows in both views and is absent without any."""
     credit = (ActiveTimedCredit(remaining_usd=Decimal("7.5"), ends_at=END),)
     for is_admin in (True, False):
@@ -121,11 +121,11 @@ def test_timed_credit_shows_under_server_credit_in_both_views() -> None:
             _state(is_admin=is_admin, timed_credit=credit), now=NOW, since=SINCE
         )
         text = _text(container)
-        assert f"$7.50 timed credit left · ends <t:{int(END.timestamp())}:f>" in text, (
-            "each view should show the timed credit and its end"
+        assert "-# Includes $7.50 that expires. It's used first." in text, (
+            "each view should say how much of the credit expires"
         )
     plain = build_billing_container(_state(), now=NOW, since=SINCE)
-    assert "timed credit" not in _text(plain), "no timed credit should mean no line"
+    assert "Includes" not in _text(plain), "no timed credit should mean no line"
 
 
 def test_ready_embed_mentions_redemption_only_when_a_code_is_redeemable() -> None:
@@ -339,7 +339,7 @@ async def test_snapshot_offers_redemption_only_while_a_code_is_redeemable(
         now=now,
         since=SINCE,
     )
-    assert "🎟️ Redeem code" in _buttons(view), "the admin panel should render the button"
+    assert "Redeem code" in _buttons(view), "the admin panel should render the button"
 
 
 async def test_snapshot_hides_redemption_when_the_lookup_fails(

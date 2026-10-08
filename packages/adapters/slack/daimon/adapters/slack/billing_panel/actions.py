@@ -27,27 +27,41 @@ via views.update. Never stripe.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.billing_panel.views import build_billing_view, build_loading_view
+from daimon.adapters.slack.billing_panel.views import (
+    EXPIRY_OPEN_ACTION_ID,
+    LOOKUP_ACTION_ID,
+    build_billing_view,
+    build_expiry_view,
+    build_loading_view,
+)
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.billing_panel import (
+    LOOK_UP,
     TOPUP_AMOUNTS,
     create_checkout,
     load_billing_snapshot,
+    lookup_line,
     month_start,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.promo_credit import get_active_timed_credit
 from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.usage_events import (
+    cost_for_user_in_tenant_since,
+    turn_count_for_user_in_tenant_since,
+)
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -252,3 +266,111 @@ async def handle_topup_select(
                 ],
             },
         )
+
+
+LOOKUP_ADMIN_ONLY = "Only workspace admins can look up a person's spend."
+
+
+async def handle_panel_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
+    """The /billing modal's "Expiry dates" button and "Look up a person" picker.
+
+    "Expiry dates" pushes the timed credit's end dates for anyone. A pick in
+    "Look up a person" re-checks admin at pick time, reads fresh and redraws the
+    panel with that person's spend under the picker.
+    """
+    team: dict[str, Any] = payload.get("team") or {}
+    user: dict[str, Any] = payload.get("user") or {}
+    open_view: dict[str, Any] = payload.get("view") or {}
+    team_id = str(team.get("id") or "")
+    user_id = str(user.get("id") or "")
+    trigger_id = str(payload.get("trigger_id") or "")
+    view_id = str(open_view.get("id") or "")
+    actions: list[dict[str, Any]] = payload.get("actions") or []
+    action: dict[str, Any] = actions[0] if actions else {}
+    action_id = str(action.get("action_id") or "")
+    client = await resolve_web_client(runtime, team_id=team_id)
+    if client is None:
+        log.warning("slack.billing_panel_action.no_token", team_id=team_id)
+        return
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    now = datetime.now(UTC)
+    since = month_start(now)
+    try:
+        if action_id == EXPIRY_OPEN_ACTION_ID:
+            async with runtime.sessionmaker() as session:
+                credits = await get_active_timed_credit(session, tenant_id=tenant_id, now=now)
+            await client.views_push(  # pyright: ignore[reportUnknownMemberType]
+                trigger_id=trigger_id, view=build_expiry_view(credits)
+            )
+            return
+        if action_id != LOOKUP_ACTION_ID:
+            return
+        if not await resolve_is_admin(client, user_id=user_id):
+            await client.views_push(  # pyright: ignore[reportUnknownMemberType]
+                trigger_id=trigger_id,
+                view={
+                    "type": "modal",
+                    "title": {"type": "plain_text", "text": LOOK_UP},
+                    "close": {"type": "plain_text", "text": "Back"},
+                    "blocks": [
+                        {"type": "section", "text": {"type": "mrkdwn", "text": LOOKUP_ADMIN_ONLY}}
+                    ],
+                },
+            )
+            return
+        channel_id = _channel_of(open_view)
+        picked = str(action.get("selected_user") or "")
+        async with runtime.sessionmaker() as session:
+            state = await load_billing_snapshot(
+                session,
+                tenant_id=tenant_id,
+                platform_user_id=user_id,
+                is_admin=True,
+                since=since,
+                now=now,
+                platform="slack",
+                channel_id=channel_id or None,
+            )
+            spend = await cost_for_user_in_tenant_since(
+                session, tenant_id=tenant_id, platform_user_id=picked, since=since
+            )
+            turns = await turn_count_for_user_in_tenant_since(
+                session, tenant_id=tenant_id, platform_user_id=picked, since=since
+            )
+        view = build_billing_view(
+            state,
+            now=now,
+            since=since,
+            channel_id=channel_id,
+            lookup=(picked, lookup_line(spend, turns)),
+        )
+        # The hash makes a slower, earlier lookup lose to a newer one instead of
+        # overwriting it.
+        try:
+            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+                view_id=view_id, hash=open_view.get("hash"), view=view
+            )
+        except SlackApiError as exc:
+            error = str(cast("dict[str, object]", exc.response.data).get("error", ""))  # pyright: ignore[reportUnknownMemberType]
+            if error != "hash_conflict":
+                raise
+            log.info("slack.billing_panel_lookup_superseded", team_id=team_id)
+    except (DaimonError, SlackApiError, SQLAlchemyError) as exc:
+        log.error(
+            "slack.billing_panel_action_failed",
+            team_id=team_id,
+            action_id=action_id,
+            exc_info=exc,
+        )
+        capture_exception_with_scope(exc)
+
+
+def _channel_of(view: dict[str, Any]) -> str:
+    """The channel /billing ran in, kept in the panel's private metadata."""
+    try:
+        meta: object = json.loads(str(view.get("private_metadata") or "") or "{}")
+    except json.JSONDecodeError:
+        return ""
+    return (
+        str(cast("dict[str, Any]", meta).get("channel_id") or "") if isinstance(meta, dict) else ""
+    )

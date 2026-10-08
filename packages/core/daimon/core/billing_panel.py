@@ -9,17 +9,19 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
-from datetime import UTC, datetime
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Literal
 
 import httpx
 import structlog
 from daimon.core.billing import month_start as month_start
 from daimon.core.channel_budget import (
     ChannelBudgetStatus,
-    describe_budget,
     get_channel_budget_status,
     list_channel_budget_statuses,
+    window_label,
 )
 from daimon.core.config import McpSettings
 from daimon.core.errors import DaimonError
@@ -48,6 +50,26 @@ MEMBER_CAP = 25
 CHANNEL_BUDGETS_SHOWN = 5
 # Per-turn cost assumed while a tenant has no usage history yet.
 _FALLBACK_TURN_COST_USD = 0.10
+# Rows the admin panel names under Top spenders; the rest are counted.
+TOP_SPENDERS_SHOWN = 5
+# Timed credits "Expiry dates" lists, soonest first; the rest are counted.
+EXPIRY_SHOWN = 5
+# Timed credit ending within this long turns the panel's accent amber.
+EXPIRY_WARNING = timedelta(days=7)
+
+# The words every platform's panel uses, so they read the same everywhere.
+TITLE = "Billing"
+YOU = "You"
+ASK_ADMIN = "Ask an admin to add credit."
+NOTHING_USED = "Nothing used this month"
+ADD_CREDIT = "Add credit"
+REDEEM_CODE = "Redeem code"
+EXPIRY_DATES = "Expiry dates"
+EXPIRY_INTRO = "Unused credit expires:"
+LOOK_UP = "Look up a person"
+CHANNEL_BUDGET = "Channel budget"
+TOP_SPENDERS = "Top spenders"
+CHANNEL_BUDGETS = "Channel budgets"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -85,7 +107,13 @@ class BillingPanelState:
 
 
 def member_label(user_id: str) -> str:
-    """`User XXXX` from the id's last four characters; chat adapters keep no name cache."""
+    """`User XXXX` from the id's last four characters: the fallback label for a person.
+
+    Rows start with it, and each adapter replaces it on the rows it shows with
+    the person's name where its platform can tell it (a Discord member fetch,
+    a Slack user mention, a Teams team roster). Anyone it cannot resolve, such
+    as someone who has left, keeps this label.
+    """
     return f"User {user_id[-4:]}" if len(user_id) >= 4 else "<unknown user>"
 
 
@@ -183,12 +211,97 @@ async def load_billing_snapshot(
 
 
 def fmt_usd(value: float | Decimal) -> str:
+    """`$1,234.50`; a negative amount reads `-$12.00`."""
+    if value < 0:
+        return f"-${-value:,.2f}"
     return f"${value:,.2f}"
 
 
-def channel_budget_line(status: ChannelBudgetStatus, *, label: str) -> str:
-    """`#team-a: $4.00 of $5.00 (monthly) · 80% used`, with the platform's channel ``label``."""
-    return f"{label}: {describe_budget(status)} · {status.percent_used}% used"
+def credit_headline(balance: Decimal) -> tuple[str, str | None]:
+    """The big figure and the words under it: `$62.40`, `total credit left`.
+
+    At or below zero the figure is `No credit left`, with `$3.10 spent beyond it`
+    under it when the balance is negative (an operator-funded tenant).
+    """
+    if balance > 0:
+        return fmt_usd(balance), "total credit left"
+    return "No credit left", (f"{fmt_usd(-balance)} spent beyond it" if balance < 0 else None)
+
+
+def timed_credit_note(credits: Sequence[ActiveTimedCredit]) -> str | None:
+    """`Includes $25.00 that expires. It's used first.`; None without timed credit.
+
+    The amount is everything left in live timed credit; when each part expires
+    is behind the panel's "Expiry dates" action.
+    """
+    if not credits:
+        return None
+    amount = fmt_usd(sum((credit.remaining_usd for credit in credits), Decimal("0")))
+    return f"Includes {amount} that expires. It's used first."
+
+
+def expiry_rows(
+    credits: Sequence[ActiveTimedCredit], *, when: Callable[[datetime], str]
+) -> list[str]:
+    """`$20.00 · Oct 12` per timed credit, soonest first, at most ``EXPIRY_SHOWN``, then `+ N more`.
+
+    ``when`` renders a date in the platform's own syntax.
+    """
+    ordered = sorted(credits, key=lambda credit: credit.ends_at)
+    rows = [
+        f"{fmt_usd(credit.remaining_usd)} · {when(credit.ends_at)}"
+        for credit in ordered[:EXPIRY_SHOWN]
+    ]
+    if (more := len(ordered) - EXPIRY_SHOWN) > 0:
+        rows.append(f"+ {more} more")
+    return rows
+
+
+Tone = Literal["alert", "warning"]
+
+
+def panel_tone(
+    *,
+    balance: Decimal,
+    caller_spend: float,
+    caller_cap: Decimal | None,
+    credits: Sequence[ActiveTimedCredit],
+    now: datetime,
+) -> Tone | None:
+    """The panel's state for an accent: `alert` with no credit left or the caller over
+    their cap, `warning` when timed credit expires within ``EXPIRY_WARNING``, else None."""
+    if balance <= 0 or spend_over_cap(caller_spend, caller_cap):
+        return "alert"
+    if any(credit.ends_at - now <= EXPIRY_WARNING for credit in credits):
+        return "warning"
+    return None
+
+
+def channel_budget_phrase(status: ChannelBudgetStatus, *, now: datetime) -> str:
+    """The invoking channel's budget in words, e.g. `$1.20 of $5.00 used this month`.
+
+    A budget that has not started shows its limit and when it starts; a fixed
+    one that has ended says so.
+    """
+    budget = status.budget
+    spent = f"{fmt_usd(status.spent_usd)} of {fmt_usd(budget.limit_usd)} used"
+    if budget.window == "monthly":
+        return f"{spent} this month"
+    if budget.starts_at is None:
+        return f"{spent} in total"
+    total = budget.window == "total" or budget.ends_at is None
+    if budget.starts_at > now:
+        when = window_label(budget, started=False)
+        return f"{fmt_usd(budget.limit_usd)} budget {when if total else f'from {when}'}"
+    if total:
+        return f"{spent} {window_label(budget)}"
+    ended = "" if status.is_active else " (ended)"
+    return f"{spent} from {window_label(budget)}{ended}"
+
+
+def channel_budget_line(status: ChannelBudgetStatus, *, label: str, now: datetime) -> str:
+    """`#team-a  $4.00 of $5.00 used this month`, with the platform's channel ``label``."""
+    return f"{label}  {channel_budget_phrase(status, now=now)}"
 
 
 def more_channel_budgets(state: BillingPanelState) -> int:
@@ -196,8 +309,17 @@ def more_channel_budgets(state: BillingPanelState) -> int:
     return max(0, len(state.channel_budgets) - CHANNEL_BUDGETS_SHOWN)
 
 
-def period_label(since: datetime) -> str:
-    return f"Period: {since.strftime('%B %Y')} (UTC)"
+def month_label(since: datetime) -> str:
+    """`October 2026`: the month the panel covers, and the member view's subtext."""
+    return since.strftime("%B %Y")
+
+
+def admin_summary(since: datetime, *, spend: float, people: int) -> str:
+    """The admin view's subtext: `October 2026 · $48.17 spent by 9 people`."""
+    if people == 0:
+        return f"{month_label(since)} · nothing used yet"
+    who = "1 person" if people == 1 else f"{people} people"
+    return f"{month_label(since)} · {fmt_usd(spend)} spent by {who}"
 
 
 def spend_over_cap(spend: float, cap: Decimal | None) -> bool:
@@ -205,12 +327,27 @@ def spend_over_cap(spend: float, cap: Decimal | None) -> bool:
 
 
 def caller_line(spend: float, cap: Decimal | None, turns: int) -> str:
-    """The member view's own spend line, with the cap share when one applies."""
+    """The member's own use: `$11.50 of your $25.00 this month`, `$11.50 used this month`."""
+    if not spend and not turns:
+        return NOTHING_USED
     if cap is None:
-        return f"💸 {fmt_usd(spend)} spent · {turns} turns"
-    cap_usd = float(cap)
-    pct = int(spend / cap_usd * 100) if cap_usd > 0 else 0
-    return f"💸 {fmt_usd(spend)} / {fmt_usd(cap_usd)} cap ({pct}%) · {turns} turns"
+        return f"{fmt_usd(spend)} used this month"
+    return f"{fmt_usd(spend)} of your {fmt_usd(cap)} this month"
+
+
+def lookup_line(spend: float, turns: int) -> str:
+    """One person's use in the admin member lookup: `$14.02 this month`."""
+    return NOTHING_USED if not spend and not turns else f"{fmt_usd(spend)} this month"
+
+
+def spender_line(rank: int, name: str, *, cost: float, is_caller: bool, you: str = " (you)") -> str:
+    """`1. Maya Chen  $14.02`; ``name`` is already in the platform's safe form."""
+    return f"{rank}. {name}{you if is_caller else ''}  {fmt_usd(cost)}"
+
+
+def more_spenders(row_count: int, over_cap_count: int) -> int:
+    """Spenders past the first ``TOP_SPENDERS_SHOWN``, for a `+ N more` line."""
+    return max(0, row_count - TOP_SPENDERS_SHOWN) + over_cap_count
 
 
 def estimate_turns(amount_usd: float, *, guild_spend: float, guild_turns: int) -> int:

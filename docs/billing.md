@@ -248,9 +248,12 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 Members can read a channel's budget with `get_channel_budget`; listing,
 setting and clearing are for server admins only, never a channel's own admins
 (`daimon.core.authz`, `SET_CHANNEL_BUDGET`); each change is recorded in `security_audit_events`, from the CLI too. `/billing` in a channel with a budget
-shows `this channel: $spent of $limit (window)`. An admin's `/billing` also
-lists the five most used budgets on that platform (active ones first, by
-share of the limit spent) with a count of the rest.
+shows it in a **Channel budget** section under the credit, worded from its
+window (`$1.20 of $5.00 used this month`, `… used since 2026-07-01`, `$5.00
+budget from 2026-07-01` before it starts). An admin's `/billing` also lists,
+under **Channel budgets** after the top spenders, the five most used budgets
+on that platform (active ones first, by share of the limit spent) with a count
+of the rest.
 
 What a budget does not cover:
 
@@ -398,8 +401,12 @@ many tenants may redeem it. Each tenant redeems a code at most once.
   credited twice.
 
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
-timed credit only changes what the ledger holds. `/billing` shows live timed
-credit and when it ends. Admins redeem from `/billing` on Discord or Slack,
+timed credit only changes what the ledger holds. `/billing` shows the balance
+as `$62.40` `total credit left`, a total that already includes live timed credit,
+and under it `Includes $25.00 that expires. It's used first.` (everything left in
+timed credit). Below zero (an operator-funded tenant) it reads `No credit left`
+and `$3.10 spent beyond it`, still with that line. **Expiry dates** lists each
+timed credit with its end date, soonest first (five, then a count of the rest). Admins redeem from `/billing` on Discord or Slack,
 `billing` on Teams, or with the admin-only MCP tool `redeem_promo_code`. Refusals are one of
 `invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
 `already_redeemed` and `throttled`; five refusals in 15 minutes pause a
@@ -513,10 +520,28 @@ usage line on any platform. Teams cards show no summary.
 
 `/billing` on Discord and Slack, and `billing` on Teams, is the reporting surface, always over the
 current calendar month, built from
-`packages/core/daimon/core/stores/usage_events.py`. A member sees their own
-spend, turn count and cap plus the tenant balance; an admin additionally sees
-tenant totals and a per-member breakdown. Admin-only figures are not fetched
-for a non-admin rather than fetched and hidden.
+`packages/core/daimon/core/stores/usage_events.py`, in the same words on every
+platform. A member sees their own use against their cap and the credit left,
+with "Ask an admin to add credit."; an admin sees the month's spend and how
+many people spent it, the credit left, the **Top spenders** (five, then a
+count) and the **Channel budgets**, with the actions **Add credit** and
+**Redeem code** (while a code is redeemable) and, on Discord and Slack, a
+**Look up a person** picker that re-checks admin and shows one person's spend
+this month. Both get **Expiry dates** while the credit includes timed credit:
+a private reply on Discord, a pushed view on Slack, an expanding section on
+Teams. Admin-only figures are not fetched for a non-admin rather than fetched
+and hidden. On Discord the panel's accent is red with no credit left or the
+viewer over their cap, and amber while timed credit expires within a week.
+
+The top spenders are shown by name, never as a ping. Discord takes each
+from the member cache or one member fetch (no privileged intent), all within
+1.5 seconds, and escapes markdown and mentions in it. Slack writes a user
+mention, which a modal shows as the name without notifying anyone; the panel is
+only ever a modal. Teams looks each person up on the rosters of the teams the
+bot is installed in, within 2 seconds, as plain text. Anyone who cannot be
+named (left the server, in no installed team, a lookup that failed or timed
+out, an id that is not a Slack user id) is shown as `User` and the last four
+characters of their id.
 
 Two things those numbers are not. They are pre-markup, as above. And tenant
 aggregates exclude rows with no platform user attached, so spend recovered by
