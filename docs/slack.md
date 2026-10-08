@@ -8,7 +8,7 @@ what operators should understand about the resulting trust model.
 `/here` sends only the caller a compact channel card. Its title names the agent
 that answers here or the reason replies are unavailable. Reading and Publishing
 show the effective scope and whether approval is required. The footer says
-`Channel setting · threads can differ` because Slack slash commands have no
+`Channel setting. Threads can differ.` because Slack slash commands have no
 thread context. Credential names and values are absent from the card.
 
 ### Session output files

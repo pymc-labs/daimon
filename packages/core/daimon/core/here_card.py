@@ -161,13 +161,10 @@ def render_here_card_text(card: HereCard) -> str:
     lines = [rendered.title]
     if rendered.subline is not None:
         lines.append(rendered.subline)
-    fields: list[str] = []
     if rendered.reading is not None:
-        fields.append(f"Reading: {rendered.reading}")
+        lines.append(f"Reading: {rendered.reading}")
     if rendered.publishing is not None:
-        fields.append(f"Publishing: {rendered.publishing}")
-    if fields:
-        lines.append(" · ".join(fields))
+        lines.append(f"Publishing: {rendered.publishing}")
     lines.extend(rendered.extras)
     return "\n".join(lines)
 

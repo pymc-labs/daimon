@@ -29,33 +29,53 @@ NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
-    ("state", "first_line", "second_line"),
+    ("state", "expected_lines"),
     [
-        ("no_view", "No channel access", "Ask an admin to check Daimon's access."),
+        (
+            "no_view",
+            [
+                "No channel access",
+                "Ask an admin to check Daimon's access.",
+                "Reading: Any conversation",
+                "Publishing: No approval",
+            ],
+        ),
         (
             "no_replies",
-            "Replies disabled here",
-            "Reading: Any conversation · Publishing: No approval",
+            ["Replies disabled here", "Reading: Any conversation", "Publishing: No approval"],
         ),
-        ("no_agent", "No agent selected", "Ask an admin: /agent-setup"),
+        (
+            "no_agent",
+            [
+                "No agent selected",
+                "Ask an admin: /agent-setup",
+                "Reading: Any conversation",
+                "Publishing: No approval",
+            ],
+        ),
         (
             "blocked",
-            "ResearchBot can't answer here",
-            "Reading: Any conversation · Publishing: No approval",
+            [
+                "ResearchBot can't answer here",
+                "Reading: Any conversation",
+                "Publishing: No approval",
+            ],
         ),
         (
             "channel",
-            "ResearchBot answers here",
-            "Reading: Any conversation · Publishing: No approval",
+            ["ResearchBot answers here", "Reading: Any conversation", "Publishing: No approval"],
         ),
         (
             "thread",
-            "ResearchBot answers in this thread",
-            "Reading: Any conversation · Publishing: No approval",
+            [
+                "ResearchBot answers in this thread",
+                "Reading: Any conversation",
+                "Publishing: No approval",
+            ],
         ),
     ],
 )
-def test_mcp_plain_text_states(state: str, first_line: str, second_line: str) -> None:
+def test_mcp_plain_text_states(state: str, expected_lines: list[str]) -> None:
     card = HereCard(
         channel_rule=ChannelRule(),
         who_may_answer="",
@@ -75,10 +95,11 @@ def test_mcp_plain_text_states(state: str, first_line: str, second_line: str) ->
         text="",
     )
     text = render_here_card_text(card)
-    assert text.splitlines()[:2] == [first_line, second_line]
+    assert text.splitlines() == expected_lines
     assert "SECRET_NAME" not in text
     assert "ghp_fake_value" not in text
-    assert "Channel setting · threads can differ" not in text
+    assert "Channel setting. Threads can differ." not in text
+    assert " · " not in text
 
 
 def test_card_title_fits_discord_and_slack_limits() -> None:

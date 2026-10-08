@@ -103,8 +103,9 @@ def test_slack_block_kit_states(state: str, title: str, colour: str, subline: st
     } == {"*Reading*\nAny conversation", "*Publishing*\nNo approval"}
     assert blocks[-1] == {
         "type": "context",
-        "elements": [{"type": "plain_text", "text": "Channel setting · threads can differ"}],
+        "elements": [{"type": "plain_text", "text": "Channel setting. Threads can differ."}],
     }
+    assert " · " not in str(blocks)
 
 
 def test_slack_extra_lines_and_no_credentials() -> None:

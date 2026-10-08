@@ -77,7 +77,7 @@ def build_here_attachment(card: HereCard) -> dict[str, Any]:
     blocks.append(
         {
             "type": "context",
-            "elements": [{"type": "plain_text", "text": "Channel setting · threads can differ"}],
+            "elements": [{"type": "plain_text", "text": "Channel setting. Threads can differ."}],
         }
     )
     return {"color": shown.colour, "blocks": blocks}
