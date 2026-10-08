@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "PyMC Labs" }]
 dependencies = [
-    "anthropic>=0.96",
+    "anthropic>=1.12",
     "asyncpg>=0.29",
     "daimon-core",
     "fastapi>=0.115",
