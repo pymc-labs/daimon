@@ -48,8 +48,6 @@ class GrantsPanel:
 
     def text(self, agent_name: str, *, page: int = 0, page_size: int = 20) -> str:
         lines = [f"Repos {agent_name} uses"]
-        if self.has_pat and self.mode == "legacy":
-            lines.append("GitHub: uses a saved key (old way).")
         visible = [r for r in self.repos if r.live_ceiling is not None]
         for repo in visible[page * page_size : (page + 1) * page_size]:
             ability = "Read only" if repo.live_ceiling == "read" else "Read and write"
