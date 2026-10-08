@@ -1,8 +1,10 @@
 # Discord webhook posting under concurrent turns
 
 `WebhookLoad.tla` checks posting capacity and route changes for concurrent
-turns sharing parent channels. `CardRecovery.tla` checks the durable initial
-card, ambiguous post response, terminal edit, and restart reconciliation.
+turns sharing parent channels. `Cadence.tla` checks two render windows with
+the event's parent-channel spread and both global rate-limit modes.
+`CardRecovery.tla` checks the durable initial card, ambiguous post response,
+terminal edit, and restart reconciliation.
 Run both through `TLA2TOOLS_JAR=... formal/check.sh` from the repository root.
 These are finite abstractions of the code, not a proof of Discord or discord.py.
 
@@ -28,18 +30,32 @@ identity off routes directly to bot. Per-hook use and bot use reset each
 window. The bot allowance is 50 requests per second, or 100 per model window;
 the small TLC configs use lower allowances to expose the same boundary.
 
+`discord.py` 2.7.1 sends token-URL webhook execute, edit and delete requests
+without a bot `Authorization` header. [Discord's rate-limit documentation](https://docs.discord.com/developers/topics/rate-limits)
+says unauthenticated requests use an **IP-based** global limit, while bot-token
+requests use the bot's global limit; both are stated as 50 requests/s. Thus
+webhook posts do not spend the bot-token global bucket, but a webhook pool does
+not escape a global ceiling. The three hooks are per **parent channel**, not
+per thread. The stated five requests per webhook per two-second window is a
+planning assumption: Discord says route limits can change and response
+headers, including `retry_after`, are authoritative. The model conservatively
+shares a hook quota across execute, edit and delete, though actual buckets can
+depend on route and method.
+
 The model assumes one process owns the per-parent creation lock, Discord
 honors the stated quota, `retry_after` is finite, and each HTTP acceptance
 returns a response except for the separately modeled ambiguous initial card.
 It does **not** assume that a failed 429 automatically succeeds through bot
 posting: the adapter propagates a final 429. It also does not bound webhook
-creation, network latency, other bots' use of the global allowance, progress
-edits, answer overflow, or a permanent platform outage. Cross-process hook
+creation, network latency, other traffic on the same egress IP or bot token,
+answer overflow, or a permanent platform outage. Cross-process hook
 creation is not serialized; concurrent processes can create more than the
 intended three in one parent, though the Discord channel cap is 15. The
-production worker cap is 200 concurrent turns; TLC checks two or three turns
-across one or two parents and one to three hooks. No 200-turn state exploration
-is claimed.
+production worker cap of 200 concurrent turns is planned, not live. The
+`WebhookLoad` interleaving model checks two or three turns across one or two
+parents and one to three hooks. `Cadence` deterministically checks 15 and 200
+active-turn request counts across 40 or 65 parents. It does not explore 200
+independent turn interleavings or prove a latency bound.
 
 ## Checked configurations
 
@@ -55,6 +71,10 @@ is claimed.
 | `LoadUnsafeFallback` | Dropping the bot route with identity off violates `FallbackRoute`. Discord and MCP transport tests pin the bot route when identity is disabled or webhooks are unavailable. |
 | `LoadUnsafeBackoff` | Ignoring `retry_after` permits repeated 429s in one window and violates `NoBusyRetry`. The safe model waits for the next window. |
 | `LoadUnsafeBound` | Claiming completion within two windows when six calls share a hook that accepts two per window violates `BoundedPosting`. The corrected three-window bound is checked by `LoadSafe`. |
+| `CadenceExpected` | 15 active turns across 40 parents, one state-change edit per turn per two-second window: route and IP global backlogs stay zero. |
+| `CadenceWebhookRoutes`, `CadenceSixtyFiveRoutes` | At 200 active turns, 40 parents with three evenly selected hooks can absorb an initial post plus edit per turn at the assumed hook quota; 65 parents can absorb one edit per turn even if each parent has one hook. These check route capacity only. |
+| `CadenceWebhookIPUnsafe`, `CadenceBotGlobalUnsafe` | At 200 active turns, one edit per turn per window is 200 requests against either global allowance of 100 per window. Both modes leave 100 requests queued after the first window. Transport tests pin that final webhook and bot 429s propagate; no fallback can promise delivery after global exhaustion. |
+| `CadenceWebhookSkewUnsafe` | Five turns per parent, all mapped to one hook, plus simultaneous initial post and edit require ten calls in one window against five. `test_same_parent_threads_can_select_one_webhook` pins the hash-collision route. |
 | `CardSafe` | A committed intent, one remote card, terminal edit or token-available recovery: no duplicate card/answer and no pending card after a finished turn, retirement, or recovery. |
 | `CardUnsafeDuplicate` | Retrying an accepted initial post after losing its response creates two cards and violates `NoDuplicateCard`. The durable intent and history lookup avoid blind repost; Discord recovery tests cover the ambiguous response and duplicate discovery. |
 | `CardUnsafeFinish` | Marking a turn finished before clearing its card violates `NoPendingAfterTurnEnds`. The lifecycle finishes the card before revealing the answer. |
@@ -76,28 +96,50 @@ claim.
 
 ## Load answer and fallback
 
-For the worker's 200-concurrent-turn ceiling, a simultaneous burst of one
-prompted card cycle per turn is at least **600 Discord requests** before any
-progress edits or extra answer chunks. If all turns share one parent and the
-three hooks receive even load, the stated 5-per-hook-per-two-second allowance
-requires at least `ceil(600 / 15) = 40` rate windows. If all thread IDs map to
-one hook, it requires at least `ceil(600 / 5) = 120` windows. Direct channel
-posts also use one hook. Across several parent channels, the bottleneck is the
-most loaded individual hook, not the guild-wide average. Bot-only posting at
-50 requests per second requires at least `ceil(600 / 100) = 6` two-second
-windows if that whole allowance is free. These are capacity lower bounds,
-not delivery guarantees or elapsed-time predictions. Startup creation,
-`retry_after`, other traffic, and progress edits increase the requirement.
+The event rehearsal used one guild with 65 private team channels and 195
+pre-created threads; the final soak used 40 channels and 120 threads, three
+threads per parent. The expected rate is 50–60 turns/min, with roughly 15
+turns in flight inferred from the lower-rate soak. A 200-turn cold burst was
+observed with 195 sampled turns in flight. The final soak used each thread
+eight to ten times. The planned worker and event-guild caps are 200; current
+defaults are an unset global cap and three per tenant. These figures come
+from the private R3 staging rehearsal report and are summarized here without
+identifiers or operational details. R3 recorded zero Discord 429s in its
+later cold and soak stages, but all synthetic prompts came from one QA bot
+account and the rehearsal predates webhook identity mode. It does not
+validate webhook mode.
 
-The hackathon load cannot be judged from the worker cap alone. The remaining
-inputs are peak concurrent turns per parent channel, thread-ID distribution
-across the three hook slots, average progress edits and answer chunks, and
-other bot traffic. Until those numbers are supplied, a one-parent burst is a
-credible webhook bottleneck; spreading active threads across parents and
-hooks reduces it. Automatic fallback uses a bot post with the agent name on
-the first answer chunk when webhook setup or a non-429 send fails. A final
-429 propagates instead of switching routes, and bot posting can itself be
-rate limited. `DAIMON_AGENT_IDENTITY__ENABLED=false` sends all guilds through
+At roughly 15 in flight, the maximum render cadence adds about 7.5 edits/s;
+50–60 turns/min add about 2.5–3 initial/terminal/answer requests/s at the
+three-request baseline. Both posting modes fit a free 50/s global allowance
+under this estimate. At 200 in flight, the render ceiling is 100 edits/s,
+before new cards and terminal updates: **both webhook IP and bot-token global
+budgets are overloaded if every card changes on every tick**. The model
+retains this counterexample for each mode. Edits occur only when card state
+changes, so 100/s is a stress ceiling, not an observed steady rate.
+
+The 200-card cold burst alone requires at least two global two-second windows
+in either mode. Spread evenly over 40 parents, five initial posts per parent
+exactly fill one hook's assumed route bucket; over 65 parents, each needs at
+most four. If an edit lands in the same window, 40 parents with three evenly
+used hooks still fit the route quota, but one-hook collisions create local
+backlog. Thread IDs can collide modulo three, so three threads do not
+guarantee three active hooks. The IP global bucket remains the bottleneck even
+when route capacity is sufficient. This is a capacity lower bound, not a
+delivery guarantee; hook creation, `retry_after`, other egress traffic, and
+answer overflow can add windows.
+
+**Answer:** webhook mode has better per-route distribution and keeps its
+requests out of the bot-token global bucket, but it is not intrinsically safe
+at the 200-turn maximum cadence because its unauthenticated requests share an
+IP-based global ceiling. Bot mode has no per-webhook collision risk, but its
+50/s bot-token ceiling also overloads at that cadence. Monitor actual
+`X-RateLimit-Scope`, bucket headers, 429 counts and card-edit rate in staging;
+the R3 zero-429 result does not settle webhook capacity. Automatic fallback
+uses a bot post with the agent name on the first answer chunk when webhook
+setup or a non-429 send fails. A final 429 propagates instead of switching
+routes, and bot posting can itself be rate limited.
+`DAIMON_AGENT_IDENTITY__ENABLED=false` sends all guilds through
 the bot without agent identity. There is currently no per-guild identity
 switch; automatic fallback is per destination/turn, and removing Manage
 Webhooks permission may not disable already cached hooks.

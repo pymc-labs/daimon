@@ -186,6 +186,24 @@ async def test_exhausted_webhook_429_is_not_silently_reposted_by_bot() -> None:
     channel.send.assert_not_awaited()
 
 
+async def test_bot_fallback_429_propagates() -> None:
+    client, channel, _ = _world()
+    channel.send = AsyncMock(
+        side_effect=discord.HTTPException(
+            MagicMock(status=429), {"message": "rate limited", "retry_after": 2.0}
+        )
+    )
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False, identity_enabled=False
+    )
+
+    with pytest.raises(discord.HTTPException) as exc_info:
+        await transport.send(content="answer")
+
+    assert exc_info.value.status == 429
+    channel.send.assert_awaited_once_with(content="answer")
+
+
 async def test_webhook_400_cooldown_only_applies_to_that_agent_identity() -> None:
     client, channel, hook = _world()
     hook.send = AsyncMock(
@@ -248,6 +266,30 @@ async def test_thread_pool_selects_by_thread_id_and_edits_by_message_webhook_id(
     message.application_id = client.application_id
     await transport.edit(message, content="updated")
     hooks[1].edit_message.assert_awaited_once_with(40, content="updated", thread=thread)
+
+
+async def test_same_parent_threads_can_select_one_webhook() -> None:
+    client, parent, _ = _world()
+    hooks = [MagicMock(spec=discord.Webhook) for _ in range(3)]
+    for offset, hook in enumerate(hooks):
+        hook.id = 30 + offset
+        hook.token = "in-memory-test-token"
+        hook.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
+    _webhooks[parent.id] = {hook.id: hook for hook in hooks}
+
+    for thread_id in (21, 24, 27):
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = thread_id
+        thread.parent = parent
+        thread.locked = False
+        transport = DiscordPostTransport(
+            client, thread, name="Research", avatar_url=None, builtin=False
+        )
+        await transport.send(content="answer")
+
+    assert hooks[0].send.await_count == 3
+    hooks[1].send.assert_not_awaited()
+    hooks[2].send.assert_not_awaited()
 
 
 async def test_locked_thread_uses_bot_fallback() -> None:

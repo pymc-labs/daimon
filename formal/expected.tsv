@@ -180,3 +180,9 @@ discord_webhooks	CardRecovery	CardUnsafeRecovery	violates:NoPendingAfterRecovery
 discord_webhooks	WebhookLoad	LoadDiscordQuota	clean	193	-	production hook and bot quota values with six requests in one parent
 discord_webhooks	CardRecovery	CardDeleteFailed	clean	21	-	failed discard keeps original intent active for later recovery
 discord_webhooks	CardRecovery	CardUnsafeDeleteRetire	violates:NoPendingAfterRetirement	9	-	retiring after failed delete hides a pending card
+discord_webhooks	Cadence	CadenceExpected	clean	3	-	15 active turns spread over 40 parents fit route and IP ceilings at one edit per window
+discord_webhooks	Cadence	CadenceWebhookRoutes	clean	3	-	200 turns over 40 parents with three balanced hooks fit per-hook quota even with initial plus edit
+discord_webhooks	Cadence	CadenceWebhookIPUnsafe	violates:NoGlobalBacklog	2	-	200 edits per window exceed unauthenticated IP global allowance of 100
+discord_webhooks	Cadence	CadenceWebhookSkewUnsafe	violates:NoHookBacklog	2	-	five turns on one parent and one hook cannot send initial plus edit in one window
+discord_webhooks	Cadence	CadenceBotGlobalUnsafe	violates:NoGlobalBacklog	2	-	200 bot edits per window exceed bot-token global allowance of 100
+discord_webhooks	Cadence	CadenceSixtyFiveRoutes	clean	3	-	200 turns over 65 parents fit per-hook quota even if one hook per parent carries edits
