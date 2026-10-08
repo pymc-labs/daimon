@@ -17,6 +17,7 @@ from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.turn_card_recovery import (
     TurnCardSearchState,
+    UnrecoverableTurnCardError,
     expire_unrecoverable_turn_card,
     find_turn_card_message,
     post_initial_turn_card,
@@ -68,11 +69,17 @@ async def test_aged_unrecoverable_card_stops_blocking_and_deletes_when_allowed(
     thread.guild.me = MagicMock()
     thread.permissions_for.return_value.manage_messages = can_delete
     message = MagicMock(spec=discord.Message)
+    message.components = _fetched_message(123, intent.id).components
     message.delete = AsyncMock()
     thread.fetch_message = AsyncMock(return_value=message)
 
     assert await expire_unrecoverable_turn_card(
-        db_session_factory, intent=aged, thread=thread, max_age_s=86400, now=now
+        db_session_factory,
+        intent=aged,
+        thread=thread,
+        max_age_s=86400,
+        reason="own webhook no longer exists",
+        now=now,
     )
     assert not await turn_card_intent_is_active(db_session, id=intent.id)
     assert await list_recoverable_turn_card_intents(db_session, platform="discord") == []
@@ -102,9 +109,89 @@ async def test_fresh_unresolved_card_stays_recoverable(
         intent=intent,
         thread=None,
         max_age_s=86400,
+        reason="own webhook no longer exists",
         now=intent.created_at + timedelta(hours=1),
     )
     assert await turn_card_intent_is_active(db_session, id=intent.id)
+
+
+async def test_age_out_does_not_delete_answered_card(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    tenant = await make_tenant(db_session)
+    intent = await create_turn_card_intent(
+        db_session, tenant_id=tenant.id, platform="discord", thread_id="456", turn_token=_TURN_ID
+    )
+    await record_turn_card_message(db_session, id=intent.id, message_id="123")
+    await db_session.execute(
+        text("UPDATE turn_card_intents SET created_at = :created_at WHERE id = :id"),
+        {"created_at": now - timedelta(days=2), "id": intent.id},
+    )
+    await db_session.commit()
+    aged = intent.model_copy(
+        update={"created_at": now - timedelta(days=2), "message_id": "123", "status": "posted"}
+    )
+    thread = MagicMock(spec=discord.Thread)
+    thread.guild.me = MagicMock()
+    thread.permissions_for.return_value.manage_messages = True
+    answer = MagicMock(spec=discord.Message)
+    answer.components = _fetched_message(123).components
+    answer.delete = AsyncMock()
+    thread.fetch_message = AsyncMock(return_value=answer)
+
+    assert await expire_unrecoverable_turn_card(
+        db_session_factory,
+        intent=aged,
+        thread=thread,
+        max_age_s=86400,
+        reason="own webhook no longer exists",
+        now=now,
+    )
+    answer.delete.assert_not_awaited()
+
+
+async def test_age_out_checks_all_found_duplicates_and_logs_failed_delete(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    now = datetime.now(UTC)
+    tenant = await make_tenant(db_session)
+    intent = await create_turn_card_intent(
+        db_session, tenant_id=tenant.id, platform="discord", thread_id="456", turn_token=_TURN_ID
+    )
+    await db_session.execute(
+        text("UPDATE turn_card_intents SET created_at = :created_at WHERE id = :id"),
+        {"created_at": now - timedelta(days=2), "id": intent.id},
+    )
+    await db_session.commit()
+    aged = intent.model_copy(update={"created_at": now - timedelta(days=2)})
+    thread = MagicMock(spec=discord.Thread)
+    thread.guild.me = MagicMock()
+    thread.permissions_for.return_value.manage_messages = True
+    first = MagicMock(spec=discord.Message)
+    first.components = _fetched_message(123, intent.id).components
+    first.delete = AsyncMock()
+    second = MagicMock(spec=discord.Message)
+    second.components = _fetched_message(124, intent.id).components
+    response = MagicMock(status=403)
+    second.delete = AsyncMock(side_effect=discord.Forbidden(response, "delete denied"))
+    thread.fetch_message = AsyncMock(side_effect=[first, second])
+
+    assert await expire_unrecoverable_turn_card(
+        db_session_factory,
+        intent=aged,
+        thread=thread,
+        max_age_s=86400,
+        reason="own webhook no longer exists",
+        candidate_message_ids={123, 124},
+        now=now,
+    )
+    first.delete.assert_awaited_once()
+    second.delete.assert_awaited_once()
+    assert "turn.card_intent_stale_delete_failed" in capsys.readouterr().out
 
 
 _TURN_ID = UUID("12345678-1234-5678-1234-567812345678")
@@ -141,9 +228,10 @@ async def test_recovery_keeps_pending_card_when_webhook_token_is_gone(
     edit = AsyncMock(side_effect=discord.ClientException("own webhook token unavailable"))
     monkeypatch.setattr(DiscordPostTransport, "edit", edit)
 
-    assert not await turn_card_recovery._mark_card_interrupted(  # pyright: ignore[reportPrivateUsage]
-        message, intent_id=_TURN_ID, client=MagicMock(spec=discord.Client)
-    )
+    with pytest.raises(UnrecoverableTurnCardError):
+        await turn_card_recovery._mark_card_interrupted(  # pyright: ignore[reportPrivateUsage]
+            message, intent_id=_TURN_ID, client=MagicMock(spec=discord.Client)
+        )
     assert edit.await_args.kwargs["_allow_replacement"] is False
 
 

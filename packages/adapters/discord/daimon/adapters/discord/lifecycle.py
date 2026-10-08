@@ -644,9 +644,12 @@ class DiscordTurnLifecycle:
             return
         try:
             await self._delete(self._message_ref)
-        except discord.NotFound:
-            # A missing card is already discarded; no pending button remains.
-            pass
+        except discord.NotFound as err:
+            # 10008 means the message is gone. 10015 means the webhook is gone,
+            # while its message and pending button may still be visible.
+            if err.code != 10008:
+                self._card_discard_failed = True
+                log.info("turn.embed_discard_failed", exc_info=True)
         except (discord.HTTPException, discord.ClientException):
             # Keep the durable intent so a later recovery pass can resolve a
             # card whose pending button may still be visible.

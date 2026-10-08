@@ -1328,7 +1328,8 @@ class TestUnpromptedTurn:
 
         async def missing_delete(_message: object) -> None:
             raise discord.NotFound(
-                types.SimpleNamespace(status=404, reason="Not Found"), "Unknown Message"
+                types.SimpleNamespace(status=404, reason="Not Found"),
+                {"code": 10008, "message": "Unknown Message"},
             )
 
         lc._delete = missing_delete  # pyright: ignore[reportPrivateUsage]
@@ -1336,6 +1337,21 @@ class TestUnpromptedTurn:
         await lc.on_terminal_success(TurnState())
 
         assert not lc.card_discard_failed
+
+    async def test_missing_webhook_delete_keeps_card_intent_recoverable(self) -> None:
+        lc, _, _, _ = _make_unprompted_lifecycle()
+
+        async def missing_webhook(_message: object) -> None:
+            raise discord.NotFound(
+                types.SimpleNamespace(status=404, reason="Not Found"),
+                {"code": 10015, "message": "Unknown Webhook"},
+            )
+
+        lc._delete = missing_webhook  # pyright: ignore[reportPrivateUsage]
+        await lc.on_render(TurnState(content=[TextBlock(kind="text", text="partial")]))
+        await lc.on_terminal_success(TurnState())
+
+        assert lc.card_discard_failed
 
     async def test_client_delete_failure_keeps_card_intent_recoverable(self) -> None:
         lc, _, _, _ = _make_unprompted_lifecycle()

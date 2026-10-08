@@ -21,7 +21,7 @@ These are finite abstractions of the code, not a proof of Discord or discord.py.
 | `SilentEnd` | An unprompted turn with no answer deletes its transient card. If delete fails, the lifecycle marks the discard failure and the caller retains the intent. |
 | `Crash`, `BootLookup`, `RecoverEdit` | `bot.py` gates new turn admission behind orphan sweep, then reconciles the boot intent snapshot; `turn_card_recovery.py` scans history and edits every matching pending card before retirement. The orphan sweep also refuses replacement, so an unknown webhook cannot create a second bot card while leaving the original pending. |
 | `RecoverReplacement` | The pre-fix recovery path could replace an uneditable webhook card with a new bot message and retire the intent while the old card still displayed a pending button. Recovery now disables replacement and retains the intent on missing/unknown webhook token. Normal non-recovery edits may still replace a message. |
-| `AgeOut` | After the configured age, an unresolved Discord intent becomes `unrecoverable`, which releases the channel tidy gate. If the bot has Manage Messages and knows the card ID, it tries to delete the stale card. A failed delete leaves the old card visible but the terminal state records that automatic recovery is exhausted. |
+| `RecoveryFailure`, `AgeOut` | An aged Discord intent becomes `unrecoverable` only after a definite missing-webhook, missing-token, permission or deleted-thread failure. Transient API failures and cancellation keep it active. The bot periodically revisits aged intents. With Manage Messages, it deletes only fetched messages that still carry this turn's pending button, including duplicates; a finished answer is preserved. A failed delete is logged and the terminal state records exhausted automatic recovery. |
 
 `WebhookLoad` counts **three requests per prompted turn**: initial card,
 terminal Done edit, answer edit. It models the final answer as one message and
@@ -93,13 +93,15 @@ turn interleavings or prove a latency bound.
 | `CardDeleteFailed` | An unprompted card delete fails; the turn ends silently but the intent remains active for later recovery. |
 | `CardUnsafeDeleteRetire` | Retiring that intent anyway violates `NoPendingAfterRetirement`. The lifecycle records discard failure and the caller skips retirement; a regression test checks the flag. |
 | `CardMissingToken` | With no token, fresh recovery stays incomplete and the intent remains active. The aged case is covered by `CardStaleUnrecoverable`. |
-| `CardStaleUnrecoverable`, `CardStaleDelete` | An aged unresolved card becomes terminal. Without Manage Messages the old card may remain; with permission and successful deletion it is removed. Both states release the tidy gate. |
+| `CardStaleUnrecoverable`, `CardStaleDelete` | After a definite recovery failure, an aged intent becomes terminal. Without Manage Messages the old pending card may remain; with permission and successful deletion it is removed. Both states release the tidy gate. |
+| `CardAnsweredSafe`, `CardUnsafeAnsweredDelete` | A recorded message ID may point at an answered card before the intent retires. Checking the turn's pending button preserves the answer; blind deletion violates `NoDeletedAnswer`. The Discord age-out tests cover answered cards and multiple matches. |
 | `CardUnsafeStale` | Keeping an aged unresolved intent active violates `NoStaleActive`; this is the old permanent `turn_in_progress` path. |
 
 `CardSafe` assumes a known card can be edited and a requested delete succeeds. It does not prove that every
 crash is recoverable: Discord history lookup is bounded, a message can be
 unfetchable, a webhook token can disappear, and an edit can fail. The
-`CardMissingToken` retains that residual state until the configured age is reached.
+`CardMissingToken` retains that residual state until both the configured age
+and a definite recovery failure are present.
 “No card left pending after recovery” is therefore a conditional safety rule:
 when recovery retires an intent, every matching card it found has been
 resolved. Pending cards after a failed recovery are visible in the retained
@@ -130,9 +132,13 @@ at least five ticks between Discord edits and three between Slack edits.
 Terminal edits bypass this debounce. At roughly 15 Discord turns in flight,
 the maximum sustained progress rate is about 1.5 edits/s. At 200 it is about
 20 edits/s. The 50–60 turns/min expectation adds about 2.5–3 initial,
-terminal, and answer requests/s at the three-request baseline. With staggered
-edits, both webhook-IP and bot-token modes remain below their separate 50/s
-global allowances in the model. Slack's 200-turn progress ceiling is about
+terminal, and answer requests/s at the three-request baseline. Keeping 200
+turns in flight at that arrival rate assumes turns last roughly 3.5 minutes
+or longer. If 200 turns each last about 15–18 seconds, the same baseline adds
+roughly 33–40 non-edit requests/s; with 20 edits/s, demand approaches or
+exceeds 50/s. With staggered edits and the lower arrival rate, both
+webhook-IP and bot-token modes remain below their separate 50/s global
+allowances in the model. Slack's 200-turn progress ceiling is about
 33 edits/s after tick rounding; this Discord global allowance does not apply
 to Slack.
 

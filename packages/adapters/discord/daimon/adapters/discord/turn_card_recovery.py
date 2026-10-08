@@ -35,6 +35,26 @@ from discord.components import ActionRow, Button
 log = structlog.get_logger()
 
 
+class UnrecoverableTurnCardError(Exception):
+    """A definite platform failure prevents editing this turn's pending card."""
+
+    def __init__(self, reason: str, message_ids: set[int] | None = None) -> None:
+        super().__init__(reason)
+        self.message_ids = set(message_ids or ())
+
+
+def is_definite_recovery_failure(err: BaseException) -> bool:
+    """Distinguish missing identity or permissions from retryable API failures."""
+    if isinstance(err, discord.HTTPException) and (err.status == 403 or err.code in (10003, 10015)):
+        return True
+    if isinstance(err, discord.ClientException) and str(err) in (
+        "own webhook token unavailable",
+        "own webhook no longer exists",
+    ):
+        return True
+    return err.__cause__ is not None and is_definite_recovery_failure(err.__cause__)
+
+
 async def post_initial_turn_card(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -126,9 +146,13 @@ async def expire_unrecoverable_turn_card(
     intent: TurnCardIntentRow,
     thread: discord.Thread | None,
     max_age_s: int,
+    reason: str,
+    candidate_message_ids: set[int] | None = None,
     now: datetime | None = None,
 ) -> bool:
-    """Close an aged unresolved intent and try bot deletion of its known card."""
+    """Close an aged intent after a definite failure; delete only its pending cards."""
+    if not reason:
+        raise ValueError("unrecoverable reason is required")
     current_time = now or datetime.now(UTC)
     if (current_time - intent.created_at).total_seconds() < max_age_s:
         return False
@@ -150,29 +174,50 @@ async def expire_unrecoverable_turn_card(
     if not marked:
         return False
 
-    deleted = False
-    if thread is not None and intent.message_id is not None:
+    deleted = 0
+    if thread is not None:
         member = thread.guild.me
         if thread.permissions_for(member).manage_messages:
-            try:
-                message = await thread.fetch_message(int(intent.message_id))
-                await message.delete()
-                deleted = True
-            except discord.NotFound:
-                deleted = True
-            except (discord.HTTPException, discord.ClientException, ValueError):
-                log.warning(
-                    "turn.card_intent_stale_delete_failed",
-                    intent_id=str(intent.id),
-                    message_id=intent.message_id,
-                    exc_info=True,
-                )
+            ids = set(candidate_message_ids or ())
+            if intent.message_id is not None:
+                try:
+                    ids.add(int(intent.message_id))
+                except ValueError:
+                    log.warning(
+                        "turn.card_intent_stale_delete_failed",
+                        intent_id=str(intent.id),
+                        message_id=intent.message_id,
+                        error="invalid message ID",
+                    )
+            for message_id in sorted(ids):
+                try:
+                    message = await thread.fetch_message(message_id)
+                    if intent.id not in turn_card_ids_from_message(message):
+                        continue  # the recorded message may now contain the answer
+                    await message.delete()
+                    deleted += 1
+                except discord.NotFound as err:
+                    if err.code != 10008:
+                        log.warning(
+                            "turn.card_intent_stale_delete_failed",
+                            intent_id=str(intent.id),
+                            message_id=str(message_id),
+                            exc_info=True,
+                        )
+                except (discord.HTTPException, discord.ClientException, ValueError):
+                    log.warning(
+                        "turn.card_intent_stale_delete_failed",
+                        intent_id=str(intent.id),
+                        message_id=str(message_id),
+                        exc_info=True,
+                    )
     log.warning(
         "turn.card_intent_unrecoverable",
         intent_id=str(intent.id),
         message_id=intent.message_id,
+        reason=reason,
         age_s=round((current_time - intent.created_at).total_seconds()),
-        card_deleted=deleted,
+        cards_deleted=deleted,
     )
     return True
 
@@ -195,6 +240,7 @@ class TurnCardSearchResult:
 
     state: TurnCardSearchState
     message_ids: tuple[int, ...]
+    definite_failure: bool = False
 
 
 def turn_card_custom_id(turn_id: UUID) -> str:
@@ -268,10 +314,11 @@ async def find_turn_card_message(
             messages_read += 1
             if turn_id in turn_card_ids_from_message(message):
                 message_ids.add(message.id)
-    except (discord.HTTPException, discord.ClientException, ValueError):
+    except (discord.HTTPException, discord.ClientException, ValueError) as err:
         return TurnCardSearchResult(
             state=TurnCardSearchState.INDETERMINATE,
             message_ids=tuple(sorted(message_ids)),
+            definite_failure=is_definite_recovery_failure(err),
         )
 
     if messages_read == message_budget:
@@ -347,15 +394,19 @@ async def reconcile_turn_card_intent(
                     sessionmaker, intent_id=intent.id, expected_message_id=message_id
                 )
 
-            await reconcile_found_card(
-                expected_message_id=intent.message_id,
-                recovered_message_id=(
-                    str(min(message_ids)) if intent.message_id is None else intent.message_id
-                ),
-                record=record,
-                edit=edit,
-                retire=retire,
-            )
+            try:
+                await reconcile_found_card(
+                    expected_message_id=intent.message_id,
+                    recovered_message_id=(
+                        str(min(message_ids)) if intent.message_id is None else intent.message_id
+                    ),
+                    record=record,
+                    edit=edit,
+                    retire=retire,
+                )
+            except UnrecoverableTurnCardError as err:
+                err.message_ids.update(message_ids)
+                raise
             return
         if result.state is TurnCardSearchState.NOT_FOUND and intent.message_id is not None:
             # The known response may be terminal and therefore absent from the
@@ -393,6 +444,8 @@ async def reconcile_turn_card_intent(
             )
             return
 
+        if result.definite_failure:
+            raise UnrecoverableTurnCardError("history access denied", set(result.message_ids))
         incomplete_attempts += 1
         if incomplete_attempts < 3:
             await sleep(5.0)
@@ -415,9 +468,13 @@ async def _reconcile_matching_messages(
         for attempt in range(3):
             try:
                 message = await thread.fetch_message(message_id)
-            except discord.NotFound:
+            except discord.NotFound as err:
+                if err.code != 10008 and is_definite_recovery_failure(err):
+                    raise UnrecoverableTurnCardError(str(err), message_ids) from err
                 break
             except (discord.HTTPException, discord.ClientException, ValueError) as err:
+                if is_definite_recovery_failure(err):
+                    raise UnrecoverableTurnCardError(str(err), message_ids) from err
                 if attempt < 2:
                     await sleep(5.0)
                     continue
@@ -465,6 +522,8 @@ async def _mark_card_interrupted(
             await message.edit(embed=embed, view=None)
         return True
     except (discord.HTTPException, discord.ClientException) as err:
+        if is_definite_recovery_failure(err):
+            raise UnrecoverableTurnCardError(str(err), {message.id}) from err
         log.warning(
             "turn.card_intent_edit_failed",
             intent_id=str(intent_id),

@@ -7,11 +7,12 @@ EXTENDS Naturals, FiniteSets, TLC
 CONSTANTS BlindRetry, TokenAvailable, RetireReplacement,
           FinishBeforeEdit, CompleteEarly, DeleteFails,
           RetireOnDeleteFailure, EnableAgeOut, SkipAgeRetirement,
-          ManageMessages, DeleteSucceeds
+          ManageMessages, DeleteSucceeds, AnswerBeforeRetire,
+          DeleteAnsweredCard
 VARIABLES process, intent, card, responseKnown, phase, answerPosts,
-          bootRead, recoveryDone, aged
+          bootRead, recoveryDone, aged, recoveryFailed
 vars == <<process, intent, card, responseKnown, phase, answerPosts,
-          bootRead, recoveryDone, aged>>
+          bootRead, recoveryDone, aged, recoveryFailed>>
 
 Init ==
     /\ process = "up"
@@ -23,25 +24,27 @@ Init ==
     /\ bootRead = FALSE
     /\ recoveryDone = FALSE
     /\ aged = FALSE
+    /\ recoveryFailed = FALSE
 
 CommitIntent ==
     /\ process = "up" /\ intent = "absent"
     /\ intent' = "prepared"
     /\ UNCHANGED <<process, card, responseKnown, phase, answerPosts,
-                   bootRead, recoveryDone, aged>>
+                   bootRead, recoveryDone, aged, recoveryFailed>>
 
 RemoteAccept ==
     /\ process = "up" /\ intent = "prepared"
     /\ card[1] = "absent"
     /\ card' = [card EXCEPT ![1] = "pending"]
     /\ UNCHANGED <<process, intent, responseKnown, phase, answerPosts,
-                   bootRead, recoveryDone, aged>>
+                   bootRead, recoveryDone, aged, recoveryFailed>>
 
 PersistResponse ==
     /\ process = "up" /\ intent = "prepared" /\ card[1] = "pending"
     /\ responseKnown' = TRUE
     /\ intent' = "posted"
-    /\ UNCHANGED <<process, card, phase, answerPosts, bootRead, recoveryDone, aged>>
+    /\ UNCHANGED <<process, card, phase, answerPosts, bootRead, recoveryDone, aged,
+                   recoveryFailed>>
 
 \* A naive retry after a lost HTTP response makes a second visible card.
 BlindPostAgain ==
@@ -49,7 +52,7 @@ BlindPostAgain ==
     /\ card[1] = "pending" /\ card[2] = "absent"
     /\ card' = [card EXCEPT ![2] = "pending"]
     /\ UNCHANGED <<process, intent, responseKnown, phase, answerPosts,
-                   bootRead, recoveryDone, aged>>
+                   bootRead, recoveryDone, aged, recoveryFailed>>
 
 FinishAnswer ==
     /\ process = "up" /\ intent = "posted" /\ phase = "working"
@@ -58,7 +61,18 @@ FinishAnswer ==
     /\ card' = IF FinishBeforeEdit THEN card
                ELSE [card EXCEPT ![1] = "terminal"]
     /\ intent' = "retired"
-    /\ UNCHANGED <<process, responseKnown, bootRead, recoveryDone, aged>>
+    /\ UNCHANGED <<process, responseKnown, bootRead, recoveryDone, aged,
+                   recoveryFailed>>
+
+\* The answer may be visible before the intent's terminal commit. A stale
+\* recorded message ID can therefore point at an answered card.
+AnswerVisibleBeforeRetire ==
+    /\ AnswerBeforeRetire /\ process = "up" /\ intent = "posted"
+    /\ phase = "working"
+    /\ card' = [card EXCEPT ![1] = "answered"]
+    /\ answerPosts' = 1 /\ phase' = "finished"
+    /\ UNCHANGED <<process, intent, responseKnown, bootRead, recoveryDone,
+                   aged, recoveryFailed>>
 
 \* An unprompted turn with no final answer discards its transient card.
 \* A failed webhook delete leaves the original card and its intent active.
@@ -70,19 +84,19 @@ SilentEnd ==
     /\ intent' = IF DeleteFails /\ ~RetireOnDeleteFailure
                   THEN intent ELSE "retired"
     /\ UNCHANGED <<process, responseKnown, answerPosts,
-                   bootRead, recoveryDone, aged>>
+                   bootRead, recoveryDone, aged, recoveryFailed>>
 
 Crash ==
     /\ process = "up" /\ intent \in {"prepared", "posted"}
     /\ process' = "down"
     /\ UNCHANGED <<intent, card, responseKnown, phase, answerPosts,
-                   bootRead, recoveryDone, aged>>
+                   bootRead, recoveryDone, aged, recoveryFailed>>
 
 BootLookup ==
     /\ process = "down" /\ ~bootRead
     /\ bootRead' = TRUE
     /\ UNCHANGED <<process, intent, card, responseKnown, phase,
-                   answerPosts, recoveryDone, aged>>
+                   answerPosts, recoveryDone, aged, recoveryFailed>>
 
 \* Orphan sweep and intent reconciliation edit every known pending card.
 RecoverEdit ==
@@ -90,7 +104,7 @@ RecoverEdit ==
     /\ card[1] = "pending"
     /\ card' = [card EXCEPT ![1] = "terminal"]
     /\ UNCHANGED <<process, intent, responseKnown, phase, answerPosts,
-                   bootRead, recoveryDone, aged>>
+                   bootRead, recoveryDone, aged, recoveryFailed>>
 
 \* 10015 / missing webhook token: transport.edit posts a replacement but
 \* cannot clear the old card's cancel button. Retiring here hides the gap.
@@ -100,7 +114,7 @@ RecoverReplacement ==
     /\ card' = [card EXCEPT ![2] = "terminal"]
     /\ intent' = "retired"
     /\ UNCHANGED <<process, responseKnown, phase, answerPosts,
-                   bootRead, recoveryDone, aged>>
+                   bootRead, recoveryDone, aged, recoveryFailed>>
 
 CompleteRecovery ==
     /\ process = "down" /\ bootRead
@@ -109,33 +123,45 @@ CompleteRecovery ==
     /\ intent' = "retired"
     /\ recoveryDone' = TRUE
     /\ UNCHANGED <<process, card, responseKnown, phase, answerPosts,
-                   bootRead, aged>>
+                   bootRead, aged, recoveryFailed>>
+
+\* A missing webhook/token or denied access is definite evidence. A 429, 5xx,
+\* incomplete history read or cancellation does not enable age-out.
+RecoveryFailure ==
+    /\ process = "down" /\ bootRead /\ ~TokenAvailable
+    /\ intent \in {"prepared", "posted"} /\ ~recoveryFailed
+    /\ recoveryFailed' = TRUE
+    /\ UNCHANGED <<process, intent, card, responseKnown, phase, answerPosts,
+                   bootRead, recoveryDone, aged>>
 
 \* A stale unresolved intent stops blocking later channel work. A bot with
 \* Manage Messages makes one last delete attempt; deletion may still fail.
 AgeOut ==
-    /\ EnableAgeOut /\ process = "down" /\ bootRead /\ ~aged
+    /\ EnableAgeOut /\ process = "down" /\ bootRead /\ recoveryFailed /\ ~aged
     /\ intent \in {"prepared", "posted"}
     /\ aged' = TRUE
     /\ intent' = IF SkipAgeRetirement THEN intent ELSE "unrecoverable"
     /\ card' = IF ManageMessages /\ DeleteSucceeds
+                   /\ (card[1] = "pending" \/ DeleteAnsweredCard)
                 THEN [card EXCEPT ![1] = "absent"] ELSE card
     /\ UNCHANGED <<process, responseKnown, phase, answerPosts,
-                   bootRead, recoveryDone>>
+                   bootRead, recoveryDone, recoveryFailed>>
 
 Next == CommitIntent \/ RemoteAccept \/ PersistResponse \/ BlindPostAgain
-        \/ FinishAnswer \/ SilentEnd \/ Crash \/ BootLookup \/ RecoverEdit
-        \/ RecoverReplacement \/ CompleteRecovery \/ AgeOut
+        \/ FinishAnswer \/ AnswerVisibleBeforeRetire \/ SilentEnd \/ Crash
+        \/ BootLookup \/ RecoverEdit \/ RecoverReplacement \/ CompleteRecovery
+        \/ RecoveryFailure \/ AgeOut
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
     /\ process \in {"up", "down"}
     /\ intent \in {"absent", "prepared", "posted", "retired", "unrecoverable"}
-    /\ card \in [1..2 -> {"absent", "pending", "terminal"}]
+    /\ card \in [1..2 -> {"absent", "pending", "terminal", "answered"}]
     /\ responseKnown \in BOOLEAN
     /\ phase \in {"working", "finished", "silent"}
     /\ answerPosts \in 0..1
     /\ bootRead \in BOOLEAN /\ recoveryDone \in BOOLEAN /\ aged \in BOOLEAN
+    /\ recoveryFailed \in BOOLEAN
 NoDuplicateCard == Cardinality({i \in 1..2: card[i] # "absent"}) <= 1
 NoPendingAfterRetirement ==
     intent = "retired" => \A i \in 1..2: card[i] # "pending"
@@ -145,5 +171,6 @@ NoPendingAfterRecovery ==
     recoveryDone => \A i \in 1..2: card[i] # "pending"
 NoDuplicateAnswer == answerPosts <= 1
 NoLostFinishedAnswer == phase = "finished" => answerPosts = 1
+NoDeletedAnswer == phase = "finished" => card[1] # "absent"
 NoStaleActive == aged => intent \notin {"prepared", "posted"}
 =================================================================
