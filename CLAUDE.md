@@ -33,10 +33,15 @@ hand does nothing — change the source and re-run the generator.
 | change `packages/mux` or what imports it | `packages/mux/README.md` | by hand |
 | change anything a user can notice | `CHANGELOG.md` under `[Unreleased]` | by hand |
 
+`docs/` is the public documentation site: every page in it is published.
+It describes behaviour that has shipped, for operators and contributors.
+Plans, designs, adoption reviews, refactor notes and anything measured on a
+real deployment do not go in `docs/` or the nav; put them in the issue or
+the PR description. A note about a scaffold belongs in that package's README.
+
 Adding a page to `docs/` means two more edits: a line in `docs/README.md`
-and a nav entry in `mkdocs.yml`. A page missing from the nav is only an INFO
-line in the mkdocs log, so the strict build stays green and the page ships
-unreachable from the site.
+and a nav entry in `mkdocs.yml`. The strict build fails on a page missing
+from the nav.
 
 A PR that touches one of those areas without the matching documentation update
 is incomplete. Re-run the generator rather than editing a generated page: CI
