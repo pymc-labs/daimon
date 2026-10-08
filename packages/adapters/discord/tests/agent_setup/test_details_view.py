@@ -290,6 +290,31 @@ async def test_picture_upload_refreshes_live_panel_without_expiring_it(
     assert panel_interaction.edit_original_response.await_count == 1
 
 
+async def test_picture_upload_ignores_missing_live_panel(
+    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    details = _details()
+    state = _state(details, account_id=account_id)
+    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
+    panel_interaction = _admin_interaction()
+    panel_interaction.edit_original_response.side_effect = discord.NotFound(
+        MagicMock(status=404, reason="Not Found"), "Unknown Webhook"
+    )
+    view.bind_render_interaction(panel_interaction, panel=state)
+    modal = PictureUploadModal(view)
+    modal.file_input._values = [MagicMock(spec=discord.Attachment)]
+    avatar = AvatarRow(token="new-token", sha256="abcdef123456more", png=b"", source="upload")
+    monkeypatch.setattr(
+        details_view_mod,
+        "upload_agent_avatar",
+        AsyncMock(return_value=("Picture changed.", avatar)),
+    )
+
+    await modal.on_submit(_admin_interaction())
+
+    panel_interaction.edit_original_response.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     ("message", "retry"),
     [
@@ -323,7 +348,26 @@ async def test_picture_upload_retry_owns_modal_response(
         assert retry_view._render_interaction is interaction
         await retry_view.on_timeout()
         assert interaction.edit_original_response.await_count == 2
+        expired = interaction.edit_original_response.await_args.kwargs
+        assert expired["view"] is None
+        assert isinstance(expired["embed"], discord.Embed)
+        assert expired["embed"].title == "Panel expired."
         panel_interaction.edit_original_response.assert_not_awaited()
+
+
+async def test_picture_retry_timeout_ignores_missing_response(account_id: uuid.UUID) -> None:
+    state = _state(_details(), account_id=account_id)
+    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
+    interaction = _admin_interaction()
+    interaction.edit_original_response.side_effect = discord.NotFound(
+        MagicMock(status=404, reason="Not Found"), "Unknown Webhook"
+    )
+    retry_view = details_view_mod.PictureRetryView(view)
+    retry_view.bind_render_interaction(interaction, panel=None)
+
+    await retry_view.on_timeout()
+
+    interaction.edit_original_response.assert_awaited_once()
 
 
 async def test_load_details_for_skips_avatar_with_identity_off(
