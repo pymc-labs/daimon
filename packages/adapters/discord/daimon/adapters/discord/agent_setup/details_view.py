@@ -23,6 +23,7 @@ from daimon.adapters.discord.agent_setup.add_skill import (
     AddSkillModal,
     skill_change_refusal,
 )
+from daimon.adapters.discord.agent_setup.avatar import avatar_public_url, reset_agent_avatar
 from daimon.adapters.discord.agent_setup.budget import LAYOUT_TEXT_BUDGET
 from daimon.adapters.discord.agent_setup.conversations import open_setup_conversation
 from daimon.adapters.discord.agent_setup.mcp_access import send_coding_tools_access
@@ -37,8 +38,11 @@ from daimon.core.agent_detail_lists import (
     format_detail_lists,
 )
 from daimon.core.agent_details import AgentDetails, RepoBinding
+from daimon.core.agent_identity import is_builtin_agent
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import (
@@ -58,6 +62,10 @@ _LIST_TEXT_RESERVE = 256
 _PURPOSE_MAX_CHARS = 800
 _ROUTING_MAX_CHARS = 1000
 _DETAIL_LIST_NAMES: tuple[DetailListName, ...] = ("keys", "skills", "connections")
+AVATAR_CHANGE_ID = "agent-setup:avatar-change"
+AVATAR_RESET_ID = "agent-setup:avatar-reset"
+AVATAR_RESET_CONFIRM_ID = "agent-setup:avatar-reset-confirm"
+AVATAR_RESET_CANCEL_ID = "agent-setup:avatar-reset-cancel"
 
 
 def _answers_line(places: tuple[AnsweringPlace, ...]) -> str:
@@ -187,6 +195,7 @@ def build_details_container(
     expanded_detail: DetailListName | None,
     is_admin: bool,
     attribution: str | None,
+    is_builtin: bool = False,
 ) -> discord.ui.Container[discord.ui.LayoutView]:
     """Fold one agent's details into the panel card. Pure — no I/O, no clock.
 
@@ -194,7 +203,6 @@ def build_details_container(
     screens' builders; the role already reached this card through
     ``details.unrouted_note``, which core wrote in the reader's own voice.
     """
-    del state, is_admin
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
     fixed_texts = [f"## {details.name}"]
     if details.purpose:
@@ -248,6 +256,39 @@ def build_details_container(
                 note=list_notes[name],
             )
         )
+    if not is_builtin:
+        avatar_url = state.avatar_urls.get(details.name)
+        avatar_copy = (
+            "**Avatar**\nAvatars are public: anyone who sees a message can open its image, "
+            "and platform caches can keep it after a change."
+        )
+        if avatar_url:
+            avatar_text: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
+                avatar_copy
+            )
+            avatar_thumbnail: discord.ui.Thumbnail[discord.ui.LayoutView] = discord.ui.Thumbnail(
+                avatar_url
+            )
+            container.add_item(discord.ui.Section(avatar_text, accessory=avatar_thumbnail))
+        else:
+            container.add_item(discord.ui.TextDisplay(avatar_copy))
+        if is_admin:
+            avatar_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+            avatar_row.add_item(
+                discord.ui.Button(
+                    label="Change avatar",
+                    custom_id=AVATAR_CHANGE_ID,
+                    style=discord.ButtonStyle.secondary,
+                )
+            )
+            avatar_row.add_item(
+                discord.ui.Button(
+                    label="Reset avatar",
+                    custom_id=AVATAR_RESET_ID,
+                    style=discord.ButtonStyle.secondary,
+                )
+            )
+            container.add_item(avatar_row)
     container.add_item(hairline())
     return container
 
@@ -303,6 +344,11 @@ class DetailsView(PanelViewBase):
             expanded_detail=state.expanded_detail,
             is_admin=state.is_admin,
             attribution=None,
+            is_builtin=is_builtin_agent(
+                name=details.name,
+                metadata={MA_METADATA_KEY_MANAGED: "true"} if details.daimon_managed else None,
+                default_agent_name=runtime.deployment_default.agent_name,
+            ),
         )
         for name, toggle in _toggle_buttons(container).items():
             toggle.callback = functools.partial(  # type: ignore[method-assign]  # per-instance callback
@@ -316,6 +362,12 @@ class DetailsView(PanelViewBase):
             and child.label == setup_target_label(details.name)
         )
         setup_button.callback = self._on_setup  # type: ignore[method-assign]  # per-instance callback
+
+        for child in container.walk_children():
+            if isinstance(child, discord.ui.Button) and child.custom_id == AVATAR_CHANGE_ID:
+                child.callback = self._on_change_avatar  # type: ignore[method-assign]
+            elif isinstance(child, discord.ui.Button) and child.custom_id == AVATAR_RESET_ID:
+                child.callback = self._on_reset_avatar  # type: ignore[method-assign]
 
         action_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
         coding_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
@@ -362,6 +414,27 @@ class DetailsView(PanelViewBase):
             state=self.state,
             allowed_user_id=self.allowed_user_id,
             agent=self.agent,
+        )
+
+    async def _on_change_avatar(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(
+            f"Run `/agent-setup agent:{self.details.name} avatar:<image>` and attach one PNG, "
+            "JPG, GIF, or WebP under 2 MB. Avatars are public and platform caches can "
+            "keep old images.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _on_reset_avatar(self, interaction: discord.Interaction) -> None:
+        await self.swap_to(
+            interaction,
+            AvatarResetConfirmView(
+                self.state,
+                runtime=self.runtime,
+                allowed_user_id=self.allowed_user_id,
+                details=self.details,
+                agent=self.agent,
+            ),
         )
 
     async def _on_add_skill(self, interaction: discord.Interaction) -> None:
@@ -411,3 +484,69 @@ class DetailsView(PanelViewBase):
             interaction,
             RosterView(self.state, runtime=self.runtime, allowed_user_id=self.allowed_user_id),
         )
+
+
+class AvatarResetConfirmView(PanelViewBase):
+    """Ask for a second click before rotating a public avatar URL."""
+
+    def __init__(
+        self,
+        state: PanelState,
+        *,
+        runtime: DiscordRuntime,
+        allowed_user_id: int,
+        details: AgentDetails,
+        agent: RosterAgent | None,
+    ) -> None:
+        super().__init__(state, runtime=runtime, allowed_user_id=allowed_user_id)
+        self.details = details
+        self.agent = agent
+        container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
+            discord.ui.TextDisplay(
+                f"Reset **{details.name}** to its generated avatar? The current public URL "
+                "will change, but platform caches can keep the previous image."
+            )
+        )
+        row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+        confirm: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+            label="Reset avatar",
+            custom_id=AVATAR_RESET_CONFIRM_ID,
+            style=discord.ButtonStyle.danger,
+        )
+        confirm.callback = self._on_confirm  # type: ignore[method-assign]
+        row.add_item(confirm)
+        cancel: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+            label="Cancel",
+            custom_id=AVATAR_RESET_CANCEL_ID,
+            style=discord.ButtonStyle.secondary,
+        )
+        cancel.callback = self._on_cancel  # type: ignore[method-assign]
+        row.add_item(cancel)
+        container.add_item(row)
+        self.add_item(container)
+
+    def _details_view(self) -> DetailsView:
+        return DetailsView(
+            self.state,
+            runtime=self.runtime,
+            allowed_user_id=self.allowed_user_id,
+            details=self.details,
+            agent=self.agent,
+        )
+
+    async def _on_cancel(self, interaction: discord.Interaction) -> None:
+        await self.swap_to(interaction, self._details_view())
+
+    async def _on_confirm(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(self.state.guild_id))
+        message, avatar = await reset_agent_avatar(
+            interaction,
+            self.runtime,
+            tenant_id=tenant_id,
+            agent_name=self.details.name,
+        )
+        if avatar is not None:
+            self.state.avatar_urls[self.details.name] = avatar_public_url(self.runtime, avatar)
+            await self.swap_to(interaction, self._details_view())
+        await interaction.followup.send(message, ephemeral=True)

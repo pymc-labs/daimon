@@ -6,6 +6,7 @@ from typing import cast
 
 import anthropic
 import structlog
+from daimon.adapters.discord.agent_setup.avatar import upload_agent_avatar
 from daimon.adapters.discord.agent_setup.hydrate import load_roster_state
 from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.checks import (
@@ -53,8 +54,17 @@ class AgentSetupCog(commands.Cog):
         name="agent-setup",
         description="See your agents, who answers where, and make changes",
     )
+    @app_commands.describe(
+        agent="Agent whose avatar to change (use with avatar)",
+        avatar="PNG, JPG, GIF, or WebP image, up to 2 MB (use with agent)",
+    )
     @require_registered_guild
-    async def agent_setup(self, interaction: BotInteraction) -> None:
+    async def agent_setup(
+        self,
+        interaction: BotInteraction,
+        agent: str | None = None,
+        avatar: discord.Attachment | None = None,
+    ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         rid = generate_request_id()
         try:
@@ -69,6 +79,25 @@ class AgentSetupCog(commands.Cog):
             if tenant_row.provision_status != "ready":
                 await interaction.edit_original_response(
                     content=_not_ready_message(tenant_row.provision_status),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
+            if agent is not None or avatar is not None:
+                if not agent or avatar is None:
+                    await interaction.edit_original_response(
+                        content="Provide both an agent name and an avatar image.",
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    return
+                message, _ = await upload_agent_avatar(
+                    interaction,
+                    runtime,
+                    tenant_id=tenant_id,
+                    agent_name=agent,
+                    attachment=avatar,
+                )
+                await interaction.edit_original_response(
+                    content=message,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return

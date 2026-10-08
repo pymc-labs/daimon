@@ -1,7 +1,7 @@
 # Agent identity on every message
 
 Status: delivery in progress; Slack identity merged, Slack avatar panel and Teams
-prefix in PR 3. Owner: the
+prefix in PR 3, Discord avatar panel in PR 4. Owner: the
 agent-identity effort.
 
 ## Problem

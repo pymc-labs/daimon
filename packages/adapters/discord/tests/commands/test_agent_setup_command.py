@@ -14,7 +14,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import httpx
+import pytest
 from daimon.adapters.discord.agent_setup.roster_view import RosterView
+from daimon.adapters.discord.commands import agent_setup as command_module
 from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.provisioning import provision_tenant
@@ -191,6 +193,30 @@ async def test_ready_status_still_renders_panel(
     assert kwargs["allowed_mentions"].users is False, (
         "the roster renders creator mentions; rendering it must not ping anybody"
     )
+
+
+async def test_avatar_option_dispatches_without_loading_roster(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guild_id = 700000006
+    await _provision(db_session_factory, guild_id=guild_id, status="ready")
+    router, calls = _counting_router()
+    runtime = _make_runtime(
+        db_session_factory, anthropic_client=build_fake_anthropic(router.dispatch)
+    )
+    interaction = _make_interaction(runtime, guild_id=guild_id)
+    attachment = MagicMock(spec=discord.Attachment)
+    upload = AsyncMock(return_value=("Avatar changed.", MagicMock()))
+    monkeypatch.setattr(command_module, "upload_agent_avatar", upload)
+
+    cog = AgentSetupCog(MagicMock())
+    await cog.agent_setup.callback(cog, interaction, agent="analyst", avatar=attachment)  # pyright: ignore[reportArgumentType]
+
+    upload.assert_awaited_once()
+    assert upload.await_args.kwargs["agent_name"] == "analyst"
+    assert upload.await_args.kwargs["attachment"] is attachment
+    assert interaction.edit_original_response.call_args.kwargs["content"] == "Avatar changed."
+    assert calls == [], "avatar writes do not need to load the roster"
 
 
 async def test_ready_status_names_the_channel_and_offers_setup(
