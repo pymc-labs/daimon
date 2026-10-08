@@ -111,9 +111,17 @@ def _auth(**overrides: object) -> AuthIdentity:
     return AuthIdentity(**base)  # type: ignore[arg-type]  # test kwargs are shape-correct
 
 
-async def test_identity_off_skips_slack_agent_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("excluded", [False, True])
+async def test_identity_off_or_excluded_skips_slack_agent_lookup(
+    monkeypatch: pytest.MonkeyPatch, excluded: bool
+) -> None:
     runtime = SimpleNamespace(
-        settings=SimpleNamespace(agent_identity=SimpleNamespace(enabled=False))
+        settings=SimpleNamespace(
+            agent_identity=SimpleNamespace(
+                enabled=excluded,
+                excluded_slack_team_ids=["T_TEST"] if excluded else [],
+            )
+        )
     )
     lookup = AsyncMock()
     monkeypatch.setattr(_send, "find_agent_by_derived_uuid", lookup)

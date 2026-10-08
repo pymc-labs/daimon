@@ -15,7 +15,12 @@ from daimon.adapters.slack.channel_admin_groups import user_group_ids
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime, admission_refusal_message
-from daimon.core.agent_identity import AgentIdentity, is_builtin_agent, resolve_agent_identity
+from daimon.core.agent_identity import (
+    AgentIdentity,
+    identity_enabled_for,
+    is_builtin_agent,
+    resolve_agent_identity,
+)
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.direct_messages import (
@@ -251,7 +256,7 @@ async def handle_direct_message(
 
         async def on_agent(name: str) -> None:
             nonlocal identity
-            if not runtime.settings.agent_identity.enabled:
+            if not identity_enabled_for(runtime.settings, "slack", team_id):
                 return
             try:
                 agent = await find_agent_by_daimon_tag(
@@ -268,7 +273,7 @@ async def handle_direct_message(
                             default_agent_name=runtime.deployment_default.agent_name,
                         ),
                         public_base_url=runtime.settings.mcp.app_root_url,
-                        enabled=runtime.settings.agent_identity.enabled,
+                        enabled=identity_enabled_for(runtime.settings, "slack", team_id),
                         background_sessionmaker=runtime.sessionmaker,
                     )
             except (anthropic.APIError, SQLAlchemyError) as exc:

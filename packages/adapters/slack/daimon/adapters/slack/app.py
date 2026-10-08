@@ -192,7 +192,12 @@ from daimon.adapters.slack.vision import (
     is_vision_image,
 )
 from daimon.core.access_policy import DM_SCOPE_PREFIX
-from daimon.core.agent_identity import AgentIdentity, is_builtin_agent, resolve_agent_identity
+from daimon.core.agent_identity import (
+    AgentIdentity,
+    identity_enabled_for,
+    is_builtin_agent,
+    resolve_agent_identity,
+)
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -2036,7 +2041,7 @@ class SlackApp:
                         default_agent_name=self.runtime.deployment_default.agent_name,
                     ),
                     public_base_url=self.runtime.settings.mcp.app_root_url,
-                    enabled=self.runtime.settings.agent_identity.enabled,
+                    enabled=identity_enabled_for(self.runtime.settings, "slack", team_id),
                     background_sessionmaker=self.runtime.sessionmaker,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
@@ -2534,7 +2539,8 @@ class SlackApp:
                     # second, successful card.
                     adopt_status_ts=lifecycle.status_ts,
                     header_customized=(
-                        lifecycle.header_customized and self.runtime.settings.agent_identity.enabled
+                        lifecycle.header_customized
+                        and identity_enabled_for(self.runtime.settings, "slack", team_id)
                     ),
                     intent_id=card_intent.id,
                     identity=turn_identity,
@@ -2939,7 +2945,7 @@ class SlackApp:
                         default_agent_name=self.runtime.deployment_default.agent_name,
                     ),
                     public_base_url=self.runtime.settings.mcp.app_root_url,
-                    enabled=self.runtime.settings.agent_identity.enabled,
+                    enabled=identity_enabled_for(self.runtime.settings, "slack", team_id),
                     background_sessionmaker=self.runtime.sessionmaker,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
@@ -3055,7 +3061,7 @@ class SlackApp:
                 adopt_status_ts=follow_lifecycle.status_ts,
                 header_customized=(
                     follow_lifecycle.header_customized
-                    and self.runtime.settings.agent_identity.enabled
+                    and identity_enabled_for(self.runtime.settings, "slack", team_id)
                 ),
                 intent_id=card_intent.id,
                 identity=follow_identity,

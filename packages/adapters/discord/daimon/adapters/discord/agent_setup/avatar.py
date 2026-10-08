@@ -10,7 +10,7 @@ import aiohttp
 from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_avatar_image import MAX_UPLOAD_BYTES, normalize_avatar_image
-from daimon.core.agent_identity import is_builtin_agent
+from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
 from daimon.core.stores.agent_avatars import AvatarRow, replace_avatar, reset_avatar
@@ -78,7 +78,9 @@ async def _may_edit(
     agent_name: str,
     change: bool,
 ) -> bool:
-    if runtime.settings.agent_identity.enabled and is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+    identity_on = identity_enabled_for(runtime.settings, "discord", interaction.guild_id)
+    admin = identity_on and is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+    if admin:
         agent = await find_agent_by_daimon_tag(
             runtime.anthropic, tenant_id=tenant_id, name=agent_name
         )
@@ -109,7 +111,7 @@ async def upload_agent_avatar(
     attachment: discord.Attachment,
 ) -> tuple[str, AvatarRow | None]:
     """Authorize, read only the supplied Discord attachment, and replace the avatar."""
-    if not runtime.settings.agent_identity.enabled:
+    if not identity_enabled_for(runtime.settings, "discord", interaction.guild_id):
         await _may_edit(
             interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=True
         )
@@ -216,7 +218,7 @@ async def reset_agent_avatar(
     agent_name: str,
 ) -> tuple[str, AvatarRow | None]:
     """Restore the generated avatar with a fresh public token."""
-    if not runtime.settings.agent_identity.enabled:
+    if not identity_enabled_for(runtime.settings, "discord", interaction.guild_id):
         await _may_edit(
             interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=False
         )

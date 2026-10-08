@@ -7,8 +7,10 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 import structlog
+from daimon.core.config import Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.stores.agent_avatars import (
     get_agent_avatar,
@@ -28,6 +30,30 @@ class AgentIdentity:
     name: str
     avatar_url: str | None
     builtin: bool
+
+
+def identity_enabled_for(
+    settings: Settings,
+    platform: Literal["discord", "slack", "teams"],
+    workspace_id: str | int | None,
+) -> bool:
+    """Apply the deployment switch and a platform's workspace exclusions."""
+    identity = getattr(settings, "agent_identity", None)
+    if identity is None:
+        return False
+    if identity.enabled is not True:
+        return False
+    if platform == "discord":
+        excluded = getattr(identity, "excluded_discord_guild_ids", ())
+    elif platform == "slack":
+        excluded = getattr(identity, "excluded_slack_team_ids", ())
+    else:
+        return True
+    if not isinstance(excluded, (list, tuple, set, frozenset)):
+        excluded = ()
+    if workspace_id is None:
+        return not excluded
+    return str(workspace_id) not in excluded
 
 
 def is_builtin_agent(

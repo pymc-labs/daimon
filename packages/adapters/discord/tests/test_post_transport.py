@@ -43,6 +43,7 @@ def _world(*, manage_webhooks: bool = True) -> tuple[MagicMock, MagicMock, Magic
     client.http.channel_webhooks = AsyncMock(return_value=[])
     parent = MagicMock(spec=discord.TextChannel)
     parent.id = 20
+    parent.guild.id = 123
     parent.guild.me = MagicMock(spec=discord.Member)
     parent.permissions_for.return_value.manage_webhooks = manage_webhooks
     parent.send = AsyncMock()
@@ -96,6 +97,23 @@ async def test_bot_runtime_switch_covers_recovery_transports() -> None:
     await transport.send(content="answer")
     channel.send.assert_awaited_once_with(content="answer")
     channel.create_webhook.assert_not_awaited()
+
+
+async def test_excluded_guild_posts_as_bot_and_other_guild_uses_webhook() -> None:
+    client, channel, hook = _world()
+    client.runtime.settings.agent_identity.excluded_discord_guild_ids = ["123"]
+    excluded = DiscordPostTransport(
+        client, channel, name="Research", avatar_url="https://x/y", builtin=False
+    )
+    await excluded.send(content="answer")
+    channel.send.assert_awaited_once_with(content="answer")
+    hook.send.assert_not_awaited()
+    channel.guild.id = 456
+    included = DiscordPostTransport(
+        client, channel, name="Research", avatar_url="https://x/y", builtin=False
+    )
+    await included.send(content="answer")
+    assert hook.send.call_args.kwargs["username"] == "Research"
 
 
 async def test_terminal_flush_without_card_omits_none_view() -> None:
@@ -340,8 +358,15 @@ async def test_webhook_message_edits_and_deletes_through_webhook() -> None:
     message.delete.assert_not_awaited()
 
 
-async def test_existing_webhook_message_is_edited_and_deleted_with_identity_off() -> None:
+@pytest.mark.parametrize("excluded", [False, True])
+async def test_existing_webhook_message_is_edited_and_deleted_with_identity_off_or_excluded(
+    excluded: bool,
+) -> None:
     client, channel, hook = _world()
+    if excluded:
+        client.runtime.settings.agent_identity.excluded_discord_guild_ids = ["123"]
+    else:
+        client.runtime.settings.agent_identity.enabled = False
     message = MagicMock(spec=discord.Message)
     message.id = 40
     message.webhook_id = hook.id
@@ -349,7 +374,7 @@ async def test_existing_webhook_message_is_edited_and_deleted_with_identity_off(
     hook.edit_message = AsyncMock(return_value=message)
     hook.delete_message = AsyncMock()
     transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False, identity_enabled=False
+        client, channel, name="Research", avatar_url=None, builtin=False
     )
     _webhooks[channel.id] = {hook.id: hook}
 
