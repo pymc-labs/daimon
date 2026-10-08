@@ -2510,7 +2510,9 @@ class SlackApp:
                     # this turn's answer rather than left standing beside a
                     # second, successful card.
                     adopt_status_ts=lifecycle.status_ts,
-                    header_customized=lifecycle.header_customized,
+                    header_customized=(
+                        lifecycle.header_customized and self.runtime.settings.agent_identity.enabled
+                    ),
                     intent_id=card_intent.id,
                     identity=turn_identity,
                     ma_agent_id=str(agent.id),
@@ -3027,7 +3029,10 @@ class SlackApp:
                 register_pending=self._register_cancel,
                 deregister_pending=self._deregister_cancel,
                 adopt_status_ts=follow_lifecycle.status_ts,
-                header_customized=follow_lifecycle.header_customized,
+                header_customized=(
+                    follow_lifecycle.header_customized
+                    and self.runtime.settings.agent_identity.enabled
+                ),
                 intent_id=card_intent.id,
                 identity=follow_identity,
                 ma_agent_id=str(follow_admission.agent.id),
