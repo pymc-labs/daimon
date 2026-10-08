@@ -1553,7 +1553,13 @@ class DaimonBot(commands.Bot):
             and reference.message_id is not None
             and resolved_is_ours
             and message.guild is not None
-            and not message.author.bot
+            and (
+                not message.author.bot
+                or (
+                    discord_settings is not None
+                    and str(message.author.id) in discord_settings.qa_bot_user_ids
+                )
+            )
             and not is_webhook_post
         ):
             reply_tenant = derive_tenant_uuid(

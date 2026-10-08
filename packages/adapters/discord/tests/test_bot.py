@@ -107,13 +107,23 @@ def _make_channel_message(
 
 
 @pytest.mark.parametrize(
-    ("source", "resolved_author_id", "resolved_webhook_id", "resolved_application_id", "expected"),
+    (
+        "source",
+        "resolved_author_id",
+        "resolved_webhook_id",
+        "resolved_application_id",
+        "qa_bot_author",
+        "qa_bot_listed",
+        "expected",
+    ),
     [
-        ("tool", 999, None, None, True),
-        ("auto_thread", 999, None, None, False),
-        ("tool", 777, None, None, False),
-        ("tool", 777, 900, 10, True),
-        ("tool", 777, 901, 11, False),
+        ("tool", 999, None, None, False, False, True),
+        ("auto_thread", 999, None, None, False, False, False),
+        ("tool", 777, None, None, False, False, False),
+        ("tool", 777, 900, 10, False, False, True),
+        ("tool", 777, 901, 11, False, False, False),
+        ("tool", 777, 900, 10, True, True, True),
+        ("tool", 777, 900, 10, True, False, False),
     ],
 )
 async def test_reply_to_recorded_agent_post_starts_turn(
@@ -122,6 +132,8 @@ async def test_reply_to_recorded_agent_post_starts_turn(
     resolved_author_id: int,
     resolved_webhook_id: int | None,
     resolved_application_id: int | None,
+    qa_bot_author: bool,
+    qa_bot_listed: bool,
     expected: bool,
 ) -> None:
     from daimon.core.defaults.provisioning import provision_tenant
@@ -144,10 +156,13 @@ async def test_reply_to_recorded_agent_post_starts_turn(
             agent_id=uuid.uuid4(),
             source=source,
         )
-    bot = make_bot(_make_runtime(db_session_factory))
+    runtime = _make_runtime(db_session_factory)
+    runtime.settings.discord.qa_bot_user_ids = ("333",) if qa_bot_listed else ()
+    bot = make_bot(runtime)
     bot._connection.application_id = 10  # pyright: ignore[reportPrivateUsage]
     bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue,reportMethodAssign]
-    message = _make_channel_message(guild_id=int(guild_id))
+    message = _make_channel_message(guild_id=int(guild_id), author_id=333 if qa_bot_author else 111)
+    message.author.bot = qa_bot_author
     message.mentions = []
     message.webhook_id = None
     message.reference = discord.MessageReference(
