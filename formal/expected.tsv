@@ -7,6 +7,16 @@ turn	TurnLifecycle	TurnLifecycle	violates:TerminalExclusive	39	-	adversarial ter
 turn	TurnLifecycle	TurnLifecycleReplay	clean	6926	-	stale replay with the merge fix: RenderAnchorBound holds
 turn	TurnLifecycle	TurnLifecycleBounded	clean	2646	-	adversarial conditions off: all safety invariants
 turn	TurnProgress	TurnProgress	clean	57	-	liveness: turn finalizes, periodic render resolves (weak fairness)
+# ---- tool approval and Managed Agents pauses ----
+approvals	Approvals	ApprovalsSingle	clean	5489	-	three single cards: safety through duplicate pauses and queued echoes
+approvals	Approvals	ApprovalsBatched	clean	593	-	one card for three calls: same MA batch and safety invariants
+approvals	Approvals	ApprovalsProgress	clean	935	-	weak-fair termination with single cards
+approvals	Approvals	ApprovalsPreFix	violates:NoFalseNotAccepted	162	-	pre-#446 duplicate pause ends turn before confirmation echo
+approvals	Approvals	ApprovalsPreFixLateRun	violates:ApprovedRunsInTurn	346	-	pre-#446 queued allow runs after turn end
+approvals	Approvals	ApprovalsReAsk	clean	413	-	genuine post-echo re-ask safely ends not accepted
+approvals	Approvals	ApprovalsDroppedConfirm	clean	629	-	dropped queue terminates via quiet-stream timeout
+approvals	Approvals	ApprovalsQuietEarly	violates:ApprovedRunsInTurn	172	-	conditional current-code eventless early exit while allow remains queued
+approvals	Approvals	ApprovalsEarlyCard	violates:CardTruth	14	-	current Discord card displays approved before gathered batch is sent
 # ---- scheduler ----
 scheduler	RoutineScheduler	RoutineScheduler	clean	110	-	two schedulers, one lock: one dispatch per occurrence
 scheduler	RoutineScheduler	RoutineSchedulerProgress	clean	110	-	liveness under fairness: pending completes, first occurrence advances
