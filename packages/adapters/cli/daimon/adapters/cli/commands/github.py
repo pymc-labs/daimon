@@ -35,6 +35,7 @@ from daimon.core.stores.github_access import (
     stage_grant,
 )
 from daimon.core.stores.github_connect import (
+    activate_pending_agent,
     admin_account_for_platform_user,
     cli_account_id,
     mint_invitation,
@@ -52,6 +53,37 @@ from rich.console import Console
 github_app = typer.Typer(help="GitHub App connection commands.")
 grants_app = typer.Typer(help="Stage and activate agent GitHub grants.")
 github_app.add_typer(grants_app, name="grants")
+
+
+@github_app.command("finish-update")
+def finish_update(
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    agent: Annotated[uuid.UUID, typer.Option("--agent")],
+) -> None:
+    """Finish an operator-issued saved-key update after repo confirmation."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        engine = build_engine(str(settings.database.url))
+        try:
+            sessionmaker = build_session_factory(engine)
+            async with sessionmaker.begin() as session:
+                account_id = await cli_account_id(
+                    session, tenant_id=tenant, os_user=getpass.getuser()
+                )
+                if account_id is None:
+                    raise ValueError("current CLI user is not a workspace admin")
+                finished = await activate_pending_agent(
+                    session, tenant_id=tenant, agent_id=agent, account_id=account_id
+                )
+                if not finished:
+                    raise ValueError("No operator-issued GitHub update is waiting for this agent")
+            console.print("GitHub update finished. Open chats restart on the next turn.")
+        finally:
+            await engine.dispose()
+
+    run_cli(_run(), console=console)
 
 
 async def _require_tenant_agent(

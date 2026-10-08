@@ -1,5 +1,6 @@
 """GitHub operator command contract."""
 
+import asyncio
 import re
 import uuid
 from types import SimpleNamespace
@@ -29,6 +30,56 @@ def test_connect_link_requires_platform_requester_and_explains_authority() -> No
     missing = runner.invoke(github_app, ["connect-link", "--tenant", str(uuid.uuid4())])
     assert missing.exit_code != 0
     assert "--requester" in _plain(missing.output)
+
+
+@pytest.mark.asyncio
+async def test_finish_update_calls_operator_activation(monkeypatch: pytest.MonkeyPatch) -> None:
+    tenant_id, agent_id, admin_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    session = object()
+
+    class Transaction:
+        async def __aenter__(self) -> object:
+            return session
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class Sessionmaker:
+        def begin(self) -> Transaction:
+            return Transaction()
+
+    class Engine:
+        async def dispose(self) -> None:
+            return None
+
+    engine = Engine()
+    monkeypatch.setattr(
+        github_command,
+        "load_settings",
+        lambda: SimpleNamespace(database=SimpleNamespace(url="postgresql://test")),
+    )
+    monkeypatch.setattr(github_command, "build_engine", lambda _url: engine)
+    monkeypatch.setattr(github_command, "build_session_factory", lambda _engine: Sessionmaker())
+    monkeypatch.setattr(github_command, "cli_account_id", AsyncMock(return_value=admin_id))
+    activate = AsyncMock(return_value=True)
+    monkeypatch.setattr(github_command, "activate_pending_agent", activate)
+    tasks: list[asyncio.Task[None]] = []
+    monkeypatch.setattr(
+        github_command, "run_cli", lambda coro, console: tasks.append(asyncio.create_task(coro))
+    )
+    github_command.finish_update(tenant=tenant_id, agent=agent_id)
+    await tasks[0]
+    activate.assert_awaited_once_with(
+        session, tenant_id=tenant_id, agent_id=agent_id, account_id=admin_id
+    )
+    activate.return_value = False
+    github_command.finish_update(tenant=tenant_id, agent=agent_id)
+    with pytest.raises(ValueError, match="No operator-issued GitHub update"):
+        await tasks[1]
+    help_result = CliRunner().invoke(github_app, ["finish-update", "--help"])
+    assert help_result.exit_code == 0
+    assert "--tenant" in _plain(help_result.output)
+    assert "--agent" in _plain(help_result.output)
 
 
 @pytest.mark.asyncio

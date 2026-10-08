@@ -1,9 +1,9 @@
 """Private /github connect link for one selected agent."""
 
-import uuid
 from typing import cast
 
 import anthropic
+from daimon.adapters.discord.agent_setup.github_home import load_home
 from daimon.adapters.discord.agent_setup.hydrate import load_roster_state
 from daimon.adapters.discord.checks import (
     is_guild_admin,
@@ -18,7 +18,6 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.github_connect import (
     CLIENT_AGENT_MESSAGE,
     ClientAgentConnectionError,
-    activate_pending_agent,
     mint_invitation,
     pending_update_for_agent,
     require_app_eligible_agent,
@@ -33,78 +32,46 @@ from discord.ext import commands
 BotInteraction = Interaction[commands.Bot]
 
 
-class PendingUpdateView(discord.ui.View):
-    """One private, requester-bound confirmation for an agent's saved key."""
-
-    def __init__(
-        self,
-        *,
-        runtime: DiscordRuntime,
-        tenant_id: uuid.UUID,
-        agent_id: uuid.UUID,
-        allowed_user_id: int,
-    ) -> None:
-        super().__init__(timeout=900)
-        self.runtime = runtime
-        self.tenant_id = tenant_id
-        self.agent_id = agent_id
-        self.allowed_user_id = allowed_user_id
-
-    @discord.ui.button(label="Update and restart chats", style=discord.ButtonStyle.primary)
-    async def update(
-        self, interaction: BotInteraction, button: discord.ui.Button["PendingUpdateView"]
-    ) -> None:
-        if interaction.user.id != self.allowed_user_id or not is_guild_admin(interaction):
-            await interaction.response.send_message("Ask an admin", ephemeral=True)
-            return
-        try:
-            async with self.runtime.sessionmaker.begin() as session:
-                principal = await get_or_create_platform_principal(
-                    session,
-                    tenant_id=self.tenant_id,
-                    platform="discord",
-                    external_id=str(interaction.user.id),
-                )
-                await set_role(session, principal.account_id, Role.ADMIN)
-                updated = await activate_pending_agent(
-                    session,
-                    tenant_id=self.tenant_id,
-                    agent_id=self.agent_id,
-                    account_id=principal.account_id,
-                )
-            await interaction.response.edit_message(
-                content=(
-                    "GitHub updated. Open chats restart on their next turn."
-                    if updated
-                    else "Already updated."
-                ),
-                view=None,
-            )
-        except ClientAgentConnectionError:
-            await interaction.response.send_message(CLIENT_AGENT_MESSAGE, ephemeral=True)
-        except ValueError:
-            await interaction.response.send_message(
-                "The update could not be completed. Check the agent's repos in GitHub setup.",
-                ephemeral=True,
-            )
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(
-        self, interaction: BotInteraction, button: discord.ui.Button["PendingUpdateView"]
-    ) -> None:
-        if interaction.user.id != self.allowed_user_id:
-            await interaction.response.send_message(
-                "This card belongs to someone else.", ephemeral=True
-            )
-            return
-        await interaction.response.edit_message(content="Update cancelled.", view=None)
-
-
 @app_commands.guild_only()
 class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHub setup"):
     def __init__(self, bot: commands.Bot) -> None:
         super().__init__()
         self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: BotInteraction) -> None:
+        from daimon.adapters.discord.agent_setup.github_new_repo import handle_dm_notice
+        from daimon.adapters.discord.agent_setup.github_requests import handle_request_card
+
+        runtime = cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
+        if not await handle_dm_notice(interaction, runtime):
+            await handle_request_card(interaction, runtime)
+
+    @app_commands.command(name="home", description="GitHub repos and account status")
+    @require_registered_guild
+    async def home(self, interaction: BotInteraction) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message("GitHub is unavailable here.", ephemeral=True)
+            return
+        runtime = cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
+        if tenant_id is None:
+            await interaction.followup.send("GitHub is unavailable here.", ephemeral=True)
+            return
+        state = await load_roster_state(
+            runtime,
+            interaction,
+            tenant_id=tenant_id,
+            is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+        )
+        home = await load_home(state, runtime=runtime, user_id=interaction.user.id)
+        message = await interaction.edit_original_response(
+            embed=home.embed,
+            view=home.bind_render_interaction(interaction, panel=state),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        home.attach_message(message)
 
     @app_commands.command(name="connect", description="Connect repos to one agent")
     @app_commands.describe(agent="Agent to connect")
@@ -157,18 +124,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     session, tenant_id=tenant_id, agent_id=agent_id
                 )
             if pending is not None:
-                await interaction.followup.send(
-                    f"Update {target_name}? Its saved key is deleted and open chats restart. "
-                    "Unsaved work in those chats is lost.",
-                    view=PendingUpdateView(
-                        runtime=runtime,
-                        tenant_id=tenant_id,
-                        agent_id=agent_id,
-                        allowed_user_id=interaction.user.id,
-                    ),
-                    ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                await interaction.followup.send(CLIENT_AGENT_MESSAGE, ephemeral=True)
                 return
             async with runtime.sessionmaker() as session:
                 await require_app_eligible_agent(

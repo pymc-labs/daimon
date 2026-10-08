@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
 from typing import Any, cast
 
 import anthropic
@@ -20,7 +19,6 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.github_connect import (
     CLIENT_AGENT_MESSAGE,
     ClientAgentConnectionError,
-    activate_pending_agent,
     mint_invitation,
     pending_update_for_agent,
     require_app_eligible_agent,
@@ -111,34 +109,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 session, tenant_id=tenant_id, agent_id=agent_id
             )
         if pending is not None:
-            prompt = (
-                f"Update {target_name}? Its saved key is deleted and open chats restart. "
-                "Unsaved work in those chats is lost."
-            )
-            await reply(
-                prompt,
-                blocks=[
-                    {"type": "section", "text": {"type": "plain_text", "text": prompt}},
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "action_id": ACTION_UPDATE,
-                                "text": {"type": "plain_text", "text": "Update and restart chats"},
-                                "value": str(agent_id),
-                                "style": "primary",
-                            },
-                            {
-                                "type": "button",
-                                "action_id": ACTION_CANCEL,
-                                "text": {"type": "plain_text", "text": "Cancel"},
-                                "value": str(agent_id),
-                            },
-                        ],
-                    },
-                ],
-            )
+            await reply(CLIENT_AGENT_MESSAGE)
             return
         async with runtime.sessionmaker() as session:
             await require_app_eligible_agent(
@@ -199,49 +170,17 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
 
 
 async def handle_github_update_click(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
+    """Old update buttons cannot retire a saved key from chat."""
     team = cast(dict[str, Any], payload.get("team") or {})
     user = cast(dict[str, Any], payload.get("user") or {})
     channel = cast(dict[str, Any], payload.get("channel") or {})
-    actions = cast(list[dict[str, Any]], payload.get("actions") or [])
-    team_id = str(team.get("id") or "")
-    user_id = str(user.get("id") or "")
-    channel_id = str(channel.get("id") or "")
-    client = await resolve_web_client(runtime, team_id=team_id)
-    if client is None or not actions:
-        return
-
-    async def reply(message: str) -> None:
+    client = await resolve_web_client(runtime, team_id=str(team.get("id") or ""))
+    if client is not None:
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
-            channel=channel_id, user=user_id, text=message
+            channel=str(channel.get("id") or ""),
+            user=str(user.get("id") or ""),
+            text=CLIENT_AGENT_MESSAGE,
         )
-
-    try:
-        if not await resolve_is_admin(client, user_id=user_id):
-            await reply("Ask an admin")
-            return
-        agent_id = uuid.UUID(str(actions[0].get("value") or ""))
-        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-        async with runtime.sessionmaker.begin() as session:
-            principal = await get_or_create_platform_principal(
-                session, tenant_id=tenant_id, platform="slack", external_id=user_id
-            )
-            await set_role(session, principal.account_id, Role.ADMIN)
-            updated = await activate_pending_agent(
-                session,
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-                account_id=principal.account_id,
-            )
-        await reply(
-            "GitHub updated. Open chats restart on their next turn."
-            if updated
-            else "Already updated."
-        )
-    except ClientAgentConnectionError:
-        await reply(CLIENT_AGENT_MESSAGE)
-    except (SlackApiError, SQLAlchemyError, ValueError):
-        log.exception("slack.github_connect.update_failed")
-        await reply("The update could not be completed. Check the agent's repos in GitHub setup.")
 
 
 async def handle_github_cancel_click(runtime: SlackRuntime, payload: dict[str, Any]) -> None:

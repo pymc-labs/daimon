@@ -83,6 +83,7 @@ class PanelState:
     last_sync_error: str | None = None
     default_mcp_url: str | None = None
     is_admin: bool = False
+    can_manage_github_agents: bool = False
     guild_id: int = 0
     channel_id: int = 0
     # Resolved invocation-channel name (no leading #), for the cascade-ladder field

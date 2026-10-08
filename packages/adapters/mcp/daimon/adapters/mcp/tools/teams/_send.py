@@ -29,7 +29,6 @@ from daimon.adapters.mcp.tools.teams._files import CHANNEL as _CHANNEL
 from daimon.adapters.mcp.tools.teams._files import MAX_FILES, post_files
 from daimon.core.authz import Place
 from daimon.core.continuity.messages import ConfigurationChange
-from daimon.core.github_app_auth import build_app_install_url
 from daimon.core.posted_controls import CardState, RefusalReason, card_for_request
 from daimon.core.posted_controls.teams_card import build_adaptive_card
 from daimon.core.stores.domain import CredentialRequestRow
@@ -211,13 +210,9 @@ async def _post_teams_wizard_impl(  # pyright: ignore[reportUnusedFunction]  # u
 async def _post_teams_app_install_link_impl(  # pyright: ignore[reportUnusedFunction]  # used by tools/github_app.py
     runtime: McpRuntime, auth: AuthIdentity, *, channel_id: str, slug: str, purpose: str
 ) -> str:
-    """Post the configured GitHub App install link. Returns the activity id."""
-    text = (
-        f"{purpose}\n\n[Install the GitHub App]({build_app_install_url(slug)}) to choose "
-        "repositories it may read. Installing alone does not verify this organisation's access "
-        "or bind a working repo. A working GitHub token remains an alternative; existing "
-        "bound tokens stay in use."
-    )
+    """Tell Teams users where the GitHub setup screen is available."""
+    del slug, purpose
+    text = "GitHub setup isn't in Teams yet. Set it up from Discord or Slack."
     row = await _teams_send_message_impl(runtime, auth, channel_id=channel_id, content=text)
     return row.activity_id
 

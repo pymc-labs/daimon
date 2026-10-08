@@ -312,6 +312,7 @@ async def test_roster_lists_the_same_agents_in_the_same_order_on_both_platforms(
         f"Manage {_ANSWERING}",
         "New agent",
         "Who answers where",
+        *(("GitHub",) if driver.param_id in ("discord", "slack") else ()),
         *done,
     ), (
         f"{driver.param_id}: every roster row carries its own Details, and the screen's actions agree"
@@ -358,9 +359,16 @@ async def test_roster_shows_a_member_and_an_admin_identical_controls(
     assert admin_view.lines == member_view.lines, (
         f"{driver.param_id}: the roster reads the same for both roles"
     )
-    assert admin_view.action_labels == member_view.action_labels, (
-        f"{driver.param_id}: the roster offers both roles the same controls"
-    )
+    if driver.param_id in ("discord", "slack"):
+        assert admin_view.action_labels == (
+            *member_view.action_labels[:-1],
+            "GitHub",
+            member_view.action_labels[-1],
+        ), f"{driver.param_id}: only admins see GitHub on the roster"
+    else:
+        assert admin_view.action_labels == member_view.action_labels, (
+            f"{driver.param_id}: the roster offers both roles the same controls"
+        )
 
 
 async def test_empty_roster_shows_the_setup_copy_and_keeps_the_setup_action(

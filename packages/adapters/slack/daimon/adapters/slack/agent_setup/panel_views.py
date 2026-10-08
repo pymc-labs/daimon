@@ -132,6 +132,114 @@ ACTION_EXPAND_KEYS: Final = "agent_setup__expand:keys"
 ACTION_EXPAND_SKILLS: Final = "agent_setup__expand:skills"
 ACTION_EXPAND_CONNECTIONS: Final = "agent_setup__expand:connections"
 ACTION_NEW: Final = "agent_setup__new"
+ACTION_GITHUB_CONNECT: Final = "agent_setup__github_connect"
+ACTION_GITHUB_START: Final = "agent_setup__github_start"
+ACTION_GITHUB_CHOOSE_AGENT: Final = "agent_setup__github_choose_agent"
+ACTION_GITHUB_BACK: Final = "agent_setup__github_step_back"
+ACTION_GITHUB_MANAGE: Final = "agent_setup__github_manage"
+ACTION_GITHUB_REPOS: Final = "agent_setup__github_repos"
+ACTION_GITHUB_PERSONAL_LINK: Final = "agent_setup__github_personal_link"
+ACTION_GITHUB_UNLINK: Final = "agent_setup__github_unlink"
+ACTION_GITHUB_UNLINK_CONFIRM: Final = "agent_setup__github_unlink_confirm"
+ACTION_GITHUB_UNLINK_BACK: Final = "agent_setup__github_unlink_back"
+ACTION_GITHUB_WAITING: Final = "agent_setup__github_waiting_open"
+
+
+def build_github_home_view(
+    meta: PanelMetadata,
+    *,
+    connected_count: int,
+    is_admin: bool = True,
+    owners: tuple[str, ...] = (),
+    agent_count: int = 0,
+    pending_url: str | None = None,
+    linked_login: str | None = None,
+    can_choose_agent: bool = False,
+    own_waiting_count: int = 0,
+) -> dict[str, Any]:
+    """The private GitHub entry screen for workspace admins."""
+    if meta.github_step == "personal_unlink":
+        return finish_modal(
+            title="GitHub",
+            blocks=[
+                _section("Unlink GitHub from your account?"),
+                {
+                    "type": "actions",
+                    "elements": [
+                        _button(action_id=ACTION_GITHUB_UNLINK_CONFIRM, label="Unlink"),
+                        _button(action_id=ACTION_GITHUB_UNLINK_BACK, label="◀ Back"),
+                    ],
+                },
+            ],
+            private_metadata=encode_panel_metadata(meta.with_view("github_home")),
+            callback_id="agent_setup__github_home",
+        )
+    if is_admin and pending_url:
+        summary = "Connection in progress."
+        actions: list[dict[str, Any]] = [
+            {
+                "type": "button",
+                "action_id": "github_link__open",
+                "text": {"type": "plain_text", "text": "Continue"},
+                "url": pending_url,
+            },
+            _button(action_id=ACTION_GITHUB_START, label="Start over"),
+        ]
+    elif not is_admin:
+        summary = "Workspace admins connect repos here."
+        actions = (
+            [_button(action_id=ACTION_GITHUB_CHOOSE_AGENT, label="Choose agent")]
+            if can_choose_agent
+            else []
+        )
+    elif connected_count:
+        source = f" from {', '.join(owners)}" if owners else ""
+        summary = f"Connected: {connected_count} repos{source}."
+        actions = [
+            _button(action_id=ACTION_GITHUB_CHOOSE_AGENT, label="Choose agent"),
+            _button(action_id=ACTION_GITHUB_START, label="Connect more repos"),
+            _button(action_id=ACTION_GITHUB_MANAGE, label="Manage connected repos"),
+        ]
+    else:
+        summary = "Connect repos here, then choose which agents can use them."
+        actions = [_button(action_id=ACTION_GITHUB_START, label="Connect GitHub")]
+    actions.append(_button(action_id=ACTION_GITHUB_BACK, label="◀ Back"))
+    status = f"Linked as @{linked_login}" if linked_login else "GitHub isn't linked."
+    fields = [{"type": "mrkdwn", "text": f"*Personal link*\n{status}"}]
+    if connected_count:
+        fields.insert(0, {"type": "mrkdwn", "text": f"*Agents*\n{agent_count} using these repos"})
+    blocks: list[dict[str, Any]] = [
+        _section(summary),
+        {"type": "section", "fields": fields},
+        {"type": "divider"},
+    ]
+    if actions:
+        blocks.append({"type": "actions", "elements": actions})
+    personal = [
+        _button(
+            action_id=ACTION_GITHUB_PERSONAL_LINK,
+            label="Use another account" if linked_login else "Link GitHub",
+        )
+    ]
+    if linked_login:
+        personal.append(_button(action_id=ACTION_GITHUB_UNLINK, label="Unlink"))
+    blocks.append({"type": "actions", "elements": personal})
+    if is_admin or can_choose_agent or own_waiting_count:
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [_button(action_id=ACTION_GITHUB_WAITING, label="Requests waiting")],
+            }
+        )
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "GitHub on Daimon"}]})
+    return finish_modal(
+        title="GitHub",
+        blocks=blocks,
+        private_metadata=encode_panel_metadata(meta.with_view("github_home")),
+        callback_id="agent_setup__github_home",
+    )
+
+
 ACTION_CHANNEL_ADMINS: Final = "agent_setup__channel_admins"
 ACTION_CHANNEL_SKILLS: Final = "agent_setup__channel_skills"
 """Open the form naming this channel's admins. Workspace admins only."""
@@ -394,7 +502,7 @@ def build_agents_view(
     channel" from "answers nowhere", and the panel must not guess: without it
     a row carries no routing claim at all.
     """
-    del is_admin, attributions
+    del attributions
     blocks: list[dict[str, Any]] = [_section(f"*Agents in <#{escape_mrkdwn(channel_id)}>*")]
     answering = roster.answering
     if not roster.rows:
@@ -423,6 +531,8 @@ def build_agents_view(
     )
     elements.append(_button(action_id=ACTION_NEW, label=NEW_AGENT_LABEL))
     elements.append(_button(action_id=ACTION_ROUTING, label=ROUTING_LABEL))
+    if is_admin:
+        elements.append(_button(action_id=ACTION_GITHUB_CONNECT, label="🐙 GitHub"))
     blocks.append({"type": "actions", "elements": elements})
     blocks.extend(_pager_blocks(page, meta=meta))
     return finish_modal(
@@ -533,7 +643,10 @@ def build_details_view(
         )
     blocks.extend(_repo_blocks(details))
     blocks.extend(_detail_list_blocks(details, meta=meta))
-    actions = [_button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name)]
+    actions = [
+        _button(action_id=ACTION_GITHUB_REPOS, label="🐙 GitHub repos", value=details.name),
+        _button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name),
+    ]
     if coding_tools_available:
         actions.insert(
             0,

@@ -15,9 +15,11 @@ import pytest
 from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.core._models import (
+    Account,
     AgentGitHubGrant,
     GitHubIssuedToken,
     GitHubNewRepoNotice,
+    GitHubRemovalNotice,
     Tenant,
     TenantGitHubRepo,
 )
@@ -25,11 +27,19 @@ from daimon.core.config import GithubAppSettings, GithubSettings, load_settings
 from daimon.core.github_app_auth import group_repository_access, mint_installation_token
 from daimon.core.github_app_session import add_app_credentials, prepare_app_access
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.github_removal_delivery import poll_removal_notices_once
 from daimon.core.github_requester_access import PermissionCache
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.security_audit import GITHUB_TOKEN_MINT
 from daimon.core.stores import github_access, github_app_installations, github_issued_tokens
+from daimon.core.stores.github_access_requests import get_request, request_access
 from daimon.core.stores.github_new_repo_notices import queue_new_repos
+from daimon.core.stores.github_removal_notices import (
+    RemovalNotice,
+    cancel_unconfirmed_removal,
+    confirm_removal,
+    queue_removal,
+)
 from daimon.core.stores.security_audit import append_github_token_event
 from pydantic import SecretStr
 from sqlalchemy import select
@@ -250,6 +260,79 @@ async def test_new_installation_repo_is_queued_for_connected_workspace_admins(
     notices = list(await db_session.scalars(select(GitHubNewRepoNotice)))
     assert queued == 1 and repeated == 0
     assert [(row.tenant_id, row.repo_full_name) for row in notices] == [(tenant_id, "example/new")]
+
+
+@pytest.mark.asyncio
+async def test_github_removal_waits_for_confirmation_then_notifies_once(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = uuid.uuid4()
+    asker_id = uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    db_session.add(Account(id=asker_id, tenant_id=tenant_id, role="user"))
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=101,
+            owner_id=1,
+            installation_id=77,
+            repo_full_name="example/old",
+            max_access="read",
+            authorized_by_github_user_id=2,
+            status="active",
+            version=1,
+        )
+    )
+    await db_session.flush()
+    now = datetime.now(UTC)
+    waiting = await request_access(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=asker_id,
+        requester_platform_user_id="person",
+        platform="discord",
+        parent_channel_id="channel",
+        thread_id="thread",
+        agent_id=uuid.uuid4(),
+        ma_agent_id="ag_helper",
+        agent_name="Helper",
+        repo_name="example/old",
+        requested_work="Continue the report",
+        is_admin=False,
+        now=now,
+    )
+    await queue_removal(db_session, installation_id=77, account_login="example", now=now)
+    before = await get_request(db_session, tenant_id=tenant_id, request_id=waiting.id)
+    assert before is not None and before.status == "open"
+    notices = list(await db_session.scalars(select(GitHubRemovalNotice)))
+    assert len(notices) == 1 and notices[0].confirmed_at is None
+    delivered: list[str] = []
+
+    async def deliver(notice: object) -> bool:
+        assert isinstance(notice, RemovalNotice)
+        delivered.append(notice.account_login)
+        return True
+
+    assert (
+        await poll_removal_notices_once(db_session_factory, platform="discord", deliver=deliver)
+        == 0
+    )
+    await confirm_removal(db_session, installation_id=77, now=now)
+    after = await get_request(db_session, tenant_id=tenant_id, request_id=waiting.id)
+    assert after is not None and after.status == "cancelled"
+    assert (
+        await poll_removal_notices_once(db_session_factory, platform="discord", deliver=deliver)
+        == 1
+    )
+    assert (
+        await poll_removal_notices_once(db_session_factory, platform="discord", deliver=deliver)
+        == 0
+    )
+    assert delivered == ["example"]
+    await cancel_unconfirmed_removal(db_session, installation_id=77)
+    assert len(list(await db_session.scalars(select(GitHubRemovalNotice)))) == 1
 
 
 @pytest.mark.asyncio

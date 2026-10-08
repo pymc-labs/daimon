@@ -64,7 +64,7 @@ _FONTS_PRECONNECT = (
     '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
     '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
     "family=Bricolage+Grotesque:wght@400;600&amp;"
-    "family=Hanken+Grotesk:wght@400;600&amp;"
+    "family=Hanken+Grotesk:wght@400;600;700&amp;"
     "family=Spline+Sans+Mono:wght@400&amp;"
     'display=swap">'
 )

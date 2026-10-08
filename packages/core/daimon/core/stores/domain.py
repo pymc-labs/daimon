@@ -33,7 +33,9 @@ PreparationStage = Literal["decided", "checkpointed", "uploaded", "created", "co
 # What the caller answered about uncommitted repository changes: carry them
 # into the successor's working files, or leave them in the old checkout.
 UnsavedWorkChoice = Literal["copy", "leave"]
-ContinuationReason = Literal["task_handoff", "private_input_applied", "timer"]
+ContinuationReason = Literal[
+    "task_handoff", "private_input_applied", "timer", "github_access_ready"
+]
 ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
 UserSkillSource = Literal["repo", "upload"]
 

@@ -78,6 +78,9 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError, TurnError
+from daimon.core.github_new_repo_delivery import run_new_repo_notice_poller
+from daimon.core.github_removal_delivery import run_removal_notice_poller
+from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
@@ -86,6 +89,9 @@ from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
+from daimon.core.stores.github_access_requests import AccessRequest
+from daimon.core.stores.github_new_repo_notices import NewRepoNoticeGroup
+from daimon.core.stores.github_removal_notices import RemovalNotice
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenants import (
     get_tenant_liveness,
@@ -693,6 +699,30 @@ class DaimonBot(commands.Bot):
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
+            self._spawn(
+                run_request_expiry_poller(
+                    self.runtime.sessionmaker,
+                    platform="discord",
+                    post=self._post_github_request_expiry,
+                    should_stop=lambda: self.draining or self.is_closed(),
+                )
+            )
+            self._spawn(
+                run_new_repo_notice_poller(
+                    self.runtime.sessionmaker,
+                    platform="discord",
+                    deliver=self._send_new_repo_group,
+                    should_stop=lambda: self.draining or self.is_closed(),
+                )
+            )
+            self._spawn(
+                run_removal_notice_poller(
+                    self.runtime.sessionmaker,
+                    platform="discord",
+                    deliver=self._send_github_removal_notice,
+                    should_stop=lambda: self.draining or self.is_closed(),
+                )
+            )
             # FEAT-085: post routine results to their destinations. Same
             # switch as the wake poller: one process per platform posts.
             self._spawn(
@@ -723,9 +753,9 @@ class DaimonBot(commands.Bot):
 
         await self.add_cog(HelpCog(self))
         await self.add_cog(HereCog(self))
-        await self.add_cog(GitHubCog(self))
         await self.add_cog(DirectMessageCog(self))
         await self.add_cog(AgentSetupCog(self))
+        await self.add_cog(GitHubCog(self))
         await self.add_cog(RoutinesCog(self))
         await self.add_cog(BillingCog(self))
         await self.add_cog(PrivacyCog(self))
@@ -2168,6 +2198,31 @@ class DaimonBot(commands.Bot):
         """Cached channel, else a REST fetch (raises NotFound/Forbidden)."""
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
 
+    async def _post_github_request_expiry(self, request: AccessRequest) -> bool:
+        try:
+            channel = await self._channel_by_id(int(request.thread_id))
+            if not isinstance(channel, discord.abc.Messageable):
+                return True
+            await channel.send(
+                "Stopped waiting for GitHub access. Ask again any time.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return True
+        except (discord.NotFound, discord.Forbidden, ValueError):
+            return True
+        except discord.HTTPException:
+            return False
+
+    async def _send_new_repo_group(self, group: NewRepoNoticeGroup) -> bool:
+        from daimon.adapters.discord.agent_setup.github_new_repo import send_group_dm
+
+        return await send_group_dm(self, self.runtime, group)
+
+    async def _send_github_removal_notice(self, notice: RemovalNotice) -> bool:
+        from daimon.adapters.discord.agent_setup.github_removal import send_removal_dm
+
+        return await send_removal_dm(self, self.runtime, notice)
+
     async def open_member_dm(self, guild_id: int, user_id: int) -> discord.abc.Messageable:
         """A DM with a human member of `guild_id` (FEAT-085's delivery fallback).
 
@@ -2447,6 +2502,9 @@ class DaimonBot(commands.Bot):
                     now=datetime.now(UTC),
                 )
                 await session.commit()
+
+        if row.reason == "github_access_ready":
+            await safe_thread_send(thread, "Access is ready, continuing.")
 
         transfer_kind = prepared.continuity.transfer_kind
         workspace: Literal["transferred", "transcript_only", "history_only"] = (
@@ -3142,6 +3200,16 @@ class DaimonBot(commands.Bot):
             # announces itself elsewhere, so no prefix is rendered.
             replacement_summary = render_replacement_summary(prepared.continuity.transfer_kind, [])
             lifecycle.answer_prefix = replacement_summary
+        if prepared.continuity.state == "replaced" and prepared.mapping_id is not None:
+            from daimon.core.stores.thread_sessions import github_key_restart_line
+
+            async with self.runtime.sessionmaker() as notice_session:
+                key_restart = await github_key_restart_line(
+                    notice_session, mapping_id=prepared.mapping_id
+                )
+            if key_restart is not None:
+                replacement_summary = key_restart
+                lifecycle.answer_prefix = key_restart
         session_state = (
             None
             if prepared.continuity.state == "continued"

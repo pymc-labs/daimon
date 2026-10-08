@@ -63,22 +63,71 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 def test_effective_access_properties() -> None:
     levels = ("none", "read", "write")
-    for baseline in levels:
-        for ceiling in levels:
-            for asker in levels:
-                if levels.index(baseline) > levels.index(ceiling) or ceiling == "none":
-                    continue
-                result = effective_access({1: baseline}, {1: ceiling}, {1: asker}).get(1, "none")
-                rank = levels.index(result)
-                assert rank >= levels.index(baseline)
-                assert rank <= levels.index(ceiling)
-                assert rank == max(
-                    levels.index(baseline), min(levels.index(ceiling), levels.index(asker))
-                )
-    assert effective_access({}, {1: "write"}, {}) == {}
-    assert effective_access({1: "read"}, {}, {}) == {1: "read"}
-    with pytest.raises(ValueError, match="baseline exceeds ceiling"):
-        effective_access({1: "write"}, {1: "read"}, {1: "write"})
+    for ability in levels:
+        for asker in levels:
+            result = effective_access({1: ability}, {1: asker}).get(1, "none")
+            assert levels.index(result) == min(levels.index(ability), levels.index(asker))
+    assert effective_access({1: "write"}, {}) == {}
+    assert effective_access({1: "read"}, {1: "write"}) == {1: "read"}
+    assert effective_access(
+        {1: "write", 2: "write"}, {1: "none", 2: "read"}, {1: "read", 2: "none"}
+    ) == {1: "read", 2: "read"}
+
+
+@pytest.mark.asyncio
+async def test_headless_app_run_uses_baseline_not_ceiling(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="headless-baseline"))
+    await db_session.flush()
+    await github_app_installations.upsert(
+        db_session,
+        installation_id=99001,
+        account_login="example",
+        repo_full_names=["example/baseline"],
+    )
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=99002,
+            owner_id=1,
+            installation_id=99001,
+            repo_full_name="example/baseline",
+            max_access="write",
+            authorized_by_github_user_id=2,
+            status="active",
+            version=1,
+        )
+    )
+    await db_session.flush()
+    db_session.add(AgentGitHubMode(tenant_id=tenant_id, agent_id=agent_id, mode="app"))
+    db_session.add(
+        AgentGitHubGrant(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=99002,
+            baseline_access="read",
+            ceiling_access="write",
+            staged=False,
+            is_working_repo=False,
+            version=1,
+        )
+    )
+    await db_session.commit()
+    async with httpx.AsyncClient() as client:
+        rows, _, _ = await github_app_session._effective_rows(  # pyright: ignore[reportPrivateUsage]
+            db_session_factory,
+            client,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=None,
+            config=GithubAppSettings(),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            cache=PermissionCache(),
+        )
+    assert [access for _, _, access in rows] == ["read"]
 
 
 def test_permission_cache_evicts_least_recently_used() -> None:
@@ -318,7 +367,7 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
         requester_label="Alex",
     )
     invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
-    assert invitation is not None and invitation.workspace_label == "discord workspace workspace"
+    assert invitation is not None and invitation.workspace_label == "this Discord server"
     assert invitation.requester_label == "Alex"
     assert invitation.expires_at > datetime.now(UTC) + timedelta(days=6)
     admin = await db_session.get(Account, admin_id)
@@ -360,13 +409,17 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
         ],
     )
     assert saved
-    assert (
-        await github_connect.get_flow(db_session, state="other-browser", cookie="other-cookie")
-        is None
+    receipt = await github_connect.successful_confirmation(
+        db_session, state="state", cookie="cookie"
     )
-    assert (
-        await github_connect.successful_confirmation(db_session, state="state", cookie="cookie")
-    ).connected_repo_count == 1
+    assert receipt is not None and receipt.connected_repo_count == 1
+    sibling = await db_session.get(GitHubConnectFlow, github_connect.digest("other-browser"))
+    assert sibling is not None
+    assert sibling.encrypted_verifier == b""
+    assert sibling.encrypted_invitation_token is None
+    assert sibling.encrypted_user_token is None
+    assert sibling.expires_at > datetime.now(UTC) + timedelta(days=6)
+    assert await github_connect.get_flow(db_session, state="state", cookie="cookie") is None
     assert await github_connect.get_invitation(db_session, github_connect.digest(token)) is None
     assert not await github_connect.confirm(
         db_session, state="state", cookie="cookie", github_user_id=17, repos=[]
@@ -544,40 +597,14 @@ async def test_agent_bound_connection_activates_without_a_saved_key_and_waits_wi
                 )
             )
             await db_session.flush()
-            again = await github_connect.mint_invitation(
+            # App-mode agents remain manageable even when old local bindings exist.
+            assert await github_connect.mint_invitation(
                 db_session,
                 tenant_id=tenant_id,
                 requester_account_id=admin_id,
                 agent_id=agent_id,
                 agent_name="ResearchBot",
             )
-            again_invitation = await github_connect.get_invitation(
-                db_session, github_connect.digest(again)
-            )
-            assert again_invitation is not None
-            await github_connect.create_flow(
-                db_session,
-                invitation_hash=github_connect.digest(again),
-                state="again",
-                cookie="again",
-                encrypted_verifier=b"encrypted",
-            )
-            assert await github_connect.confirm(
-                db_session,
-                state="again",
-                cookie="again",
-                github_user_id=17,
-                repos=[confirmation],
-            )
-            assert (
-                await github_connect.activate_confirmed_agent(
-                    db_session, invitation=again_invitation, repos=[confirmation]
-                )
-                == "activated"
-            )
-            restaged = await db_session.get(AgentGitHubGrant, (tenant_id, agent_id, 101))
-            assert restaged is not None
-            assert restaged.is_working_repo and restaged.mount_path == "/workspace/work"
         if has_key:
             assert (
                 await github_connect.pending_update_for_agent(
@@ -813,6 +840,53 @@ async def test_reconfirmation_respects_inactive_repo_choice(
     assert repo is not None
     assert repo.status == "active" and repo.max_access == expected_access
     assert repo.version == 2
+
+
+@pytest.mark.asyncio
+async def test_workspace_a_can_connect_org_repo_after_workspace_b(
+    db_session: AsyncSession,
+) -> None:
+    await github_app_installations.upsert(
+        db_session,
+        installation_id=77,
+        account_login="org-x",
+        repo_full_names=["org-x/one", "org-x/two"],
+    )
+    connected: list[tuple[uuid.UUID, int]] = []
+    for workspace, index, repo_name in (("B", 2, "org-x/two"), ("A", 1, "org-x/one")):
+        tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
+        db_session.add(Tenant(id=tenant_id, platform="discord", external_id=workspace))
+        await db_session.flush()
+        db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+        await db_session.flush()
+        token = await github_connect.mint_invitation(
+            db_session, tenant_id=tenant_id, requester_account_id=admin_id
+        )
+        await github_connect.create_flow(
+            db_session,
+            invitation_hash=github_connect.digest(token),
+            state=f"shared-state-{index}",
+            cookie=f"shared-cookie-{index}",
+            encrypted_verifier=b"encrypted",
+        )
+        assert await github_connect.confirm(
+            db_session,
+            state=f"shared-state-{index}",
+            cookie=f"shared-cookie-{index}",
+            github_user_id=17,
+            repos=[
+                github_connect.RepoConfirmation(
+                    repo_id=index,
+                    owner_id=55,
+                    installation_id=77,
+                    full_name=repo_name,
+                    max_access="write",
+                )
+            ],
+        )
+        assert await db_session.get(TenantGitHubRepo, (tenant_id, index)) is not None
+        connected.append((tenant_id, index))
+    assert all([await db_session.get(TenantGitHubRepo, key) is not None for key in connected])
 
 
 @pytest.mark.asyncio
@@ -1198,6 +1272,37 @@ async def test_user_token_401_invalidates_link(db_engine: AsyncEngine, db_clean:
     async with sessionmaker() as session:
         row = await github_links.get_user(session, github_user_id=1234)
     assert row is not None and row.status == "broken" and row.link_generation == 2
+
+
+@pytest.mark.asyncio
+async def test_broken_link_is_distinct_from_no_link(db_session: AsyncSession) -> None:
+    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    db_session.add(Account(id=account_id, tenant_id=tenant_id, role="user"))
+    db_session.add(
+        GitHubUserLink(
+            github_user_id=1234,
+            login="alex",
+            encrypted_access_token=b"encrypted",
+            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            status="broken",
+        )
+    )
+    await db_session.flush()
+    assert not await github_links.account_link_is_broken(db_session, account_id=account_id)
+    db_session.add(
+        AccountGitHubLink(
+            account_id=account_id,
+            github_user_id=1234,
+            platform="discord",
+            platform_user_id="person",
+            verified_via="discord_oauth",
+        )
+    )
+    await db_session.flush()
+    assert await github_links.account_link_is_broken(db_session, account_id=account_id)
+    assert await github_links.account_link_status(db_session, account_id=account_id) is None
 
 
 @pytest.mark.asyncio

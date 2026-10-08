@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import html
 import re
 import uuid
-from unittest.mock import AsyncMock
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
 from cryptography.fernet import Fernet
+from daimon.adapters.mcp import oauth_github
 from daimon.adapters.mcp.oauth_github import build_oauth_github_routes
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
@@ -21,8 +24,6 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.github_credentials import build_multifernet
-from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.session_snapshot import SessionSnapshot, fingerprint_identity
 from daimon.core.stores import github_access, github_app_installations, github_connect
 from daimon.core.stores.accounts import set_external, set_role
 from daimon.core.stores.domain import Role
@@ -69,12 +70,39 @@ def test_routes_not_mounted_when_unconfigured(
     assert "/oauth/github/confirm" not in paths
 
 
-@pytest.mark.parametrize("agent_bound", [False, True])
+@pytest.mark.asyncio
+async def test_pending_installation_request_matches_signed_in_person(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def app_jwt(private_key: str, app_id: str, *, now: int) -> str:
+        return "app-jwt"
+
+    monkeypatch.setattr(oauth_github, "build_app_jwt", app_jwt)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/app/installation-requests"
+        assert request.headers["authorization"] == "Bearer app-jwt"
+        return httpx.Response(
+            200,
+            json=[
+                {"requester": {"id": 99}, "account": {"login": "another-org"}},
+                {"requester": {"id": 17}, "account": {"login": "example"}},
+            ],
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await oauth_github.has_pending_installation_request(
+            client, app_id="42", private_key="pem", github_user_id=17
+        )
+        assert not await oauth_github.has_pending_installation_request(
+            client, app_id="42", private_key="pem", github_user_id=20
+        )
+
+
 @pytest.mark.asyncio
 async def test_connection_happy_path_and_rechecks(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
-    agent_bound: bool,
 ) -> None:
     sessionmaker = committing_sessionmaker
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
@@ -87,17 +115,23 @@ async def test_connection_happy_path_and_rechecks(
             tenant_id=tenant_id,
             requester_account_id=account_id,
             requester_label="Alex",
-            agent_id=(
-                derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ma-agent")
-                if agent_bound
-                else None
-            ),
-            agent_name="ResearchBot" if agent_bound else None,
         )
     repo_admin = True
     repo_two_admin = False
     installation_available = True
+    repository_selection = "all"
+    installations_available = True
+    github_unavailable = False
+    approval_pending = False
     requests: list[httpx.Request] = []
+
+    async def pending_check(
+        client: httpx.AsyncClient, *, app_id: str, private_key: str, github_user_id: int
+    ) -> bool:
+        assert app_id == "42" and private_key == "pem" and github_user_id == 17
+        return approval_pending
+
+    monkeypatch.setattr(oauth_github, "has_pending_installation_request", pending_check)
 
     def github_handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -127,6 +161,8 @@ async def test_connection_happy_path_and_rechecks(
         if request.url.path == "/user":
             return httpx.Response(200, json={"id": 17})
         if request.url.path == "/user/installations":
+            if github_unavailable:
+                raise httpx.ConnectError("unavailable")
             return httpx.Response(
                 200,
                 json={
@@ -134,8 +170,11 @@ async def test_connection_happy_path_and_rechecks(
                         {
                             "id": 77,
                             "account": {"id": 55, "login": "example", "type": "Organization"},
+                            "repository_selection": repository_selection,
                         }
                     ]
+                    if installations_available
+                    else []
                 },
             )
         if request.url.path == "/user/installations/77/repositories":
@@ -197,6 +236,10 @@ async def test_connection_happy_path_and_rechecks(
         assert (
             await browser.get("/oauth/github/callback", params={"state": "bad", "code": "code"})
         ).status_code == 400
+        refused_oauth = await browser.get("/oauth/github/callback", params={"state": state})
+        assert "Nothing was connected." in refused_oauth.text
+        assert "You can close this tab." in refused_oauth.text
+        assert "Back to Discord" in refused_oauth.text
         wrong_browser = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"
         )
@@ -212,7 +255,15 @@ async def test_connection_happy_path_and_rechecks(
         assert callback_response.status_code == 307
         page = await browser.get("/oauth/github/confirm", params={"state": state})
         assert page.status_code == 200
-        assert "discord workspace workspace" in page.text and "Alex" in page.text
+        assert "Choose repos" in page.text
+        assert "Select at least one repo" in page.text
+        assert 'id="github-connect-form"' in page.text
+        assert 'submit.textContent = "Connecting…"' in page.text
+        assert "submit.disabled = true" in page.text
+        assert "if (connecting || !boxes.some(box => box.checked))" in page.text
+        assert 'name="access" value="write" checked' in page.text
+        assert page.text.index('id="search-repos"') < page.text.index('class="gh-repo-list"')
+        assert page.text.count('class="gh-primary"') == 1
         assert 'action="https://mcp.test/oauth/github/confirm"' in page.text
         assert page.headers["cache-control"] == "no-store"
         assert page.headers["x-frame-options"] == "DENY"
@@ -226,18 +277,61 @@ async def test_connection_happy_path_and_rechecks(
         assert malformed.headers["cache-control"] == "no-store"
         assert malformed.headers["x-frame-options"] == "DENY"
         assert malformed.headers["referrer-policy"] == "no-referrer"
-        assert "example/one" in page.text and "example/two" not in page.text
-        assert "Select all repos you administer" in page.text
+        assert 'gh-repo-name">one' in page.text
+        assert 'gh-repo-name">two' not in page.text
+        assert "Select all" in page.text
         assert "onclick=" not in page.text
         assert 'id="select-all-repos"' in page.text
         assert "All repos in this org" not in page.text
         assert 'name="repo" value="101"' in page.text
         assert 'name="repo" value="101" checked' not in page.text
-        assert '<option value="write" selected>' in page.text
-        assert "Push branches, open issues and pull requests." in page.text
-        assert "Read code, issues and pull requests." in page.text
-        assert 'id="connect-repos"' in page.text
-        assert 'button.textContent = "Connecting…"' in page.text
+        cancelled = await browser.get(
+            "/oauth/github/confirm", params={"state": state, "cancel": "1"}
+        )
+        assert "Nothing was connected." in cancelled.text
+        assert "You can close this tab." in cancelled.text
+        installations_available = False
+        install_page = await browser.get("/oauth/github/confirm", params={"state": state})
+        assert "Install Daimon on GitHub" in install_page.text
+        assert "You'll choose which repos to connect after GitHub." in install_page.text
+        approval_pending = True
+        waiting = await browser.get("/oauth/github/confirm", params={"state": state})
+        assert "Waiting for GitHub approval" in waiting.text
+        assert "GitHub has the request." in waiting.text
+        assert "Check again" in waiting.text
+        assert waiting.text.count('class="gh-primary"') == 1
+        approval_pending = False
+        installations_available = True
+        repo_admin = False
+        no_managed = await browser.get("/oauth/github/confirm", params={"state": state})
+        assert "No repos available to connect" in no_managed.text
+        assert "Copy link" in no_managed.text
+        assert invitation_token in no_managed.text
+        approval_pending = True
+        waiting_with_other_install = await browser.get(
+            "/oauth/github/confirm", params={"state": state}
+        )
+        assert "Waiting for GitHub approval" in waiting_with_other_install.text
+        approval_pending = False
+        repo_admin = True
+        github_unavailable = True
+        unavailable = await browser.get("/oauth/github/confirm", params={"state": state})
+        assert unavailable.status_code == 502
+        assert "Couldn't reach GitHub" in html.unescape(unavailable.text)
+        assert "Try again" in unavailable.text
+        github_unavailable = False
+        repository_selection = "selected"
+        repo_two_admin = True
+        picker = await browser.get("/oauth/github/confirm", params={"state": state})
+        assert "Choose repos" in picker.text
+        assert 'id="search-repos"' in picker.text
+        assert 'type="hidden" name="repo"' not in picker.text
+        assert 'name="repo" value="101" checked' not in picker.text
+        assert 'name="repo" value="102" checked' not in picker.text
+        assert 'name="access" value="write" checked' in picker.text
+        empty = await browser.post("/oauth/github/confirm", data={"state": state})
+        assert "Select at least one repo" in empty.text
+        assert 'id="github-connect-form"' in empty.text
         spoof = await browser.get(
             "/oauth/github/setup", params={"state": state, "installation_id": "999999"}
         )
@@ -245,7 +339,7 @@ async def test_connection_happy_path_and_rechecks(
         assert "installation_id" not in spoof.headers["location"]
         repo_admin = False
         denied = await browser.post(
-            "/oauth/github/confirm", data={"state": state, "repo": "101", "access_101": "write"}
+            "/oauth/github/confirm", data={"state": state, "repo": "101", "access": "write"}
         )
         assert denied.status_code == 403
         async with sessionmaker() as session:
@@ -274,74 +368,18 @@ async def test_connection_happy_path_and_rechecks(
         async with sessionmaker() as session:
             assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
         installation_available = True
-        if agent_bound:
-            with monkeypatch.context() as patch:
-                patch.setattr(
-                    github_connect,
-                    "activate_confirmed_agent",
-                    AsyncMock(side_effect=ValueError("stale grant")),
-                )
-                failed = await browser.post(
-                    "/oauth/github/confirm", data={"state": state, "repo": "101"}
-                )
-            assert failed.status_code == 400
-            assert "GitHub connection" in failed.text
-            async with sessionmaker() as session:
-                assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
         confirmed = await browser.post(
             "/oauth/github/confirm",
             data={
                 "state": state,
                 "repo": ["101", "102"],
-                "access_102": "read",
+                "access": "read",
             },
         )
-        assert confirmed.status_code == 200
-        assert (
-            "Connected 2 repos to ResearchBot." if agent_bound else "Connected: 2 repos"
-        ) in confirmed.text
+        assert confirmed.status_code == 200 and "Connected 2 repos" in confirmed.text
         async with sessionmaker() as session:
             repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
-            assert {repo.repo_id: repo.max_access for repo in repos} == {101: "write", 102: "read"}
-            if agent_bound:
-                agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ma-agent")
-                grants = await github_access.list_agent_grants(
-                    session, tenant_id=tenant_id, agent_id=agent_id
-                )
-                assert {grant.repo_id: grant.ceiling_access for grant in grants} == {
-                    101: "write",
-                    102: "read",
-                }
-                assert all(not grant.staged for grant in grants)
-                assert (
-                    await github_access.get_agent_mode(
-                        session, tenant_id=tenant_id, agent_id=agent_id
-                    )
-                    == "app"
-                )
-                existing = SessionSnapshot(
-                    ma_agent_id="ma-agent",
-                    model_id="model",
-                    system_sha256=None,
-                    skills_sha256="skills",
-                    environment_id="env",
-                    repo_url=None,
-                    repo_branch=None,
-                    memory_store_id=None,
-                    vault_id="vault",
-                    tools_sha256="tools",
-                    mcp_servers_sha256="mcp",
-                    env_sha256=None,
-                    agent_version=1,
-                    agent_name="ResearchBot",
-                )
-                next_turn = existing.model_copy(
-                    update={
-                        "github_mode": "app",
-                        "repo_urls": ("example/one", "example/two"),
-                    }
-                )
-                assert fingerprint_identity(existing) != fingerprint_identity(next_turn)
+            assert {repo.repo_id: repo.max_access for repo in repos} == {101: "read", 102: "read"}
             assert all(repo.installation_id == 77 for repo in repos)
             installation = await github_app_installations.get(session, installation_id=77)
             assert installation is not None
@@ -356,33 +394,119 @@ async def test_connection_happy_path_and_rechecks(
                 is None
             )
             events = await list_events(session, tenant_id=tenant_id)
-            confirmed_events = [event for event in events if event.operation == "github_connect"]
-            assert len(confirmed_events) == 1
-            assert confirmed_events[0].github_repo_ids == [101, 102]
-        reused = await browser.post("/oauth/github/confirm", data={"state": state, "repo": "101"})
+            assert len(events) == 1
+            assert events[0].operation == "github_connect"
+            assert events[0].github_repo_ids == [101, 102]
+        github_unavailable = True
+        reused = await browser.post(
+            "/oauth/github/confirm", data={"state": state, "repo": "101", "access": "write"}
+        )
         assert reused.status_code == 200
-        assert "Already connected: 2 repos" in reused.text
-        refreshed = await browser.get("/oauth/github/confirm", params={"state": state})
-        assert "Already connected: 2 repos" in refreshed.text
-        receipt = re.search(r'name="receipt" value="([a-f0-9]+)"', page.text)
-        invitation = re.search(r'name="invitation" value="([a-f0-9]+)"', page.text)
-        assert receipt is not None and invitation is not None
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"
-        ) as no_cookie_browser:
-            queued_post = await no_cookie_browser.post(
-                "/oauth/github/confirm",
-                data={
-                    "state": state,
-                    "repo": "101",
-                    "invitation": invitation.group(1),
-                    "receipt": receipt.group(1),
-                },
+        assert (
+            "Already connected: 2 repos." in reused.text
+            and "You can close this tab." in reused.text
+        )
+        forged = await browser.post(
+            "/oauth/github/confirm",
+            data={
+                "state": "not-this-flow",
+                "invitation": github_connect.digest(invitation_token),
+                "receipt": "invalid",
+            },
+        )
+        assert forged.status_code == 400
+        github_unavailable = False
+        async with sessionmaker() as session:
+            repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
+            assert {repo.repo_id: repo.max_access for repo in repos} == {101: "read", 102: "read"}
+            assert len(await list_events(session, tenant_id=tenant_id)) == 1
+        used_link = await browser.get(f"/oauth/github/connect/{invitation_token}")
+        assert used_link.status_code == 200
+        assert (
+            "Already connected: 2 repos." in used_link.text
+            and "You can close this tab." in used_link.text
+        )
+        async with sessionmaker.begin() as session:
+            expired_token = await github_connect.mint_invitation(
+                session,
+                tenant_id=tenant_id,
+                requester_account_id=account_id,
+                requester_label="Alex",
             )
-        assert queued_post.status_code == 200
-        assert "Already connected: 2 repos" in queued_post.text
+            await github_connect.expire_pending_invitation(
+                session, tenant_id=tenant_id, requester_account_id=account_id
+            )
+        expired = await browser.get(f"/oauth/github/connect/{expired_token}")
+        assert expired.status_code == 400
+        assert "This link has expired." in expired.text
+        assert "Ask Alex for a new one." in expired.text
+        async with sessionmaker.begin() as session:
+            default_token = await github_connect.mint_invitation(
+                session,
+                tenant_id=tenant_id,
+                requester_account_id=account_id,
+                requester_label="Alex",
+            )
+        default_start = await browser.get(f"/oauth/github/connect/{default_token}")
+        default_state = parse_qs(urlparse(default_start.headers["location"]).query)["state"][0]
+        assert (
+            await browser.get(
+                "/oauth/github/callback", params={"state": default_state, "code": "code"}
+            )
+        ).status_code == 307
+        default_form = await browser.get("/oauth/github/confirm", params={"state": default_state})
+        assert 'name="access" value="write" checked' in default_form.text
+        signature_match = re.search(r'name="receipt" value="([a-f0-9]+)"', default_form.text)
+        assert signature_match is not None
+        signed_form = {
+            "state": default_state,
+            "repo": ["101", "102"],
+            "invitation": github_connect.digest(default_token),
+            "receipt": signature_match.group(1),
+        }
+        first, second = await asyncio.gather(
+            browser.post("/oauth/github/confirm", data=signed_form),
+            browser.post("/oauth/github/confirm", data=signed_form),
+        )
+        assert first.status_code == second.status_code == 200
+        assert sorted(
+            [
+                "already" if "Already connected: 2 repos." in response.text else "connected"
+                for response in (first, second)
+            ]
+        ) == ["already", "connected"]
+        async with sessionmaker() as session:
+            repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
+            assert {repo.repo_id: repo.max_access for repo in repos} == {101: "write", 102: "write"}
+            assert len(await list_events(session, tenant_id=tenant_id)) == 2
+        async with sessionmaker.begin() as session:
+            await github_connect.delete_expired_flows(
+                session, now=datetime.now(UTC) + timedelta(days=8)
+            )
+        replay_after_cleanup = await browser.post("/oauth/github/confirm", data=signed_form)
+        assert replay_after_cleanup.status_code == 200
+        assert "Already connected: 2 repos." in replay_after_cleanup.text
+        async with sessionmaker.begin() as session:
+            client = await make_account(session, tenant=tenant)
+            await set_external(session, client.id, True)
+            client_token = await github_connect.mint_invitation(
+                session,
+                tenant_id=tenant_id,
+                requester_account_id=account_id,
+                requester_label="Alex",
+            )
+        client_start = await browser.get(f"/oauth/github/connect/{client_token}")
+        client_state = parse_qs(urlparse(client_start.headers["location"]).query)["state"][0]
+        assert (
+            await browser.get(
+                "/oauth/github/callback", params={"state": client_state, "code": "code"}
+            )
+        ).status_code == 307
+        client_form = await browser.get("/oauth/github/confirm", params={"state": client_state})
+        assert "Clients use this server. Pick only the repos they may see." in client_form.text
+        assert 'id="select-all-repos"' in client_form.text
+        assert 'name="repo" value="101" checked' not in client_form.text
+        assert 'type="hidden" name="repo"' not in client_form.text
     assert any(request.url.path == "/user/installations" for request in requests)
     assert all(request.url.path != "/user/memberships/orgs" for request in requests)
-    assert sum(request.url.path == "/applications/client/token" for request in requests) == (
-        2 if agent_bound else 1
-    )
+    assert sum(request.url.path == "/applications/client/token" for request in requests) == 3
