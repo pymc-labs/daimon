@@ -524,6 +524,16 @@ spend, turn count and cap plus the tenant balance; an admin additionally sees
 tenant totals and a per-member breakdown. Admin-only figures are not fetched
 for a non-admin rather than fetched and hidden.
 
+The five top spenders are shown by name, never as a ping. Discord takes each
+from the member cache or one member fetch (no privileged intent), all within
+1.5 seconds, and escapes markdown and mentions in it. Slack writes a user
+mention, which a modal shows as the name without notifying anyone; the panel is
+only ever a modal. Teams looks each person up on the rosters of the teams the
+bot is installed in, within 2 seconds, as plain text. Anyone who cannot be
+named (left the server, in no installed team, a lookup that failed or timed
+out, an id that is not a Slack user id) is shown as `User` and the last four
+characters of their id.
+
 Two things those numbers are not. They are pre-markup, as above. And tenant
 aggregates exclude rows with no platform user attached, so spend recovered by
 the sweep from a session with no account stamp is debited to the ledger but

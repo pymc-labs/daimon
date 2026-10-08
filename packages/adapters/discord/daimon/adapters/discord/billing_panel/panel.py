@@ -24,6 +24,7 @@ from decimal import Decimal
 import httpx
 from daimon.adapters.discord import layout
 from daimon.adapters.discord.billing_panel.read import (
+    TOP_SPENDERS_SHOWN,
     invoking_channel_id,
     is_guild_admin,
     load_billing_snapshot,
@@ -77,6 +78,12 @@ def _period_label(since: datetime) -> str:
 
 def _is_over_cap(spend: float, cap: Decimal | None) -> bool:
     return cap is not None and spend > float(cap)
+
+
+def plain_name(name: str) -> str:
+    """A display name as literal text: no markdown, no mention, no line break."""
+    flat = " ".join(name.splitlines())
+    return discord.utils.escape_mentions(discord.utils.escape_markdown(flat))
 
 
 def _discord_date(moment: datetime) -> str:
@@ -166,7 +173,7 @@ def build_billing_container(
       - hairline
       - one TextDisplay: 🏦 Server credit (total, then the timed credit it
         includes), 📊 Channel budget for the invoking channel, 🏆 Top spenders
-        (top 5) with a dim '{N} more members' line when N > 0,
+        (top 5, names escaped) with a dim '{N} more members' line when N > 0,
         then 📊 Channel budgets for every channel
 
     Member branch:
@@ -194,20 +201,19 @@ def build_billing_container(
             "",
             "🏆 **Top spenders**",
         ]
-        top5 = state.member_rows[:5]
+        top5 = state.member_rows[:TOP_SPENDERS_SHOWN]
         if top5:
             for i, row in enumerate(top5):
                 rank = i + 1
                 you = " (you)" if row.is_caller else ""
                 spend_str = _fmt_usd(row.cost_usd)
-                body_lines.append(
-                    f"-# {rank}. {row.display_name}{you}  {spend_str} · {row.turn_count} turns"
-                )
+                name = plain_name(row.display_name)
+                body_lines.append(f"-# {rank}. {name}{you}  {spend_str} · {row.turn_count} turns")
         else:
             body_lines.append("-# no usage yet this period")
 
         # 'N more members' overflow line
-        overflow = max(0, len(state.member_rows) - 5) + state.over_cap_count
+        overflow = max(0, len(state.member_rows) - TOP_SPENDERS_SHOWN) + state.over_cap_count
         if overflow > 0:
             body_lines.append(f"-# {overflow} more members — look one up below")
         body_lines += _channel_budgets_lines(state)
@@ -254,7 +260,7 @@ def build_member_lookup_container(
     When spend == 0.0 and turns == 0 the body is the locked line
     'no usage this period' — covers the zero-daimon-account case invisibly.
     """
-    hdr = layout.header(f"🔍 {display_name}", subtext=_period_label(since))
+    hdr = layout.header(f"🔍 {plain_name(display_name)}", subtext=_period_label(since))
 
     if spend_usd == 0.0 and turns == 0:
         body_text = "no usage this period"
@@ -534,6 +540,9 @@ async def _rerender(
     assert interaction.guild_id is not None
     assert interaction.guild is not None
     bot_interaction: BotInteraction = interaction  # type: ignore[assignment]  # narrowing to the Bot-bound interaction inside our adapter
+    if not interaction.response.is_done():
+        # Member fetches can take a moment; a deferred update keeps the click alive.
+        await interaction.response.defer()
     now = datetime.now(UTC)
     since = datetime(now.year, now.month, 1, tzinfo=UTC)
     is_admin = is_guild_admin(bot_interaction)
@@ -557,13 +566,7 @@ async def _rerender(
         now=now,
         since=since,
     )
-    if interaction.response.is_done():
-        await interaction.edit_original_response(
-            view=new_view,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-    else:
-        await interaction.response.edit_message(
-            view=new_view,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+    await interaction.edit_original_response(
+        view=new_view,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )

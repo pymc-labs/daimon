@@ -18,6 +18,7 @@ from daimon.core.billing_panel import (
     estimate_turns,
     fmt_usd,
     load_billing_snapshot,
+    member_label,
     timed_credit_lines,
 )
 from daimon.core.channel_budget import ChannelBudgetStatus
@@ -63,6 +64,11 @@ def test_fmt_usd_formats_cents_and_thousands() -> None:
     assert fmt_usd(Decimal("1000")) == "$1,000.00", "Decimal gets a thousands separator"
     assert fmt_usd(2500.75) == "$2,500.75", "float gets a thousands separator"
     assert fmt_usd(Decimal("-12.5")) == "-$12.50", "the sign goes before the dollar"
+
+
+def test_member_label_is_the_ids_last_four() -> None:
+    assert member_label("100000000000004993") == "User 4993"
+    assert member_label("ab") == "<unknown user>", "too short to slice"
 
 
 def _ends(day: int) -> datetime:

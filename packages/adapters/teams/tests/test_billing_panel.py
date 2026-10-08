@@ -22,21 +22,28 @@ from daimon.adapters.teams.billing_panel import (
     REDEEM_ADMIN_ONLY,
     UNKNOWN_AMOUNT,
     panel_card,
+    plain_name,
+    roster_names,
 )
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.identity import DENIED
 from daimon.core.billing_panel import BillingPanelState, MemberRow
 from daimon.core.channel_budget import ChannelBudgetStatus
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
 from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores.domain import ChannelBudgetRow
+from daimon.core.stores.teams_installations import record_teams_installation
+from daimon.core.stores.tenants import get_tenant
+from daimon.testing.factories import make_usage_event
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
     CONVERSATION_ID,
+    ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     TeamsApiFake,
     build_teams_runtime,
@@ -218,8 +225,89 @@ def test_the_admin_card_lists_channel_budgets_and_the_member_card_does_not() -> 
 
 
 # ---------------------------------------------------------------------------
-# The credit layout
+# Top spender names and the credit layout
 # ---------------------------------------------------------------------------
+
+TEAM_A = "19:team-a@thread.tacv2"
+TEAM_B = "19:team-b@thread.tacv2"
+
+
+async def test_the_admin_card_names_top_spenders_from_team_rosters(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    gone = str(uuid.UUID(int=7))
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with db_session_factory.begin() as session:
+        await record_teams_installation(
+            session, tenant_id=tenant_id, team_id=TEAM_A, group_id="g", name="A"
+        )
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None
+        for user, tokens in ((OTHER_AAD_OBJECT_ID, 2000), (gone, 1000)):
+            await make_usage_event(
+                session, tenant=tenant, platform_user_id=user, input_tokens=tokens
+            )
+    teams_api_fake.names[OTHER_AAD_OBJECT_ID] = "Maya *Chen*"
+    teams_api_fake.absent.add(gone)
+
+    async with _running(db_session_factory, teams_api_fake) as service:
+        admin = await _command(service, teams_api_fake, AAD_OBJECT_ID)
+
+    assert "1. Maya \\\\*Chen\\\\* $" in admin, "a roster name, its markdown escaped"
+    assert "2. User 0007 $" in admin, "someone no roster has keeps `User XXXX`"
+    assert "<at>" not in admin and '"mention"' not in admin, "a name is never a mention"
+    looked_up = sorted(
+        r.url.rsplit("/conversations/", 1)[-1]
+        for r in teams_api_fake.requests
+        if r.url.endswith((OTHER_AAD_OBJECT_ID, gone))
+    )
+    assert looked_up == [f"{TEAM_A}/members/{OTHER_AAD_OBJECT_ID}", f"{TEAM_A}/members/{gone}"], (
+        "each shown spender is looked up once, on the installed team's roster"
+    )
+
+
+async def test_roster_names_tries_each_team_and_drops_the_unresolved() -> None:
+    rosters = {TEAM_A: {"u1": "Ann"}, TEAM_B: {"u2": "Bo"}}
+
+    async def roster_name(team_id: str, user_id: str) -> str | None:
+        if user_id == "u4":
+            raise httpx.HTTPStatusError(
+                "gone", request=httpx.Request("GET", "x"), response=httpx.Response(404)
+            )
+        return rosters[team_id].get(user_id)
+
+    names = await roster_names(
+        roster_name, team_ids=[TEAM_A, TEAM_B], user_ids=["u1", "u2", "u3", "u4"]
+    )
+
+    assert names == {"u1": "Ann", "u2": "Bo"}, "the first roster with a name wins"
+
+
+async def test_roster_names_gives_up_on_slow_lookups_after_the_timeout() -> None:
+    async def roster_name(team_id: str, user_id: str) -> str | None:
+        if user_id == "slow":
+            await asyncio.sleep(10)
+        return f"name-{user_id}"
+
+    async with asyncio.timeout(2):
+        names = await roster_names(
+            roster_name, team_ids=[TEAM_A], user_ids=["fast", "slow"], timeout_s=0.1
+        )
+
+    assert names == {"fast": "name-fast"}, "a lookup pending at the timeout is left out"
+
+
+async def test_roster_names_without_an_installed_team_looks_nobody_up() -> None:
+    async def roster_name(team_id: str, user_id: str) -> str | None:
+        raise AssertionError("no lookup without a team")
+
+    assert await roster_names(roster_name, team_ids=[], user_ids=["u1"]) == {}
+
+
+def test_plain_name_shows_markdown_and_tags_literally() -> None:
+    assert plain_name("<at>@everyone</at> **x** [a](b)\nnext") == (
+        "at@everyone/at \\*\\*x\\*\\* \\[a\\](b) next"
+    )
 
 
 def _card_text(state: BillingPanelState, *, now: datetime | None = None) -> list[str]:

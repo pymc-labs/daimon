@@ -289,8 +289,49 @@ def test_the_admin_view_lists_channel_budgets_and_the_member_view_does_not() -> 
 
 
 # ---------------------------------------------------------------------------
-# The credit layout
+# Top spender names and the credit layout
 # ---------------------------------------------------------------------------
+
+
+def _spender_lines(state: BillingPanelState) -> list[str]:
+    from daimon.adapters.slack.billing_panel.views import build_billing_container
+
+    blocks = build_billing_container(state, now=_NOW, since=_SINCE)
+    text = next(b["text"]["text"] for b in blocks if "Top spenders" in str(b))
+    return text.splitlines()[1:]
+
+
+def _row(user_id: str, *, is_caller: bool = False) -> MemberRow:
+    label = f"User {user_id[-4:]}"
+    return MemberRow(user_id, label, 2.0, 3, is_caller)
+
+
+def test_top_spenders_are_user_mentions_which_a_modal_shows_as_names() -> None:
+    state = dataclasses.replace(
+        _make_admin_state(), member_rows=(_row("U0123ABCD"), _row("W0456EFGH", is_caller=True))
+    )
+    lines = _spender_lines(state)
+    assert lines[0] == "1. <@U0123ABCD>  $2.00 · 3 turns", lines
+    assert lines[1] == "2. <@W0456EFGH> _(you)_  $2.00 · 3 turns", "the caller is still marked"
+
+
+def test_an_id_that_is_not_a_slack_user_id_keeps_the_escaped_label() -> None:
+    odd = MemberRow("U1|<!channel>", "User <!channel>", 1.0, 1, False)
+    state = dataclasses.replace(
+        _make_admin_state(), member_rows=(odd, _row("u0123abcd"), _row("B0123ABCD"))
+    )
+    lines = _spender_lines(state)
+    assert "<!channel>" not in "\n".join(lines) and "<@" not in "\n".join(lines), lines
+    assert lines[1].startswith("2. User abcd"), "a lowercase id is not a user id"
+    assert lines[2].startswith("3. User ABCD"), "a bot id is not a user id"
+
+
+def test_the_billing_blocks_only_ever_go_into_a_modal() -> None:
+    """A `<@U…>` mention notifies only in a message; the panel must stay a view."""
+    from daimon.adapters.slack.billing_panel import views
+
+    view = views.build_billing_view(_make_admin_state(), now=_NOW, since=_SINCE)
+    assert view["type"] == "modal"
 
 
 def _credit_blocks(state: BillingPanelState) -> list[dict[str, Any]]:

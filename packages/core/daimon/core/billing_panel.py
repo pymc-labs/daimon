@@ -92,7 +92,13 @@ class BillingPanelState:
 
 
 def member_label(user_id: str) -> str:
-    """`User XXXX` from the id's last four characters; chat adapters keep no name cache."""
+    """`User XXXX` from the id's last four characters: the fallback label for a person.
+
+    Rows start with it, and each adapter replaces it on the rows it shows with
+    the person's name where its platform can tell it (a Discord member fetch,
+    a Slack user mention, a Teams team roster). Anyone it cannot resolve, such
+    as someone who has left, keeps this label.
+    """
     return f"User {user_id[-4:]}" if len(user_id) >= 4 else "<unknown user>"
 
 

@@ -839,6 +839,23 @@ def test_the_member_view_says_top_ups_are_admin_only_under_the_credit() -> None:
     assert block.endswith("-# Top-ups are admin-only."), block
 
 
+def test_top_spender_names_are_escaped() -> None:
+    row = _make_member_row(display_name="@everyone **x** <@100000000000000009>")
+    state = _make_state(is_admin=True, member_rows=(row,))
+    text = _joined_container_text(build_billing_container(state, now=NOW, since=SINCE))
+    line = next(ln for ln in text.splitlines() if ln.startswith("-# 1."))
+    assert "@everyone" not in line and "<@100000000000000009>" not in line, line
+    assert "\\*\\*x\\*\\*" in line, "markdown in a name is shown literally"
+
+
+def test_member_lookup_header_escapes_the_name() -> None:
+    container = build_member_lookup_container(
+        display_name="@everyone **x**", spend_usd=0.0, turns=0, since=SINCE, now=NOW
+    )
+    header = _joined_container_text(container).splitlines()[0]
+    assert header == "## 🔍 @\u200beveryone \\*\\*x\\*\\*", header
+
+
 def test_over_cap_container_has_color_over_cap_accent() -> None:
     """Container for an over-cap caller must use COLOR_OVER_CAP as accent_colour."""
     state = _make_state(caller_spend=200.0, caller_turns=10, caller_cap=Decimal("100.00"))

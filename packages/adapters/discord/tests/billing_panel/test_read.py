@@ -1,11 +1,12 @@
 """DB-backed tests for billing_panel.read.
 
-Covers load_billing_snapshot, is_guild_admin, _resolve_member_name.
+Covers load_billing_snapshot, is_guild_admin, resolve_shown_names.
 Uses real Postgres via the `db_session` fixture.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -17,14 +18,14 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
 from daimon.adapters.discord.billing_panel.read import (
-    _resolve_member_name,
     invoking_channel_id,
     is_guild_admin,
     load_billing_snapshot,
+    resolve_shown_names,
 )
 
 # pyright: reportPrivateUsage=false
-from daimon.adapters.discord.billing_panel.state import BillingPanelState
+from daimon.adapters.discord.billing_panel.state import BillingPanelState, MemberRow
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.tenants import get_tenant
@@ -36,47 +37,136 @@ from daimon.testing.factories import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# ---- _resolve_member_name ----
+# ---- resolve_shown_names ----
 
 
-def test_resolve_member_name_returns_display_name_on_cache_hit() -> None:
-    guild = MagicMock(spec=discord.Guild)
+def _row(user_id: str) -> MemberRow:
+    return MemberRow(
+        platform_user_id=user_id,
+        display_name=f"User {user_id[-4:]}",
+        cost_usd=1.0,
+        turn_count=1,
+        is_caller=False,
+    )
+
+
+def _member(name: str) -> discord.Member:
     member = MagicMock(spec=discord.Member)
-    member.display_name = "alice"
-    guild.get_member.return_value = member
-    assert _resolve_member_name(guild, "100000000000000001") == "alice", (
-        "cache hit should return member.display_name"
-    )
+    member.display_name = name
+    return member
 
 
-def test_resolve_member_name_falls_back_to_last_four_on_cache_miss() -> None:
+def _http_error(cls: type[discord.HTTPException], status: int) -> discord.HTTPException:
+    return cls(MagicMock(status=status, reason="no"), "no")
+
+
+def _guild(
+    *,
+    cached: dict[int, str] | None = None,
+    fetched: dict[int, str | discord.HTTPException] | None = None,
+    slow: frozenset[int] = frozenset(),
+) -> tuple[discord.Guild, list[int]]:
+    """A guild whose cache holds `cached` and whose REST fetch answers from `fetched`.
+
+    A `slow` id never answers in time. Returns the guild and the ids fetched.
+    """
     guild = MagicMock(spec=discord.Guild)
-    guild.get_member.return_value = None
-    assert _resolve_member_name(guild, "100000000000004993") == "User 4993", (
-        "cache miss should fall back to 'User XXXX' (last 4 of snowflake)"
+    calls: list[int] = []
+
+    def get_member(snowflake: int) -> discord.Member | None:
+        name = (cached or {}).get(snowflake)
+        return None if name is None else _member(name)
+
+    async def fetch_member(snowflake: int) -> discord.Member:
+        calls.append(snowflake)
+        if snowflake in slow:
+            await asyncio.sleep(10)
+        answer = (fetched or {}).get(snowflake)
+        if answer is None:
+            raise _http_error(discord.NotFound, 404)
+        if isinstance(answer, discord.HTTPException):
+            raise answer
+        return _member(answer)
+
+    guild.get_member.side_effect = get_member
+    guild.fetch_member.side_effect = fetch_member
+    return guild, calls
+
+
+async def test_resolve_shown_names_uses_the_cache_before_fetching() -> None:
+    guild, calls = _guild(cached={100000000000000001: "alice"})
+
+    [row] = await resolve_shown_names(guild, (_row("100000000000000001"),))
+
+    assert row.display_name == "alice", "a cached member is named from the cache"
+    assert calls == [], "a cache hit needs no REST fetch"
+
+
+async def test_resolve_shown_names_fetches_a_cache_miss() -> None:
+    guild, calls = _guild(fetched={100000000000000002: "bob"})
+
+    [row] = await resolve_shown_names(guild, (_row("100000000000000002"),))
+
+    assert row.display_name == "bob", "a cache miss is named from a member fetch"
+    assert calls == [100000000000000002]
+
+
+async def test_resolve_shown_names_keeps_the_label_for_someone_who_left() -> None:
+    guild, _ = _guild(fetched={})
+
+    [row] = await resolve_shown_names(guild, (_row("100000000000004993"),))
+
+    assert row.display_name == "User 4993", "NotFound (they left) keeps `User XXXX`"
+
+
+async def test_resolve_shown_names_keeps_the_label_on_forbidden_and_http_errors() -> None:
+    guild, _ = _guild(
+        fetched={
+            100000000000000003: _http_error(discord.Forbidden, 403),
+            100000000000000004: _http_error(discord.HTTPException, 500),
+        }
+    )
+
+    rows = await resolve_shown_names(
+        guild, (_row("100000000000000003"), _row("100000000000000004"))
+    )
+
+    assert [r.display_name for r in rows] == ["User 0003", "User 0004"], (
+        "Forbidden and other HTTP errors fall back to `User XXXX`"
     )
 
 
-def test_resolve_member_name_returns_unknown_for_short_id() -> None:
-    guild = MagicMock(spec=discord.Guild)
-    guild.get_member.return_value = None
-    assert _resolve_member_name(guild, "ab") == "<unknown user>", (
-        "ids shorter than 4 chars cannot form a User XXXX label"
+async def test_resolve_shown_names_gives_up_on_slow_fetches_after_the_timeout() -> None:
+    guild, _ = _guild(fetched={100000000000000005: "eve"}, slow=frozenset({100000000000000006}))
+
+    async with asyncio.timeout(2):
+        rows = await resolve_shown_names(
+            guild, (_row("100000000000000005"), _row("100000000000000006")), timeout_s=0.1
+        )
+
+    assert [r.display_name for r in rows] == ["eve", "User 0006"], (
+        "a fetch still pending at the timeout keeps `User XXXX`; the others are named"
     )
 
 
-def test_resolve_member_name_handles_non_numeric_id() -> None:
-    guild = MagicMock(spec=discord.Guild)
-    # int("not-a-number") raises ValueError — helper must swallow it.
-    assert _resolve_member_name(guild, "not-a-number").startswith(("User ", "<unknown")), (
-        "non-numeric id should not raise; falls back to id-suffix or unknown"
-    )
+async def test_resolve_shown_names_only_fetches_the_rows_the_panel_shows() -> None:
+    ids = [f"1000000000000000{i:02d}" for i in range(10, 18)]
+    guild, calls = _guild(fetched={int(uid): f"name{uid[-2:]}" for uid in ids})
+
+    rows = await resolve_shown_names(guild, tuple(_row(uid) for uid in ids))
+
+    assert sorted(calls) == [int(uid) for uid in ids[:5]], "only the top five are fetched"
+    assert [r.display_name for r in rows[:5]] == [f"name{uid[-2:]}" for uid in ids[:5]]
+    assert rows[5].display_name == "User 0015", "rows past the top five keep `User XXXX`"
+    assert [r.platform_user_id for r in rows] == ids, "order is unchanged"
 
 
-def test_resolve_member_name_handles_none_guild() -> None:
-    assert _resolve_member_name(None, "100000000000004993") == "User 4993", (
-        "absent guild should still produce a stable fallback label"
-    )
+async def test_resolve_shown_names_skips_an_id_that_is_not_a_snowflake() -> None:
+    guild, calls = _guild()
+
+    [row] = await resolve_shown_names(guild, (_row("not-a-number"),))
+
+    assert row.display_name == "User mber" and calls == [], "a bad id is neither fetched nor named"
 
 
 # ---- is_guild_admin ----
@@ -153,7 +243,11 @@ def _make_guild_with_members(members: dict[int, str], owner_id: int = 999) -> di
             return m
         return None
 
+    async def _fetch_member(snowflake: int) -> Any:
+        raise discord.NotFound(MagicMock(status=404, reason="no"), "Unknown Member")
+
     guild.get_member.side_effect = _get_member
+    guild.fetch_member.side_effect = _fetch_member
     return guild
 
 

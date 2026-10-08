@@ -3,11 +3,16 @@
 Raw dicts only — no slack_sdk model types, no stripe, no I/O. All user-derived
 strings are escaped with escape_mrkdwn (S5). The figures and formatters are
 the chat-neutral ones in daimon.core.billing_panel.
+
+These blocks only ever go into a modal (views.open / views.update), where a
+`<@U…>` mention renders as the person's name and notifies nobody; that is how
+top spenders are named. Never post them as a message: there a mention pings.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -17,6 +22,7 @@ from daimon.core.billing_panel import (
     TOPUP_AMOUNTS,
     TOPUPS_ADMIN_ONLY,
     BillingPanelState,
+    MemberRow,
     caller_line,
     channel_budget_line,
     channel_budget_phrase,
@@ -30,6 +36,8 @@ from daimon.core.billing_panel import (
 
 REDEEM_OPEN_ACTION_ID = "billing_redeem_open"
 _TOP_SHOWN = 5
+# A Slack user id, as a mention may carry it; anything else is shown as `User XXXX`.
+_USER_ID = re.compile(r"^[UW][A-Z0-9]{2,}$")
 
 # ---------------------------------------------------------------------------
 # Block Kit builders (pure raw dicts — S4 pattern)
@@ -68,6 +76,16 @@ def _channel_budget_blocks(state: BillingPanelState, *, now: datetime) -> list[d
         return []
     phrase = channel_budget_phrase(state.channel_budget, now=now)
     return [_section("📊 *Channel budget*"), _context(phrase)]
+
+
+def spender_name(row: MemberRow) -> str:
+    """A mention of the person, which a modal shows as their name without notifying them.
+
+    An id that is not a Slack user id falls back to the row's escaped `User XXXX` label.
+    """
+    if _USER_ID.fullmatch(row.platform_user_id):
+        return f"<@{row.platform_user_id}>"
+    return escape_mrkdwn(row.display_name)
 
 
 def _channel_budgets_text(state: BillingPanelState) -> str | None:
@@ -111,7 +129,7 @@ def build_billing_container(
       - Divider
       - Server credit section (total) + context (timed credit it includes)
       - Channel budget section + context, when the channel has one
-      - Top spenders header + per-member rows (top 5 shown; overflow noted)
+      - Top spenders header + per-member rows (top 5 shown as mentions; overflow noted)
       - Channel budgets section, when any exist
       - Divider
       - Top-up actions block with static_select (admin only)
@@ -154,7 +172,7 @@ def build_billing_container(
                 rank = i + 1
                 you = " _(you)_" if row.is_caller else ""
                 spend_str = fmt_usd(row.cost_usd)
-                name = escape_mrkdwn(row.display_name)
+                name = spender_name(row)
                 spenders_lines.append(f"{rank}. {name}{you}  {spend_str} · {row.turn_count} turns")
         else:
             spenders_lines.append("no usage yet this period")

@@ -239,6 +239,10 @@ class TeamsApiFake:
     posted: int = 0
     channels: dict[str, str] = dataclasses.field(default_factory=dict[str, str])
     """Every team's standard channels, by id, as its conversation listing names them."""
+    names: dict[str, str] = dataclasses.field(default_factory=dict[str, str])
+    """Roster names by Entra object id; a member lookup answers with the person's name."""
+    absent: set[str] = dataclasses.field(default_factory=set[str])
+    """Entra object ids no roster has: a member lookup answers 404."""
 
     async def send(
         self,
@@ -268,13 +272,18 @@ class TeamsApiFake:
             details = {"id": team.group(1), "aadGroupId": TEAM_GROUP_ID}
             return httpx.Response(200, json=details, request=request)
         if context.method == "GET" and "/members/" in context.url:
+            aad_object_id = httpx.URL(context.url).path.rsplit("/", 1)[-1]
+            if aad_object_id in self.absent:
+                return httpx.Response(404, json={}, request=request)
             # As Teams answers for one of our own members.
             member = {
                 "id": "29:member",
-                "aadObjectId": httpx.URL(context.url).path.rsplit("/", 1)[-1],
+                "aadObjectId": aad_object_id,
                 "tenantId": ENTRA_TENANT_ID,
                 "userRole": "user",
             }
+            if aad_object_id in self.names:
+                member["name"] = self.names[aad_object_id]
             return httpx.Response(200, json=member, request=request)
         if context.method == "POST" and httpx.URL(context.url).path.endswith("/v3/conversations"):
             return httpx.Response(200, json={"id": DIRECT_CHAT_ID}, request=request)

@@ -5,12 +5,22 @@ admin also sees tenant totals, the top spenders and top-up buttons. A top-up
 click re-checks admin, creates a Stripe Checkout through the MCP server and
 replaces the card with an `Action.OpenUrl` to it. While a promo code is
 redeemable, the admin view has a code box whose Redeem button submits it.
+
+The top spenders are named from the rosters of the teams the bot is installed
+in (`teams_installations`): Teams has no app-only way to name a person from
+their Entra id without a tenant-wide Graph permission, but the Bot Framework
+answers for any member of a team the bot is in. Someone in none of those teams
+keeps the `User XXXX` label. Names are plain text, never an `<at>` mention.
 """
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import functools
+import re
 import uuid
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import cast
 
@@ -31,12 +41,14 @@ from daimon.adapters.teams.card_actions import (
 )
 from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import DENIED
+from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.billing_panel import (
     CHANNEL_BUDGETS_SHOWN,
     TOPUP_AMOUNTS,
     TOPUPS_ADMIN_ONLY,
     BillingPanelState,
+    MemberRow,
     caller_line,
     channel_budget_line,
     channel_budget_phrase,
@@ -55,8 +67,10 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.panel_audit import record_panel_write
 from daimon.core.promo_codes import describe_refusal
 from daimon.core.promo_credit import PromoRedeemed, PromoRedeemRefused, redeem_promo_code
+from daimon.core.stores.teams_installations import list_teams_installations
+from daimon.core.teams_bot_framework import SERVICE_URL
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
-from microsoft_teams.apps import ActivityContext
+from microsoft_teams.apps import ActivityContext, App
 from microsoft_teams.cards import (
     Action,
     ActionSet,
@@ -81,6 +95,14 @@ REDEEM_ADMIN_ONLY = "Only an admin can redeem a promo code."
 ENTER_CODE = "Enter a promo code."
 CODE_INPUT = "code"
 _TOP_SHOWN = 5
+# The panel waits at most this long for roster lookups, all together.
+NAME_LOOKUP_TIMEOUT_S = 2.0
+# Team rosters tried per person, in `list_teams_installations` order.
+_ROSTER_TEAMS = 5
+_MARKDOWN = re.compile(r"([\\*_`~\[\]])")
+
+RosterName = Callable[[str, str], Awaitable[str | None]]
+"""(team id, Entra object id) -> the person's name on that team's roster, or None."""
 
 
 def card_time(moment: datetime) -> str:
@@ -111,6 +133,62 @@ def _channel_budget(state: BillingPanelState, now: datetime) -> list[CardElement
         return []
     phrase = channel_budget_phrase(state.channel_budget, now=now)
     return [*text_lines("📊 **Channel budget**"), *_details(phrase)]
+
+
+def plain_name(name: str) -> str:
+    """A roster name as literal card text: markdown escaped, no `<at>` tag, one line."""
+    flat = " ".join(name.replace("<", "").replace(">", "").split())
+    return _MARKDOWN.sub(r"\\\1", flat)
+
+
+def sdk_roster_name(app: App) -> RosterName:
+    """Look a person up on a team's roster over the Bot Framework; no Graph permission needed."""
+
+    async def roster_name(team_id: str, aad_object_id: str) -> str | None:
+        conversations = app.api.from_service_url(SERVICE_URL).conversations
+        member = await conversations.get_member_by_id(team_id, aad_object_id)
+        if (member.aad_object_id or "").lower() != aad_object_id.lower():
+            return None
+        return member.name or None
+
+    return roster_name
+
+
+async def roster_names(
+    roster_name: RosterName,
+    *,
+    team_ids: Sequence[str],
+    user_ids: Sequence[str],
+    timeout_s: float = NAME_LOOKUP_TIMEOUT_S,
+) -> dict[str, str]:
+    """Each person's name from the first team roster that has them.
+
+    People are looked up concurrently; whoever is unresolved after ``timeout_s``
+    is left out, as is anyone no roster has (a 404 for someone who left).
+    """
+
+    async def lookup(user_id: str) -> str | None:
+        for team_id in team_ids[:_ROSTER_TEAMS]:
+            try:
+                if name := await roster_name(team_id, user_id):
+                    return name
+            except TEAMS_SEND_ERRORS as err:
+                log.info("teams.billing.roster_lookup_failed", error=type(err).__name__)
+        return None
+
+    if not team_ids or not user_ids:
+        return {}
+    tasks = {asyncio.create_task(lookup(user_id)): user_id for user_id in user_ids}
+    done, pending = await asyncio.wait(tasks, timeout=timeout_s)
+    for task in pending:
+        task.cancel()
+    if pending:
+        log.info("teams.billing.roster_lookup_timed_out", unresolved=len(pending))
+    return {
+        tasks[task]: name
+        for task in done
+        if not task.cancelled() and task.exception() is None and (name := task.result())
+    }
 
 
 def redeemed_text(result: PromoRedeemed) -> str:
@@ -163,7 +241,7 @@ def _admin_body(state: BillingPanelState, since: datetime, now: datetime) -> lis
         f"{state.guild_turns} turns · {state.guild_distinct_members} active members"
     )
     top = [
-        f"{rank}. {row.display_name}{' (you)' if row.is_caller else ''} "
+        f"{rank}. {plain_name(row.display_name)}{' (you)' if row.is_caller else ''} "
         f"{fmt_usd(row.cost_usd)} · {row.turn_count} turns"
         for rank, row in enumerate(state.member_rows[:_TOP_SHOWN], start=1)
     ]
@@ -219,8 +297,9 @@ def checkout_card(url: str, amount: int) -> AdaptiveCard:
 class BillingPanel:
     """Handlers for the command and the panel buttons."""
 
-    def __init__(self, runtime: TeamsRuntime) -> None:
+    def __init__(self, runtime: TeamsRuntime, *, roster_name: RosterName | None = None) -> None:
         self._runtime = runtime
+        self._roster_name = roster_name
 
     async def command(self, context: CommandContext) -> None:
         await context.send_card(
@@ -247,7 +326,25 @@ class BillingPanel:
                 now=now,
                 platform="teams",
             )
+            teams = await list_teams_installations(session, tenant_id=tenant_id)
+        state = await self._named(state, [team.team_id for team in teams])
         return panel_card(state, since=since, now=now, notice=notice)
+
+    async def _named(self, state: BillingPanelState, team_ids: list[str]) -> BillingPanelState:
+        """The state with the shown top spenders' roster names in place of `User XXXX`."""
+        shown = state.member_rows[:_TOP_SHOWN]
+        if self._roster_name is None or not shown:
+            return state
+        names = await roster_names(
+            self._roster_name,
+            team_ids=team_ids,
+            user_ids=[row.platform_user_id for row in shown],
+        )
+        rows: tuple[MemberRow, ...] = tuple(
+            dataclasses.replace(row, display_name=names.get(row.platform_user_id, row.display_name))
+            for row in shown
+        )
+        return dataclasses.replace(state, member_rows=rows + state.member_rows[_TOP_SHOWN:])
 
     async def _act(self, activity: AdaptiveCardInvokeActivity) -> AdaptiveCardInvokeResponse:
         actor = await card_actor(self._runtime, activity)

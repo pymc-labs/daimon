@@ -1,7 +1,8 @@
 """Load + sort + cap the (user, tenant)-attributed billing snapshot for /billing.
 
-Composition layer: reads from core stores, resolves Discord member display
-names via the cache (no API calls), assembles a BillingPanelState.
+Composition layer: reads from core stores, resolves the display names of the
+top spenders the panel shows (the member cache, else one member fetch each
+under a short shared timeout), assembles a BillingPanelState.
 
 `is_guild_admin` is Discord-native: manage_guild | administrator | owner_id.
 Gating on a daimon-DB role would block legitimate guild admins, so we resolve
@@ -10,6 +11,8 @@ permissions from Discord at click time instead.
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 from datetime import datetime
 
 import structlog
@@ -18,6 +21,7 @@ from daimon.adapters.discord.billing_panel.state import (
     MemberRow,
 )
 from daimon.adapters.discord.checks import is_member_guild_admin
+from daimon.core.billing_panel import member_label
 from daimon.core.channel_budget import get_channel_budget_status, list_channel_budget_statuses
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.promo_credit import get_active_timed_credit
@@ -44,6 +48,9 @@ BotInteraction = Interaction[commands.Bot]
 _log = structlog.get_logger()
 
 _TOP_MEMBERS_CAP = 25  # same number as _PICKER_CAP, different semantics
+TOP_SPENDERS_SHOWN = 5  # rows the panel lists by name
+# The panel waits at most this long for the member fetches, all together.
+NAME_FETCH_TIMEOUT_S = 1.5
 
 
 def is_guild_admin(interaction: BotInteraction) -> bool:
@@ -68,22 +75,62 @@ def invoking_channel_id(interaction: BotInteraction) -> str | None:
     return str(interaction.channel_id) if interaction.channel_id is not None else None
 
 
-def _resolve_member_name(guild: discord.Guild | None, user_id: str) -> str:
-    """Cache-only display-name lookup.
+async def _fetch_member_name(guild: discord.Guild, user_id: str) -> str | None:
+    """The member's display name from one REST fetch, or None when Discord can't say.
 
-    Returns `member.display_name` on cache hit; `User XXXX` (last 4 chars of
-    snowflake) on cache miss; `<unknown user>` if the id is too short to slice.
+    A single-member fetch needs no privileged members intent. NotFound (they
+    left), Forbidden and any other HTTP error all read as unknown.
     """
-    if guild is not None:
+    try:
+        member = await guild.fetch_member(int(user_id))
+    except ValueError:
+        return None
+    except discord.HTTPException as exc:
+        _log.info("billing.member_fetch_failed", status=exc.status)
+        return None
+    return member.display_name
+
+
+async def resolve_shown_names(
+    guild: discord.Guild,
+    rows: tuple[MemberRow, ...],
+    *,
+    timeout_s: float = NAME_FETCH_TIMEOUT_S,
+) -> tuple[MemberRow, ...]:
+    """Name the rows the panel shows; the rest, and anyone unresolved, keep `User XXXX`.
+
+    The member cache answers first. Misses are fetched concurrently, and
+    whatever has not answered within ``timeout_s`` is cancelled.
+    """
+    shown = rows[:TOP_SPENDERS_SHOWN]
+    names: dict[str, str] = {}
+    misses: list[str] = []
+    for row in shown:
         try:
-            member = guild.get_member(int(user_id))
+            cached = guild.get_member(int(row.platform_user_id))
         except ValueError:
-            member = None
-        if member is not None:
-            return member.display_name
-    if len(user_id) >= 4:
-        return f"User {user_id[-4:]}"
-    return "<unknown user>"
+            continue
+        if cached is not None:
+            names[row.platform_user_id] = cached.display_name
+        else:
+            misses.append(row.platform_user_id)
+    if misses:
+        tasks = {asyncio.create_task(_fetch_member_name(guild, uid)): uid for uid in misses}
+        done, pending = await asyncio.wait(tasks, timeout=timeout_s)
+        for task in pending:
+            task.cancel()
+        if pending:
+            _log.info("billing.member_fetch_timed_out", unresolved=len(pending))
+        for task in done:
+            if not task.cancelled() and task.exception() is None and (name := task.result()):
+                names[tasks[task]] = name
+    named = tuple(
+        dataclasses.replace(row, display_name=names[row.platform_user_id])
+        if row.platform_user_id in names
+        else row
+        for row in shown
+    )
+    return named + rows[TOP_SPENDERS_SHOWN:]
 
 
 async def _has_redeemable_promo_code_best_effort(session: AsyncSession, *, now: datetime) -> bool:
@@ -114,8 +161,8 @@ async def load_billing_snapshot(
 
     For regular (non-admin) viewers, only the caller-scoped reads happen.
     For admin viewers, additionally pulls tenant aggregates + per-member
-    breakdown, applies sort+cap, and resolves display names from the guild
-    member cache.
+    breakdown, applies sort+cap, and resolves the shown rows' display names
+    (`resolve_shown_names`).
     """
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
@@ -198,7 +245,7 @@ async def load_billing_snapshot(
         rows.append(
             MemberRow(
                 platform_user_id=user_id,
-                display_name=_resolve_member_name(guild, user_id),
+                display_name=member_label(user_id),
                 cost_usd=costs_by_user.get(user_id, 0.0),
                 turn_count=turns_by_user.get(user_id, 0),
                 is_caller=(user_id == caller_user_id),
@@ -208,7 +255,7 @@ async def load_billing_snapshot(
     # D-SORT-01: by cost_usd DESC, tie-break by platform_user_id ASC.
     rows.sort(key=lambda r: (-r.cost_usd, r.platform_user_id))
     over_cap_count = max(0, len(rows) - _TOP_MEMBERS_CAP)
-    capped = tuple(rows[:_TOP_MEMBERS_CAP])
+    capped = await resolve_shown_names(guild, tuple(rows[:_TOP_MEMBERS_CAP]))
 
     return BillingPanelState(
         is_admin=True,
