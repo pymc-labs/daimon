@@ -125,7 +125,9 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
             if state.notice:
                 next_marker = "**Next:** "
                 if next_marker in state.notice:
-                    description = state.notice.split(next_marker, 1)[1].split("\n", 1)[0]
+                    extracted = state.notice.split(next_marker, 1)[1].split("\n", 1)[0].strip()
+                    if extracted:
+                        description = extracted
                     notice_text = "\n".join(
                         line
                         for line in state.notice.splitlines()
@@ -161,7 +163,11 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         description="\n\n".join(sections),
         color=color,
         footer=format_duration(elapsed_seconds) if elapsed_seconds is not None else None,
-        details="\n".join(state.tool_lines) if state.tool_lines else None,
+        details=(
+            "\n".join(f"`{line.replace('`', "'")}`" for line in state.tool_lines)
+            if state.tool_lines
+            else None
+        ),
     )
 
 

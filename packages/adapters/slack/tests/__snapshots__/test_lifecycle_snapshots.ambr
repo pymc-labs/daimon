@@ -204,7 +204,7 @@
               dict({
                 'text': '''
                   *Details*
-                  🖋️ Running a command
+                  `🖋️ Running a command`
                 ''',
                 'type': 'mrkdwn',
               }),

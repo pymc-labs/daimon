@@ -60,13 +60,13 @@
         dict({
           'text': '''
             *Details*
-            +3 earlier
-            ✔️ Read a file
-            🚫 Wrote a file
-            ✔️ Search issues (tracker)
-            ✔️ Listed files
-            🔍 Searching files
-            🖋️ Running a command
+            `+3 earlier`
+            `✔️ Read a file`
+            `🚫 Wrote a file`
+            `✔️ Search issues (tracker)`
+            `✔️ Listed files`
+            `🔍 Searching files`
+            `🖋️ Running a command`
           ''',
           'type': 'mrkdwn',
         }),
@@ -123,7 +123,7 @@
         dict({
           'text': '''
             *Details*
-            🖋️ Running a command
+            `🖋️ Running a command`
           ''',
           'type': 'mrkdwn',
         }),

@@ -152,7 +152,9 @@ def to_blocks(
             next_step = "Mention me to try again."
             notice_text = state.notice
             if state.notice and "*Next:* " in state.notice:
-                next_step = state.notice.split("*Next:* ", 1)[1].split("\n", 1)[0]
+                extracted = state.notice.split("*Next:* ", 1)[1].split("\n", 1)[0].strip()
+                if extracted:
+                    next_step = extracted
                 notice_text = "\n".join(
                     line for line in state.notice.splitlines() if not line.startswith("*Next:* ")
                 )
@@ -187,7 +189,9 @@ def to_blocks(
         {"type": "section", "text": {"type": "mrkdwn", "text": headline}},
     ]
     if state.tool_lines:
-        tool_lines = escape_mrkdwn("\n".join(state.tool_lines))
+        tool_lines = "\n".join(
+            f"`{escape_mrkdwn(line.replace('`', "'"))}`" for line in state.tool_lines
+        )
         blocks.append(
             {
                 "type": "context",

@@ -67,6 +67,21 @@ def test_max_length_error_notice_keeps_all_metrics() -> None:
     )
 
 
+def test_empty_notice_next_step_keeps_retry_text_and_metrics() -> None:
+    state = dataclasses.replace(
+        _make_state(phase=TurnPhase.ERROR, cost_str="$0.05"),
+        notice="Model usage limit reached.\n**Next:** \n`rid: test`",
+        balance_str="$9.95",
+    )
+    embed = build_discord_embed(to_embed_data(state, now=12.0))
+
+    assert embed.description == "Mention me to try again."
+    assert "Model usage limit reached." in embed.fields[0].value
+    assert "`rid: test`" in embed.fields[0].value
+    assert "Cost: $0.05" in embed.fields[1].value
+    assert "Balance: $9.95" in embed.fields[1].value
+
+
 class TestUpdate:
     def test_message_event_sets_draft_without_touching_phase(self) -> None:
         state = _make_state(phase=TurnPhase.TOOL_RUNNING)
@@ -146,7 +161,14 @@ class TestToEmbedData:
         data = to_embed_data(state, now=165.0)
         assert data.title == "Working on it…"
         assert data.description == "> Checking \\*the\\* logs"
-        assert data.details == "✔️ Ran a command\n🔍 Reading a file"
+        assert data.details == "`✔️ Ran a command`\n`🔍 Reading a file`"
+
+    def test_tool_line_markdown_stays_in_inline_code(self) -> None:
+        state = dataclasses.replace(
+            _make_state(phase=TurnPhase.TOOL_RUNNING),
+            tool_lines=("🔍 Search *issue* <#123>",),
+        )
+        assert to_embed_data(state).details == "`🔍 Search *issue* <#123>`"
 
     def test_footer_none_on_non_terminal(self) -> None:
         state = _make_state(phase=TurnPhase.THINKING)

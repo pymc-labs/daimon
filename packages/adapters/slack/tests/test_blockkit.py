@@ -174,7 +174,18 @@ class TestToBlocks:
         sections = _find_blocks_by_type(blocks, "section")
         assert sections[0]["text"]["text"] == "*Working on it…*"
         contexts = _find_blocks_by_type(blocks, "context")
-        assert contexts[0]["elements"][0]["text"] == "*Details*\n✔️ Read a file\n🖋️ Q&amp;A sync"
+        assert contexts[0]["elements"][0]["text"] == (
+            "*Details*\n`✔️ Read a file`\n`🖋️ Q&amp;A sync`"
+        )
+
+    def test_tool_line_markdown_stays_in_inline_code(self) -> None:
+        state = _make_state(
+            phase=TurnPhase.TOOL_RUNNING,
+            tool_lines=("🔍 Search *issue* <#123>",),
+        )
+        blocks = to_blocks(state, now=None)
+        contexts = _find_blocks_by_type(blocks, "context")
+        assert contexts[0]["elements"][0]["text"] == ("*Details*\n`🔍 Search *issue* &lt;#123&gt;`")
 
     def test_running_state_with_text_preview_has_quoted_escaped_draft(
         self,
@@ -257,6 +268,20 @@ class TestToBlocks:
         assert "*Next:*" not in section_texts[2]
         assert "Model usage limit reached." in section_texts[2]
         assert "`rid: test`" in section_texts[2]
+
+    def test_empty_notice_next_step_keeps_retry_text_and_metrics(self) -> None:
+        state = replace(
+            _make_state(phase=TurnPhase.ERROR, cost_str="$0.05"),
+            notice="Model usage limit reached.\n*Next:* \n`rid: test`",
+            balance_str="$9.95",
+        )
+        blocks = to_blocks(state, now=12.0)
+        sections = _find_blocks_by_type(blocks, "section")
+        assert sections[1]["text"]["text"] == "Mention me to try again."
+        assert "Model usage limit reached." in sections[2]["text"]["text"]
+        assert "`rid: test`" in sections[2]["text"]["text"]
+        assert "Cost: $0.05" in blocks[-1]["elements"][0]["text"]
+        assert "Balance: $9.95" in blocks[-1]["elements"][0]["text"]
 
     def test_no_block_contains_color_key(self) -> None:
         """No block dict anywhere must contain a 'color' key."""
