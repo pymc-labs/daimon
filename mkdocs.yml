@@ -25,9 +25,6 @@ nav:
   - Agent identity: agent-identity.md
   - Teams: teams.md
   - Claude Code plugin: plugin.md
-  - mux: mux.md
-  - Managed Agents adoption plan: managed-agents-adoption.md
-  - Dreams design: dreams-design.md
 
 theme:
   name: material

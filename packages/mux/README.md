@@ -53,7 +53,7 @@ Nothing in `daimon` imports `mux`. It is not listed in the root
 the services; the `[tool.uv.sources]` entry for `daimon-mux` is a resolution
 hint for anything that does depend on it, not a dependency itself. A turn
 goes `daimon.core.turn` → the Anthropic SDK, with no mux in the chain. See
-[architecture.md](architecture.md).
+[architecture.md](../../docs/architecture.md).
 
 It is still a first-class member of the workspace: pyright checks it in
 strict mode, its eleven tests run in CI, and `uv run lint-imports` holds this

@@ -32,12 +32,6 @@ pieces fit together.
   channel history and files, agent tools, restarts and current limits.
 - [plugin.md](plugin.md) — the Claude Code plugin: what the hub login mounts
   are and what has to be configured before installing it.
-- [mux.md](mux.md) — what `packages/mux` is for, and that it is a scaffold
-  nothing imports yet.
-- [managed-agents-adoption.md](managed-agents-adoption.md) — which recent
-  Claude Managed Agents features to adopt, what each touches, and go or no-go.
-- [dreams-design.md](dreams-design.md) — design for tidying agent memory with
-  Managed Agents dreams; not built.
 - [slack-app-manifest.yaml](slack-app-manifest.yaml) — paste-in manifest for
   creating the Slack app.
 - [teams-app-manifest.yaml](teams-app-manifest.yaml) — the Teams app manifest

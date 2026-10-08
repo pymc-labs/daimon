@@ -30,7 +30,7 @@ hand does nothing — change the source and re-run the generator.
 | change the `defaults/` tree, `daimon defaults apply`/`verify` or the seeded-skill fingerprint | `docs/defaults.md` | by hand |
 | change Slack file delivery or per-user access | `docs/slack.md` | by hand |
 | change the plugin's login mounts, commands or install prerequisites | `docs/plugin.md`, `plugin/README.md` | by hand |
-| change `packages/mux` or what imports it | `docs/mux.md` | by hand |
+| change `packages/mux` or what imports it | `packages/mux/README.md` | by hand |
 | change anything a user can notice | `CHANGELOG.md` under `[Unreleased]` | by hand |
 
 Adding a page to `docs/` means two more edits: a line in `docs/README.md`

@@ -63,7 +63,7 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
 | `daimon.testing` | `packages/testing/` | Shared fixtures. |
-| `mux` | `packages/mux/` | A separate namespace, not part of `daimon`. See [mux.md](mux.md). |
+| `mux` | `packages/mux/` | A separate namespace, not part of `daimon`. See [its README](https://github.com/pymc-labs/daimon/blob/main/packages/mux/README.md). |
 | `notebook_host`, `report_host` | `apps/*/src/` | Standalone services that talk to daimon over HTTP only. |
 
 None of that is convention. Eight `import-linter` contracts in the root
