@@ -16,7 +16,6 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 
-from daimon.adapters.discord.agent_setup.avatar import avatar_public_url
 from daimon.adapters.discord.agent_setup.scope_default import (
     list_guild_propagations,
     resolve_account_display,
@@ -24,7 +23,7 @@ from daimon.adapters.discord.agent_setup.scope_default import (
 from daimon.adapters.discord.agent_setup.state import PanelState, ThreadContext
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
-from daimon.core.agent_identity import is_builtin_agent
+from daimon.core.agent_identity import is_builtin_agent, resolve_agent_identity
 from daimon.core.answering_map import AnsweringMap, load_answering_map
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
@@ -32,7 +31,6 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.roster import RosterAgent, load_roster
 from daimon.core.rule_views import RuleViewer, load_rule_viewer
-from daimon.core.stores.agent_avatars import get_or_create_avatar
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_agent_bindings import get_binding
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -224,11 +222,16 @@ async def load_details_for(
             metadata={MA_METADATA_KEY_MANAGED: "true"} if details.daimon_managed else None,
             default_agent_name=runtime.deployment_default.agent_name,
         ):
-            avatar = await get_or_create_avatar(
-                session, tenant_id=_tenant_id(state), agent_name=agent.name, face_enabled=True
+            identity = await resolve_agent_identity(
+                session,
+                tenant_id=_tenant_id(state),
+                agent_name=agent.name,
+                is_builtin=False,
+                public_base_url=runtime.settings.mcp.app_root_url,
+                enabled=True,
+                background_sessionmaker=runtime.sessionmaker,
             )
-            state.avatar_urls[agent.name] = avatar_public_url(runtime, avatar)
-            await session.commit()
+            state.avatar_urls[agent.name] = identity.avatar_url
         return details
 
 

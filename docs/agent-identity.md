@@ -169,15 +169,18 @@ Named-agent routing is tracked separately from this identity work.
 
 ## Avatars
 
-- Table `agent_avatars (tenant_id, agent_name, token, sha256, png, source,
-  face_combo, face_thumbnail, updated_by_account_id, updated_at)`, keyed by tenant and the agent's daimon
+- Table `agent_avatars (tenant_id, agent_name, token, sha256, png, png_128,
+  png_512, previous_sha256, previous_png, previous_png_128,
+  previous_png_512, source, face_combo, face_thumbnail,
+  updated_by_account_id, updated_at)`, keyed by tenant and the agent's daimon
   name normalized as #409 normalizes names (NFKC, casefolded), so an agent the
   resolver recreates keeps its avatar. A rename moves the row; archiving or
   deleting the agent, and tenant purge, delete it, so a later agent reusing
   the name starts from a fresh default. Uploads remain 256×256 PNG, at most 256 KB.
 - With the identity switch on, the first turn reads the current picture without
   waiting for artwork. A missing face is generated after the turn proceeds; an
-  existing initials URL stays valid until the new PNG is stored. The default is
+  existing initials URL stays valid after the new PNG is stored, until an admin
+  changes or resets the picture. The default is
   a 512×512 mascot face. The production mascot supplies the base face and the
   canonical expression sprites supply relaxed closed eyes; the remaining eyes
   are small plain ovals. The production laugh mouth and two restrained warm

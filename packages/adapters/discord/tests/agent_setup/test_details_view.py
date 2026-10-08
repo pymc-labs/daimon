@@ -392,7 +392,7 @@ async def test_load_details_for_skips_avatar_with_identity_off(
     runtime = _make_runtime(sessionmaker, settings=settings)
     monkeypatch.setattr(hydrate_mod, "load_agent_details", AsyncMock(return_value=details))
     avatar_lookup = AsyncMock()
-    monkeypatch.setattr(hydrate_mod, "get_or_create_avatar", avatar_lookup)
+    monkeypatch.setattr(hydrate_mod, "resolve_agent_identity", avatar_lookup)
 
     result = await hydrate_mod.load_details_for(
         runtime, state=state, agent=_roster_agent(details.name)
@@ -401,6 +401,28 @@ async def test_load_details_for_skips_avatar_with_identity_off(
     assert result is details
     assert state.avatar_urls[details.name] is None
     avatar_lookup.assert_not_awaited()
+
+
+async def test_load_details_for_queues_picture_without_generating_in_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    details = _details()
+    state = _state(details, account_id=uuid.uuid4())
+    session = AsyncMock()
+    sessionmaker = MagicMock()
+    sessionmaker.return_value.__aenter__ = AsyncMock(return_value=session)
+    sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
+    runtime = _make_runtime(sessionmaker, settings=_mcp_settings())
+    monkeypatch.setattr(hydrate_mod, "load_agent_details", AsyncMock(return_value=details))
+    lookup = AsyncMock(return_value=MagicMock(avatar_url=None))
+    monkeypatch.setattr(hydrate_mod, "resolve_agent_identity", lookup)
+
+    result = await hydrate_mod.load_details_for(
+        runtime, state=state, agent=_roster_agent(details.name)
+    )
+
+    assert result is details
+    assert lookup.await_args.kwargs["background_sessionmaker"] is sessionmaker
 
 
 def test_managed_agent_details_hide_avatar_controls_even_if_roster_flag_is_false(

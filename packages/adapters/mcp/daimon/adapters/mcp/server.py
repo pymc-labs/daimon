@@ -10,7 +10,6 @@ any collaborator the caller supplied.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from datetime import timedelta
@@ -174,11 +173,20 @@ def _build_avatar_route(
             return Response(status_code=400)
         async with sessionmaker() as session:
             row = await get_avatar_by_token(session, token=token)
-        if row is None or row.sha256[:12] != sha12:
+        if row is None:
             return Response(status_code=404)
-        png = row.png
-        if size_arg is not None:
-            png = await asyncio.to_thread(_avatar_at_size, png, int(size_arg))
+        if row.sha256[:12] == sha12:
+            png = {None: row.png, "128": row.png_128, "512": row.png_512}[size_arg]
+        elif row.previous_sha256 and row.previous_sha256[:12] == sha12:
+            png = {
+                None: row.previous_png,
+                "128": row.previous_png_128,
+                "512": row.previous_png_512,
+            }[size_arg]
+        else:
+            return Response(status_code=404)
+        if png is None:
+            return Response(status_code=404)
         return Response(
             png,
             media_type="image/png",
@@ -186,21 +194,6 @@ def _build_avatar_route(
         )
 
     return avatar
-
-
-def _avatar_at_size(png: bytes, target: int) -> bytes:
-    from io import BytesIO
-
-    from PIL import Image
-
-    with Image.open(BytesIO(png)) as original:
-        if original.size == (target, target):
-            return png
-        output = BytesIO()
-        original.convert("RGB").resize((target, target), Image.Resampling.LANCZOS).save(
-            output, format="PNG"
-        )
-        return output.getvalue()
 
 
 def create_mcp_app(

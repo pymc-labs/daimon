@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from daimon.core.agent_faces import CLASSIC, assign, render_image
+from daimon.core.agent_faces import assign, classic_combo, render_image
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +55,7 @@ def main() -> None:
     draw.line((0, 77, width, 77), fill="#dddddd", width=1)
     faces = assign([key for _, key, _ in ROWS if key is not None])
     if args.built_in_image is None:
-        built_in = _round_avatar(render_image(CLASSIC, 36))
+        built_in = _round_avatar(render_image(classic_combo(), 36))
     else:
         with Image.open(args.built_in_image) as reference:
             built_in = _round_avatar(reference)

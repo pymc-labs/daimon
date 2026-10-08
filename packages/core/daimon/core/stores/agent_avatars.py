@@ -17,9 +17,9 @@ from datetime import UTC, datetime
 import numpy as np
 from daimon.core._models import AgentAvatar, Tenant
 from daimon.core.agent_faces import (
-    CLASSIC,
     FaceCombo,
     choose,
+    classic_combo,
     decode_combo,
     encode_combo,
     render,
@@ -42,6 +42,12 @@ class AvatarRow:
     source: str
     face_combo: FaceCombo | None = None
     has_face_assignment: bool = False
+    png_128: bytes | None = None
+    png_512: bytes | None = None
+    previous_sha256: str | None = None
+    previous_png: bytes | None = None
+    previous_png_128: bytes | None = None
+    previous_png_512: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +95,21 @@ def generate_default_png(name: str) -> bytes:
     return output.getvalue()
 
 
+def _sized_pngs(png: bytes) -> tuple[bytes, bytes]:
+    """Render supported public sizes once when artwork is written."""
+    with Image.open(io.BytesIO(png)) as original:
+        rgb = original.convert("RGB")
+        result: list[bytes] = []
+        for size in (128, 512):
+            if rgb.size == (size, size):
+                result.append(png)
+                continue
+            output = io.BytesIO()
+            rgb.resize((size, size), Image.Resampling.LANCZOS).save(output, format="PNG")
+            result.append(output.getvalue())
+        return result[0], result[1]
+
+
 def _row(orm: AgentAvatar) -> AvatarRow:
     try:
         combo = decode_combo(orm.face_combo) if orm.face_combo else None
@@ -102,6 +123,12 @@ def _row(orm: AgentAvatar) -> AvatarRow:
         source=orm.source,
         face_combo=combo,
         has_face_assignment=orm.face_combo is not None,
+        png_128=orm.png_128,
+        png_512=orm.png_512,
+        previous_sha256=orm.previous_sha256,
+        previous_png=orm.previous_png,
+        previous_png_128=orm.previous_png_128,
+        previous_png_512=orm.previous_png_512,
     )
 
 
@@ -115,8 +142,9 @@ async def _choose_face(
             AgentAvatar.face_combo.is_not(None),
         )
     )
-    existing = [CLASSIC]
-    pictures = [await asyncio.to_thread(thumbnail, CLASSIC)]
+    classic = classic_combo()
+    existing = [classic]
+    pictures = [await asyncio.to_thread(thumbnail, classic)]
     for name, raw, picture in rows:
         try:
             if raw is None:
@@ -162,33 +190,26 @@ async def get_or_create_avatar(
     ):
         return _row(existing)
     if face_enabled:
-        combo = await _choose_face(session, tenant_id=tenant_id, agent_name=agent_name)
-        png = await asyncio.to_thread(render, combo, 512)
-        face_picture = bytes((await asyncio.to_thread(thumbnail, combo)).astype(np.uint8))
-        # Key-share allows unrelated rows referencing the tenant to be inserted.
+        # Assign under the tenant advisory lock so concurrent agents see the
+        # same committed set of variants and thumbnails.
         await _lock_tenant(session, tenant_id)
         existing = await session.get(AgentAvatar, (tenant_id, key), populate_existing=True)
         if existing is not None and (existing.source == "upload" or existing.face_combo):
             return _row(existing)
-        occupied = await session.scalar(
-            select(AgentAvatar.agent_name)
-            .where(
-                AgentAvatar.tenant_id == tenant_id,
-                AgentAvatar.agent_name != key,
-                AgentAvatar.face_combo == encode_combo(combo),
-            )
-            .limit(1)
-        )
-        if occupied is not None:
-            combo = await _choose_face(session, tenant_id=tenant_id, agent_name=agent_name)
-            png = await asyncio.to_thread(render, combo, 512)
-            face_picture = bytes((await asyncio.to_thread(thumbnail, combo)).astype(np.uint8))
+        combo = await _choose_face(session, tenant_id=tenant_id, agent_name=agent_name)
+        png = await asyncio.to_thread(render, combo, 512)
+        face_picture = bytes((await asyncio.to_thread(thumbnail, combo)).astype(np.uint8))
     else:
         combo = None
         png = generate_default_png(agent_name)
         face_picture = None
-    token = secrets.token_urlsafe(24)
+    png_128, png_512 = await asyncio.to_thread(_sized_pngs, png)
+    token = existing.token if face_enabled and existing is not None else secrets.token_urlsafe(24)
     sha = hashlib.sha256(png).hexdigest()
+    previous_sha = existing.sha256 if face_enabled and existing is not None else None
+    previous_png = existing.png if face_enabled and existing is not None else None
+    previous_png_128 = existing.png_128 if face_enabled and existing is not None else None
+    previous_png_512 = existing.png_512 if face_enabled and existing is not None else None
     await session.execute(
         pg_insert(AgentAvatar)
         .values(
@@ -197,6 +218,12 @@ async def get_or_create_avatar(
             token=token,
             sha256=sha,
             png=png,
+            png_128=png_128,
+            png_512=png_512,
+            previous_sha256=previous_sha,
+            previous_png=previous_png,
+            previous_png_128=previous_png_128,
+            previous_png_512=previous_png_512,
             source="default",
             face_combo=encode_combo(combo) if combo else None,
             face_thumbnail=face_picture,
@@ -207,6 +234,12 @@ async def get_or_create_avatar(
                 "token": token,
                 "sha256": sha,
                 "png": png,
+                "png_128": png_128,
+                "png_512": png_512,
+                "previous_sha256": previous_sha,
+                "previous_png": previous_png,
+                "previous_png_128": previous_png_128,
+                "previous_png_512": previous_png_512,
                 "source": "default",
                 "face_combo": encode_combo(combo) if combo else None,
                 "face_thumbnail": face_picture,
@@ -249,6 +282,7 @@ async def replace_avatar(
     key = normalize_agent_name(agent_name)
     token = secrets.token_urlsafe(24)
     sha = hashlib.sha256(png).hexdigest()
+    png_128, png_512 = await asyncio.to_thread(_sized_pngs, png)
     face_picture = (
         bytes((await asyncio.to_thread(thumbnail, face_combo)).astype(np.uint8))
         if face_combo
@@ -262,6 +296,12 @@ async def replace_avatar(
             token=token,
             sha256=sha,
             png=png,
+            png_128=png_128,
+            png_512=png_512,
+            previous_sha256=None,
+            previous_png=None,
+            previous_png_128=None,
+            previous_png_512=None,
             source=source,
             face_combo=encode_combo(face_combo) if face_combo else None,
             face_thumbnail=face_picture,
@@ -274,6 +314,12 @@ async def replace_avatar(
                 "token": token,
                 "sha256": sha,
                 "png": png,
+                "png_128": png_128,
+                "png_512": png_512,
+                "previous_sha256": None,
+                "previous_png": None,
+                "previous_png_128": None,
+                "previous_png_512": None,
                 "source": source,
                 "face_combo": AgentAvatar.face_combo
                 if source == "upload"
@@ -301,6 +347,7 @@ async def reset_avatar(
     face_enabled: bool = False,
 ) -> AvatarRow:
     combo: FaceCombo | None = None
+    await _lock_tenant(session, tenant_id)
     if face_enabled:
         existing = await session.get(
             AgentAvatar, (tenant_id, normalize_agent_name(agent_name)), populate_existing=True

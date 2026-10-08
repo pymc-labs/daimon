@@ -14,11 +14,11 @@ import pytest
 from daimon.core import agent_faces
 from daimon.core._models import AgentAvatar
 from daimon.core.agent_faces import (
-    CLASSIC,
     FaceCombo,
     assign,
     candidates,
     choose,
+    classic_combo,
     decode_combo,
     encode_combo,
     render,
@@ -47,7 +47,7 @@ def test_render_is_stable_and_round_trips_its_combination() -> None:
     ]
     assert decode_combo('[12,"arc","smile",3,false,"raised"]') == combo
     assert Image.open(BytesIO(png)).size == (512, 512)
-    assert Image.open(BytesIO(render(CLASSIC, 128))).size == (128, 128)
+    assert Image.open(BytesIO(render(classic_combo(), 128))).size == (128, 128)
     with pytest.raises(ValueError, match="invalid face"):
         decode_combo('[0,"arc","smile",0,false,"not-a-brow"]')
 
@@ -90,7 +90,7 @@ def test_thread_palette_spreads_hues_around_the_builtin_face() -> None:
         "sales-copilot",
     ]
     faces = assign(names)
-    colours = [CLASSIC[0], *(combo[0] for combo in faces.values())]
+    colours = [classic_combo()[0], *(combo[0] for combo in faces.values())]
     separation = agent_faces._catalogue().hue_separation[np.ix_(colours, colours)].copy()
     np.fill_diagonal(separation, np.inf)
     assert float(separation.min()) >= 20

@@ -1,4 +1,4 @@
-"""Public avatar URLs serve only the current content hash."""
+"""Public avatar URLs serve current and first-use initials content hashes."""
 
 from __future__ import annotations
 
@@ -72,3 +72,35 @@ async def test_face_avatar_route_serves_stored_512_and_resized_128(
         assert original.content == row.png
         assert Image.open(BytesIO(original.content)).size == (512, 512)
         assert Image.open(BytesIO(small.content)).size == (128, 128)
+
+
+@pytest.mark.asyncio
+async def test_first_face_keeps_prior_initials_url_until_admin_change(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        initials = await get_or_create_avatar(session, tenant_id=tenant.id, agent_name="Analyst")
+    async with db_session_factory.begin() as session:
+        face = await get_or_create_avatar(
+            session, tenant_id=tenant.id, agent_name="Analyst", face_enabled=True
+        )
+    assert face.token == initials.token
+    assert face.sha256 != initials.sha256
+    app = Starlette(
+        routes=[Route("/avatars/{token}/{sha12}.png", _build_avatar_route(db_session_factory))]
+    )
+    old_path = f"/avatars/{initials.token}/{initials.sha256[:12]}.png"
+    new_path = f"/avatars/{face.token}/{face.sha256[:12]}.png"
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://example.test"
+    ) as client:
+        assert (await client.get(old_path)).content == initials.png
+        assert (await client.get(f"{old_path}?size=128")).status_code == 200
+        assert (await client.get(new_path)).content == face.png
+        async with db_session_factory.begin() as session:
+            await reset_avatar(
+                session, tenant_id=tenant.id, agent_name="Analyst", face_enabled=True
+            )
+        assert (await client.get(old_path)).status_code == 404
+        assert (await client.get(new_path)).status_code == 404

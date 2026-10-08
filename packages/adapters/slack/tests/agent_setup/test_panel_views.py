@@ -548,7 +548,7 @@ async def test_load_details_view_omits_avatar_when_identity_is_off(
     monkeypatch.setattr(setup_actions, "resolve_attributions", AsyncMock(return_value={}))
     monkeypatch.setattr(setup_actions, "coding_tools_available", lambda _runtime: True)
     avatar_lookup = AsyncMock()
-    monkeypatch.setattr(setup_actions, "get_or_create_avatar", avatar_lookup)
+    monkeypatch.setattr(setup_actions, "resolve_agent_identity", avatar_lookup)
 
     view = await setup_actions.load_details_view(  # type: ignore[arg-type]
         runtime, tenant_id=uuid.uuid4(), meta=_meta(), agent_name="research-bot", is_admin=True
@@ -558,6 +558,37 @@ async def test_load_details_view_omits_avatar_when_identity_is_off(
     assert "*Avatar*" not in _joined(view)
     assert ACTION_AVATAR_CHANGE not in json.dumps(view)
     avatar_lookup.assert_not_awaited()
+
+
+async def test_load_details_view_queues_picture_without_generating_in_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = AsyncMock()
+    sessionmaker = MagicMock()
+    sessionmaker.return_value.__aenter__ = AsyncMock(return_value=session)
+    sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
+    runtime = SimpleNamespace(
+        sessionmaker=sessionmaker,
+        anthropic=MagicMock(),
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+        settings=SimpleNamespace(
+            agent_identity=SimpleNamespace(enabled=True),
+            mcp=SimpleNamespace(app_root_url="https://example.test"),
+        ),
+    )
+    monkeypatch.setattr(setup_actions, "load_panel_roster", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(setup_actions, "load_panel_details", AsyncMock(return_value=_details()))
+    monkeypatch.setattr(setup_actions, "resolve_attributions", AsyncMock(return_value={}))
+    monkeypatch.setattr(setup_actions, "coding_tools_available", lambda _runtime: True)
+    lookup = AsyncMock(return_value=SimpleNamespace(avatar_url=None))
+    monkeypatch.setattr(setup_actions, "resolve_agent_identity", lookup)
+
+    view = await setup_actions.load_details_view(  # type: ignore[arg-type]
+        runtime, tenant_id=uuid.uuid4(), meta=_meta(), agent_name="research-bot", is_admin=True
+    )
+
+    assert view is not None
+    assert lookup.await_args.kwargs["background_sessionmaker"] is sessionmaker
 
 
 def test_details_view_when_short_name_does_not_repeat_it_in_the_body() -> None:

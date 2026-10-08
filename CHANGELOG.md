@@ -21,8 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   appearance when the draw table changes.
   First-use face generation runs after a turn starts, and stored 20 px
   thumbnails keep assignment fast in larger workspaces.
-  Public avatar URLs can serve 128 px and 512 px images; uploads and the
-  identity-off behavior keep their existing paths.
+  Public avatar URLs can serve pre-rendered 128 px and 512 px images. An
+  initials URL remains valid after its generated face is stored, until an
+  admin changes the picture. Uploads and the identity-off behavior keep their
+  existing paths.
 - Agent identity now has a deployment switch, `DAIMON_AGENT_IDENTITY__ENABLED`,
   off by default. When off, Slack and Discord post as the app, Discord replies
   need a mention, Teams omits the agent name prefix, and setup panels hide

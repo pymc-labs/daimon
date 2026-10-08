@@ -760,7 +760,7 @@
       "legacy_index": 7,
       "width": 0.6,
       "bottom": 0.215,
-      "sha256": "e45b6f436003c6183ca7d16de76b0c45503b0951d105649302dd6120eaffbacf"
+      "sha256": "0177ed25836574a717a1782658ac9bc6bcd6ba9b8a960e7ebf82e9e3d615c155"
     },
     {
       "id": "hat-cap-red",
@@ -772,7 +772,7 @@
       "colour_override": "#C23B3B",
       "width": 0.6,
       "bottom": 0.215,
-      "sha256": "e45b6f436003c6183ca7d16de76b0c45503b0951d105649302dd6120eaffbacf"
+      "sha256": "0177ed25836574a717a1782658ac9bc6bcd6ba9b8a960e7ebf82e9e3d615c155"
     },
     {
       "id": "hat-cap-purple",
@@ -784,7 +784,7 @@
       "colour_override": "#6A4BA8",
       "width": 0.6,
       "bottom": 0.215,
-      "sha256": "e45b6f436003c6183ca7d16de76b0c45503b0951d105649302dd6120eaffbacf"
+      "sha256": "0177ed25836574a717a1782658ac9bc6bcd6ba9b8a960e7ebf82e9e3d615c155"
     },
     {
       "id": "hat-gradcap-base",
@@ -795,7 +795,7 @@
       "legacy_index": 10,
       "width": 0.7,
       "bottom": 0.215,
-      "sha256": "3f91c0d090fa1fa35fe4453cd0f1a8f5f3b0b5bf583323583cc4f4622cbfd4aa"
+      "sha256": "25901e29b97f1736c3c55a2db04ab072ca30e40983d611e4120439451dc5fafd"
     },
     {
       "id": "hat-headset-base",
@@ -809,7 +809,7 @@
         29,
         64
       ],
-      "sha256": "966ce59b525099ad3b982120464ac3a9c2f040095ae79c61c5f23ce02dc1d1dc"
+      "sha256": "66b500204562fbdaa8425d4570f6e2fd16bf5394eb49222db739c5a542ba9c9a"
     },
     {
       "id": "eyewear-none",

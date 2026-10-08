@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import cast
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 from pydantic import BaseModel, Field
 
 type FaceCombo = tuple[int, str, str, int, str, str, str]
@@ -226,18 +226,13 @@ def _to_ids(combo: FaceCombo) -> tuple[str, str, str, str, str, str, str]:
         raise ValueError("invalid face combination") from exc
 
 
-_classic = _catalogue().manifest.classic
-CLASSIC: FaceCombo = _from_ids(
-    (
-        _classic.colour,
-        _classic.eyes,
-        _classic.mouth,
-        _classic.hat,
-        _classic.eyewear,
-        _classic.brows,
-        _classic.base,
+@lru_cache(maxsize=1)
+def classic_combo() -> FaceCombo:
+    """Load the fixed built-in face only when face generation is enabled."""
+    spec = _catalogue().manifest.classic
+    return _from_ids(
+        (spec.colour, spec.eyes, spec.mouth, spec.hat, spec.eyewear, spec.brows, spec.base)
     )
-)
 
 
 def encode_combo(combo: FaceCombo) -> str:
@@ -326,7 +321,7 @@ def _weighted_modulo(value: int, entries: tuple[_Layer, ...]) -> _Layer:
     raise AssertionError("unreachable weighted layer draw")
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=4)
 def _assets(
     size: int,
     base_id: str,
@@ -354,8 +349,6 @@ def _assets(
         if spec.file not in files:
             with Image.open(_LAYER_DIR / spec.file) as source:
                 layer = source.convert("RGBA")
-            if spec.file == "hat-cap.png":
-                layer = _repair_cap(layer)
             box = layer.getchannel("A").getbbox()
             if box is None:
                 raise ValueError(f"empty face layer: {spec.id}")
@@ -384,24 +377,6 @@ def _recolour(part: Image.Image, colour: str) -> Image.Image:
     shade = np.clip(luminosity / max(lit, 1), 0.6, 1.3)
     new_rgb = np.where(body, np.clip(_rgb(colour) * shade, 0, 255), rgb)
     return Image.fromarray(np.dstack([new_rgb, pixels[..., 3]]).astype(np.uint8), "RGBA")
-
-
-def _repair_cap(part: Image.Image) -> Image.Image:
-    """Fill transparent extraction gaps inside the cap and brim."""
-    pixels = np.array(part)
-    closed = np.asarray(
-        part.getchannel("A").filter(ImageFilter.MaxFilter(21)).filter(ImageFilter.MinFilter(21))
-    )
-    holes = (pixels[..., 3] < 128) & (closed >= 128)
-    pixels[holes] = (52, 133, 140, 255)
-    for row in pixels:
-        occupied = np.flatnonzero(row[:, 3] >= 128)
-        if len(occupied) < 2:
-            continue
-        inner = row[occupied[0] : occupied[-1] + 1]
-        gaps = inner[:, 3] < 128
-        inner[gaps] = (52, 133, 140, 255)
-    return Image.fromarray(pixels, "RGBA")
 
 
 def render_image(combo: FaceCombo, size: int = 512) -> Image.Image:
@@ -466,6 +441,10 @@ def render_image(combo: FaceCombo, size: int = 512) -> Image.Image:
     else:
         eyewear_spec = catalogue.layers[eyewear]
         place(eyewear_spec.id, width=eyewear_spec.width, cy=eyewear_spec.cy)
+    offset = round(0.06 * canvas_size)
+    result = Image.new("RGBA", (canvas_size, canvas_size), tuple(int(v) for v in target) + (255,))
+    result.alpha_composite(canvas.crop((0, 0, canvas_size, canvas_size - offset)), (0, offset))
+    canvas = result
     hat_spec = catalogue.hats[hat]
     if hat_spec.full:
         place(hat_spec.id, full=True)
@@ -476,10 +455,7 @@ def render_image(combo: FaceCombo, size: int = 512) -> Image.Image:
             bottom=hat_spec.bottom,
             colour_override=hat_spec.colour_override,
         )
-    offset = round(0.06 * canvas_size)
-    result = Image.new("RGBA", (canvas_size, canvas_size), tuple(int(v) for v in target) + (255,))
-    result.alpha_composite(canvas.crop((0, 0, canvas_size, canvas_size - offset)), (0, offset))
-    return result.convert("RGB").resize((size, size), Image.Resampling.LANCZOS)
+    return canvas.convert("RGB").resize((size, size), Image.Resampling.LANCZOS)
 
 
 def render(combo: FaceCombo, size: int = 512) -> bytes:
@@ -507,6 +483,7 @@ def candidates(agent_key: str, count: int = 48) -> list[FaceCombo]:
     """Stable draws favour the classic face and use restrained canonical variants."""
     result: list[FaceCombo] = []
     catalogue = _catalogue()
+    classic = classic_combo()
     eyes_options = _active("eyes")
     mouth_options = _active("mouth")
     brow_options = _active("brows")
@@ -535,10 +512,10 @@ def candidates(agent_key: str, count: int = 48) -> list[FaceCombo]:
         )
         eyes = _weighted_byte(digest[7], eyes_options).id.removeprefix("eyes-")
         mouth = _weighted_byte(digest[8], mouth_options).id.removeprefix("mouth-")
-        classic_brows = catalogue.layers[f"brows-{CLASSIC[5]}"]
+        classic_brows = catalogue.layers[f"brows-{classic[5]}"]
         brows = (
-            CLASSIC[5]
-            if mouth == CLASSIC[2] and not classic_brows.retired and classic_brows.weight > 0
+            classic[5]
+            if mouth == classic[2] and not classic_brows.retired and classic_brows.weight > 0
             else _weighted_byte(digest[3], brow_options).id.removeprefix("brows-")
         )
         combo: FaceCombo = (
@@ -550,7 +527,7 @@ def candidates(agent_key: str, count: int = 48) -> list[FaceCombo]:
             brows,
             _weighted_byte(digest[9], base_options).id,
         )
-        if combo != CLASSIC and combo not in result:
+        if combo != classic and combo not in result:
             result.append(combo)
     return result
 
@@ -566,11 +543,12 @@ def choose(
     """Balance colours first, then prefer distinct plain canonical faces."""
     used = set(existing)
     catalogue = _catalogue()
+    classic = classic_combo()
     candidate_count = count if count is not None else (96 if len(existing) < 24 else 48)
     options = [combo for combo in candidates(agent_key, candidate_count) if combo not in used]
     if not options:
         raise ValueError("no unused face candidates")
-    plain = [combo for combo in options if combo[3] == CLASSIC[3] and combo[4] == "eyewear-none"]
+    plain = [combo for combo in options if combo[3] == classic[3] and combo[4] == "eyewear-none"]
     colour_uses = Counter(combo[0] for combo in existing)
     if not existing:
         return min(
@@ -649,16 +627,16 @@ def choose(
         )
 
     # Keep props in the minority even when a dense tenant needs distinction.
-    hat_share = sum(combo[3] != CLASSIC[3] for combo in existing) / (len(existing) + 1)
+    hat_share = sum(combo[3] != classic[3] for combo in existing) / (len(existing) + 1)
     shade_share = sum(combo[4] != "eyewear-none" for combo in existing) / (len(existing) + 1)
     balanced = [
         combo
         for combo in options
-        if (combo[3] == CLASSIC[3] or hat_share < catalogue.manifest.draw.headwear_share)
+        if (combo[3] == classic[3] or hat_share < catalogue.manifest.draw.headwear_share)
         and (combo[4] == "eyewear-none" or shade_share < catalogue.manifest.draw.shades_share)
     ]
     options = balanced or options
-    plain = [combo for combo in options if combo[3] == CLASSIC[3] and combo[4] == "eyewear-none"]
+    plain = [combo for combo in options if combo[3] == classic[3] and combo[4] == "eyewear-none"]
     classic_share = sum(_is_classic(combo) for combo in existing) / (len(existing) + 1)
     classic_plain = [combo for combo in plain if _is_classic(combo)]
     if classic_plain and len(existing) < 24 and classic_share < 0.55:
@@ -673,18 +651,19 @@ def choose(
 
 
 def _is_classic(combo: FaceCombo) -> bool:
+    classic = classic_combo()
     return (
-        combo[1:3] == CLASSIC[1:3]
-        and combo[3] == CLASSIC[3]
+        combo[1:3] == classic[1:3]
+        and combo[3] == classic[3]
         and combo[4] == "eyewear-none"
-        and combo[6] == CLASSIC[6]
+        and combo[6] == classic[6]
     )
 
 
 def assign(agent_keys: list[str]) -> dict[str, FaceCombo]:
     """Assign in creation order while reserving the built-in face's colour."""
     assigned: dict[str, FaceCombo] = {}
-    existing = [CLASSIC]
+    existing = [classic_combo()]
     for key in agent_keys:
         assigned[key] = choose(key, existing)
         existing.append(assigned[key])
