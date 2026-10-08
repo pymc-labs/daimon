@@ -83,7 +83,7 @@ def picture_details_embed() -> discord.Embed:
     embed.add_field(
         name="After change", value="The old picture may still appear for a while.", inline=False
     )
-    embed.set_footer(text="Agent setup · Details")
+    embed.set_footer(text="Agent setup")
     return embed
 
 
@@ -95,7 +95,7 @@ def picture_status_embed(message: str, *, success: bool) -> discord.Embed:
     remainder = message.partition(". ")[2]
     if remainder:
         embed.add_field(name="Next", value=remainder, inline=False)
-    embed.set_footer(text="Agent setup · Picture")
+    embed.set_footer(text="Agent setup")
     return embed
 
 

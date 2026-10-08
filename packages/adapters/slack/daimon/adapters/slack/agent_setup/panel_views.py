@@ -594,7 +594,7 @@ def build_avatar_details_view(*, meta: PanelMetadata) -> dict[str, Any]:
             _section("Anyone who sees a message can open the picture."),
             _section("The old picture may still appear for a while."),
             {"type": "divider"},
-            _context("Agent setup · Picture"),
+            _context("Agent setup"),
         ],
         private_metadata=encode_panel_metadata(meta),
         callback_id="agent_setup__avatar_details_view",
@@ -629,7 +629,7 @@ def build_avatar_status_view(
                 if retry
                 else []
             ),
-            _context("Agent setup · Picture"),
+            _context("Agent setup"),
         ],
         private_metadata=encode_panel_metadata(meta),
         callback_id=CALLBACK_AVATAR_UPLOAD,
