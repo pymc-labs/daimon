@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from collections import Counter
 from io import BytesIO
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -13,6 +16,7 @@ from daimon.core.agent_faces import (
     CLASSIC,
     FaceCombo,
     assign,
+    candidates,
     choose,
     decode_combo,
     encode_combo,
@@ -27,10 +31,20 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 def test_render_is_stable_and_round_trips_its_combination() -> None:
-    combo: FaceCombo = (12, "arc", "smile", 3, False, "raised")
+    combo: FaceCombo = (12, "arc", "smile", 3, "eyewear-none", "raised", "base")
     png = render(combo, 512)
     assert png == render(combo, 512)
     assert decode_combo(encode_combo(combo)) == combo
+    assert json.loads(encode_combo(combo))["variant"] == [
+        "bg-12",
+        "eyes-arc",
+        "mouth-smile",
+        "hat-hardhat-white",
+        "eyewear-none",
+        "brows-raised",
+        "base",
+    ]
+    assert decode_combo('[12,"arc","smile",3,false,"raised"]') == combo
     assert Image.open(BytesIO(png)).size == (512, 512)
     assert Image.open(BytesIO(render(CLASSIC, 128))).size == (128, 128)
     with pytest.raises(ValueError, match="invalid face"):
@@ -38,10 +52,10 @@ def test_render_is_stable_and_round_trips_its_combination() -> None:
 
 
 def test_props_reach_inside_the_circular_header_crop() -> None:
-    plain = (0, "arc", "smile", 0, False, "default")
-    hat = (0, "arc", "smile", 1, False, "default")
-    headset = (0, "arc", "smile", 11, False, "default")
-    shades = (0, "arc", "smile", 0, True, "default")
+    plain = (0, "arc", "smile", 0, "eyewear-none", "default", "base")
+    hat = (0, "arc", "smile", 1, "eyewear-none", "default", "base")
+    headset = (0, "arc", "smile", 11, "eyewear-none", "default", "base")
+    shades = (0, "arc", "smile", 0, "eyewear-shades", "default", "base")
     mask = Image.new("L", (36, 36), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, 35, 35), fill=255)
     inside = np.asarray(mask) > 0
@@ -54,9 +68,9 @@ def test_props_reach_inside_the_circular_header_crop() -> None:
 def test_assignment_prefers_hue_separation_before_expression_distance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    previous: FaceCombo = (0, "arc", "laugh", 0, False, "default")
-    same_colour: FaceCombo = (0, "plain", "smile", 0, False, "raised")
-    fresh_colour: FaceCombo = (1, "arc", "laugh", 0, False, "default")
+    previous: FaceCombo = (0, "arc", "laugh", 0, "eyewear-none", "default", "base")
+    same_colour: FaceCombo = (0, "plain", "smile", 0, "eyewear-none", "raised", "base")
+    fresh_colour: FaceCombo = (1, "arc", "laugh", 0, "eyewear-none", "default", "base")
     pictures = {previous: 0, same_colour: 20, fresh_colour: 6}
     monkeypatch.setattr(agent_faces, "candidates", lambda _key, _count: [same_colour, fresh_colour])
     monkeypatch.setattr(agent_faces, "thumbnail", lambda combo: np.array([pictures[combo]]))
@@ -76,7 +90,7 @@ def test_thread_palette_spreads_hues_around_the_builtin_face() -> None:
     ]
     faces = assign(names)
     colours = [CLASSIC[0], *(combo[0] for combo in faces.values())]
-    separation = agent_faces._HUE_SEPARATION[np.ix_(colours, colours)].copy()
+    separation = agent_faces._catalogue().hue_separation[np.ix_(colours, colours)].copy()
     np.fill_diagonal(separation, np.inf)
     assert float(separation.min()) >= 20
 
@@ -90,12 +104,12 @@ def test_five_hundred_faces_are_distinct_at_twenty_pixels() -> None:
     np.fill_diagonal(distances, np.inf)
     assert not np.any(distances < 4), "near-identical faces remain at 20 px"
     hats = sum(combo[3] != 0 for combo in faces.values())
-    shades = sum(combo[4] for combo in faces.values())
+    shades = sum(combo[4] == "eyewear-shades" for combo in faces.values())
     colours = Counter(combo[0] for combo in faces.values())
     eyes = Counter(combo[1] for combo in faces.values())
     mouths = Counter(combo[2] for combo in faces.values())
     classic = sum(
-        combo[1:3] == ("arc", "laugh") and combo[3] == 0 and not combo[4]
+        combo[1:3] == ("arc", "laugh") and combo[3] == 0 and combo[4] == "eyewear-none"
         for combo in faces.values()
     )
     assert 200 <= hats <= 325, "props provide distinction in a dense tenant"
@@ -108,7 +122,7 @@ def test_five_hundred_faces_are_distinct_at_twenty_pixels() -> None:
             weight: sum(
                 count
                 for index, count in colours.items()
-                if agent_faces._COLOUR_WEIGHTS[index] == weight
+                if agent_faces._catalogue().colours[index].weight == weight
             )
             for weight in (1, 2, 4)
         }
@@ -120,6 +134,98 @@ def test_five_hundred_faces_are_distinct_at_twenty_pixels() -> None:
     assert set(mouths) == {"laugh", "smile", "soft-open"}
     assert 370 <= eyes["arc"] <= 380
     assert 290 <= mouths["laugh"] <= 310
+
+
+@pytest.mark.asyncio
+async def test_manifest_change_keeps_existing_layer_ids_and_rendered_bytes(
+    db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant = await make_tenant(db_session)
+    avatar = await get_or_create_avatar(
+        db_session, tenant_id=tenant.id, agent_name="Analyst", face_enabled=True
+    )
+    assert avatar.face_combo is not None
+    stored = encode_combo(avatar.face_combo)
+    old_stored = json.dumps({"v": 2, "variant": json.loads(stored)["variant"][:6]})
+    png = avatar.png
+    token = avatar.token
+    original_layer_dir = agent_faces._LAYER_DIR
+    for asset in original_layer_dir.glob("*.png"):
+        os.link(asset, tmp_path / asset.name)
+    manifest = json.loads((original_layer_dir / "manifest.json").read_text())
+    manifest["colours"].reverse()
+    for colour in manifest["colours"]:
+        colour["weight"] = 1 if colour["weight"] == 4 else 4
+    for layer in manifest["layers"]:
+        if layer["id"] == "base":
+            layer["retired"] = True
+        if layer["id"] == "eyes-arc":
+            layer["retired"] = True
+        if layer["id"] == "eyes-plain":
+            layer["weight"] = 1
+    base_hash = next(layer["sha256"] for layer in manifest["layers"] if layer["id"] == "base")
+    plain_hash = next(
+        layer["sha256"] for layer in manifest["layers"] if layer["id"] == "eyes-plain"
+    )
+    manifest["layers"].insert(
+        1,
+        {
+            "id": "eyes-new",
+            "file": "eyes-plain.png",
+            "sha256": plain_hash,
+            "kind": "eyes",
+            "weight": 99,
+            "retired": False,
+            "width": 0.47,
+            "cy": 0.345,
+        },
+    )
+    manifest["layers"].insert(
+        0,
+        {
+            "id": "base-v2",
+            "file": "base.png",
+            "sha256": base_hash,
+            "kind": "base",
+            "weight": 1,
+            "retired": False,
+        },
+    )
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    with monkeypatch.context() as patch:
+        patch.setattr(agent_faces, "_LAYER_DIR", tmp_path)
+        agent_faces._catalogue.cache_clear()
+        agent_faces._assets.cache_clear()
+        agent_faces.thumbnail.cache_clear()
+        try:
+            restored = decode_combo(stored)
+            assert encode_combo(restored) == stored
+            assert render(restored, 512) == png
+            assert render(decode_combo(old_stored), 512) == png
+            fetched = await get_or_create_avatar(
+                db_session, tenant_id=tenant.id, agent_name="Analyst", face_enabled=True
+            )
+            assert fetched.token == token
+            assert fetched.png == png
+            assert fetched.face_combo is not None
+            assert encode_combo(fetched.face_combo) == stored
+            reset = await reset_avatar(
+                db_session, tenant_id=tenant.id, agent_name="Analyst", face_enabled=True
+            )
+            assert reset.png == png
+            assert reset.face_combo is not None
+            assert encode_combo(reset.face_combo) == stored
+            assert all(combo[1] != "arc" for combo in candidates("next-agent", 48))
+            assert all(combo[6] == "base-v2" for combo in candidates("next-agent", 48))
+            (tmp_path / "base.png").unlink()
+            (tmp_path / "base.png").write_bytes(b"changed base")
+            agent_faces._catalogue.cache_clear()
+            with pytest.raises(ValueError, match="face layer bytes changed"):
+                agent_faces._catalogue()
+        finally:
+            agent_faces._catalogue.cache_clear()
+            agent_faces._assets.cache_clear()
+            agent_faces.thumbnail.cache_clear()
 
 
 @pytest.mark.asyncio

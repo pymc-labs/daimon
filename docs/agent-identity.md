@@ -186,9 +186,12 @@ Named-agent routing is tracked separately from this identity work.
   yellow and lime. Candidates are compared as 20 px circular thumbnails against
   existing faces in the tenant; hue is spread against previously assigned faces
   and the built-in Daimon before expression distance.
-  The selected combination and PNG are stored together, so later agents do not
-  change earlier assignments. Reset renders the same combination with a new
-  token. The built-in agent keeps its fixed classic platform avatar.
+  The layer files, their hashes, and draw weights are listed in the package's
+  face manifest. The selected layer IDs, including the base, and PNG are stored
+  together, so later catalogue edits
+  do not change earlier assignments. Retired layers stay available to render
+  stored variants. Reset renders the same combination with a new token. The
+  built-in agent keeps its fixed classic platform avatar.
 - With the switch off, no default row is created by message posting. The legacy
   initials generator remains available to callers that explicitly request it.
 - Served publicly by the MCP service at `/avatars/{token}/{sha256[:12]}.png`

@@ -1,0 +1,832 @@
+{
+  "schema": 1,
+  "draw": {
+    "headwear_share": 0.2,
+    "shades_share": 0.1,
+    "colour_group_targets": {
+      "bright": 0.05,
+      "other": 0.25,
+      "favoured": 0.7
+    }
+  },
+  "classic": {
+    "colour": "bg-00",
+    "eyes": "eyes-arc",
+    "mouth": "mouth-laugh",
+    "hat": "hat-none",
+    "eyewear": "eyewear-none",
+    "brows": "brows-default",
+    "base": "base"
+  },
+  "colours": [
+    {
+      "id": "bg-00",
+      "hex": "#7AB8D6",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 0,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-01",
+      "hex": "#7FA8E0",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 1,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-02",
+      "hex": "#9ED8C3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 2,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-03",
+      "hex": "#F2B66B",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 3,
+      "group": "other"
+    },
+    {
+      "id": "bg-04",
+      "hex": "#B9A8E3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 4,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-05",
+      "hex": "#F5D76E",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 5,
+      "group": "bright"
+    },
+    {
+      "id": "bg-06",
+      "hex": "#F6C9A8",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 6,
+      "group": "other"
+    },
+    {
+      "id": "bg-07",
+      "hex": "#A7C98A",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 7,
+      "group": "bright"
+    },
+    {
+      "id": "bg-08",
+      "hex": "#9AA8D8",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 8,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-09",
+      "hex": "#E8D7A6",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 9,
+      "group": "bright"
+    },
+    {
+      "id": "bg-10",
+      "hex": "#8FC4A8",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 10,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-11",
+      "hex": "#8FD0E6",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 11,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-12",
+      "hex": "#C9B6E4",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 12,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-13",
+      "hex": "#F0A97A",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 13,
+      "group": "other"
+    },
+    {
+      "id": "bg-14",
+      "hex": "#B5D88A",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 14,
+      "group": "bright"
+    },
+    {
+      "id": "bg-15",
+      "hex": "#A9C2E8",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 15,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-16",
+      "hex": "#E7A1B0",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 16,
+      "group": "other"
+    },
+    {
+      "id": "bg-17",
+      "hex": "#7FC7C0",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 17,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-18",
+      "hex": "#D9C27A",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 18,
+      "group": "bright"
+    },
+    {
+      "id": "bg-19",
+      "hex": "#B7B7E9",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 19,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-20",
+      "hex": "#F2C5D3",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 20,
+      "group": "other"
+    },
+    {
+      "id": "bg-21",
+      "hex": "#9CCB6E",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 21,
+      "group": "bright"
+    },
+    {
+      "id": "bg-22",
+      "hex": "#D7A4E0",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 22,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-23",
+      "hex": "#7FB6A0",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 23,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-24",
+      "hex": "#6FA8DC",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 24,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-25",
+      "hex": "#F4B183",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 25,
+      "group": "other"
+    },
+    {
+      "id": "bg-26",
+      "hex": "#C5E0B4",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 26,
+      "group": "bright"
+    },
+    {
+      "id": "bg-27",
+      "hex": "#FFD966",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 27,
+      "group": "bright"
+    },
+    {
+      "id": "bg-28",
+      "hex": "#B4A7D6",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 28,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-29",
+      "hex": "#EA9999",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 29,
+      "group": "other"
+    },
+    {
+      "id": "bg-30",
+      "hex": "#76A5AF",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 30,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-31",
+      "hex": "#D5A6BD",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 31,
+      "group": "other"
+    },
+    {
+      "id": "bg-32",
+      "hex": "#A4C2F4",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 32,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-33",
+      "hex": "#B6D7A8",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 33,
+      "group": "bright"
+    },
+    {
+      "id": "bg-34",
+      "hex": "#F9CB9C",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 34,
+      "group": "other"
+    },
+    {
+      "id": "bg-35",
+      "hex": "#8E7CC3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 35,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-36",
+      "hex": "#D38982",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 36,
+      "group": "other"
+    },
+    {
+      "id": "bg-37",
+      "hex": "#D39782",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 37,
+      "group": "other"
+    },
+    {
+      "id": "bg-38",
+      "hex": "#D3A482",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 38,
+      "group": "other"
+    },
+    {
+      "id": "bg-39",
+      "hex": "#D3B282",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 39,
+      "group": "other"
+    },
+    {
+      "id": "bg-40",
+      "hex": "#D3BF82",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 40,
+      "group": "bright"
+    },
+    {
+      "id": "bg-41",
+      "hex": "#D3CD82",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 41,
+      "group": "bright"
+    },
+    {
+      "id": "bg-42",
+      "hex": "#CDD382",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 42,
+      "group": "bright"
+    },
+    {
+      "id": "bg-43",
+      "hex": "#BFD382",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 43,
+      "group": "bright"
+    },
+    {
+      "id": "bg-44",
+      "hex": "#B2D382",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 44,
+      "group": "bright"
+    },
+    {
+      "id": "bg-45",
+      "hex": "#A4D382",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 45,
+      "group": "bright"
+    },
+    {
+      "id": "bg-46",
+      "hex": "#97D382",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 46,
+      "group": "bright"
+    },
+    {
+      "id": "bg-47",
+      "hex": "#89D382",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 47,
+      "group": "bright"
+    },
+    {
+      "id": "bg-48",
+      "hex": "#82D389",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 48,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-49",
+      "hex": "#82D397",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 49,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-50",
+      "hex": "#82D3A4",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 50,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-51",
+      "hex": "#82D3B2",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 51,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-52",
+      "hex": "#82D3BF",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 52,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-53",
+      "hex": "#82D3CD",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 53,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-54",
+      "hex": "#82CDD3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 54,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-55",
+      "hex": "#82BFD3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 55,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-56",
+      "hex": "#82B2D3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 56,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-57",
+      "hex": "#82A4D3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 57,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-58",
+      "hex": "#8297D3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 58,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-59",
+      "hex": "#8289D3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 59,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-60",
+      "hex": "#8982D3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 60,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-61",
+      "hex": "#9782D3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 61,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-62",
+      "hex": "#A482D3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 62,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-63",
+      "hex": "#B282D3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 63,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-64",
+      "hex": "#BF82D3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 64,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-65",
+      "hex": "#CD82D3",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 65,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-66",
+      "hex": "#D382CD",
+      "weight": 4,
+      "retired": false,
+      "legacy_index": 66,
+      "group": "favoured"
+    },
+    {
+      "id": "bg-67",
+      "hex": "#D382BF",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 67,
+      "group": "other"
+    },
+    {
+      "id": "bg-68",
+      "hex": "#D382B2",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 68,
+      "group": "other"
+    },
+    {
+      "id": "bg-69",
+      "hex": "#D382A4",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 69,
+      "group": "other"
+    },
+    {
+      "id": "bg-70",
+      "hex": "#D38297",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 70,
+      "group": "other"
+    },
+    {
+      "id": "bg-71",
+      "hex": "#D38289",
+      "weight": 2,
+      "retired": false,
+      "legacy_index": 71,
+      "group": "other"
+    }
+  ],
+  "layers": [
+    {
+      "id": "base",
+      "file": "base.png",
+      "kind": "base",
+      "weight": 1,
+      "retired": false,
+      "sha256": "36ded614331ffc33681aaee3fb360249926a4bc5552c0a0a82d3bb76b50f4ce2"
+    },
+    {
+      "id": "eyes-arc",
+      "file": "eyes-arc.png",
+      "kind": "eyes",
+      "weight": 3,
+      "retired": false,
+      "width": 0.6072,
+      "cy": 0.345,
+      "sha256": "7376ad9d6b074bea761c30ae0116c3421d15a161388c15be4d1ffe33a3ff7abd"
+    },
+    {
+      "id": "eyes-plain",
+      "file": "eyes-plain.png",
+      "kind": "eyes",
+      "weight": 1,
+      "retired": false,
+      "width": 0.47,
+      "cy": 0.345,
+      "sha256": "1f7a7251a7ff3f4a5f8b3d16826afc05a5d36d95444a554b46d2706939a11fe7"
+    },
+    {
+      "id": "mouth-laugh",
+      "file": "mouth-laugh.png",
+      "kind": "mouth",
+      "weight": 6,
+      "retired": false,
+      "width": 0.4,
+      "top": 0.4,
+      "sha256": "2605df134490f56bbee1e1a925aa35b375f69a8087abe39231d0504f65317ae5"
+    },
+    {
+      "id": "mouth-smile",
+      "file": "mouth-smile.png",
+      "kind": "mouth",
+      "weight": 3,
+      "retired": false,
+      "width": 0.31,
+      "top": 0.4,
+      "sha256": "cc5539e8a11aacec1ee30dc54385eff423884eec2875b5dc948743a1a44e6061"
+    },
+    {
+      "id": "mouth-soft-open",
+      "file": "mouth-soft-open.png",
+      "kind": "mouth",
+      "weight": 1,
+      "retired": false,
+      "width": 0.26,
+      "top": 0.4,
+      "sha256": "001bc01fac73a86d7fd0628102e5e9c7e056c7faf980635aeae201ec438622b2"
+    },
+    {
+      "id": "brows-raised",
+      "file": "brows-raised.png",
+      "kind": "brows",
+      "weight": 1,
+      "retired": false,
+      "full": true,
+      "sha256": "2e595a144dc3347e741fd3f4e1fbbb8a01f6ccccae63134d8fe00b94671ba836"
+    },
+    {
+      "id": "brows-default",
+      "file": "brows-default.png",
+      "kind": "brows",
+      "weight": 3,
+      "retired": false,
+      "full": true,
+      "sha256": "0edae214d296d6c7eaef43601820386447187225070e151fb6e9d9a79934969a"
+    },
+    {
+      "id": "hat-none",
+      "file": null,
+      "kind": "hat",
+      "weight": 0,
+      "retired": false,
+      "legacy_index": 0
+    },
+    {
+      "id": "hat-hardhat-base",
+      "file": "hat-hardhat.png",
+      "kind": "hat",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 1,
+      "width": 0.58,
+      "bottom": 0.215,
+      "sha256": "22b382dbf34a6c9f7722843ed4316eac2795bc5347325698596f8be0819fb488"
+    },
+    {
+      "id": "hat-hardhat-orange",
+      "file": "hat-hardhat.png",
+      "kind": "hat",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 2,
+      "colour_override": "#F28C28",
+      "width": 0.58,
+      "bottom": 0.215,
+      "sha256": "22b382dbf34a6c9f7722843ed4316eac2795bc5347325698596f8be0819fb488"
+    },
+    {
+      "id": "hat-hardhat-white",
+      "file": "hat-hardhat.png",
+      "kind": "hat",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 3,
+      "colour_override": "#F4F4F0",
+      "width": 0.58,
+      "bottom": 0.215,
+      "sha256": "22b382dbf34a6c9f7722843ed4316eac2795bc5347325698596f8be0819fb488"
+    },
+    {
+      "id": "hat-beanie-base",
+      "file": "hat-beanie.png",
+      "kind": "hat",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 4,
+      "width": 0.58,
+      "bottom": 0.215,
+      "sha256": "881017d42fadbc8b4dd392d85a330591f23d62ae20ed1a83008e681dc383ca3f"
+    },
+    {
+      "id": "hat-beanie-blue",
+      "file": "hat-beanie.png",
+      "kind": "hat",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 5,
+      "colour_override": "#3E6FB0",
+      "width": 0.58,
+      "bottom": 0.215,
+      "sha256": "881017d42fadbc8b4dd392d85a330591f23d62ae20ed1a83008e681dc383ca3f"
+    },
+    {
+      "id": "hat-beanie-green",
+      "file": "hat-beanie.png",
+      "kind": "hat",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 6,
+      "colour_override": "#3F9E5A",
+      "width": 0.58,
+      "bottom": 0.215,
+      "sha256": "881017d42fadbc8b4dd392d85a330591f23d62ae20ed1a83008e681dc383ca3f"
+    },
+    {
+      "id": "hat-cap-base",
+      "file": "hat-cap.png",
+      "kind": "hat",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 7,
+      "width": 0.6,
+      "bottom": 0.215,
+      "sha256": "e45b6f436003c6183ca7d16de76b0c45503b0951d105649302dd6120eaffbacf"
+    },
+    {
+      "id": "hat-cap-red",
+      "file": "hat-cap.png",
+      "kind": "hat",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 8,
+      "colour_override": "#C23B3B",
+      "width": 0.6,
+      "bottom": 0.215,
+      "sha256": "e45b6f436003c6183ca7d16de76b0c45503b0951d105649302dd6120eaffbacf"
+    },
+    {
+      "id": "hat-cap-purple",
+      "file": "hat-cap.png",
+      "kind": "hat",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 9,
+      "colour_override": "#6A4BA8",
+      "width": 0.6,
+      "bottom": 0.215,
+      "sha256": "e45b6f436003c6183ca7d16de76b0c45503b0951d105649302dd6120eaffbacf"
+    },
+    {
+      "id": "hat-gradcap-base",
+      "file": "hat-gradcap.png",
+      "kind": "hat",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 10,
+      "width": 0.7,
+      "bottom": 0.215,
+      "sha256": "3f91c0d090fa1fa35fe4453cd0f1a8f5f3b0b5bf583323583cc4f4622cbfd4aa"
+    },
+    {
+      "id": "hat-headset-base",
+      "file": "hat-headset.png",
+      "kind": "hat",
+      "weight": 1,
+      "retired": false,
+      "legacy_index": 11,
+      "full": true,
+      "placement": [
+        29,
+        64
+      ],
+      "sha256": "966ce59b525099ad3b982120464ac3a9c2f040095ae79c61c5f23ce02dc1d1dc"
+    },
+    {
+      "id": "eyewear-none",
+      "file": null,
+      "kind": "eyewear",
+      "weight": 0,
+      "retired": false
+    },
+    {
+      "id": "eyewear-shades",
+      "file": "eyewear-shades.png",
+      "kind": "eyewear",
+      "weight": 1,
+      "retired": false,
+      "width": 0.64,
+      "cy": 0.345,
+      "sha256": "4e8c11ccc3f0b6a6f3de6e9396ad75b9a39a886d7828abc7b3005f5e05e3dcc0"
+    }
+  ]
+}
