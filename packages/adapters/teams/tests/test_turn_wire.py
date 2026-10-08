@@ -205,7 +205,7 @@ async def test_answer_replaces_the_status_card_in_the_conversation_it_came_from(
     ), "the answer replaces the card in place"
     assert answer.body["text"] == AGENT_TEXT, "the answer alone, no usage footer"
     assert "attachments" not in answer.body, "no card left under the answer"
-    assert _feedback(answer) == {"type": "default"}, "Teams' thumbs up and down"
+    assert _feedback(answer) == {"type": "custom"}, "Teams' thumbs, answered by our own form"
     assert "AIGeneratedContent" in str(answer.body["entities"]), "labelled AI generated"
 
 
@@ -309,7 +309,7 @@ async def test_long_answer_splits_into_ordered_parts_and_keeps_its_code_block_wh
     whole = [code in str(r.body["text"]) for r in parts]
     assert whole == [False, True, False], "the code block stays whole in one part"
     feedback = [_feedback(r) for r in parts]
-    assert feedback == [None, None, {"type": "default"}], "only the last part asks for feedback"
+    assert feedback == [None, None, {"type": "custom"}], "only the last part asks for feedback"
     labels = ["AIGeneratedContent" in str(r.body["entities"]) for r in parts]
     assert all(labels), "every part is labelled AI generated"
 

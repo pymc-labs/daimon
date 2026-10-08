@@ -8,6 +8,9 @@ once the post lands, so a failed post loses nothing. Requests go to
 `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`: a Teams channel (`19:…`) gets a post
 from this bot, any other id is a Discord channel posted to with the Discord
 bot token. `enabled` decides whether the command is registered at all.
+
+The same post path carries a tenant's routed 👎 forms (`routes_feedback`,
+`feedback`), which spend no credit.
 """
 
 from __future__ import annotations
@@ -16,9 +19,9 @@ import secrets
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
-from urllib.parse import quote
 
 import structlog
+from daimon.adapters.teams.answer_access import AnswerPlace
 from daimon.adapters.teams.card_actions import (
     FAILED,
     button,
@@ -66,6 +69,8 @@ __all__ = [
     "VERB",
     "SupportCommand",
     "enabled",
+    "post_to_support_channel",
+    "routes_feedback",
 ]
 
 log = structlog.get_logger(__name__)
@@ -98,13 +103,23 @@ def enabled(settings: Settings) -> bool:
     return _teams_channel(channel) or settings.discord is not None
 
 
+def routes_feedback(settings: Settings, tenant_id: uuid.UUID) -> bool:
+    """Whether this tenant's submitted 👎 forms also go to the escalation channel.
+
+    Off unless the tenant turned it on and the channel is reachable from here,
+    as for `enabled`; credits play no part, since a form spends none.
+    """
+    channel = settings.support.escalation_channel_id
+    if channel is None or settings.support.routes_feedback(tenant_id) is not True:
+        return False
+    return _teams_channel(channel) or settings.discord is not None
+
+
 def _link(asked: TeamsInbound) -> str:
     """A link to the message `support` was typed in; the 1:1 chat has none to share."""
     if asked.kind == "dm":
         return _DM_LINK
-    channel, _, root = asked.conversation_id.partition(";messageid=")
-    query = f"tenantId={asked.entra_tenant_id}" + (f"&parentMessageId={root}" if root else "")
-    return f"https://teams.microsoft.com/l/message/{quote(channel)}/{asked.activity_id}?{query}"
+    return AnswerPlace(asked.conversation_id, asked.activity_id, True).link(asked.entra_tenant_id)
 
 
 @dataclass(frozen=True)
@@ -225,7 +240,7 @@ class SupportCommand:
             return OUT_OF_CREDITS
         who = f"{asked.user_name or 'Someone'} (Teams user {asked.user_id})"
         body = f"**Human support requested** by {who}\n{asked.link}\n\n{note}"
-        delivered = await self._post(body)
+        delivered = await post_to_support_channel(runtime, self._direct, body)
         if delivered:
             async with runtime.sessionmaker.begin() as session:
                 await mark_delivered(session, escalation_id=row.id)
@@ -234,26 +249,29 @@ class SupportCommand:
             return RECORDED_UNDELIVERED
         return received_text(remaining=await self._remaining(tenant_id, asked.user_id))
 
-    async def _post(self, body: str) -> bool:
-        """Post `body` to the escalation channel; False when it did not land."""
-        settings = self._runtime.settings
-        channel = settings.support.escalation_channel_id
-        try:
-            if channel is None or (_teams_channel(channel) and self._direct is None):
-                return False
-            if _teams_channel(channel) and self._direct is not None:
-                await self._direct.post(channel, body)
-                return True
-            if settings.discord is None:
-                return False
-            token = settings.discord.bot_token.get_secret_value()
-            response = await self._runtime.http_client.post(
-                f"{_DISCORD_API}/channels/{channel}/messages",
-                headers={"Authorization": f"Bot {token}"},
-                json={"content": body[:2000], "allowed_mentions": {"parse": []}},
-            )
-            response.raise_for_status()
-            return True
-        except TEAMS_SEND_ERRORS as exc:
-            log.warning("support.channel_undeliverable", err_type=type(exc).__name__)
+
+async def post_to_support_channel(
+    runtime: TeamsRuntime, direct: DirectChats | None, body: str
+) -> bool:
+    """Post `body` to the escalation channel; False when it did not land."""
+    settings = runtime.settings
+    channel = settings.support.escalation_channel_id
+    try:
+        if channel is None or (_teams_channel(channel) and direct is None):
             return False
+        if _teams_channel(channel) and direct is not None:
+            await direct.post(channel, body)
+            return True
+        if settings.discord is None:
+            return False
+        token = settings.discord.bot_token.get_secret_value()
+        response = await runtime.http_client.post(
+            f"{_DISCORD_API}/channels/{channel}/messages",
+            headers={"Authorization": f"Bot {token}"},
+            json={"content": body[:2000], "allowed_mentions": {"parse": []}},
+        )
+        response.raise_for_status()
+        return True
+    except TEAMS_SEND_ERRORS as exc:
+        log.warning("support.channel_undeliverable", err_type=type(exc).__name__)
+        return False

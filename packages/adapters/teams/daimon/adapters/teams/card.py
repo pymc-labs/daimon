@@ -4,7 +4,8 @@ The status card says what Discord's and Slack's say, in the words of
 `daimon.core.turn.status_lines`: a Thinking or Working headline with the
 elapsed time, the turn's tool lines, the latest draft, and a Cancel button.
 The answer replaces the card as plain markdown messages: a card TextBlock
-renders no code blocks, a message does.
+renders no code blocks, a message does. Its last message carries Teams' 👍/👎
+(`rated`, answered by `feedback`).
 """
 
 from __future__ import annotations
@@ -148,6 +149,12 @@ def notice_card(text: str, *, actions: Sequence[ExecuteAction] = ()) -> MessageA
 ANSWERED_BELOW = "✅ Done. The answer is below."
 
 
+def rated(message: MessageActivityInput) -> MessageActivityInput:
+    """Teams' 👍/👎 on `message`. Custom mode: a click asks daimon for the dialog,
+    so a 👎 gets the reasons Teams' built-in form has no room for."""
+    return message.add_feedback("custom")
+
+
 def answer_message(
     text: str, *, is_last: bool, mention: Account | None = None
 ) -> MessageActivityInput:
@@ -160,4 +167,4 @@ def answer_message(
         tag = f"<at>{(mention.name or 'you').replace('<', '').replace('>', '')}</at>"
         message.text = f"{tag}\n\n{text}"
         message.add_entity(MentionEntity(mentioned=mention, text=tag))
-    return message.add_feedback() if is_last else message
+    return rated(message) if is_last else message

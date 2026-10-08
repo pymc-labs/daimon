@@ -33,7 +33,7 @@ from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
 from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.externals import ExternalParticipants, MemberFacts
-from daimon.adapters.teams.feedback import record_feedback
+from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, TeamsFeedback
 from daimon.adapters.teams.help import send_help
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TimedSender
@@ -70,12 +70,10 @@ from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, TeamGroups
 from daimon.core.teams_sharepoint import SharePoint
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from microsoft_teams.api import MessageSubmitActionInvokeActivity
 from microsoft_teams.api.auth.cloud_environment import PUBLIC
-from microsoft_teams.apps import ActivityContext, App, FastAPIAdapter
+from microsoft_teams.apps import App, FastAPIAdapter
 from microsoft_teams.common import Client, ClientOptions
 from microsoft_teams.common.http import MiddlewareContext, MiddlewareNext
-from sqlalchemy.exc import SQLAlchemyError
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 MAX_TEAMS_HTTP_BODY_BYTES = 64 * 1024
@@ -373,14 +371,7 @@ def create_teams_http_service(
         ),
     )
 
-    async def handle_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity]) -> None:
-        try:
-            await record_feedback(
-                runtime.sessionmaker, ctx.activity, configured_tenant=settings.tenant_id
-            )
-        except SQLAlchemyError:
-            log.exception("teams.feedback.failed")
-
+    feedback = TeamsFeedback(runtime, direct)
     teams_app.on_message(turns.handle_message)
     teams_app.on_install_add(installs.on_install)
     teams_app.on_install_remove(installs.on_uninstall)
@@ -409,7 +400,9 @@ def create_teams_http_service(
     teams_app.on_dialog_submit(CHANNEL_DIALOG, channel_settings.on_submit)
     teams_app.on_dialog_open(CREDENTIAL_DIALOG, turns.credentials.on_dialog_open)
     teams_app.on_dialog_submit(credential_requests.SUBMIT, turns.credentials.on_dialog_submit)
-    teams_app.on_message_submit_feedback(handle_feedback)
+    teams_app.on_message_fetch_task(feedback.on_fetch)
+    teams_app.on_dialog_submit(FEEDBACK_DIALOG, feedback.on_submit)
+    teams_app.on_message_submit_feedback(feedback.on_builtin)
     teams_app.on_file_consent(turns.outputs.handle_consent)
     if settings.public_url is not None:
 
