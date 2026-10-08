@@ -457,7 +457,10 @@ never drives the stream, so the inline hook never fires for it.
 tick it lists Managed Agents sessions, skips any without a `daimon_tenant`
 stamp, belonging to a tenant this deployment does not own, or stamped
 `daimon_billing_exempt`, and replays the rest's `span.model_request_end`
-events through the same recorder. After a successful pass, it skips event
+events through the same recorder. It requests only that event type and skips
+events already in `usage_events` before writing, so a session that is fully
+metered costs one query and a read of its model calls, not a write per call.
+After a successful pass, it skips event
 reads for sessions last updated before that pass started minus 15 minutes.
 The watermark stays in scheduler memory; startup and hourly passes read all
 stamped sessions, and a failed pass leaves the watermark in place. It is safe to run
