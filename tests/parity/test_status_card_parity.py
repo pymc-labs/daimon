@@ -49,7 +49,7 @@ def _discord_lines() -> list[str]:
     return [
         data.title,
         "Details",
-        *(data.details or "").splitlines(),
+        *((data.details or "").replace("`", "").splitlines()),
         data.description.removeprefix("> "),
     ]
 
@@ -67,7 +67,7 @@ def _slack_lines() -> list[str]:
         elif block["type"] == "context":
             text = block["elements"][0]["text"]
             if text.startswith("*Details*"):
-                lines.extend(text.replace("*", "").splitlines())
+                lines.extend(text.replace("*", "").replace("`", "").splitlines())
     return lines
 
 
