@@ -9,6 +9,7 @@ import asyncio
 import dataclasses
 import functools
 import json
+import re
 import uuid
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
@@ -17,10 +18,13 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from daimon.adapters.teams import billing_panel
 from daimon.adapters.teams.billing_panel import (
     ADMIN_ONLY,
     ENTER_CODE,
+    LOOKUP_ADMIN_ONLY,
     NOT_CONFIGURED,
+    PICK_A_PERSON,
     REDEEM_ADMIN_ONLY,
     UNKNOWN_AMOUNT,
     channel_labels,
@@ -55,12 +59,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    CHANNEL_ID,
     CONVERSATION_ID,
+    DIRECT_CHAT_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     TeamsApiFake,
     build_teams_runtime,
     make_card_action,
+    make_channel_activity,
     make_message_activity,
     post_activity,
     running_service,
@@ -75,9 +82,10 @@ def _running(
     db_factory: async_sessionmaker[AsyncSession],
     fake: TeamsApiFake,
     mcp: httpx.MockTransport | None = None,
+    admins: tuple[str, ...] = (AAD_OBJECT_ID,),
 ) -> AbstractAsyncContextManager[TeamsHttpService]:
     """An admin (AAD_OBJECT_ID) and a member (OTHER_AAD_OBJECT_ID); `mcp` fakes checkout."""
-    settings = teams_settings(admins=(AAD_OBJECT_ID,))
+    settings = teams_settings(admins=admins)
     client = None if mcp is None else httpx.AsyncClient(transport=mcp)
     runtime = build_teams_runtime(db_factory, teams=settings, http_client=client)
     runtime.settings.mcp.app_root_url = "https://mcp.example"
@@ -325,6 +333,121 @@ async def test_the_admin_card_names_top_spenders_and_channels(
     assert channels == {"19:research@thread.tacv2": "Research"}, "a listed channel name is stored"
 
 
+async def test_billing_typed_in_a_channel_shows_its_budget_on_every_click_of_its_typer(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with db_session_factory.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None
+        await make_channel_budget(session, tenant=tenant, platform="teams", channel_id=CHANNEL_ID)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        await post_activity(service, make_channel_activity(text="billing"))
+        async with asyncio.timeout(10):
+            while not (
+                chat := [r for r in teams_api_fake.activity_requests if DIRECT_CHAT_ID in r.url]
+            ):
+                await asyncio.sleep(0.01)
+        card = json.dumps(chat[0].body, ensure_ascii=False)
+        found = re.search(r'"place": "([^"]+)"', card)
+        assert found is not None, "the card's buttons carry the channel's token"
+        refreshed = json.dumps(await post_activity(service, _click("refresh", place=found[1])))
+        forged = json.dumps(
+            await post_activity(
+                service, _click("refresh", user=OTHER_AAD_OBJECT_ID, place=found[1])
+            )
+        )
+        in_chat = await _command(service, teams_api_fake, AAD_OBJECT_ID)
+
+    assert '"This channel"' in card and "of $5.00 used this month" in card, "its budget"
+    assert '"This channel"' in refreshed, "a refresh keeps the channel it was asked in"
+    assert '"Billing"' in forged and '"This channel"' not in forged, (
+        "someone else's click gets their own panel, naming no channel"
+    )
+    assert '"This channel"' not in in_chat, "typed in the chat, there is no channel"
+
+
+async def test_one_persons_billing_commands_never_drop_anothers_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tokens are held per person: only the typer's own older tokens make way.
+
+    Both are admins, whose cards carry the token on their buttons.
+    """
+    monkeypatch.setattr(billing_panel, "_MAX_PLACES", 1)
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with db_session_factory.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None
+        await make_channel_budget(session, tenant=tenant, platform="teams", channel_id=CHANNEL_ID)
+    admins = (AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID)
+
+    def direct() -> list[Any]:
+        return [r for r in teams_api_fake.activity_requests if DIRECT_CHAT_ID in r.url]
+
+    async with _running(db_session_factory, teams_api_fake, admins=admins) as service:
+        places: list[str] = []
+        for n, user in enumerate((AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID)):
+            activity = make_channel_activity(
+                text="billing", activity_id=f"b-{n}", aad_object_id=user
+            )
+            await post_activity(service, activity)
+            async with asyncio.timeout(10):
+                while len(chat := direct()) <= n:
+                    await asyncio.sleep(0.01)
+            found = re.search(r'"place": "([^"]+)"', json.dumps(chat[n].body))
+            assert found is not None, "the card's buttons carry the channel's token"
+            places.append(found[1])
+        mine = json.dumps(await post_activity(service, _click("refresh", place=places[0])))
+        dropped, kept = [
+            json.dumps(
+                await post_activity(service, _click("refresh", user=OTHER_AAD_OBJECT_ID, place=p))
+            )
+            for p in places[1:]
+        ]
+
+    assert '"This channel"' in mine, "another person's commands left the first typer's channel"
+    assert '"This channel"' not in dropped, "the second person's older token made way"
+    assert '"This channel"' in kept, "their newest token is held"
+
+
+async def test_an_admin_looks_up_a_person_with_the_people_picker(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    picked, idle = str(uuid.UUID(int=7)), str(uuid.UUID(int=8))
+    async with db_session_factory.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None
+        await record_teams_installation(
+            session, tenant_id=tenant_id, team_id=TEAM_A, group_id="g", name="A"
+        )
+        await make_usage_event(session, tenant=tenant, platform_user_id=picked, input_tokens=9000)
+    teams_api_fake.names[picked] = "Maya *Chen*"
+    teams_api_fake.absent.add(idle)
+
+    async with _running(db_session_factory, teams_api_fake) as service:
+        admin = await _command(service, teams_api_fake, AAD_OBJECT_ID)
+        found = json.dumps(await post_activity(service, _click("lookup", person=picked.upper())))
+        nobody = json.dumps(await post_activity(service, _click("lookup", person=idle)))
+        member = await post_activity(
+            service, _click("lookup", user=OTHER_AAD_OBJECT_ID, person=picked)
+        )
+        empty = await post_activity(service, _click("lookup"))
+        member_card = await _command(service, teams_api_fake, OTHER_AAD_OBJECT_ID)
+
+    assert '"dataset": "graph.microsoft.com/users"' in admin, "the picker searches the directory"
+    assert "Maya \\\\*Chen\\\\*" in found and "this month" in found, "their name and spend"
+    assert "Name unavailable" in nobody and "Nothing used this month" in nobody, (
+        "someone never named to us, who used nothing"
+    )
+    assert member["value"] == LOOKUP_ADMIN_ONLY, "a forwarded admin card reads nothing for a member"
+    assert empty["value"] == PICK_A_PERSON, "a click without a pick asks for one"
+    assert "Look up a person" not in member_card, "a member is not offered the picker"
+
+
 async def test_a_message_remembers_its_senders_name(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -497,8 +620,8 @@ def test_the_admin_card_is_sections_set_apart_with_the_total_biggest() -> None:
         "$20.00 on {{DATE(2026-01-20T00:00:00Z, SHORT)}}",
     ], "soonest first, hidden until Expiry dates is pressed"
     titles = [action["title"] for action in actions["actions"]]
-    assert titles == ["Add credit", "Expiry dates"]
-    add, toggle = actions["actions"]
+    assert titles == ["Add credit", "Expiry dates", "Look up a person"]
+    add, toggle, _ = actions["actions"]
     assert add["type"] == "Action.ShowCard"
     amounts = add["card"]["body"][0]
     assert amounts["type"] == "ColumnSet" and len(amounts["columns"]) == 4
@@ -519,7 +642,7 @@ def test_redeem_code_is_offered_only_while_a_code_is_redeemable() -> None:
             "actions"
         ]
     ]
-    assert titles == ["Add credit", "Redeem code"]
+    assert titles == ["Add credit", "Redeem code", "Look up a person"]
 
 
 def test_the_member_card_shows_own_use_and_asks_an_admin_for_credit() -> None:

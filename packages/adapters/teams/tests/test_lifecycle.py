@@ -396,6 +396,51 @@ def _card_text(sender: FakeSender, index: int) -> str:
     return json.loads(_card_json(sender, index))["attachments"][0]["content"]["body"][0]["text"]
 
 
+def _rated(activity: MessageActivityInput) -> bool:
+    data = activity.channel_data
+    return (
+        data is not None and data.feedback_loop is not None and data.feedback_loop.type == "custom"
+    )
+
+
+def _asks(sender: FakeSender, index: int) -> bool:
+    return card.ASK_HUMAN_DIALOG in _card_json(sender, index)
+
+
+@pytest.mark.parametrize("ask_human", [True, False])
+async def test_the_last_answer_part_carries_feedback_and_ask_a_human_when_support_is_on(
+    ask_human: bool,
+) -> None:
+    """As on Slack: Ask a human sits on the final answer, beside the 👍/👎."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender, ask_human=ask_human)
+    await lifecycle.on_terminal_success(_answer("x" * (card.TEAMS_LIMIT + 10)))
+
+    first, last = sender.activities[-2:]
+    assert not _rated(first) and not _asks(sender, -2), "earlier parts carry no controls"
+    assert _rated(last), "the 👍/👎 open daimon's own form"
+    assert _asks(sender, -1) is ask_human, "the button only when support is on"
+    assert last.text and last.text.startswith("x"), "the answer stays markdown text"
+    assert await lifecycle.append_to_answer("Saved to this channel's files:")
+    assert _asks(sender, -1) is ask_human and _rated(sender.activities[-1]), "edits keep both"
+
+
+async def test_a_tool_only_turn_carries_the_controls_and_a_cancelled_one_none() -> None:
+    """#428's rule: a finished tool-only turn is an answer; a cancelled turn is not."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender, ask_human=True)
+    tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
+    await lifecycle.on_terminal_success(TurnState(content=[tool]))
+    assert _rated(sender.activities[-1]) and _asks(sender, -1), "✅ Done can be rated"
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert _rated(sender.activities[-1]) and _asks(sender, -1), "an edit keeps the controls"
+
+    sender = FakeSender()
+    lifecycle = await _posted(sender, ask_human=True)
+    await lifecycle.on_terminal_success(TurnState())
+    assert not _rated(sender.activities[-1]) and not _asks(sender, -1), "cancelled: nothing"
+
+
 async def test_failure_closes_the_card_with_the_termination_notice_once() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import daimon.core.here_card as here_card_module
 import pytest
@@ -22,6 +22,7 @@ from daimon.core.roster import Roster, RosterAgent
 from daimon.core.rule_views import RuleViewer
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfig, TenantConfigRow
 from daimon.core.stores.domain import McpOAuthGrantRow
+from daimon.core.stores.platform_names import KnownName
 
 TENANT = uuid.uuid4()
 SETTER = uuid.uuid4()
@@ -552,3 +553,78 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
     assert unknown.set_by_label == "unknown"
     assert "set by" not in unknown.text
     assert "<@123>" not in unknown.text
+
+
+async def test_loader_names_a_teams_setter_from_the_stored_name_never_a_mention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Teams has no `<@id>` mention: the setter is named from their stored name."""
+    entra_id = str(uuid.UUID(int=7))
+    channel = "19:ops@thread.tacv2"
+    monkeypatch.setattr(
+        here_card_module, "load_access_policy", AsyncMock(return_value=TenantAccessPolicy())
+    )
+    monkeypatch.setattr(here_card_module, "load_rule_viewer", AsyncMock(return_value=None))
+    responder = RosterAgent(
+        name="helper", ma_agent_id="agent-id", model_id="test-model", is_built_in=False
+    )
+    monkeypatch.setattr(
+        here_card_module, "load_roster", AsyncMock(return_value=Roster(answering=responder))
+    )
+    monkeypatch.setattr(
+        here_card_module.scoped_config_read,
+        "resolve",
+        AsyncMock(return_value=ResolvedConfig(agent_name="helper", agent_name_tier="channel")),
+    )
+    row = ChannelConfigRow(
+        tenant_id=TENANT,
+        channel_id=channel,
+        agent_name="helper",
+        agent_name_set_by_account_id=SETTER,
+        agent_name_set_at=NOW,
+    )
+    monkeypatch.setattr(
+        here_card_module.scoped_config_read, "get_scope", AsyncMock(return_value=row)
+    )
+    monkeypatch.setattr(
+        here_card_module, "load_agent_details", AsyncMock(return_value=_details("helper"))
+    )
+    monkeypatch.setattr(
+        here_card_module,
+        "get_setup_agent",
+        AsyncMock(return_value=SimpleNamespace(name="helper", metadata={})),
+    )
+    monkeypatch.setattr(
+        here_card_module.agent_mcp_credentials, "list_credentials", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(here_card_module, "get_binding", AsyncMock(return_value=None))
+    teams_lookup = AsyncMock(return_value=entra_id)
+    monkeypatch.setattr(here_card_module, "get_teams_principal_for_account", teams_lookup)
+    stored = AsyncMock(return_value={entra_id: KnownName(display_name="Ada <Lovelace>")})
+    monkeypatch.setattr(here_card_module, "get_user_names", stored)
+
+    async def load() -> str:
+        card = await load_here_card(
+            MagicMock(),
+            MagicMock(),
+            tenant_id=TENANT,
+            platform="teams",
+            channel_id=channel,
+            thread_id=f"{channel};messageid=1",
+            default=DeploymentDefault(agent_name="other"),
+            github=GitHubDeploymentFacts(has_fallback_pat=False, app_configured=False),
+            public_mcp_url=None,
+            is_admin=False,
+            caller_account_id=None,
+        )
+        # The compact card text omits provenance; the structured facts keep it.
+        return card.set_by_label or ""
+
+    named = await load()
+    stored.return_value = {}
+    unnamed = await load()
+
+    assert named == "Ada ‹Lovelace›", "the stored name, made inert, names the setter"
+    teams_lookup.assert_awaited_with(ANY, account_id=SETTER)
+    assert unnamed == "unknown", "someone never named to us reads unknown"
+    assert entra_id not in named + unnamed, "the Entra object id never reaches the card"

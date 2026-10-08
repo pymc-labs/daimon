@@ -25,6 +25,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also posted once to the channel Ask a human uses, with the person, the agent,
   the reasons, the text and a link to the answer. The form tells the person
   it is shared.
+- **Teams feedback catches up with Slack.** 👎 on a Teams answer now opens a
+  "What went wrong?" form with the same reasons and optional text, and 👍 is
+  acknowledged. Only people who could start a turn at the answer can vote.
+  `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` now covers Teams: a submitted form is
+  posted once to the support channel, spending no credit. With support set
+  up, answers carry an Ask a person button that opens the support form for
+  that answer. Turns that only ran tools get both on their finished card;
+  cancelled turns get neither.
+- **Teams support requests reach a channel's own admins first.** As on Slack
+  and Discord, a request asked from a Teams channel with channel admins now
+  goes to them in 1:1 chats, then to the organisation's admins, and to the
+  support channel only when no chat landed. Only people who could start a
+  turn in that channel can ask from it. A channel read only from inside
+  is marked in the request and in a routed 👎 form, and the form warns that
+  the note leaves the channel.
+- **Add skill in the Teams setup panel.** An agent's Details in `setup` now
+  has an Add skill button, as on Discord and Slack. Its dialog takes a pasted
+  SKILL.md, previews its name, description, files and any scripts, and adds
+  it as the agent's own skill when sent again unchanged. The same people may
+  add as on the other platforms, re-checked on every step. Teams dialogs take
+  no files, so a `.zip` is attached in a message and added from chat.
+- **Channel skills in the Teams Channel settings dialog.** Server admins can
+  now see a channel's extra skills in its Channel settings dialog, add one by
+  name, `agent/name` or skill id, and tick skills to remove them, as Who
+  answers where offers on Discord and Slack. The same core checks decide
+  which skills a channel may add, refusals say why, and every save is
+  audited. A channel's own admins still can't change them.
+- **Teams channel reads link files.** `read_channel`, `read_thread`,
+  `get_message` and `search_messages` now return each file on a message with
+  a download link where the channel's SharePoint site is granted, as Slack
+  reads do, so an agent can open a file it finds there. Only files in the
+  channel's own Files folder are linked: the site grant ignores SharePoint's
+  per-file permissions, so a file from another library or folder, and any
+  file elsewhere, is still listed by name. Links last about an hour and only
+  come with messages the read already returns, so a sealed thread's files
+  stay out. Each file is now an object with `name` and `url`, not a name.
 - Agent setup uses short Picture labels on Slack and Discord. Discord Change opens a file upload form; the attachment option on `/agent-setup` remains available.
 - Status cards and follow-up prompts use short labels on Discord, Slack and Teams. Working cards show Stop, tool steps sit under Details, and finished Discord and Slack cards show time, cost, tokens and balance under Details for everyone. Error, stop, restart and post-failure notices show a clear next step. Feedback and help forms use the same short wording across platforms. Threads whose channel responder changed offer Switch to the new agent and a new-thread hint; staying with the old agent in that thread is not a supported action.
 - **Teams files in private and shared channels, turned on by asking.** The
@@ -46,6 +82,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub App grants can be staged and activated per agent. App sessions use per-turn repository tokens and a session-owned vault; legacy agents retain their existing GitHub path. The GitHub connection page offers Select all for repos the confirmer administers, and the default environment includes `gh`.
 
 - `/here` on Discord and Slack shows a compact, private status card: which agent answers here, its reading scope and whether publishing needs approval. When nothing can answer (no channel access, replies disabled, no agent selected) the card shows only that reason. Credential names and routing details stay off the card; the `where_am_i` MCP tool returns the same short summary for conversational questions, with the full structured facts alongside. Discord read and scoped search tools explain when the bot lacks channel view or message history access.
+- **`here` on Teams.** Typed in a channel post, `here` answers in the 1:1
+  chat with the same compact card as Discord and Slack for that post's
+  thread: who answers, what it can read and whether publishing needs
+  approval. Typed in the chat it describes the chat, or the setup
+  conversation it is in. Only the place it was typed in counts as one the
+  caller can see. The `where_am_i` MCP tool now answers in Teams channel
+  turns too, and its facts name a Teams setter by stored name.
+- **Teams `memory` shows the agent where it was typed.** Typed in a channel
+  post, `memory` now lists what that post's agent remembers, following a
+  thread handed to another agent, instead of the 1:1 chat's agent. The answer
+  still arrives in the 1:1 chat, so when the channel's readers are limited
+  (`inside` or `own`) the card says the memory is kept inside the channel and
+  shows nothing, rather than carry it out. Typed in the chat it is
+  unchanged.
+- **Teams `billing` shows the channel's budget.** Typed in a channel with a
+  budget, `billing` adds the **This channel** section the Discord and Slack
+  panels show, worded from its state, and keeps it across Refresh, Add credit
+  and Redeem code clicks on the card. The channel is held server-side for the
+  person who typed the command, so a crafted click cannot read another
+  channel's budget; after a restart a refresh drops the section until
+  `billing` is typed again.
+- **Look up a person on the Teams billing card.** Admins get a **Look up a
+  person** action with the Teams people picker over the organisation's
+  directory. Picking someone shows their spend and turn count this month
+  under the actions, with the name daimon stored for them, or "Name
+  unavailable" for someone it has never seen. Admin is checked again on the
+  click, as on Discord and Slack.
 
 - Slack message reads and searches include file metadata and expiring download links. `send_message` uploads staged file handles, or reposts a file link from the same workspace when the requester can read the file where it was shared and the channel policy lets the call read it there; a file in a sealed thread is reposted only into that thread, and a file shared only in a 1:1 DM only into a DM. `add_skill` applies the same check to a Slack file link. A caption is required, the combined limit is ten files, and posting needs the `files:write` scope. The upload messages are recorded with the caption, so the agent can delete them and `delete_thread` still accepts a thread whose files it posted. Slack thread reads return continuation cursors for newer replies.
 - A thread can move to another agent without opening a new thread. Ask the agent in the thread to hand it over (`hand_off_task`), or, when a channel's agent changed under an existing thread, press Hand over on the notice that thread shows (Discord, Slack and Teams). The new agent gets the conversation and working files from the next message, and the old session is archived with its history still readable. Inherited seals keep memory read-only. A member may hand a thread to an agent of that channel: the one it answers with, one pinned to it, or one of an isolated channel's own agents. Other agents need a server admin, or a channel admin of the channel when the thread is not sealed and the agent is one they could make its default.

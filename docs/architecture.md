@@ -662,7 +662,7 @@ shared agent carries one team's skill without every channel getting it.
 Server admins and operator tokens (`channels:write`) add and remove them,
 never a channel's own admins (`authorize(SET_CHANNEL_SKILLS)`), with the
 `*_channel_skill(s)` MCP tools, Who answers where in the Discord and Slack
-setup panels, or the CLI:
+setup panels (the Channel settings dialog on Teams), or the CLI:
 
 ```bash
 daimon channels skills list slack TEAM_ID [CHANNEL_ID]
@@ -1127,10 +1127,12 @@ admission before any of this runs.
   platform file URLs, size, and image content before replacing the public
   picture. Details keeps visibility and cache guidance off the main row.
 
-- **`/here`** in Discord and Slack reads routing and access policy, then shows
-  an ephemeral card built from `daimon.core.here_card`: who answers here,
+- **`/here`** in Discord and Slack, and `here` in Teams (answered in the 1:1
+  chat), reads routing and access policy, then shows a private card built from
+  `daimon.core.here_card`: who answers here,
   reading scope, and whether publishing needs approval. Discord uses an embed;
-  Slack uses Block Kit with a state colour and notes that threads can differ.
+  Slack uses Block Kit with a state colour and notes that threads can differ;
+  Teams uses an Adaptive Card.
   The card omits credential names, rule provenance, memory and session details.
   `where_am_i` returns the same short text plus the complete structured facts.
   The model does not compose either summary. `/agent-setup` and

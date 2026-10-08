@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import daimon.core.message_feedback
 from daimon.adapters.slack.feedback import handle_feedback_vote, run_feedback_text_submission
+from daimon.adapters.teams import card
 from daimon.core.slack_oauth import SLACK_BOT_SCOPES
 
 
@@ -51,4 +52,14 @@ def test_message_feedback_core_documents_the_per_platform_split() -> None:
     assert "Discord-only" not in doc, (
         "the module docstring must not still claim message feedback is Discord-only -- "
         "the Slack button path exists now"
+    )
+
+
+def test_teams_feedback_uses_the_native_custom_loop() -> None:
+    message = card.answer_message("done", is_last=True)
+    assert message.channel_data is not None
+    assert message.channel_data.feedback_loop is not None
+    assert message.channel_data.feedback_loop.type == "custom", (
+        "Teams answers carry Teams' own 👍/👎 with the reasons form behind 👎; "
+        "if that changed on purpose, update this record and the core docstring"
     )

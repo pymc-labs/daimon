@@ -8,7 +8,11 @@ named after the channel in the team site's default library. A shared file is
 found by its URL: the site, which must be the channel's own (the one stored
 when its files were turned on, else the team's), then the library whose URL
 prefixes it, then the item, whose short-lived `downloadUrl` is
-pre-authorised. Uploads never
+pre-authorised. A caller handing that URL to someone else passes the
+channel's Files folder: the site grant ignores SharePoint's per-item
+permissions, so only a file inside that folder, which the channel's members
+share, gets a URL, never one from a restricted library or folder elsewhere on
+the site. Uploads never
 overwrite (`conflictBehavior=rename`); one over `SIMPLE_UPLOAD_MAX` goes
 through an upload session, whose URL must be on SharePoint and gets no token.
 Any failure raises `GraphUnavailable`.
@@ -51,6 +55,8 @@ class _Model(BaseModel):
 
 class _Parent(_Model):
     drive_id: str | None = None
+    # Graph's path of the parent folder (`/drives/x/root:/General`); absent for a library's root.
+    path: str | None = None
 
 
 class DriveItem(_Model):
@@ -106,6 +112,8 @@ class SharePoint:
         self._team_sites: dict[str, str] = {}
         self._sites: dict[str, str] = {}
         self._drives: dict[str, list[_Drive]] = {}
+        # (drive id, folder id) -> the folder's Graph path, `None` for a library's root.
+        self._folder_paths: dict[tuple[str, str], str | None] = {}
 
     async def _team_site(self, group_id: str) -> str:
         if (site := self._team_sites.get(group_id)) is None:
@@ -186,11 +194,17 @@ class SharePoint:
         raise GraphUnavailable("empty upload")
 
     async def download_url(
-        self, content_url: str, *, group_id: str, site_id: str | None = None
+        self,
+        content_url: str,
+        *,
+        group_id: str,
+        site_id: str | None = None,
+        folder: DriveFolder | None = None,
     ) -> str:
         """The pre-authorised download URL of the shared file at `content_url`.
 
-        The file must be on the channel's site: `site_id`, else the team's.
+        The file must be on the channel's site: `site_id`, else the team's; and
+        inside `folder` when one is given.
         """
         # Teams sends the path unencoded: a `#` or `?` there is part of the file's name.
         url = _url(content_url.replace("#", "%23").replace("?", "%3F"))
@@ -215,14 +229,35 @@ class SharePoint:
         if site.casefold() != own_site.casefold():
             raise GraphUnavailable("not the channel's site", status=200)
         drive, relative = await self._library(site, url.path)
+        if folder is not None and drive != folder.drive_id:
+            raise GraphUnavailable("outside the channel's folder", status=200)
         path = "/".join(path_segment(part) for part in relative.split("/"))
         data = await self._graph.send(
             "GET", f"{GRAPH_ROOT}/drives/{path_segment(drive)}/root:/{path}"
         )
-        download = _parse(DriveItem, data).download_url
+        item = _parse(DriveItem, data)
+        # The site grant reads past per-item permissions: a file outside the channel's
+        # folder may be one its members cannot open, and the URL works for anyone.
+        if folder is not None and not is_inside(item, folder, await self._folder_path(folder)):
+            raise GraphUnavailable("outside the channel's folder", status=200)
+        download = item.download_url
         if download is None or not is_sharepoint_host(_url(download)):
             raise GraphUnavailable("no SharePoint download URL", status=200)
         return download
+
+    async def _folder_path(self, folder: DriveFolder) -> str | None:
+        key = (folder.drive_id, folder.item_id)
+        if key not in self._folder_paths:
+            drive, item_id = path_segment(folder.drive_id), path_segment(folder.item_id)
+            data = await self._graph.send("GET", f"{GRAPH_ROOT}/drives/{drive}/items/{item_id}")
+            item = _parse(DriveItem, data)
+            parent = item.parent_reference
+            if parent is not None and parent.path is not None and not item.name:
+                raise GraphUnavailable("folder without a name", status=200)
+            self._folder_paths[key] = (
+                None if parent is None or parent.path is None else f"{parent.path}/{item.name}"
+            )
+        return self._folder_paths[key]
 
     async def _site(self, host: str, site_path: str) -> str:
         key = f"{host}/{site_path}"
@@ -247,6 +282,18 @@ class SharePoint:
         if found is None:
             raise GraphUnavailable("no library holds the file", status=200)
         return found
+
+
+def is_inside(item: DriveItem, folder: DriveFolder, folder_path: str | None) -> bool:
+    """Whether `item` sits in `folder` (Graph path `folder_path`, `None` for a library's root)."""
+    parent = item.parent_reference
+    if parent is None or parent.drive_id != folder.drive_id:
+        return False
+    if folder_path is None:
+        return True
+    # SharePoint paths are case-insensitive; the `/` keeps `General 2` out of `General`.
+    path, root = (parent.path or "").casefold(), folder_path.casefold()
+    return path == root or path.startswith(f"{root}/")
 
 
 def file_link(name: str, web_url: str | None) -> str:

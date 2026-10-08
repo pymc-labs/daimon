@@ -16,13 +16,15 @@ from typing import Any, get_args
 import httpx
 import pytest
 from daimon.adapters.teams import card, memory, privacy_card, routines_card, setup_card
-from daimon.adapters.teams.billing_panel import checkout_card
+from daimon.adapters.teams.billing_panel import Lookup, checkout_card
 from daimon.adapters.teams.billing_panel import panel_card as billing_card
 from daimon.adapters.teams.credential_requests import credential_form, oauthdialog
 from daimon.adapters.teams.help import COMMAND_HELP, help_card
+from daimon.adapters.teams.here import here_card
 from daimon.adapters.teams.privacy_panel import NAME_MISMATCH
 from daimon.adapters.teams.setup_panel import GONE
 from daimon.adapters.teams.tool_confirmation import confirmation_adaptive_card
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import (
     AgentDetails,
@@ -38,12 +40,13 @@ from daimon.core.answering_map import (
     SetupThreadRef,
     TenantAnswer,
 )
-from daimon.core.billing_panel import BillingPanelState, MemberRow
+from daimon.core.billing_panel import BillingPanelState, MemberRow, lookup_line
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_repo_auth import RepoAccess
 from daimon.core.headless_runner import LAST_RESULT_TAIL_MAX
+from daimon.core.here_card import assemble_here_card
 from daimon.core.ma import SessionDeletionReport
 from daimon.core.mcp_auth import coding_tool_config
 from daimon.core.message_split import split_fenced
@@ -313,7 +316,8 @@ def _billing(*, is_admin: bool) -> AdaptiveCard:
             for index in range(10**3)
         ),
     )
-    return billing_card(state, since=NOW)
+    lookup = Lookup(name=EMOJI * 256, line=lookup_line(10.0**6, 10**6))
+    return billing_card(state, since=NOW, place="p" * 22, lookup=lookup)
 
 
 def _request(kind: str) -> CredentialRequestRow:
@@ -408,6 +412,20 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
         f"No memory at /memories/{EMOJI * 10_000}.md.", hint="Send memory to list paths."
     ),
     "help": lambda: help_card(COMMAND_HELP, bot=NAME),
+    "here": lambda: here_card(
+        assemble_here_card(
+            channel_id=f"19:{'x' * 120}@thread.tacv2",
+            platform="teams",
+            agent_name="*" * 1000,
+            tier="channel",
+            channel=None,
+            tenant=None,
+            configuration_target_name="_" * 1000,
+            set_by_label=EMOJI * 1000,
+            policy=TenantAccessPolicy(),
+            details=None,
+        )
+    ),
     **{
         f"posted_{kind}_{state}": lambda kind=kind, state=state: _posted(kind, state)
         for kind in ("env", "mcp", "mcp_oauth", "repo", "skill_repo")

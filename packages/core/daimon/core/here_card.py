@@ -41,7 +41,9 @@ from daimon.core.stores.domain import McpOAuthGrantRow, Platform
 from daimon.core.stores.identity import (
     get_discord_principal_for_account,
     get_slack_principal_for_account,
+    get_teams_principal_for_account,
 )
+from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.thread_agent_bindings import get_binding
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -215,6 +217,8 @@ def assemble_here_card(
     )
     visible = set(visible_channel_ids) if visible_channel_ids is not None else None
     stored_channel_rule = channel_rule(policy, channel_id)
+    # Slack keys a thread `channel:ts`; Discord and Teams by the thread's own id
+    # (for Teams its `19:…;messageid=<root>` conversation).
     thread_key = (
         (f"{channel_id}:{thread_id}" if platform == "slack" else thread_id)
         if thread_id is not None
@@ -376,6 +380,15 @@ def _short(value: str, limit: int = 120) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
+async def _stored_name(
+    session: AsyncSession, tenant_id: uuid.UUID, platform: Platform, user_id: str
+) -> str | None:
+    known = await get_user_names(
+        session, tenant_id=tenant_id, platform=platform, user_ids=[user_id]
+    )
+    return known[user_id].label if user_id in known else None
+
+
 async def load_here_card(
     session: AsyncSession,
     anthropic: AsyncAnthropic,
@@ -502,13 +515,21 @@ async def load_here_card(
         external_id = (
             await get_discord_principal_for_account(session, account_id=setter_account_id)
             if platform == "discord"
+            else await get_teams_principal_for_account(session, account_id=setter_account_id)
+            if platform == "teams"
             else await get_slack_principal_for_account(session, account_id=setter_account_id)
         )
         if external_id is not None:
-            if resolve_setter_display is None:
+            if resolve_setter_display is None and platform != "teams":
                 set_by_label = f"<@{external_id}>"
             else:
-                display = await resolve_setter_display(external_id)
+                # Teams renders no `<@id>` mention, and its id is an Entra object id:
+                # without a live lookup the setter gets the name their last message stored.
+                display = (
+                    await resolve_setter_display(external_id)
+                    if resolve_setter_display is not None
+                    else await _stored_name(session, tenant_id, platform, external_id)
+                )
                 if display:
                     set_by_label = _short(
                         display.replace("@", "＠")

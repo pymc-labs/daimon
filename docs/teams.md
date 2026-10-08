@@ -58,12 +58,33 @@ is supported; government and China clouds use other Bot Framework hosts.
 
 A turn shows one status card, edited in place, with a Cancel button only the
 author can use. The answer replaces the card, split across messages when long,
-with Teams' thumbs up/down feedback on the last one. Messages sent while a turn
+with feedback controls on the last one (below). Messages sent while a turn
 runs are queued and run as one follow-up per author. Work an agent hands off
 (`hand_off_task`) runs right after the turn that queued it; if admission
 refuses that work, it is dropped without a notice, as on Slack. Retried
 deliveries are deduplicated in memory only, so a retry that lands after a
 restart runs again.
+
+### Feedback and Ask a human
+
+The last part of an answer carries Teams' thumbs up/down. 👍 records the vote;
+👎 opens a "What went wrong?" form with optional reasons and text, at least one
+required. When support is set up the answer also has an Ask a person button
+that opens the `support` form for it, spending a credit, and the post links
+to the answer; asking again about the same answer spends nothing. A turn that only ran tools gets both on its finished card; a
+cancelled turn gets neither. Only people who could start a turn at that
+answer can vote or ask. With `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` on, each
+submitted 👎 form is posted once to the support channel without spending a
+credit, and the form says it is shared. Feedback text is never logged.
+
+Support requests route as on Slack and Discord. One asked from a channel with
+channel admins goes to those admins in 1:1 chats first, then to the
+organisation's admins, and to the support channel only when no chat landed;
+each recipient must be allowed by the DM policy and be on the channel's team
+roster. A request asked from a channel is open to those who could start a
+turn there. When the channel is read only from inside (`readers: inside`),
+the form warns that the note leaves it, and the request and any routed 👎
+form say so, so whoever picks it up answers in the channel.
 
 ### People from another organisation
 
@@ -115,18 +136,21 @@ details and Teams has no message only its sender sees. One typed in a channel
 is answered in the sender's 1:1 chat, opened if needed, with a short pointer
 in the channel; `new` there says each post is its own conversation. A message
 is a command only when it is the bare word (or `memory /<path>`); anything
-longer goes to the agent. None of them runs an agent turn.
+longer goes to the agent. A message that is exactly a command word runs the
+command, so a reply of just `here` shows the status card rather than reaching
+the agent. None of them runs an agent turn.
 
 | Command | Does |
 | --- | --- |
 | `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
 | `help` | List the commands. |
-| `setup` | Agents, their details and who answers where; create an agent, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
+| `setup` | Agents, their details and who answers where; create an agent, add a skill to one, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
+| `here` | The status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
-| `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
+| `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. Typed in a channel whose readers are limited, it says so instead, since the answer would leave the channel. |
 | `privacy` | See, export or delete what daimon stores about you. |
-| `billing` | Your usage this month and the credit left, with when timed credit expires; admins also see the month's spend, the top spenders and channel budgets, add credit and redeem promo codes. |
-| `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked. |
+| `billing` | Your usage this month and the credit left, with when timed credit expires, and, typed in a channel with a budget, that budget; admins also see the month's spend, the top spenders and channel budgets, add credit, redeem promo codes and look up one person's spend with the people picker. |
+| `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked; one from a channel with channel admins goes to them first (above). |
 
 A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
 setup conversation for the chosen agent, with its own session. The chat's
@@ -145,8 +169,10 @@ group ID in `role_ids` to admit that team's owners), channel budgets
 work as on Discord and Slack. Who answers where lists each channel's
 environment, and its **Channel settings** dialog changes one channel picked
 there, since the panel lives in the 1:1 chat: its environment (server admins,
-or that channel's admins), and its permissions (readers and writers) and admins by
-Entra object ID (server admins only). Channel rules work as on Discord and Slack,
+or that channel's admins), and its permissions (readers and writers), admins by
+Entra object ID and channel skills (server admins only). Channel skills are
+extra skills for whatever agent answers in that channel, added by name,
+`agent/name` or skill id and removed by ticking them, as on Discord and Slack. Channel rules work as on Discord and Slack,
 with `set_channel_rule` or `daimon channels rule set`. A thread (`;messageid=`)
 counts as its channel, and a channel's own agents send nothing to 1:1 chats. The
 CLI can't read channel names, so a copy it makes is named from the channel id.
@@ -243,7 +269,13 @@ A shared `.md` or `.zip` can become a skill: `add_skill(attachment_url=…)`
 takes its download link only over https from a SharePoint, OneDrive or Graph
 host, sends no token, refuses a redirect off those hosts, and checks the
 file's name before reading its capped body, with the usual preview and
-confirmation card.
+confirmation card. **Add skill** on an agent's Details in `setup` takes a
+pasted SKILL.md (up to 4,000 characters; a dialog has no file input), shows
+what it holds, and adds it on a second Send as the agent's own skill, under
+Discord's and Slack's rule: an admin for any agent, a channel admin for one
+that answers only in their channels, anyone for one nobody else uses. The
+panel is outside every channel, so a pinned agent needs an admin of every
+channel it is pinned to.
 
 ### Channel files (optional)
 
@@ -313,7 +345,13 @@ registration:
   works. The caller must be on the channel's roster; a private or shared
   channel is read only from a turn inside it. Graph has no message search for
   an app, so `search_messages` scans recent posts, bounded, and says when it
-  stopped short. A 1:1 chat cannot be read back.
+  stopped short. A 1:1 chat cannot be read back. A message's files come with
+  a download link where the channel's site is granted and the file is in the
+  channel's own Files folder, else by name: the site grant ignores
+  SharePoint's per-file permissions, so a file from a restricted library or
+  folder elsewhere on the site is never linked. The link lasts about an hour
+  and anyone holding it can fetch the file, so only messages the read returns
+  get one.
 - **Posting.** `send_message` and `create_thread` (up to 6,000 characters,
   only into a conversation the requester belongs to). Files ride along: in a
   channel whose site is granted they are saved to its Files tab and linked; in

@@ -6499,8 +6499,8 @@
         publishing needs approval, or whose token or sign-in you hold. Never
         guess these facts from the conversation. Pass the parent channel id
         from turn controls and the current thread id when present. A bound
-        coding token can omit channel_id. Discord and Slack channel turns only.
-        Unknown visibility is reported as unknown.
+        coding token can omit channel_id. Discord, Slack and Teams channel turns
+        only. Unknown visibility is reported as unknown.
       ''',
       'parameters': dict({
         'additionalProperties': False,

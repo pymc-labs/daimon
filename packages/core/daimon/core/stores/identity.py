@@ -220,3 +220,21 @@ async def get_slack_principal_for_account(
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def get_teams_principal_for_account(
+    session: AsyncSession,
+    *,
+    account_id: uuid.UUID,
+) -> str | None:
+    """Return the Teams external_id (the Entra object id) for this account, or None.
+
+    Teams analog of get_slack_principal_for_account, for naming who set an
+    agent on the /here card.
+    """
+    stmt = select(PlatformPrincipal.external_id).where(
+        PlatformPrincipal.account_id == account_id,
+        PlatformPrincipal.platform == "teams",
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()

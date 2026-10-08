@@ -1,0 +1,53 @@
+{
+  "type": "invoke",
+  "channelId": "msteams",
+  "id": "f:00000000-0000-4000-8000-000000000001",
+  "serviceUrl": "https://smba.trafficmanager.net/amer/00000000-0000-0000-0000-000000000001/",
+  "channelData": {
+    "tenant": {
+      "id": "00000000-0000-0000-0000-000000000001"
+    },
+    "source": {
+      "name": "message"
+    },
+    "legacy": {
+      "replyToId": "1:1synthetic-legacy-reply-id"
+    }
+  },
+  "from": {
+    "id": "29:1synthetic-user-mri",
+    "name": "Ada Lovelace",
+    "aadObjectId": "00000000-0000-0000-0000-000000000002"
+  },
+  "recipient": {
+    "id": "28:bot-client-id",
+    "name": "daimon"
+  },
+  "conversation": {
+    "id": "a:conversation-1",
+    "conversationType": "personal",
+    "tenantId": "00000000-0000-0000-0000-000000000001"
+  },
+  "entities": [
+    {
+      "locale": "en-US",
+      "country": "US",
+      "platform": "Web",
+      "timezone": "America/Los_Angeles",
+      "type": "clientInfo"
+    }
+  ],
+  "value": {
+    "actionName": "feedback",
+    "actionValue": {
+      "reaction": "dislike",
+      "feedback": "{\"reasons\":\"inaccurate,too_slow\",\"text\":\"The totals are off.\"}"
+    }
+  },
+  "name": "message/submitAction",
+  "timestamp": "2026-01-07T06:04:59.89Z",
+  "localTimestamp": "2026-01-06T22:04:59.89-08:00",
+  "replyToId": "1700000000100",
+  "locale": "en-US",
+  "localTimezone": "America/Los_Angeles"
+}

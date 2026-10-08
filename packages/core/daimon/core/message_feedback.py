@@ -38,6 +38,8 @@ Slack callers. `tests/parity/test_message_feedback_discord_only.py` is the
 executable record of that split -- it fails if reactions:read quietly appears
 or the Slack button surface disappears. Agent-initiated direct messages now
 require im:write separately; that scope does not change feedback capture.
+Teams needs neither: its own custom feedback loop puts 👍/👎 under every
+answer and opens the reasons form from the 👎 (`daimon.adapters.teams.feedback`).
 """
 
 from __future__ import annotations
