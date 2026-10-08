@@ -110,11 +110,20 @@ async def upload_agent_avatar(
     if not await _may_edit(
         interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=True
     ):
-        return "Only a server admin can change a live agent's avatar.", None
-    if (
-        attachment.size > MAX_UPLOAD_BYTES
-        or not (attachment.content_type or "").startswith("image/")
-        or not _trusted_attachment_url(attachment.url)
+        return "Only admins can change this agent's picture. Ask an admin to change it.", None
+    if attachment.size > MAX_UPLOAD_BYTES:
+        await _audit(
+            runtime,
+            tenant_id=tenant_id,
+            user_id=interaction.user.id,
+            change=True,
+            outcome="error",
+            reason="invalid_image",
+            agent_name=agent_name,
+        )
+        return "That picture is too big. Choose one up to 2 MB.", None
+    if not (attachment.content_type or "").startswith("image/") or not _trusted_attachment_url(
+        attachment.url
     ):
         await _audit(
             runtime,
@@ -125,14 +134,16 @@ async def upload_agent_avatar(
             reason="invalid_image",
             agent_name=agent_name,
         )
-        return "Attach one PNG, JPG, GIF, or WebP image of at most 2 MB.", None
+        return "We couldn't use that picture. Use PNG, JPG, GIF or WebP.", None
     try:
         async with asyncio.timeout(15):
             body = await attachment.read()
         if len(body) > MAX_UPLOAD_BYTES:
             raise ValueError("attachment exceeds 2 MB")
         png = await asyncio.to_thread(normalize_avatar_image, body)
-    except (aiohttp.ClientError, discord.HTTPException, TimeoutError, ValueError):
+    except (aiohttp.ClientError, discord.HTTPException, TimeoutError):
+        return "We couldn't read that file. Upload it again.", None
+    except ValueError:
         await _audit(
             runtime,
             tenant_id=tenant_id,
@@ -142,11 +153,11 @@ async def upload_agent_avatar(
             reason="invalid_image",
             agent_name=agent_name,
         )
-        return "I could not use that image. Attach one PNG, JPG, GIF, or WebP under 2 MB.", None
+        return "We couldn't use that picture. Use PNG, JPG, GIF or WebP.", None
     if not await _may_edit(
         interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=True
     ):
-        return "That agent is no longer available.", None
+        return "This agent is no longer available.", None
     async with runtime.sessionmaker.begin() as session:
         actor = await get_or_create_platform_principal(
             session,
@@ -171,7 +182,7 @@ async def upload_agent_avatar(
         reason="completed",
         agent_name=agent_name,
     )
-    return "Avatar changed. Platform caches can keep the previous image.", avatar
+    return "Picture changed.", avatar
 
 
 async def reset_agent_avatar(
@@ -190,7 +201,7 @@ async def reset_agent_avatar(
     if not await _may_edit(
         interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=False
     ):
-        return "Only a server admin can reset a live agent's avatar.", None
+        return "Only admins can change this agent's picture. Ask an admin to change it.", None
     async with runtime.sessionmaker.begin() as session:
         actor = await get_or_create_platform_principal(
             session,
@@ -213,4 +224,4 @@ async def reset_agent_avatar(
         reason="completed",
         agent_name=agent_name,
     )
-    return "Generated avatar restored. Platform caches can keep the previous image.", avatar
+    return "Default picture restored.", avatar

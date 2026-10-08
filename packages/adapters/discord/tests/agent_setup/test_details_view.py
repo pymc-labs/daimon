@@ -27,7 +27,9 @@ from daimon.adapters.discord.agent_setup.details_view import (
     SHOW_FEWER_LABEL,
     SHOW_MORE_LABEL,
     DetailsView,
+    PictureUploadModal,
     build_details_container,
+    picture_details_embed,
 )
 from daimon.adapters.discord.agent_setup.mcp_access import coding_tools_refusal
 from daimon.adapters.discord.agent_setup.state import PanelState
@@ -210,10 +212,11 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
         state, details, expanded_detail=None, is_admin=True, attribution=None, identity_enabled=True
     )
     assert any(isinstance(item, discord.ui.Thumbnail) for item in _walk(container))
-    assert "Avatars are public" in _container_text(container)
+    assert "Shown next to this agent's messages." in _container_text(container)
     assert {item.label for item in _walk(container) if isinstance(item, discord.ui.Button)} >= {
-        "Change avatar",
-        "Reset avatar",
+        "Change",
+        "Use default",
+        "Details",
     }
 
     member = build_details_container(
@@ -225,7 +228,7 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
         identity_enabled=True,
     )
     assert not any(
-        isinstance(item, discord.ui.Button) and item.label in {"Change avatar", "Reset avatar"}
+        isinstance(item, discord.ui.Button) and item.label in {"Change", "Use default"}
         for item in _walk(member)
     )
     built_in = build_details_container(
@@ -237,7 +240,7 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
         is_builtin=True,
         identity_enabled=True,
     )
-    assert "Avatars are public" not in _container_text(built_in)
+    assert "**Picture**" not in _container_text(built_in)
 
     disabled = build_details_container(
         state,
@@ -282,7 +285,7 @@ def test_managed_agent_details_hide_avatar_controls_even_if_roster_flag_is_false
     details = _details().model_copy(update={"daimon_managed": True})
     state = _state(details, account_id=account_id, is_admin=True)
     view = DetailsView(state, runtime=_make_runtime(settings=_mcp_settings()), allowed_user_id=42)
-    assert "Avatars are public" not in _container_text(view.children[0])
+    assert "**Picture**" not in _container_text(view.children[0])
 
 
 async def test_reset_avatar_button_updates_detail_image(
@@ -301,17 +304,35 @@ async def test_reset_avatar_button_updates_detail_image(
     view.swap_to = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
     interaction = _admin_interaction()
 
-    reset_button = _find_button(view, "Reset avatar")
+    reset_button = _find_button(view, "Use default")
     assert reset_button.custom_id == "agent-setup:avatar-reset"
     await reset_button.callback(interaction)
     reset.assert_not_awaited()
     confirmation = view.swap_to.await_args.args[1]  # pyright: ignore[reportUnknownMemberType]
-    assert "Reset **research-bot**" in _container_text(confirmation.children[0])
+    assert "Use the default picture?" in _container_text(confirmation.children[0])
     confirmation.swap_to = AsyncMock()
-    await _find_button(confirmation, "Reset avatar").callback(interaction)
+    await _find_button(confirmation, "Use default").callback(interaction)
     reset.assert_awaited_once()
     assert state.avatar_urls[details.name].endswith("/avatars/new-token/abcdef123456.png")  # type: ignore[union-attr]
     confirmation.swap_to.assert_awaited_once()
+
+
+async def test_change_picture_opens_file_modal(account_id: uuid.UUID) -> None:
+    details = _details()
+    state = _state(details, account_id=account_id, is_admin=True)
+    view = DetailsView(state, runtime=_make_runtime(settings=_mcp_settings()), allowed_user_id=42)
+    interaction = _admin_interaction()
+    interaction.response.send_modal = AsyncMock()
+
+    await _find_button(view, "Change").callback(interaction)
+
+    modal = interaction.response.send_modal.await_args.args[0]
+    assert isinstance(modal, PictureUploadModal)
+    assert isinstance(modal.file_input, discord.ui.FileUpload)
+    assert modal.file_input.required
+    assert picture_details_embed().to_dict()["fields"][0]["value"] == (
+        "Anyone who sees a message can open the picture."
+    )
 
 
 # ---------------------------------------------------------------------------

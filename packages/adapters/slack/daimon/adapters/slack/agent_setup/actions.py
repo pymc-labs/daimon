@@ -678,9 +678,18 @@ async def _dispatch_panel_action(
             trigger_id=trigger_id,
             view=panel_views.build_avatar_upload_form(
                 meta=meta.with_view(
-                    "avatar_upload", agent_name=meta.agent_name, root_view_id=view_id
+                    "avatar_upload",
+                    agent_name=meta.agent_name,
+                    root_view_id=meta.root_view_id or view_id,
                 )
             ),
+        )
+        return
+
+    if action_id == panel_views.ACTION_AVATAR_DETAILS:
+        await client.views_push(  # pyright: ignore[reportUnknownMemberType]
+            trigger_id=trigger_id,
+            view=panel_views.build_avatar_details_view(meta=meta),
         )
         return
 

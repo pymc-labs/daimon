@@ -484,14 +484,15 @@ def test_details_avatar_row_and_admin_controls() -> None:
     )
     assert ACTION_AVATAR_CHANGE in json.dumps(admin)
     assert ACTION_AVATAR_RESET in json.dumps(admin)
-    assert "Avatars are public" in _joined(admin)
+    assert "Shown next to this agent's messages." in _joined(admin)
+    assert "Anyone who sees a message" not in _joined(admin)
     reset_button = next(
         element
         for block in admin["blocks"]
         for element in block.get("elements", [])
         if element.get("action_id") == ACTION_AVATAR_RESET
     )
-    assert reset_button["confirm"]["confirm"]["text"] == "Reset"
+    assert reset_button["confirm"]["confirm"]["text"] == "Use default"
     member = build_details_view(
         _details(name="research-bot"),
         meta=_meta(),
@@ -525,8 +526,7 @@ def test_details_avatar_row_and_admin_controls() -> None:
         avatar_url=avatar_url,
         avatar_editable=False,
     )
-    assert "*Avatar*" not in _joined(built_in)
-    assert "Avatars are public" not in _joined(built_in)
+    assert "*Picture*" not in _joined(built_in)
     assert ACTION_AVATAR_CHANGE not in json.dumps(built_in)
 
 
