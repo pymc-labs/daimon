@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discord restart recovery does not replace an uneditable orphan card. Aged intents stop blocking channel tidy only after a definite recovery failure; a periodic pass revisits them. The bot deletes a known stale card only while it still carries that turn's pending button. Missing messages no longer count as failed deletes, while unknown webhooks do.
 - Discord keeps a pending turn-card intent when recovery cannot edit its webhook card or an unprompted turn cannot delete its card, instead of retiring an unresolved card.
 - Discord picture upload retry expires cleanly, and a completed upload still succeeds if its setup panel was dismissed.
+- The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
 - Agents can offer an admin a private GitHub connect link bound to the current agent; members can record a setup request. `/github connect` is available in Discord and Slack with a private button. Self-serve links activate only agents with no saved GitHub key, working repo or skill repo, and no channel pin. An operator can issue an agent-bound CLI link for a saved-key agent; it stages an update that requires **Update and restart chats**. New selections default to **Read and write**: push branches, open issues and pull requests. **Read only** reads code, issues and pull requests.
