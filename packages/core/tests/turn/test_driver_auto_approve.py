@@ -26,7 +26,13 @@ from daimon.testing.turn_fakes import (
     YieldEvent,
 )
 
-from .conftest import make_agent_message, make_end_turn, make_requires_action, make_status_idle
+from .conftest import (
+    make_agent_message,
+    make_end_turn,
+    make_requires_action,
+    make_status_idle,
+    make_tool_confirmation,
+)
 
 _FROZEN_NOW = datetime(2026, 4, 21, 12, 0, 0, tzinfo=UTC)
 _EXEMPT = BillingExempt(reason="cli-operator-run")
@@ -147,6 +153,8 @@ async def test_auto_approve_ends_turn_when_all_requested_ids_already_confirmed()
                     stop_reason=make_requires_action(event_ids=["tu_1"]),
                 )
             ),
+            # MA took the allow, then asked for the same id again.
+            YieldEvent(make_tool_confirmation(event_id="sevt_c1", tool_use_id="tu_1")),
             YieldEvent(
                 make_status_idle(
                     event_id="sevt_2",
@@ -184,11 +192,17 @@ async def test_auto_approve_dedups_across_a_reconnect() -> None:
     ra_idle = make_status_idle(
         event_id="sevt_2", stop_reason=make_requires_action(event_ids=["tu_1", "tu_2"])
     )
+    took = [
+        make_tool_confirmation(event_id="sevt_c1", tool_use_id="tu_1"),
+        make_tool_confirmation(event_id="sevt_c2", tool_use_id="tu_2"),
+    ]
     fa.beta.sessions.events.stream_scripts = [
-        [YieldEvent(pre), YieldEvent(ra_idle)],  # confirms, then exhausts -> clean close
+        [YieldEvent(pre), YieldEvent(ra_idle)],  # confirms -> clean close
         [YieldEvent(ra_idle)],  # reopened stream re-delivers the SAME idle live
     ]
-    fa.beta.sessions.events.replay_events = [pre, ra_idle]
+    # The replay shows MA took both confirmations, so the re-delivered idle
+    # is a real re-ask.
+    fa.beta.sessions.events.replay_events = [pre, ra_idle, *took]
     fa.beta.sessions.retrieve_statuses = ["running"]
     lc = RecordingLifecycle()
 
