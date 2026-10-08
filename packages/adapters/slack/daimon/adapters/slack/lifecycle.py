@@ -4,7 +4,7 @@ SlackTurnLifecycle receives SSE events from the turn driver, accumulates
 Block Kit state via the blockkit module, debounces chat.update at 5s,
 replaces the status message in-place on terminal success with overflow
 chunk support (final_ts widened to the last posted message), applies
-the cost/usage footer, and registers/deregisters its cancel Event
+the cost/usage Details, and registers/deregisters its cancel Event
 in the SlackApp registry.
 
 Design decisions:
@@ -145,7 +145,7 @@ class SlackTurnLifecycle:
 
     Accumulates Block Kit state from SSE events, debounces chat.update at
     _DEBOUNCE_S seconds, replaces the status message in-place on terminal
-    success, applies the cost/usage footer, and registers/deregisters the
+    success, applies the cost/usage Details, and registers/deregisters the
     cancel Event in the caller-supplied registry.
 
     Constructor args are all keyword-only (mirrors DiscordTurnLifecycle's
@@ -403,9 +403,9 @@ class SlackTurnLifecycle:
         """Fold accumulated token totals + priced cost onto the Block Kit state.
 
         Reconstructs a per-turn BetaManagedAgentsSpanModelUsage from the four
-        cache-split totals and prices it through cost_of, so the footer cost
+        cache-split totals and prices it through cost_of, so the displayed cost
         matches the billing ledger to the cent. An unpriced model yields None
-        cost — the footer omits the cost segment.
+        cost — Details omits the cost line.
         """
         t = state.usage_totals
         usage = BetaManagedAgentsSpanModelUsage(
@@ -566,9 +566,9 @@ class SlackTurnLifecycle:
         the user never saw.
         """
         # Transition to the DONE phase BEFORE rendering so to_blocks emits the
-        # terminal collapse (cost/usage footer, no cancel button) — matches the
+        # terminal collapse (cost/usage Details, no cancel button) — matches the
         # Discord parity reference. Without this the status would render as still
-        # running and the footer would never appear.
+        # running and the Details metrics would never appear.
         self._state = update(self._state, EmbedEvent(kind="done", label=""))
         self._apply_usage(state)
         await self._apply_balance()

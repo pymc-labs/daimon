@@ -98,34 +98,32 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
     """Render EmbedState into an EmbedData output shape.
 
     now: current monotonic time (pass time.monotonic() from caller).
-    Footer is only set on terminal phases (DONE, ERROR).
+    Terminal phases put time, cost, tokens and balance in Details.
     """
     color = _PHASE_COLOR[state.phase]
 
     if state.phase in _TERMINAL_PHASES:
-        # Terminal turns collapse to ONE line: the headline, tool lines and
-        # draft drop away, leaving just a summary in the footer. The green/red
-        # bar alone signals outcome — DONE shows no checkmark; ERROR keeps the
-        # ❌ + its reason so a failed turn still says why.
+        # Terminal turns drop the activity trail. The coloured edge signals
+        # outcome; metrics remain visible together in Details.
         elapsed = int(now - state.started_at) if now is not None else 0
         tokens = f"{_fmt_tokens(state.usage_in)} in / {_fmt_tokens(state.usage_out)} out"
-        parts = [state.agent_name, f"{elapsed}s"]
+        parts = [f"Time: {elapsed}s"]
         if state.cost_str is not None:
-            parts.append(state.cost_str)
+            parts.append(f"Cost: {state.cost_str}")
+        parts.append(f"Tokens: {tokens}")
         if state.balance_str is not None:
-            parts.append(state.balance_str)
-        summary = " · ".join(parts)
+            parts.append(f"Balance: {state.balance_str}")
         description = ""
         title = ""
-        details = f"Tokens: {tokens}"
+        details = "\n".join(parts)
         if state.phase is TurnPhase.ERROR:
-            footer = summary
+            footer = state.agent_name
             title = "Something went wrong."
             description = "Mention me to try again."
             if state.notice:
                 details = f"{state.notice}\n\n{details}"
         else:
-            footer = summary
+            footer = state.agent_name
         return EmbedData(
             phase=state.phase,
             title=title,

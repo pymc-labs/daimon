@@ -136,29 +136,34 @@ class TestToEmbedData:
         state = _make_state(phase=TurnPhase.DONE, agent_name="my-agent", started_at=100.0)
         data = to_embed_data(state, now=105.0)
         assert data.footer is not None
-        assert "5s" in data.footer
+        assert "Time: 5s" in data.details
         assert "my-agent" in data.footer
 
     def test_footer_set_on_error(self) -> None:
         state = _make_state(phase=TurnPhase.ERROR, agent_name="my-agent", started_at=0.0)
         data = to_embed_data(state, now=12.0)
         assert data.footer is not None
-        assert "12s" in data.footer
+        assert "Time: 12s" in data.details
         assert "my-agent" in data.footer
 
     def test_footer_format_with_cost(self) -> None:
-        state = _make_state(
-            phase=TurnPhase.DONE,
-            agent_name="Atlas",
-            started_at=0.0,
-            usage_in=1500,
-            usage_out=320,
-            cost_str="$0.04",
+        state = dataclasses.replace(
+            _make_state(
+                phase=TurnPhase.DONE,
+                agent_name="Atlas",
+                started_at=0.0,
+                usage_in=1500,
+                usage_out=320,
+                cost_str="$0.04",
+            ),
+            balance_str="$12.50 left",
         )
         data = to_embed_data(state, now=12.0)
         # Centered dot U+00B7
-        assert data.footer == "Atlas · 12s · $0.04"
-        assert data.details == "Tokens: 1.5k in / 320 out"
+        assert data.footer == "Atlas"
+        assert data.details == (
+            "Time: 12s\nCost: $0.04\nTokens: 1.5k in / 320 out\nBalance: $12.50 left"
+        )
 
     def test_footer_omits_cost_when_unpriced(self) -> None:
         state = _make_state(
@@ -170,8 +175,8 @@ class TestToEmbedData:
             cost_str=None,
         )
         data = to_embed_data(state, now=12.0)
-        assert data.footer == "Atlas · 12s"
-        assert data.details == "Tokens: 1.5k in / 320 out"
+        assert data.footer == "Atlas"
+        assert data.details == "Time: 12s\nTokens: 1.5k in / 320 out"
 
     def test_fmt_tokens_humanizes(self) -> None:
         assert _fmt_tokens(320) == "320", "sub-1000 counts render verbatim"
@@ -188,13 +193,15 @@ class TestToEmbedData:
         assert done.footer is not None and "✅" not in done.footer, (
             "the one-line summary lives in the footer; success path has no checkmark"
         )
-        assert done.footer.startswith("Atlas · 3s"), "footer leads with agent · elapsed"
+        assert done.footer == "Atlas"
+        assert done.details.startswith("Time: 3s")
 
     def test_error_collapses_to_footer_with_cross_and_reason(self) -> None:
         error = to_embed_data(_make_state(phase=TurnPhase.ERROR), now=3.0)
         assert error.title == "Something went wrong."
         assert error.description == "Mention me to try again."
-        assert error.footer is not None and error.footer.startswith("test-agent · 3s")
+        assert error.footer == "test-agent"
+        assert error.details.startswith("Time: 3s")
 
     def test_error_footer_renders_reason_and_summary(self) -> None:
         state = _make_state(
@@ -206,8 +213,8 @@ class TestToEmbedData:
             cost_str=None,
         )
         data = to_embed_data(dataclasses.replace(state, error_reason="rate limited"), now=3.0)
-        assert data.footer == "Atlas · 3s"
-        assert data.details == "Tokens: 100 in / 50 out"
+        assert data.footer == "Atlas"
+        assert data.details == "Time: 3s\nTokens: 100 in / 50 out"
 
     def test_update_carries_usage_fields_forward(self) -> None:
         state = _make_state(

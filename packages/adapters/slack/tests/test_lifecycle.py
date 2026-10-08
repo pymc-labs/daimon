@@ -162,7 +162,7 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     )
     await lc.post_initial()
     await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
-    assert _block_text(_last_update_blocks(fake_slack_web_client)).endswith("· $12.50 left")
+    assert _block_text(_last_update_blocks(fake_slack_web_client)).endswith("Balance: $12.50 left")
 
     async with db_session_factory() as s, s.begin():
         await set_funding_mode(s, tenant_id=tenant.id, funding_mode="operator_funded")
@@ -1821,9 +1821,9 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
         await lc.post_initial()
         await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
         footers[channel] = _block_text(_last_update_blocks(fake_slack_web_client))
-    assert footers["C1"].endswith("· $3.75 of channel budget left"), "the budget's remainder"
+    assert footers["C1"].endswith("Balance: $3.75 of channel budget left"), "the budget's remainder"
     for channel in ("C2", "C3", None):
-        assert footers[channel].endswith("· $11.25 left"), (
+        assert footers[channel].endswith("Balance: $11.25 left"), (
             f"{channel}: an inactive or missing budget shows the tenant balance"
         )
 

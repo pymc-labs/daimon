@@ -8,7 +8,22 @@
           dict({
             'color': 15548997,
             'description': 'Mention me to try again.',
-            'footer': 'Atlas · 15s · $0.003',
+            'fields': list([
+              tuple(
+                'Details',
+                list([
+                  'The turn ended unexpectedly.',
+                  'The conversation and its workspace are kept.',
+                  '**Next:** Send your message again. If it keeps happening, share the request id with an admin.',
+                  '`rid: 01TESTREQUESTID0000000000`',
+                  '',
+                  'Time: 15s',
+                  'Cost: $0.003',
+                  'Tokens: 500 in / 80 out',
+                ]),
+              ),
+            ]),
+            'footer': 'Atlas',
             'title': 'Something went wrong.',
           }),
         ]),
@@ -21,6 +36,8 @@
           dict({
             'color': 3447003,
             'description': None,
+            'fields': list([
+            ]),
             'footer': '0s',
             'title': 'Working on it…',
           }),
@@ -38,6 +55,14 @@
           dict({
             'color': 3447003,
             'description': None,
+            'fields': list([
+              tuple(
+                'Details',
+                list([
+                  '🖋️ Running a command',
+                ]),
+              ),
+            ]),
             'footer': '11s',
             'title': 'Working on it…',
           }),
@@ -49,7 +74,17 @@
           dict({
             'color': 5763719,
             'description': None,
-            'footer': 'Atlas · 11s · $0.008',
+            'fields': list([
+              tuple(
+                'Details',
+                list([
+                  'Time: 11s',
+                  'Cost: $0.008',
+                  'Tokens: 1.5k in / 320 out',
+                ]),
+              ),
+            ]),
+            'footer': 'Atlas',
             'title': None,
           }),
         ]),
@@ -66,6 +101,8 @@
           dict({
             'color': 3447003,
             'description': None,
+            'fields': list([
+            ]),
             'footer': '0s',
             'title': 'Working on it…',
           }),

@@ -197,23 +197,27 @@ class TestToBlocks:
 
     def test_done_state_has_cost_footer_context_block(self) -> None:
         """DONE state produces a trailing context block with the cost/usage summary."""
-        state = _make_state(
-            phase=TurnPhase.DONE,
-            agent_name="Atlas",
-            started_at=0.0,
-            usage_in=1500,
-            usage_out=320,
-            cost_str="$0.04",
+        state = replace(
+            _make_state(
+                phase=TurnPhase.DONE,
+                agent_name="Atlas",
+                started_at=0.0,
+                usage_in=1500,
+                usage_out=320,
+                cost_str="$0.04",
+            ),
+            balance_str="$12.50 left",
         )
         blocks = to_blocks(state, now=12.0)
         context_blocks = _find_blocks_by_type(blocks, "context")
         assert context_blocks, "DONE state must produce a context block"
         summary_text = context_blocks[-1]["elements"][0]["text"]
-        assert "Atlas" in summary_text, "the bot-header fallback must name the agent"
+        assert context_blocks[-2]["elements"][0]["text"] == "Atlas"
         customized = to_blocks(replace(state, header_customized=True), now=12.0)
-        assert "Atlas" not in customized[-1]["elements"][0]["text"]
-        assert "12s" in summary_text, "footer must contain elapsed time"
-        assert "$0.04" in summary_text, "footer must contain cost_str when set"
+        assert "Atlas" not in str(customized[-2:])
+        assert summary_text == (
+            "*Details*\nTime: 12s\nCost: $0.04\nTokens: 1.5k in / 320 out\nBalance: $12.50 left"
+        )
 
     def test_error_state_summary_context_has_cross_emoji_and_reason(self) -> None:
         """ERROR state's summary context block carries the cross emoji + the reason."""
@@ -225,7 +229,8 @@ class TestToBlocks:
         context_blocks = _find_blocks_by_type(blocks, "context")
         assert context_blocks, "ERROR state must produce a context block"
         summary_text = context_blocks[-1]["elements"][0]["text"]
-        assert summary_text == "Atlas · 5s"
+        assert summary_text == "*Details*\nTime: 5s\nTokens: 0 in / 0 out"
+        assert context_blocks[-2]["elements"][0]["text"] == "Atlas"
         assert blocks[0]["text"]["text"] == "Something went wrong."
 
     def test_no_block_contains_color_key(self) -> None:

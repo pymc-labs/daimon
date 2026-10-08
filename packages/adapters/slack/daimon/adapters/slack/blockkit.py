@@ -22,12 +22,12 @@ Status surface shape (non-terminal):
   actions  — Cancel button (action_id="cancel_turn"; style="danger"; no value)
 
 Terminal collapse (DONE/ERROR):
-  context  — {elapsed}s · {in} in / {out} out [· {cost}]
-             For ERROR: ❌ {reason} prepended
+  section  — outcome and retry step when needed
+  context  — Details: time, cost, tokens, balance
 
 No color field anywhere — blocks only, no attachments.
 Preview text entity-escaped via escape_mrkdwn (& first, then < >).
-Cost/usage footer on terminal.
+Terminal metrics stay visible in Details.
 """
 
 from __future__ import annotations
@@ -130,24 +130,20 @@ def to_blocks(
         - actions  : Cancel button  (action_id="cancel_turn", style="danger")
 
     Terminal (DONE / ERROR):
-        - context  : {elapsed}s · {in} in / {out} out [· {cost}]
-                     ERROR prepends ❌ {reason}, under a section with the
-                     termination notice when one was rendered
+        - context  : Details with time, cost, tokens and balance
+                     ERROR adds a separate notice section when available
         No actions block (cancel button removed on terminal).
     """
     if state.phase in _TERMINAL_PHASES:
-        # Terminal collapse: one summary context block only.
+        # Terminal collapse: outcome above, metrics grouped under Details.
         elapsed = int(now - state.started_at) if now is not None else 0
         tokens = f"{_fmt_tokens(state.usage_in)} in / {_fmt_tokens(state.usage_out)} out"
-        parts: list[str] = [f"{elapsed}s"]
-        if state.agent_name and not state.header_customized:
-            parts.insert(0, state.agent_name)
+        parts: list[str] = [f"Time: {elapsed}s"]
         if state.cost_str is not None:
-            parts.append(state.cost_str)
+            parts.append(f"Cost: {state.cost_str}")
+        parts.append(f"Tokens: {tokens}")
         if state.balance_str is not None:
-            parts.append(state.balance_str)
-        summary = " · ".join(parts)
-        summary_text = summary
+            parts.append(f"Balance: {state.balance_str}")
         blocks: list[dict[str, Any]] = []
         if state.phase is TurnPhase.ERROR:
             blocks.append(
@@ -166,10 +162,17 @@ def to_blocks(
         elif not answer_visible and state.text_preview is None:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "Done."}})
         blocks.append({"type": "divider"})
+        if state.agent_name and not state.header_customized:
+            blocks.append(
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": state.agent_name}]}
+            )
+        details_label = "" if state.phase is TurnPhase.ERROR and state.notice else "*Details*\n"
         blocks.append(
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": f"Details · {tokens}"}]}
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": details_label + "\n".join(parts)}],
+            }
         )
-        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": summary_text}]})
         return blocks
 
     # Non-terminal: the headline, the tool lines, then the latest draft.

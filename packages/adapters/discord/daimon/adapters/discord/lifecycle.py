@@ -328,10 +328,10 @@ class DiscordTurnLifecycle:
 
         Reconstructs a per-turn ``BetaManagedAgentsSpanModelUsage`` from the four
         cache-split totals and prices it through the same ``cost_of`` the billing
-        ledger uses, so the footer cost matches the ledger to the cent. The
+        ledger uses, so the Details cost matches the ledger to the cent. The
         displayed input count stays merged (input + cache_creation + cache_read);
         only the cost math is stage-split, inside ``cost_of``. An unpriced model
-        yields ``cost_of`` -> None -> ``cost_str`` None -> footer omits the cost.
+        yields ``cost_of`` -> None -> ``cost_str`` None -> Details omits the cost.
         """
         t = state.usage_totals
         usage = BetaManagedAgentsSpanModelUsage(
