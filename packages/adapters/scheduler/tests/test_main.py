@@ -1934,6 +1934,36 @@ async def test_run_loops_ends_when_a_usage_pass_crashes() -> None:
     )
 
 
+async def test_run_loops_ends_when_a_tick_crashes() -> None:
+    """A tick crash stops the scheduler and cancels a usage pass in flight."""
+    pass_cancelled = asyncio.Event()
+
+    async def crashing_tick() -> None:
+        await asyncio.sleep(0)
+        raise RuntimeError("unexpected tick failure")
+
+    async def endless_pass() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass_cancelled.set()
+            raise
+
+    async with asyncio.timeout(5):
+        with pytest.raises(ExceptionGroup) as raised:
+            await _run_loops(
+                tick=crashing_tick,
+                usage_sweep=endless_pass,
+                interval_s=0.01,
+                stop_event=asyncio.Event(),
+            )
+
+    assert raised.group_contains(RuntimeError, match="unexpected tick failure"), (
+        "the tick's error propagates out of the loops"
+    )
+    assert pass_cancelled.is_set(), "the usage pass in flight is cancelled"
+
+
 @pytest.mark.parametrize(
     ("policy_sql", "expected_error"),
     [
