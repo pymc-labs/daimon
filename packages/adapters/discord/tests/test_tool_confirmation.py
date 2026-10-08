@@ -14,7 +14,12 @@ from daimon.adapters.discord.tool_confirmation import (
     build_confirmation_view,
     discord_confirmation_hook,
 )
-from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt, prompt_for_tool_call
+from daimon.core.confirmation import (
+    ApprovedConfirmation,
+    ConfirmationAnswer,
+    ConfirmationPrompt,
+    prompt_for_tool_call,
+)
 from daimon.core.posted_controls.confirmation import NOT_YOURS_MESSAGE, build_confirmation_card
 from daimon.core.tool_safety import ToolCall
 
@@ -107,7 +112,9 @@ def test_an_answered_card_has_no_buttons() -> None:
     assert _texts(view)[0] == "**Denied**"
 
 
-async def _post_and_click(user_id: int, choice: str) -> tuple[ConfirmationAnswer, MagicMock]:
+async def _post_and_click(
+    user_id: int, choice: str
+) -> tuple[ConfirmationAnswer | ApprovedConfirmation, MagicMock]:
     channel = MagicMock()
     posted: list[discord.ui.LayoutView] = []
 
@@ -139,7 +146,7 @@ async def _post_and_click(user_id: int, choice: str) -> tuple[ConfirmationAnswer
 
 async def test_the_requesters_approve_answers_approved_and_edits_the_card() -> None:
     answer, requester = await _post_and_click(111, "approve")
-    assert answer == "approved"
+    assert isinstance(answer, ApprovedConfirmation) and answer.answer == "approved"
     edited = requester.response.edit_message.await_args.kwargs["view"]
     assert _texts(edited)[0] == "**Approved**"
     assert _buttons(edited) == []
@@ -148,6 +155,25 @@ async def test_the_requesters_approve_answers_approved_and_edits_the_card() -> N
 async def test_the_requesters_deny_answers_denied() -> None:
     answer, _requester = await _post_and_click(111, "deny")
     assert answer == "denied"
+
+
+async def test_approved_card_can_retire_stopped_before_allow_is_sent() -> None:
+    channel = MagicMock()
+    message = MagicMock(edit=AsyncMock())
+    channel.send = AsyncMock(return_value=message)
+    waiting = asyncio.create_task(discord_confirmation_hook(channel)(_prompt()))
+    while not channel.send.await_count:
+        await asyncio.sleep(0)
+    view = channel.send.await_args.kwargs["view"]
+    await _buttons(view)[0].callback(_interaction(111))
+
+    result = await asyncio.wait_for(waiting, timeout=1)
+    assert isinstance(result, ApprovedConfirmation)
+    await result.retire_unsent()
+
+    stopped = message.edit.await_args.kwargs["view"]
+    assert _texts(stopped)[0] == "**Stopped**"
+    assert _buttons(stopped) == []
 
 
 async def test_an_unanswered_card_expires() -> None:

@@ -13,7 +13,7 @@ from uuid import UUID
 
 import discord
 import pytest
-from daimon.core.confirmation import ConfirmationPrompt, PendingConfirmations
+from daimon.core.confirmation import ApprovedConfirmation, ConfirmationPrompt, PendingConfirmations
 from daimon.core.posted_controls import lifecycle
 from daimon.core.posted_controls.confirmation import NO_LONGER_PENDING_MESSAGE, NOT_YOURS_MESSAGE
 from slack_sdk.errors import SlackApiError
@@ -203,7 +203,13 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
                 with pytest.raises(asyncio.CancelledError):
                     await waiting
             else:
-                trace.append(("answer", await waiting))
+                result = await waiting
+                trace.append(
+                    (
+                        "answer",
+                        result.answer if isinstance(result, ApprovedConfirmation) else result,
+                    )
+                )
             await click()
         else:
             if scenario == "stranger":
@@ -225,7 +231,13 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
                     await waiting
             else:
                 gate.set()
-                trace.append(("answer", await waiting))
+                result = await waiting
+                trace.append(
+                    (
+                        "answer",
+                        result.answer if isinstance(result, ApprovedConfirmation) else result,
+                    )
+                )
             if scenario == "replay":
                 await click(answer="denied")
         monkeypatch.setattr(asyncio, "wait_for", original_wait)

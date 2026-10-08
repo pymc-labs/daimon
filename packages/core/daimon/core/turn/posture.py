@@ -94,6 +94,7 @@ class ToolConfirmationResult:
 
     allow: bool
     deny_message: str | None = None
+    retire_unsent: Callable[[], Awaitable[None]] | None = None
 
 
 ToolCallDecider = Callable[[ToolCall], Awaitable[ToolConfirmationResult]]
