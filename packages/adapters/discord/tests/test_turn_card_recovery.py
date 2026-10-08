@@ -51,6 +51,41 @@ async def test_recovery_edits_webhook_card_via_transport(
         message, intent_id=_TURN_ID, client=client
     )
     edit.assert_awaited_once()
+    assert edit.await_args.kwargs["_allow_replacement"] is False
+
+
+async def test_recovery_keeps_pending_card_when_webhook_token_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _fetched_message(123, _TURN_ID)
+    message.webhook_id = 900
+    message.author.name = "Research"
+    message.channel = MagicMock(spec=discord.Thread)
+    message.channel.parent = MagicMock(spec=discord.TextChannel)
+    edit = AsyncMock(side_effect=discord.ClientException("own webhook token unavailable"))
+    monkeypatch.setattr(DiscordPostTransport, "edit", edit)
+
+    assert not await turn_card_recovery._mark_card_interrupted(  # pyright: ignore[reportPrivateUsage]
+        message, intent_id=_TURN_ID, client=MagicMock(spec=discord.Client)
+    )
+    assert edit.await_args.kwargs["_allow_replacement"] is False
+
+
+async def test_recovery_does_not_retire_original_after_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _fetched_message(123, _TURN_ID)
+    message.webhook_id = 900
+    message.author.name = "Research"
+    message.channel = MagicMock(spec=discord.Thread)
+    message.channel.parent = MagicMock(spec=discord.TextChannel)
+    replacement = MagicMock(spec=discord.Message)
+    replacement.id = 124
+    monkeypatch.setattr(DiscordPostTransport, "edit", AsyncMock(return_value=replacement))
+
+    assert not await turn_card_recovery._mark_card_interrupted(  # pyright: ignore[reportPrivateUsage]
+        message, intent_id=_TURN_ID, client=MagicMock(spec=discord.Client)
+    )
 
 
 async def test_recovery_defers_webhook_card_without_resolved_parent() -> None:

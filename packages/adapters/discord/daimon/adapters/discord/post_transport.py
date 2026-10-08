@@ -315,6 +315,9 @@ class DiscordPostTransport:
             return await self.channel.send(*args, **_retry_kwargs(kwargs, retry_files))
 
     async def edit(self, message: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
+        # Boot recovery must keep the original intent when its pending card
+        # cannot be edited; a replacement message does not clear that card.
+        allow_replacement = kwargs.pop("_allow_replacement", True)
         if isinstance(kwargs.get("content"), str) and kwargs["content"].startswith(
             fallback_name_prefix(self.name, "")
         ):
@@ -324,6 +327,8 @@ class DiscordPostTransport:
                 raise discord.ClientException("webhook channel unavailable")
             hook = await self._webhook(create=False, webhook_id=message.webhook_id)
             if hook is None:
+                if not allow_replacement:
+                    raise discord.ClientException("own webhook token unavailable")
                 return await self.send(_prefix_if_fallback=True, **_replacement_send_kwargs(kwargs))
             destination = self._destination()
             assert destination is not None
@@ -337,6 +342,8 @@ class DiscordPostTransport:
                 if exc.code != 10015:
                     raise
                 _webhooks.get(destination[0].id, {}).pop(hook.id, None)
+                if not allow_replacement:
+                    raise discord.ClientException("own webhook no longer exists") from exc
                 return await self.send(_prefix_if_fallback=True, **_replacement_send_kwargs(kwargs))
         await message.edit(**kwargs)
         return None

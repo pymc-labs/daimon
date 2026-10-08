@@ -2449,7 +2449,7 @@ class DaimonBot(commands.Bot):
                 async with self.runtime.sessionmaker() as session:
                     await clear_active_turn(session, id=done_id)
                     await session.commit()
-            if outcome is not None:
+            if outcome is not None and not lifecycle_holder[0].card_discard_failed:
                 await retire_terminal_turn_card(
                     self.runtime.sessionmaker,
                     intent_id=turn_card_intent.id,
@@ -3308,7 +3308,7 @@ class DaimonBot(commands.Bot):
                 async with self.runtime.sessionmaker() as _ct_session:
                     await clear_active_turn(_ct_session, id=_done_id)
                     await _ct_session.commit()
-            if outcome is not None:
+            if outcome is not None and not lifecycle_holder[0].card_discard_failed:
                 await retire_terminal_turn_card(
                     self.runtime.sessionmaker,
                     intent_id=turn_card_intent.id,

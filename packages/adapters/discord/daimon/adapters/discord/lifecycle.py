@@ -199,6 +199,7 @@ class DiscordTurnLifecycle:
         # into the real answer, so a recovered turn looks like a normal one.
         self._message_ref: discord.Message | None = adopt_message_ref
         self._card_message_ref: discord.Message | None = adopt_message_ref
+        self._card_discard_failed = False
         self._last_flush: float = 0.0
         self._terminal: bool = False
         self._cancel_view = cancel_view
@@ -644,8 +645,9 @@ class DiscordTurnLifecycle:
         try:
             await self._delete(self._message_ref)
         except discord.HTTPException:
-            # Already gone, or no permission: a stale embed beats failing a
-            # turn that otherwise ended cleanly.
+            # Keep the durable intent so a later recovery pass can resolve a
+            # card whose pending button may still be visible.
+            self._card_discard_failed = True
             log.info("turn.embed_discard_failed", exc_info=True)
         self._message_ref = None
 
@@ -662,6 +664,11 @@ class DiscordTurnLifecycle:
     def card_message_id(self) -> str | None:
         """Original status card ID, used to retire its durable intent."""
         return str(self._card_message_ref.id) if self._card_message_ref is not None else None
+
+    @property
+    def card_discard_failed(self) -> bool:
+        """Whether deleting an unprompted turn's pending card failed."""
+        return self._card_discard_failed
 
     @property
     def final_message_id(self) -> str | None:

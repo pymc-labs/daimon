@@ -1306,6 +1306,23 @@ class TestUnpromptedTurn:
         assert deletes == [_SENTINEL_REF], "the embed is removed once the turn says nothing"
         assert lc.final_message_id is None, "a deleted embed is not a watermark"
 
+    async def test_failed_delete_keeps_card_intent_recoverable(self) -> None:
+        lc, sends, _, _ = _make_unprompted_lifecycle()
+
+        async def fail_delete(_message: object) -> None:
+            raise discord.HTTPException(
+                types.SimpleNamespace(status=503, reason="Service Unavailable"),
+                "delete unavailable",
+            )
+
+        lc._delete = fail_delete  # pyright: ignore[reportPrivateUsage]
+        await lc.on_render(TurnState(content=[TextBlock(kind="text", text="partial")]))
+        await lc.on_terminal_success(TurnState())
+
+        assert len(sends) == 1
+        assert lc.card_discard_failed
+        assert lc._card_message_ref is _SENTINEL_REF  # pyright: ignore[reportPrivateUsage]
+
     async def test_a_tool_trail_with_no_answer_is_removed_too(self) -> None:
         """Tools ran, nothing was said: a mention would keep the done embed, an
         unprompted turn deletes it, since nobody watched those tools run."""

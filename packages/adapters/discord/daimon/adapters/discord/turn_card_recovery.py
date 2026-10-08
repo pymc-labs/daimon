@@ -398,7 +398,11 @@ async def _mark_card_interrupted(
             )
             if transport._destination() is None:  # pyright: ignore[reportPrivateUsage]
                 return False
-            await transport.edit(message, embed=embed, view=None)
+            replacement = await transport.edit(
+                message, embed=embed, view=None, _allow_replacement=False
+            )
+            if isinstance(replacement, discord.Message) and replacement.id != message.id:
+                return False
         else:
             await message.edit(embed=embed, view=None)
         return True
