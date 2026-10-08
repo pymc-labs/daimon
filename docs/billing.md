@@ -248,9 +248,11 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 Members can read a channel's budget with `get_channel_budget`; listing,
 setting and clearing are for server admins only, never a channel's own admins
 (`daimon.core.authz`, `SET_CHANNEL_BUDGET`); each change is recorded in `security_audit_events`, from the CLI too. `/billing` in a channel with a budget
-shows `this channel: $spent of $limit (window)`. An admin's `/billing` also
+shows it in a **Channel budget** group under the credit, worded from its window
+(`$1.20 of $5.00 spent this month`, `… spent since 2026-07-01`, `$5.00 budget
+from 2026-07-01` before it starts). An admin's `/billing` also
 lists the five most used budgets on that platform (active ones first, by
-share of the limit spent) with a count of the rest.
+share of the limit spent) with a count of the rest, after the top spenders.
 
 What a budget does not cover:
 
@@ -398,8 +400,12 @@ many tenants may redeem it. Each tenant redeems a code at most once.
   credited twice.
 
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
-timed credit only changes what the ledger holds. `/billing` shows live timed
-credit and when it ends. Admins redeem from `/billing` on Discord or Slack,
+timed credit only changes what the ledger holds. `/billing` shows the balance
+as a total that already includes live timed credit, then lists that credit
+under it: the amount left and when it expires, soonest first (three at most,
+with a count of the rest), and a note that timed credit is spent first and what
+is left of it expires. A negative total (an operator-funded tenant) still lists
+its timed credit. Admins redeem from `/billing` on Discord or Slack,
 `billing` on Teams, or with the admin-only MCP tool `redeem_promo_code`. Refusals are one of
 `invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
 `already_redeemed` and `throttled`; five refusals in 15 minutes pause a

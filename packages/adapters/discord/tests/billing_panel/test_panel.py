@@ -26,6 +26,7 @@ from daimon.adapters.discord.billing_panel.state import (
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget import ChannelBudgetStatus
+from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores.domain import ChannelBudgetRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -730,7 +731,7 @@ def test_member_container_has_you_group_and_no_top_spenders_group() -> None:
     assert "🏆" not in text, "member container must not contain the Top spenders group"
 
 
-def test_both_views_show_the_invoking_channels_budget_only_when_it_has_one() -> None:
+def _this_channel_budget() -> ChannelBudgetStatus:
     budget = ChannelBudgetRow(
         id=uuid.uuid4(),
         tenant_id=uuid.uuid4(),
@@ -744,15 +745,98 @@ def test_both_views_show_the_invoking_channels_budget_only_when_it_has_one() -> 
         created_at=NOW,
         updated_at=NOW,
     )
-    status = ChannelBudgetStatus(budget=budget, spent_usd=Decimal("1.2"), is_active=True)
+    return ChannelBudgetStatus(budget=budget, spent_usd=Decimal("1.2"), is_active=True)
+
+
+def test_both_views_show_the_invoking_channels_budget_only_when_it_has_one() -> None:
     for is_admin in (False, True):
-        with_budget = _make_state(is_admin=is_admin, channel_budget=status)
+        with_budget = _make_state(is_admin=is_admin, channel_budget=_this_channel_budget())
         text = _joined_container_text(build_billing_container(with_budget, now=NOW, since=SINCE))
-        assert "this channel: $1.20 of $5.00 (monthly)" in text
+        assert "📊 **Channel budget**\n-# $1.20 of $5.00 spent this month" in text, (
+            "the channel's budget is its own group, worded from its window"
+        )
         plain = _joined_container_text(
             build_billing_container(_make_state(is_admin=is_admin), now=NOW, since=SINCE)
         )
-        assert "this channel" not in plain
+        assert "Channel budget" not in plain, "no budget, no group"
+
+
+def test_channel_budget_sits_between_server_credit_and_top_spenders() -> None:
+    state = _make_state(
+        is_admin=True,
+        channel_budget=_this_channel_budget(),
+        channel_budgets=(_budget_status("100", "1"),),
+        member_rows=(_make_member_row(),),
+    )
+    text = _joined_container_text(build_billing_container(state, now=NOW, since=SINCE))
+    order = [
+        text.index(group)
+        for group in (
+            "🏦 **Server credit**",
+            "📊 **Channel budget**",
+            "🏆 **Top spenders**",
+            "📊 **Channel budgets**",
+        )
+    ]
+    assert order == sorted(order), f"groups out of order: {order}"
+    member = _joined_container_text(
+        build_billing_container(
+            _make_state(channel_budget=_this_channel_budget()), now=NOW, since=SINCE
+        )
+    )
+    assert member.index("**You**") < member.index("🏦") < member.index("📊 **Channel budget**")
+
+
+def _credit(remaining: str, day: int) -> ActiveTimedCredit:
+    return ActiveTimedCredit(Decimal(remaining), datetime(2026, 5, day, 18, 0, tzinfo=UTC))
+
+
+def _credit_block(state: BillingPanelState) -> str:
+    text = _joined_container_text(build_billing_container(state, now=NOW, since=SINCE))
+    start = text.index("🏦 **Server credit**")
+    end = text.find("\n\n", start)
+    return text[start:] if end < 0 else text[start:end]
+
+
+def test_server_credit_without_timed_credit_is_just_the_total() -> None:
+    block = _credit_block(_make_state(is_admin=True, guild_balance_usd=Decimal("37.4")))
+    assert block == "🏦 **Server credit**\n**$37.40** total balance", block
+
+
+def test_server_credit_lists_the_timed_credit_the_total_includes() -> None:
+    end = int(datetime(2026, 5, 20, 18, 0, tzinfo=UTC).timestamp())
+    state = _make_state(
+        is_admin=True, guild_balance_usd=Decimal("62.4"), timed_credit=(_credit("20", 20),)
+    )
+    assert _credit_block(state) == (
+        "🏦 **Server credit**\n"
+        "**$62.40** total balance\n"
+        "-# Includes timed credit:\n"
+        f"-# $20.00 remaining · expires <t:{end}:D> (<t:{end}:R>)\n"
+        "-# Timed credit is spent first; unused amounts expire."
+    )
+
+
+def test_server_credit_lists_three_timed_credits_and_counts_the_rest() -> None:
+    credits = tuple(_credit(str(n), 20 + n) for n in range(1, 5))
+    block = _credit_block(_make_state(is_admin=True, timed_credit=credits))
+    assert block.count("remaining · expires") == 3, "at most three timed credit lines"
+    assert "-# 1 more timed credit\n" in block
+    assert "$4.00 remaining" not in block, "the soonest-ending three are the ones listed"
+
+
+def test_a_negative_balance_still_shows_its_total_and_timed_credit() -> None:
+    state = _make_state(
+        is_admin=True, guild_balance_usd=Decimal("-12.5"), timed_credit=(_credit("5", 20),)
+    )
+    block = _credit_block(state)
+    assert "**-$12.50** total balance" in block, "an operator-funded tenant runs negative"
+    assert "$5.00 remaining" in block, "timed credit still shows under a negative total"
+
+
+def test_the_member_view_says_top_ups_are_admin_only_under_the_credit() -> None:
+    block = _credit_block(_make_state(timed_credit=(_credit("5", 20),)))
+    assert block.endswith("-# Top-ups are admin-only."), block
 
 
 def test_over_cap_container_has_color_over_cap_accent() -> None:

@@ -15,18 +15,21 @@ from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.billing_panel import (
     CHANNEL_BUDGETS_SHOWN,
     TOPUP_AMOUNTS,
+    TOPUPS_ADMIN_ONLY,
     BillingPanelState,
     caller_line,
     channel_budget_line,
+    channel_budget_phrase,
     estimate_turns,
     fmt_usd,
     more_channel_budgets,
     period_label,
     spend_over_cap,
+    timed_credit_lines,
 )
-from daimon.core.channel_budget import describe_budget
 
 REDEEM_OPEN_ACTION_ID = "billing_redeem_open"
+_TOP_SHOWN = 5
 
 # ---------------------------------------------------------------------------
 # Block Kit builders (pure raw dicts — S4 pattern)
@@ -39,21 +42,32 @@ def slack_time(moment: datetime) -> str:
     return f"<!date^{int(moment.timestamp())}^{{date_short_pretty}} {{time}}|{fallback}>"
 
 
-def _timed_credit_lines(state: BillingPanelState) -> str:
-    """One line per live timed promo credit, prefixed with a newline; empty when none."""
-    lines = [
-        f"\n⏳ {fmt_usd(c.remaining_usd)} timed credit left · ends {slack_time(c.ends_at)}"
-        for c in state.timed_credit[:3]
-    ]
-    if len(state.timed_credit) > 3:
-        lines.append(f"\n⏳ {len(state.timed_credit) - 3} more timed credits")
-    return "".join(lines)
+def _context(text: str) -> dict[str, Any]:
+    """Small grey detail lines under a group."""
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
 
-def _channel_budget_suffix(state: BillingPanelState) -> str:
+def _section(text: str) -> dict[str, Any]:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
+def _server_credit_blocks(state: BillingPanelState) -> list[dict[str, Any]]:
+    """The total balance, then the timed credit it includes in a grey context block."""
+    blocks = [_section(f"🏦 *Server credit*\n*{fmt_usd(state.guild_balance_usd)}* total balance")]
+    details = timed_credit_lines(state.timed_credit, when=slack_time)
+    if not state.is_admin:
+        details.append(TOPUPS_ADMIN_ONLY)
+    if details:
+        blocks.append(_context("\n".join(details)))
+    return blocks
+
+
+def _channel_budget_blocks(state: BillingPanelState, *, now: datetime) -> list[dict[str, Any]]:
+    """The invoking channel's budget as its own group; nothing when it has none."""
     if state.channel_budget is None:
-        return ""
-    return f"\nthis channel: {describe_budget(state.channel_budget)}"
+        return []
+    phrase = channel_budget_phrase(state.channel_budget, now=now)
+    return [_section("📊 *Channel budget*"), _context(phrase)]
 
 
 def _channel_budgets_text(state: BillingPanelState) -> str | None:
@@ -95,8 +109,10 @@ def build_billing_container(
     Admin branch:
       - Header section: '💸 Billing · admin view' + period/workspace totals
       - Divider
-      - Server credit section
+      - Server credit section (total) + context (timed credit it includes)
+      - Channel budget section + context, when the channel has one
       - Top spenders header + per-member rows (top 5 shown; overflow noted)
+      - Channel budgets section, when any exist
       - Divider
       - Top-up actions block with static_select (admin only)
 
@@ -104,7 +120,8 @@ def build_billing_container(
       - Header section: '💸 Billing' + period
       - Divider
       - Caller section
-      - Server credit section
+      - Server credit section + context
+      - Channel budget section + context, when the channel has one
 
     No color fields anywhere. User/agent-derived text is escaped via
     escape_mrkdwn (S5).
@@ -126,18 +143,11 @@ def build_billing_container(
         )
         blocks.append({"type": "divider"})
 
-        # Server credit
-        credit_line = (
-            f"🏦 *Server credit*\n{fmt_usd(state.guild_balance_usd)} balance"
-            f"{_timed_credit_lines(state)}"
-            f"{_channel_budget_suffix(state)}"
-        )
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": credit_line}})
-        if (budgets_text := _channel_budgets_text(state)) is not None:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": budgets_text}})
+        blocks += _server_credit_blocks(state)
+        blocks += _channel_budget_blocks(state, now=now)
 
         # Top spenders
-        top5 = state.member_rows[:5]
+        top5 = state.member_rows[:_TOP_SHOWN]
         spenders_lines: list[str] = ["🏆 *Top spenders*"]
         if top5:
             for i, row in enumerate(top5):
@@ -149,16 +159,13 @@ def build_billing_container(
         else:
             spenders_lines.append("no usage yet this period")
 
-        overflow = max(0, len(state.member_rows) - 5) + state.over_cap_count
+        overflow = max(0, len(state.member_rows) - _TOP_SHOWN) + state.over_cap_count
         if overflow > 0:
             spenders_lines.append(f"_{overflow} more members_")
 
-        blocks.append(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "\n".join(spenders_lines)},
-            }
-        )
+        blocks.append(_section("\n".join(spenders_lines)))
+        if (budgets_text := _channel_budgets_text(state)) is not None:
+            blocks.append(_section(budgets_text))
 
         # Top-up static_select — admin only
         topup_options: list[dict[str, Any]] = []
@@ -222,14 +229,8 @@ def build_billing_container(
             }
         )
 
-        # Server credit (top-ups are admin-only)
-        credit_line = (
-            f"🏦 *Server credit*\n"
-            f"{fmt_usd(state.guild_balance_usd)} balance _(top-ups are admin-only)_"
-            f"{_timed_credit_lines(state)}"
-            f"{_channel_budget_suffix(state)}"
-        )
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": credit_line}})
+        blocks += _server_credit_blocks(state)
+        blocks += _channel_budget_blocks(state, now=now)
 
     return blocks
 

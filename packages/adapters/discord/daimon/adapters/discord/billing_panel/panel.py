@@ -36,8 +36,14 @@ from daimon.adapters.discord.billing_panel.state import (
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.billing_panel import CHANNEL_BUDGETS_SHOWN, channel_budget_line
-from daimon.core.channel_budget import describe_budget
+from daimon.core.billing_panel import (
+    CHANNEL_BUDGETS_SHOWN,
+    TOPUPS_ADMIN_ONLY,
+    channel_budget_line,
+    channel_budget_phrase,
+    fmt_usd,
+    timed_credit_lines,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.mcp_auth import mint_jwt
@@ -62,7 +68,7 @@ _FALLBACK_TURN_COST_USD = 0.10
 
 
 def _fmt_usd(value: float | Decimal) -> str:
-    return f"${value:,.2f}"
+    return fmt_usd(value)
 
 
 def _period_label(since: datetime) -> str:
@@ -73,19 +79,21 @@ def _is_over_cap(spend: float, cap: Decimal | None) -> bool:
     return cap is not None and spend > float(cap)
 
 
-_TIMED_CREDIT_LINES = 3
+def _discord_date(moment: datetime) -> str:
+    """The date and how far off it is, each shown in the reader's own timezone."""
+    epoch = int(moment.timestamp())
+    return f"<t:{epoch}:D> (<t:{epoch}:R>)"
 
 
-def _timed_credit_lines(state: BillingPanelState) -> list[str]:
-    """One dim line per live timed promo credit; nothing when there is none."""
+def _server_credit_lines(state: BillingPanelState) -> list[str]:
+    """The total balance, then the timed credit it includes, if any, in dim lines."""
     lines = [
-        f"-# ⏳ {_fmt_usd(c.remaining_usd)} timed credit left · "
-        f"ends <t:{int(c.ends_at.timestamp())}:f>"
-        for c in state.timed_credit[:_TIMED_CREDIT_LINES]
+        "🏦 **Server credit**",
+        f"**{_fmt_usd(state.guild_balance_usd)}** total balance",
+        *(f"-# {line}" for line in timed_credit_lines(state.timed_credit, when=_discord_date)),
     ]
-    extra = len(state.timed_credit) - _TIMED_CREDIT_LINES
-    if extra > 0:
-        lines.append(f"-# ⏳ {extra} more timed credits")
+    if not state.is_admin:
+        lines.append(f"-# {TOPUPS_ADMIN_ONLY}")
     return lines
 
 
@@ -98,10 +106,12 @@ def _format_caller_line(spend: float, cap: Decimal | None, turns: int) -> str:
     return f"💸 {_fmt_usd(spend)} / {_fmt_usd(cap_f)} cap ({pct}%) · {turns} turns"
 
 
-def _channel_budget_lines(state: BillingPanelState) -> list[str]:
+def _channel_budget_lines(state: BillingPanelState, *, now: datetime) -> list[str]:
+    """The invoking channel's budget as its own group; nothing when it has none."""
     if state.channel_budget is None:
         return []
-    return [f"-# this channel: {describe_budget(state.channel_budget)}"]
+    phrase = channel_budget_phrase(state.channel_budget, now=now)
+    return ["", "📊 **Channel budget**", f"-# {phrase}"]
 
 
 def _channel_budgets_lines(state: BillingPanelState) -> list[str]:
@@ -154,13 +164,15 @@ def build_billing_container(
     Admin branch:
       - header: '💸 Billing · admin view' + subtext with period/guild totals
       - hairline
-      - one TextDisplay: 🏦 Server credit group + 🏆 Top spenders group (top 5)
-        followed by dim '{N} more members' line when N > 0
+      - one TextDisplay: 🏦 Server credit (total, then the timed credit it
+        includes), 📊 Channel budget for the invoking channel, 🏆 Top spenders
+        (top 5) with a dim '{N} more members' line when N > 0,
+        then 📊 Channel budgets for every channel
 
     Member branch:
       - header: '💸 Billing' + subtext with period
       - hairline
-      - one TextDisplay: **You** group + 🏦 Server credit group
+      - one TextDisplay: **You** group + 🏦 Server credit + 📊 Channel budget
 
     Accent: COLOR_OVER_CAP only when caller is over their cap; no accent otherwise
     (COLOR_NOMINAL is retired — B8 decision).
@@ -176,14 +188,9 @@ def build_billing_container(
         )
         hdr = layout.header("💸 Billing · admin view", subtext=subtext)
 
-        # Server credit group
-        credit_line = f"-# {_fmt_usd(state.guild_balance_usd)} balance"
         body_lines: list[str] = [
-            "🏦 **Server credit**",
-            credit_line,
-            *_timed_credit_lines(state),
-            *_channel_budget_lines(state),
-            *_channel_budgets_lines(state),
+            *_server_credit_lines(state),
+            *_channel_budget_lines(state, now=now),
             "",
             "🏆 **Top spenders**",
         ]
@@ -203,6 +210,7 @@ def build_billing_container(
         overflow = max(0, len(state.member_rows) - 5) + state.over_cap_count
         if overflow > 0:
             body_lines.append(f"-# {overflow} more members — look one up below")
+        body_lines += _channel_budgets_lines(state)
 
         body: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
             "\n".join(body_lines)
@@ -220,16 +228,12 @@ def build_billing_container(
             f"-# {_format_caller_line(state.caller_spend, state.caller_cap, state.caller_turns)}"
         )
 
-    credit_line = f"-# {_fmt_usd(state.guild_balance_usd)} balance (top-ups are admin-only)"
-
     body_lines_member: list[str] = [
         "**You**",
         caller_body,
         "",
-        "🏦 **Server credit**",
-        credit_line,
-        *_timed_credit_lines(state),
-        *_channel_budget_lines(state),
+        *_server_credit_lines(state),
+        *_channel_budget_lines(state, now=now),
     ]
     body_member: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
         "\n".join(body_lines_member)

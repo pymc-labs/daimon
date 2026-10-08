@@ -121,11 +121,12 @@ def test_timed_credit_shows_under_server_credit_in_both_views() -> None:
             _state(is_admin=is_admin, timed_credit=credit), now=NOW, since=SINCE
         )
         text = _text(container)
-        assert f"$7.50 timed credit left · ends <t:{int(END.timestamp())}:f>" in text, (
+        end = int(END.timestamp())
+        assert f"-# $7.50 remaining · expires <t:{end}:D> (<t:{end}:R>)" in text, (
             "each view should show the timed credit and its end"
         )
     plain = build_billing_container(_state(), now=NOW, since=SINCE)
-    assert "timed credit" not in _text(plain), "no timed credit should mean no line"
+    assert "timed credit" not in _text(plain).lower(), "no timed credit should mean no line"
 
 
 def test_ready_embed_mentions_redemption_only_when_a_code_is_redeemable() -> None:

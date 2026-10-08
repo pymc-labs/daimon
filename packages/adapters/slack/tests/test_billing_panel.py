@@ -18,6 +18,7 @@ from typing import Any
 
 from daimon.core.billing_panel import BillingPanelState, MemberRow, load_billing_snapshot
 from daimon.core.channel_budget import ChannelBudgetStatus
+from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores.domain import ChannelBudgetRow
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -148,8 +149,8 @@ async def test_both_views_show_the_invoking_channels_budget_only_when_it_has_one
             )
             blocks = build_billing_container(state, now=_NOW, since=_SINCE)
             texts[channel_id] = str(blocks)
-        assert "this channel: $1.20 of $5.00 (monthly)" in texts["C1"]
-        assert "this channel" not in texts["C2"]
+        assert "$1.20 of $5.00 spent this month" in texts["C1"]
+        assert "*Channel budget*" not in texts["C2"], "no budget, no group"
 
 
 def test_build_billing_container_empty_period_renders_cleanly() -> None:
@@ -285,3 +286,93 @@ def test_the_admin_view_lists_channel_budgets_and_the_member_view_does_not() -> 
         )
     )
     assert "Channel budgets" not in member, "a member sees no other channel"
+
+
+# ---------------------------------------------------------------------------
+# The credit layout
+# ---------------------------------------------------------------------------
+
+
+def _credit_blocks(state: BillingPanelState) -> list[dict[str, Any]]:
+    from daimon.adapters.slack.billing_panel.views import build_billing_container
+
+    blocks = build_billing_container(state, now=_NOW, since=_SINCE)
+    start = next(i for i, b in enumerate(blocks) if "Server credit" in str(b))
+    end = next(
+        (i for i, b in enumerate(blocks) if i > start and b["type"] != "context"), len(blocks)
+    )
+    return blocks[start:end]
+
+
+def _credit(remaining: str, day: int) -> ActiveTimedCredit:
+    return ActiveTimedCredit(Decimal(remaining), datetime(2025, 1, day, 18, 0, tzinfo=UTC))
+
+
+def test_server_credit_without_timed_credit_is_just_the_total() -> None:
+    [section] = _credit_blocks(_make_admin_state())
+    assert section["text"]["text"] == "🏦 *Server credit*\n*$50.00* total balance"
+
+
+def test_server_credit_details_are_a_context_block_under_the_total() -> None:
+    end = int(datetime(2025, 1, 20, 18, 0, tzinfo=UTC).timestamp())
+    state = dataclasses.replace(_make_admin_state(), timed_credit=(_credit("20", 20),))
+    [section, context] = _credit_blocks(state)
+    assert section["text"]["text"].endswith("*$50.00* total balance")
+    assert context["type"] == "context"
+    assert context["elements"][0]["text"] == (
+        "Includes timed credit:\n"
+        f"$20.00 remaining · expires <!date^{end}^{{date_short_pretty}} {{time}}"
+        "|2025-01-20 18:00 UTC>\n"
+        "Timed credit is spent first; unused amounts expire."
+    )
+
+
+def test_server_credit_lists_three_timed_credits_and_counts_the_rest() -> None:
+    credits = tuple(_credit(str(n), 20 + n) for n in range(1, 5))
+    state = dataclasses.replace(_make_admin_state(), timed_credit=credits)
+    [_, context] = _credit_blocks(state)
+    detail = context["elements"][0]["text"]
+    assert detail.count("remaining · expires") == 3 and "\n1 more timed credit\n" in detail
+
+
+def test_a_negative_balance_still_shows_its_total_and_timed_credit() -> None:
+    state = dataclasses.replace(
+        _make_member_state(), guild_balance_usd=Decimal("-3"), timed_credit=(_credit("5", 20),)
+    )
+    [section, context] = _credit_blocks(state)
+    assert "*-$3.00* total balance" in section["text"]["text"]
+    detail = context["elements"][0]["text"]
+    assert "$5.00 remaining" in detail and detail.endswith("Top-ups are admin-only.")
+
+
+def test_channel_budget_is_its_own_group_before_top_spenders() -> None:
+    from daimon.adapters.slack.billing_panel.views import build_billing_container
+
+    budget = ChannelBudgetRow(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        platform="slack",
+        channel_id="C1",
+        limit_usd=Decimal("5"),
+        window="monthly",
+        starts_at=None,
+        ends_at=None,
+        set_by_account_id=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    status = ChannelBudgetStatus(budget=budget, spent_usd=Decimal("1.2"), is_active=True)
+    state = dataclasses.replace(
+        _make_admin_state(), channel_budget=status, channel_budgets=(status,)
+    )
+    blocks = build_billing_container(state, now=_NOW, since=_SINCE)
+    texts = [str(b) for b in blocks]
+    at = {
+        name: next(i for i, t in enumerate(texts) if name in t)
+        for name in ("Server credit", "*Channel budget*", "Top spenders", "Channel budgets")
+    }
+    assert list(at.values()) == sorted(at.values()), at
+    assert blocks[at["*Channel budget*"] + 1] == {
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": "$1.20 of $5.00 spent this month"}],
+    }

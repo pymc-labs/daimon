@@ -13,15 +13,20 @@ import jwt as pyjwt
 import pytest
 from daimon.core.billing_panel import (
     BillingPanelState,
+    channel_budget_phrase,
     create_checkout,
     estimate_turns,
     fmt_usd,
     load_billing_snapshot,
+    timed_credit_lines,
 )
+from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.errors import DaimonError
 from daimon.core.promo_codes import build_promo_code_terms
+from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenants, usage_events
+from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
 from daimon.testing import ma_model_usage
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from pydantic import SecretStr
@@ -57,6 +62,80 @@ def test_fmt_usd_formats_cents_and_thousands() -> None:
     assert fmt_usd(0.0) == "$0.00", "zero still shows cents"
     assert fmt_usd(Decimal("1000")) == "$1,000.00", "Decimal gets a thousands separator"
     assert fmt_usd(2500.75) == "$2,500.75", "float gets a thousands separator"
+    assert fmt_usd(Decimal("-12.5")) == "-$12.50", "the sign goes before the dollar"
+
+
+def _ends(day: int) -> datetime:
+    return datetime(2025, 1, day, tzinfo=UTC)
+
+
+def test_timed_credit_lines_are_empty_without_timed_credit() -> None:
+    assert timed_credit_lines((), when=str) == []
+
+
+def test_timed_credit_lines_list_three_count_the_rest_and_explain() -> None:
+    credits = [ActiveTimedCredit(Decimal(n), _ends(20 + n)) for n in range(1, 6)]
+    lines = timed_credit_lines(credits, when=lambda moment: f"{moment:%b %d}")
+    assert lines == [
+        "Includes timed credit:",
+        "$1.00 remaining · expires Jan 21",
+        "$2.00 remaining · expires Jan 22",
+        "$3.00 remaining · expires Jan 23",
+        "2 more timed credits",
+        "Timed credit is spent first; unused amounts expire.",
+    ]
+
+
+def _budget(
+    window: BudgetWindow,
+    *,
+    starts_at: datetime | None = None,
+    ends_at: datetime | None = None,
+    spent: str = "1.2",
+    is_active: bool = True,
+) -> ChannelBudgetStatus:
+    row = ChannelBudgetRow(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        platform="slack",
+        channel_id="C1",
+        limit_usd=Decimal("5"),
+        window=window,
+        starts_at=starts_at,
+        ends_at=ends_at,
+        set_by_account_id=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    return ChannelBudgetStatus(budget=row, spent_usd=Decimal(spent), is_active=is_active)
+
+
+@pytest.mark.parametrize(
+    ("status", "phrase"),
+    [
+        (_budget("monthly"), "$1.20 of $5.00 spent this month"),
+        (_budget("total"), "$1.20 of $5.00 spent in total"),
+        (_budget("total", starts_at=_ends(2)), "$1.20 of $5.00 spent since 2025-01-02"),
+        (
+            _budget("total", starts_at=_ends(20), spent="0", is_active=False),
+            "$5.00 budget from 2025-01-20",
+        ),
+        (
+            _budget("fixed", starts_at=_ends(2), ends_at=_ends(20)),
+            "$1.20 of $5.00 spent from 2025-01-02 until 2025-01-20",
+        ),
+        (
+            _budget("fixed", starts_at=_ends(20), ends_at=_ends(25), spent="0", is_active=False),
+            "$5.00 budget from 2025-01-20 until 2025-01-25",
+        ),
+        (
+            _budget("fixed", starts_at=_ends(2), ends_at=_ends(10), is_active=False),
+            "$1.20 of $5.00 spent from 2025-01-02 until 2025-01-10 (ended)",
+        ),
+    ],
+)
+def test_channel_budget_phrase_follows_the_window(status: ChannelBudgetStatus, phrase: str) -> None:
+    assert channel_budget_phrase(status, now=_NOW) == phrase
 
 
 def test_estimate_turns_uses_the_tenant_average_or_the_fallback() -> None:

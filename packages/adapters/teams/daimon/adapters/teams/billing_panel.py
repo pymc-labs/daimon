@@ -35,9 +35,11 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.billing_panel import (
     CHANNEL_BUDGETS_SHOWN,
     TOPUP_AMOUNTS,
+    TOPUPS_ADMIN_ONLY,
     BillingPanelState,
     caller_line,
     channel_budget_line,
+    channel_budget_phrase,
     create_checkout,
     estimate_turns,
     fmt_usd,
@@ -46,6 +48,7 @@ from daimon.core.billing_panel import (
     more_channel_budgets,
     period_label,
     spend_over_cap,
+    timed_credit_lines,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
@@ -61,6 +64,7 @@ from microsoft_teams.cards import (
     CardElement,
     ExecuteAction,
     OpenUrlAction,
+    TextBlock,
     TextInput,
 )
 
@@ -85,14 +89,28 @@ def card_time(moment: datetime) -> str:
     return f"{{{{DATE({iso}, SHORT)}}}} {{{{TIME({iso})}}}}"
 
 
-def _timed_credit(state: BillingPanelState) -> list[str]:
-    lines = [
-        f"⏳ {fmt_usd(c.remaining_usd)} timed credit left · ends {card_time(c.ends_at)}"
-        for c in state.timed_credit[:3]
+def _details(*lines: str) -> list[CardElement]:
+    """Small grey lines under a group."""
+    return [
+        TextBlock(text=line, is_subtle=True, size="Small", spacing="None", wrap=True)
+        for line in lines
     ]
-    if len(state.timed_credit) > 3:
-        lines.append(f"⏳ {len(state.timed_credit) - 3} more timed credits")
-    return lines
+
+
+def _credit(state: BillingPanelState) -> list[CardElement]:
+    """The total balance, then the timed credit it includes, if any."""
+    details = timed_credit_lines(state.timed_credit, when=card_time)
+    if not state.is_admin:
+        details.append(TOPUPS_ADMIN_ONLY)
+    total = f"**{fmt_usd(state.guild_balance_usd)}** total balance"
+    return [*text_lines("🏦 **Organisation credit**", total), *_details(*details)]
+
+
+def _channel_budget(state: BillingPanelState, now: datetime) -> list[CardElement]:
+    if state.channel_budget is None:
+        return []
+    phrase = channel_budget_phrase(state.channel_budget, now=now)
+    return [*text_lines("📊 **Channel budget**"), *_details(phrase)]
 
 
 def redeemed_text(result: PromoRedeemed) -> str:
@@ -108,17 +126,16 @@ def redeemed_text(result: PromoRedeemed) -> str:
     )
 
 
-def _member_body(state: BillingPanelState, since: datetime) -> list[CardElement]:
+def _member_body(state: BillingPanelState, since: datetime, now: datetime) -> list[CardElement]:
     used = "no usage yet this period"
     if state.caller_spend or state.caller_turns:
         used = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
     over = " ⚠️ over cap" if spend_over_cap(state.caller_spend, state.caller_cap) else ""
-    balance = fmt_usd(state.guild_balance_usd)
     return [
         heading("💸 Billing"),
         *text_lines(period_label(since), f"**You**{over}: {used}"),
-        *text_lines(f"🏦 **Credit**: {balance} balance (top-ups are admin-only)"),
-        *text_lines(*_timed_credit(state)),
+        *_credit(state),
+        *_channel_budget(state, now),
     ]
 
 
@@ -140,7 +157,7 @@ def _topup(amount: int, state: BillingPanelState) -> Action:
     return button(VERB, f"${amount} · ≈{turns:,} turns", "topup", amount=str(amount))
 
 
-def _admin_body(state: BillingPanelState, since: datetime) -> list[CardElement]:
+def _admin_body(state: BillingPanelState, since: datetime, now: datetime) -> list[CardElement]:
     totals = (
         f"{period_label(since)} · organisation total {fmt_usd(state.guild_spend)} · "
         f"{state.guild_turns} turns · {state.guild_distinct_members} active members"
@@ -153,12 +170,13 @@ def _admin_body(state: BillingPanelState, since: datetime) -> list[CardElement]:
     overflow = max(0, len(state.member_rows) - _TOP_SHOWN) + state.over_cap_count
     if overflow:
         top.append(f"{overflow} more members")
-    balance = fmt_usd(state.guild_balance_usd)
     body: list[CardElement] = [
         heading("💸 Billing · admin view"),
-        *text_lines(totals, f"🏦 **Credit**: {balance} balance", *_timed_credit(state)),
-        *text_lines(*_channel_budgets(state)),
+        *text_lines(totals),
+        *_credit(state),
+        *_channel_budget(state, now),
         *text_lines("🏆 **Top spenders**", *(top or ["no usage yet this period"])),
+        *text_lines(*_channel_budgets(state)),
         *text_lines("💳 **Top up credit**"),
         ActionSet(actions=[_topup(amount, state) for amount in TOPUP_AMOUNTS]),
     ]
@@ -170,10 +188,15 @@ def _admin_body(state: BillingPanelState, since: datetime) -> list[CardElement]:
 
 
 def panel_card(
-    state: BillingPanelState, *, since: datetime, notice: str | None = None
+    state: BillingPanelState,
+    *,
+    since: datetime,
+    now: datetime | None = None,
+    notice: str | None = None,
 ) -> AdaptiveCard:
     """The member view, or for an admin the tenant view with top-up buttons."""
-    body = _admin_body(state, since) if state.is_admin else _member_body(state, since)
+    now = now or datetime.now(UTC)
+    body = _admin_body(state, since, now) if state.is_admin else _member_body(state, since, now)
     if notice is not None:
         body = [*text_lines(notice), *body]
     return AdaptiveCard(body=body, fallback_text="Billing")
@@ -224,7 +247,7 @@ class BillingPanel:
                 now=now,
                 platform="teams",
             )
-        return panel_card(state, since=since, notice=notice)
+        return panel_card(state, since=since, now=now, notice=notice)
 
     async def _act(self, activity: AdaptiveCardInvokeActivity) -> AdaptiveCardInvokeResponse:
         actor = await card_actor(self._runtime, activity)

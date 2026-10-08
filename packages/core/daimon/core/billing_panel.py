@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -20,6 +21,7 @@ from daimon.core.channel_budget import (
     describe_budget,
     get_channel_budget_status,
     list_channel_budget_statuses,
+    window_label,
 )
 from daimon.core.config import McpSettings
 from daimon.core.errors import DaimonError
@@ -48,6 +50,11 @@ MEMBER_CAP = 25
 CHANNEL_BUDGETS_SHOWN = 5
 # Per-turn cost assumed while a tenant has no usage history yet.
 _FALLBACK_TURN_COST_USD = 0.10
+# Live timed credits listed under the balance; the rest are counted in one line.
+TIMED_CREDIT_SHOWN = 3
+TIMED_CREDIT_INTRO = "Includes timed credit:"
+TIMED_CREDIT_NOTE = "Timed credit is spent first; unused amounts expire."
+TOPUPS_ADMIN_ONLY = "Top-ups are admin-only."
 
 
 @dataclasses.dataclass(frozen=True)
@@ -183,7 +190,55 @@ async def load_billing_snapshot(
 
 
 def fmt_usd(value: float | Decimal) -> str:
+    """`$1,234.50`; a negative amount reads `-$12.00`."""
+    if value < 0:
+        return f"-${-value:,.2f}"
     return f"${value:,.2f}"
+
+
+def timed_credit_lines(
+    credits: Sequence[ActiveTimedCredit], *, when: Callable[[datetime], str]
+) -> list[str]:
+    """What the balance includes in timed credit, for the lines under the total.
+
+    Nothing without timed credit. Otherwise an intro, one line per credit
+    (soonest-ending first, at most ``TIMED_CREDIT_SHOWN``), a count of the rest
+    and the note on how it is spent. ``when`` renders an end date in the
+    platform's own date syntax.
+    """
+    if not credits:
+        return []
+    lines = [TIMED_CREDIT_INTRO] + [
+        f"{fmt_usd(credit.remaining_usd)} remaining · expires {when(credit.ends_at)}"
+        for credit in credits[:TIMED_CREDIT_SHOWN]
+    ]
+    more = len(credits) - TIMED_CREDIT_SHOWN
+    if more > 0:
+        lines.append(f"{more} more timed credit{'s' if more > 1 else ''}")
+    lines.append(TIMED_CREDIT_NOTE)
+    return lines
+
+
+def channel_budget_phrase(status: ChannelBudgetStatus, *, now: datetime) -> str:
+    """The invoking channel's budget in words, e.g. `$1.20 of $5.00 spent this month`.
+
+    A budget that has not started shows its limit and when it starts; a fixed
+    one that has ended says so.
+    """
+    budget = status.budget
+    spent = f"{fmt_usd(status.spent_usd)} of {fmt_usd(budget.limit_usd)} spent"
+    if budget.window == "monthly":
+        return f"{spent} this month"
+    if budget.starts_at is None:
+        return f"{spent} in total"
+    total = budget.window == "total" or budget.ends_at is None
+    if budget.starts_at > now:
+        when = window_label(budget, started=False)
+        return f"{fmt_usd(budget.limit_usd)} budget {when if total else f'from {when}'}"
+    if total:
+        return f"{spent} {window_label(budget)}"
+    ended = "" if status.is_active else " (ended)"
+    return f"{spent} from {window_label(budget)}{ended}"
 
 
 def channel_budget_line(status: ChannelBudgetStatus, *, label: str) -> str:

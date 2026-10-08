@@ -6,6 +6,7 @@ Only the outbound Bot Framework transport and the MCP checkout hop are faked.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import uuid
 from contextlib import AbstractAsyncContextManager
@@ -24,9 +25,10 @@ from daimon.adapters.teams.billing_panel import (
 )
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.identity import DENIED
-from daimon.core.billing_panel import BillingPanelState
+from daimon.core.billing_panel import BillingPanelState, MemberRow
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
+from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores.domain import ChannelBudgetRow
 from pydantic import SecretStr
@@ -85,7 +87,7 @@ async def test_only_the_admin_view_offers_top_ups(
         member = await _command(service, teams_api_fake, OTHER_AAD_OBJECT_ID)
         admin = await _command(service, teams_api_fake, AAD_OBJECT_ID)
 
-    assert "top-ups are admin-only" in member and "topup" not in member, "members only look"
+    assert "Top-ups are admin-only." in member and "topup" not in member, "members only look"
     assert admin.count('"op": "topup"') == 4, "an admin gets one button per amount"
     assert "admin view" in admin
 
@@ -213,3 +215,83 @@ def test_the_admin_card_lists_channel_budgets_and_the_member_card_does_not() -> 
             assert "2 more channel budgets" in text
         else:
             assert "Channel budgets" not in text, "a member sees no other channel"
+
+
+# ---------------------------------------------------------------------------
+# The credit layout
+# ---------------------------------------------------------------------------
+
+
+def _card_text(state: BillingPanelState, *, now: datetime | None = None) -> list[str]:
+    card = panel_card(state, since=datetime(2026, 1, 1, tzinfo=UTC), now=now)
+    return [str(e.get("text", "")) for e in card.model_dump(by_alias=True)["body"]]
+
+
+def _state(**overrides: object) -> BillingPanelState:
+    base = BillingPanelState(
+        is_admin=True,
+        caller_user_id="u",
+        caller_spend=0.0,
+        caller_turns=0,
+        caller_cap=None,
+        guild_balance_usd=Decimal("62.4"),
+        guild_spend=0.0,
+        guild_turns=0,
+        guild_distinct_members=0,
+        member_rows=(MemberRow("u", "User 0000", 1.0, 1, True),),
+        over_cap_count=0,
+    )
+    return dataclasses.replace(base, **overrides)  # pyright: ignore[reportArgumentType]
+
+
+def test_the_credit_without_timed_credit_is_just_the_total() -> None:
+    lines = _card_text(_state())
+    at = lines.index("🏦 **Organisation credit**")
+    assert lines[at + 1] == "**$62.40** total balance"
+    assert lines[at + 2] == "🏆 **Top spenders**", "nothing between the total and the next group"
+
+
+def test_the_credit_lists_the_timed_credit_it_includes_as_grey_detail() -> None:
+    credits = tuple(
+        ActiveTimedCredit(Decimal(n), datetime(2026, 1, 10 + n, tzinfo=UTC)) for n in range(1, 5)
+    )
+    card = panel_card(_state(timed_credit=credits), since=datetime(2026, 1, 1, tzinfo=UTC))
+    body = card.model_dump(by_alias=True, exclude_none=True)["body"]
+    at = next(i for i, e in enumerate(body) if e.get("text") == "**$62.40** total balance")
+    details = body[at + 1 : at + 7]
+    assert [d["text"] for d in details] == [
+        "Includes timed credit:",
+        "$1.00 remaining · expires {{DATE(2026-01-11T00:00:00Z, SHORT)}} "
+        "{{TIME(2026-01-11T00:00:00Z)}}",
+        "$2.00 remaining · expires {{DATE(2026-01-12T00:00:00Z, SHORT)}} "
+        "{{TIME(2026-01-12T00:00:00Z)}}",
+        "$3.00 remaining · expires {{DATE(2026-01-13T00:00:00Z, SHORT)}} "
+        "{{TIME(2026-01-13T00:00:00Z)}}",
+        "1 more timed credit",
+        "Timed credit is spent first; unused amounts expire.",
+    ]
+    assert all(d.get("isSubtle") and d.get("size") == "Small" for d in details)
+
+
+def test_a_negative_balance_still_shows_its_total_and_timed_credit() -> None:
+    credit = (ActiveTimedCredit(Decimal("5"), datetime(2026, 1, 20, tzinfo=UTC)),)
+    lines = _card_text(_state(is_admin=False, guild_balance_usd=Decimal("-3"), timed_credit=credit))
+    assert "**-$3.00** total balance" in lines
+    assert any(line.startswith("$5.00 remaining") for line in lines)
+    assert lines[-1] == "Top-ups are admin-only."
+
+
+def test_the_channel_budget_group_sits_between_credit_and_top_spenders() -> None:
+    status = _budget_status("19:c", "1.2")
+    lines = _card_text(_state(channel_budget=status, channel_budgets=(status,)))
+    order = [
+        lines.index(group)
+        for group in (
+            "🏦 **Organisation credit**",
+            "📊 **Channel budget**",
+            "🏆 **Top spenders**",
+            "📊 **Channel budgets**",
+        )
+    ]
+    assert order == sorted(order), order
+    assert lines[order[1] + 1] == "$1.20 of $10.00 spent this month"

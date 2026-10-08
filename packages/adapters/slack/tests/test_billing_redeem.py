@@ -59,7 +59,10 @@ def _action_ids(blocks: list[dict[str, Any]]) -> list[str]:
 
 
 def _texts(blocks: list[dict[str, Any]]) -> str:
-    return "\n".join(str(b.get("text", {}).get("text", "")) for b in blocks)
+    """Every section's and context block's text."""
+    texts = [str(b.get("text", {}).get("text", "")) for b in blocks]
+    texts += [str(e.get("text", "")) for b in blocks for e in b.get("elements", [])]
+    return "\n".join(texts)
 
 
 def _submission(code: str) -> dict[str, Any]:
@@ -108,11 +111,12 @@ def test_timed_credit_lines_in_both_views() -> None:
         blocks = build_billing_container(
             _state(is_admin=is_admin, timed_credit=credit), now=_NOW, since=_SINCE
         )
-        assert f"$7.50 timed credit left · ends <!date^{int(_END.timestamp())}^" in _texts(
-            blocks
-        ), "each view should show the timed credit and its end"
-    assert "timed credit" not in _texts(
-        build_billing_container(_state(), now=_NOW, since=_SINCE)
+        assert f"$7.50 remaining · expires <!date^{int(_END.timestamp())}^" in _texts(blocks), (
+            "each view should show the timed credit and its end"
+        )
+    assert (
+        "timed credit"
+        not in _texts(build_billing_container(_state(), now=_NOW, since=_SINCE)).lower()
     ), "no timed credit should mean no line"
 
 
@@ -206,10 +210,10 @@ async def test_submission_redeems_and_refreshes_the_panel(
     assert result["view_id"] == "V_FORM" and "Redeemed *$10.00*" in _texts(
         result["view"]["blocks"]
     ), "the form should confirm the credit"
-    assert root["view_id"] == "V_ROOT" and "$10.00 balance" in _texts(root["view"]["blocks"]), (
-        "the panel should show the new balance"
-    )
-    assert "this channel: $0.00 of $5.00" in _texts(root["view"]["blocks"]), (
+    assert root["view_id"] == "V_ROOT" and "*$10.00* total balance" in _texts(
+        root["view"]["blocks"]
+    ), "the panel should show the new balance"
+    assert "$0.00 of $5.00 spent this month" in _texts(root["view"]["blocks"]), (
         "the refreshed panel should keep the channel's budget line"
     )
     assert json.loads(root["view"]["private_metadata"]) == {"channel_id": "C1"}, (
