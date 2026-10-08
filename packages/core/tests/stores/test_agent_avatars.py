@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from daimon.core.agent_identity import resolve_agent_identity
+from daimon.core.agent_identity import is_builtin_agent, resolve_agent_identity
 from daimon.core.stores.agent_avatars import (
     delete_avatar,
     generate_default_png,
@@ -27,6 +27,14 @@ def test_default_avatar_is_stable_png() -> None:
     with Image.open(BytesIO(png)) as image:
         assert image.format == "PNG"
         assert image.size == (256, 256)
+
+
+def test_builtin_agent_uses_metadata_or_deployment_default() -> None:
+    assert is_builtin_agent(
+        name="Helper", metadata={"daimon_managed": "true"}, default_agent_name=None
+    )
+    assert is_builtin_agent(name="Main", metadata={}, default_agent_name="Main")
+    assert not is_builtin_agent(name="Daimon", metadata={}, default_agent_name="Main")
 
 
 def test_default_avatar_handles_non_ascii_and_expanding_uppercase() -> None:

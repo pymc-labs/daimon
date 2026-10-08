@@ -91,6 +91,7 @@ type = "forbidden"
 source_modules = [
     "daimon.adapters",
     "daimon.core.access_policy",
+    "daimon.core.agent_avatar_image",
     "daimon.core.agent_detail_lists",
     "daimon.core.agent_details",
     "daimon.core.agent_env_crypto",

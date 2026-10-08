@@ -113,10 +113,12 @@ class TeamsTurnLifecycle:
         unprompted: bool = False,
         completion_ping: bool = False,
         requester: Account | None = None,
+        agent_name_prefix: str | None = None,
     ) -> None:
         self._sender = sender
         self._ping = completion_ping and not unprompted
         self._requester = requester if self._ping else None
+        self._agent_name_prefix = agent_name_prefix
         # Nobody asked, so nothing is owed: no card, no notice, no failure post.
         self._unprompted = unprompted
         self._request_id = request_id
@@ -261,6 +263,8 @@ class TeamsTurnLifecycle:
                 self.answer_prefix_applied = True
             if degraded is not None:
                 answer = f"{answer}\n\n{degraded}"
+            if self._agent_name_prefix is not None:
+                answer = f"**{self._agent_name_prefix}**\n\n{answer}"
             chunks = split_fenced(answer, card.TEAMS_LIMIT)
             last = len(chunks) - 1
             # A ping posts the answer fresh, so Teams notifies; the card is retired after.

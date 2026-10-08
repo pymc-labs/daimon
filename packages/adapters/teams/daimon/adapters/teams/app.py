@@ -79,6 +79,7 @@ from daimon.adapters.teams.site_grant import (
 from daimon.adapters.teams.thread_handoff import hand_over_button
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
+from daimon.core.agent_identity import is_builtin_agent
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
@@ -916,6 +917,15 @@ class TeamsApp:
                 unprompted=inbound.unprompted,
                 completion_ping=self.runtime.settings.completion_pings.get(tenant_id) is True,
                 requester=requester,
+                agent_name_prefix=(
+                    None
+                    if is_builtin_agent(
+                        name=admission.agent.name,
+                        metadata=admission.agent.metadata,
+                        default_agent_name=self.runtime.deployment_default.agent_name,
+                    )
+                    else admission.agent.name
+                ),
             )
             holder.append(attempt)
             return attempt

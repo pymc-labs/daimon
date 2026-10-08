@@ -25,6 +25,7 @@ import pytest
 import yarl
 from aioresponses import aioresponses as AioResponsesMock
 from cryptography.fernet import Fernet
+from daimon.adapters.slack.agent_setup import avatar as avatar_module
 from daimon.adapters.slack.agent_setup.actions import (
     CHANNEL_ADMINS_NEED_ADMIN_MESSAGE,
     OPERATOR_TOKENS_NEED_ADMIN_MESSAGE,
@@ -33,6 +34,8 @@ from daimon.adapters.slack.agent_setup.actions import (
 )
 from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_ADD_SKILL,
+    ACTION_AVATAR_CHANGE,
+    ACTION_AVATAR_RESET,
     ACTION_CHANNEL_ADMINS,
     ACTION_CODING_TOOLS,
     ACTION_DETAILS,
@@ -47,6 +50,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_RULE_READERS,
     ACTION_RULE_RELEASE,
     CALLBACK_ADD_SKILL,
+    CALLBACK_AVATAR_UPLOAD,
 )
 from daimon.adapters.slack.agent_setup.rules import RULE_NEED_ADMIN_MESSAGE
 from daimon.adapters.slack.agent_setup.state import (
@@ -983,6 +987,40 @@ async def test_rule_clicks_refuse_a_shared_agent_then_keep_the_channel_to_a_copy
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
     assert (policy.channel_rules, policy.agent_rules) == ({}, {}), "all lifted"
+
+
+async def test_avatar_buttons_dispatch_to_upload_and_reset(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.slack.agent_setup import actions as actions_module
+
+    _tenant_id, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
+    agent_lookup = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions_module, "resolve_is_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(avatar_module, "may_edit_avatar", agent_lookup)
+    reset = AsyncMock()
+    monkeypatch.setattr(avatar_module, "reset_agent_avatar", reset)
+    meta = _meta(view="details", agent_name=_OTHER_AGENT)
+
+    await handle_agent_setup_action(
+        runtime, _action_payload(ACTION_AVATAR_CHANGE, meta=meta, view_id="V_DETAILS")
+    )
+    (pushed,) = _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY)
+    assert pushed["view"]["callback_id"] == CALLBACK_AVATAR_UPLOAD
+    upload_meta = decode_panel_metadata(pushed["view"]["private_metadata"])
+    assert upload_meta is not None
+    assert (upload_meta.agent_name, upload_meta.root_view_id) == (_OTHER_AGENT, "V_DETAILS")
+    agent_lookup.assert_not_awaited()
+
+    await handle_agent_setup_action(
+        runtime, _action_payload(ACTION_AVATAR_RESET, meta=meta, view_id="V_DETAILS")
+    )
+    reset.assert_awaited_once()
 
 
 async def test_add_skill_opens_the_form_or_refuses_by_where_the_agent_answers(

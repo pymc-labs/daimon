@@ -206,6 +206,7 @@ def _make_lifecycle(
     model_id: str = "claude-sonnet-4-6",
     agent_name: str = "test-agent",
     adopt_status_ts: str | None = None,
+    header_customized: bool = False,
     notify_on_completion: bool = False,
     trigger_ts: str | None = None,
     render_tables: bool = False,
@@ -249,6 +250,7 @@ def _make_lifecycle(
         register=register,
         deregister=deregister,
         adopt_status_ts=adopt_status_ts,
+        header_customized=header_customized,
         sessionmaker=sessionmaker,
         tenant_id=tenant_id,
         budget_channel_id=budget_channel_id,
@@ -455,6 +457,21 @@ async def test_status_ts_reports_the_adopted_ts_before_anything_is_posted(
     assert _post_count(fake_slack_web_client) == 0, (
         "reading status_ts on an adopting lifecycle must not perform any chat-API I/O"
     )
+
+
+async def test_adopted_agent_header_stays_out_of_footer(fake_slack_web_client: Any) -> None:
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client,
+        adopt_status_ts=_ADOPTED_TS,
+        agent_name="Ada",
+        header_customized=True,
+    )
+    assert lc.header_customized
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="Done.")]))
+    blocks = _last_update_blocks(fake_slack_web_client)
+    footer = next(block for block in blocks if block["type"] == "context")
+    assert "Ada" not in footer["elements"][0]["text"]
+    assert _post_count(fake_slack_web_client) == 0
 
 
 async def test_an_adopting_lifecycle_updates_the_adopted_card_instead_of_posting_a_new_one(

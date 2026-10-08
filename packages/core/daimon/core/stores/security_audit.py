@@ -23,6 +23,7 @@ class SecurityAuditEntry(BaseModel):
     tenant_id: uuid.UUID
     account_id: uuid.UUID | None
     agent_id: uuid.UUID | None
+    agent_name: str | None = None
     platform: str | None
     platform_user_id: str | None
     tool_name: str
@@ -103,6 +104,7 @@ async def append_event(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID | None,
     agent_id: uuid.UUID | None,
+    agent_name: str | None = None,
     platform: str | None,
     platform_user_id: str | None,
     tool_name: str,
@@ -150,6 +152,7 @@ async def append_event(
         tenant_id=tenant_id,
         account_id=account_id,
         agent_id=agent_id,
+        agent_name=agent_name,
         platform=platform,
         platform_user_id=platform_user_id,
         tool_name=tool_name,

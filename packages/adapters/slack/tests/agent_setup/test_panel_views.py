@@ -18,6 +18,8 @@ from typing import Any
 
 import pytest
 from daimon.adapters.slack.agent_setup.panel_views import (
+    ACTION_AVATAR_CHANGE,
+    ACTION_AVATAR_RESET,
     ACTION_CHANNEL_ADMINS,
     ACTION_CHANNEL_SKILLS,
     ACTION_CODING_TOOLS,
@@ -461,6 +463,68 @@ def test_details_view_when_name_exceeds_24_chars_truncates_title_and_keeps_full_
     assert f"*{long_name}*" in _joined(view), (
         "a cut title must be repaired by the full name in the body"
     )
+
+
+def test_details_avatar_row_and_admin_controls() -> None:
+    avatar_url = "https://example.test/avatars/token/hash.png"
+    admin = build_details_view(
+        _details(name="research-bot"),
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+        avatar_url=avatar_url,
+    )
+    assert any(
+        block.get("accessory", {}).get("image_url") == avatar_url for block in admin["blocks"]
+    )
+    assert ACTION_AVATAR_CHANGE in json.dumps(admin)
+    assert ACTION_AVATAR_RESET in json.dumps(admin)
+    assert "Avatars are public" in _joined(admin)
+    reset_button = next(
+        element
+        for block in admin["blocks"]
+        for element in block.get("elements", [])
+        if element.get("action_id") == ACTION_AVATAR_RESET
+    )
+    assert reset_button["confirm"]["confirm"]["text"] == "Reset"
+    member = build_details_view(
+        _details(name="research-bot"),
+        meta=_meta(),
+        is_admin=False,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+        avatar_url=avatar_url,
+    )
+    assert ACTION_AVATAR_CHANGE not in json.dumps(member)
+    assert ACTION_AVATAR_RESET not in json.dumps(member)
+    without_public_url = build_details_view(
+        _details(name="research-bot"),
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+        avatar_url=None,
+    )
+    assert not any(
+        block.get("accessory", {}).get("type") == "image" for block in without_public_url["blocks"]
+    )
+    built_in = build_details_view(
+        _details(name="research-bot"),
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+        avatar_url=avatar_url,
+        avatar_editable=False,
+    )
+    assert "*Avatar*" not in _joined(built_in)
+    assert "Avatars are public" not in _joined(built_in)
+    assert ACTION_AVATAR_CHANGE not in json.dumps(built_in)
 
 
 def test_details_view_when_short_name_does_not_repeat_it_in_the_body() -> None:
