@@ -88,25 +88,45 @@ async def test_the_requesters_deny_answers_denied() -> None:
     assert await asyncio.wait_for(waiting, timeout=1) == "denied"
 
 
-async def test_tool_words_are_literal_in_card_fallback_and_private_details() -> None:
-    value = "*x* `x` @everyone <@123456789012345678>"
+@pytest.mark.parametrize(
+    ("value", "safe"),
+    [
+        (
+            "<!channel> <!here> <@U123> & <@U456>",
+            "&lt;!channel&gt; &lt;!here&gt; &lt;@U123&gt; &amp; &lt;@U456&gt;",
+        ),
+        ("<https://example.test/path|text>", "&lt;https://example.test/path|text&gt;"),
+        ("*x* `x` ```x``` rest", "*x* `x` ```x``` rest"),
+    ],
+)
+async def test_tool_words_are_literal_in_card_fallback_and_private_details(
+    value: str, safe: str
+) -> None:
     prompt = _prompt().model_copy(
-        update={"title": f'Publish "{value}"?', "detail_lines": (f"File: {value}",)}
+        update={
+            "title": f'Publish "{value}"?',
+            "consequence": f"Sharing {value} is public.",
+            "detail_lines": (f"File: {value}",),
+        }
     )
     cards = SlackConfirmationCards()
     client = _client()
     waiting, approve_id = await _post(cards, client, prompt)
     kwargs = client.chat_postMessage.await_args.kwargs
     assert kwargs["mrkdwn"] is False and kwargs["parse"] == "none"
-    assert kwargs["text"] == prompt.title
+    assert kwargs["text"] == f'Publish "{safe}"?\nSharing {safe} is public.'
     assert kwargs["attachments"][0]["blocks"][0]["text"] == {
         "type": "plain_text",
         "text": prompt.title,
     }
+    assert kwargs["attachments"][0]["blocks"][1]["text"] == {
+        "type": "plain_text",
+        "text": prompt.consequence,
+    }
 
     await cards.handle_click(_click(approve_id.replace(":approve", ":details"), "U2"))
     details = client.chat_postEphemeral.await_args.kwargs
-    assert details["text"] == f"File: {value}"
+    assert details["text"] == f"File: {safe}"
     assert details["mrkdwn"] is False and details["parse"] == "none"
     waiting.cancel()
     with contextlib.suppress(asyncio.CancelledError):

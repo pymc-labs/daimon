@@ -12,6 +12,7 @@ card runs in this process, and a restart ends both together.
 from __future__ import annotations
 
 import asyncio
+import html
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -51,6 +52,11 @@ _COLORS: dict[ConfirmationCardState, str] = {
     "expired": "#99AAB5",
     "stopped": "#99AAB5",
 }
+
+
+def _plain_message_text(value: str) -> str:
+    """Keep Slack control characters literal in fallback and private messages."""
+    return html.escape(value, quote=False)
 
 
 def _attachment(card: ConfirmationCard, prompt: ConfirmationPrompt) -> list[dict[str, Any]]:
@@ -96,7 +102,7 @@ class SlackConfirmationCards:
                     identity,
                     channel=channel,
                     thread_ts=thread_ts,
-                    text=confirmation_card_text(card),
+                    text=_plain_message_text(confirmation_card_text(card)),
                     attachments=_attachment(card, prompt),
                     mrkdwn=False,
                     parse="none",
@@ -126,7 +132,8 @@ class SlackConfirmationCards:
                 await _ephemeral(
                     posted,
                     str(details_user.get("id") or ""),
-                    "\n".join(posted.prompt.detail_lines) or "No additional details.",
+                    _plain_message_text("\n".join(posted.prompt.detail_lines))
+                    or "No additional details.",
                 )
             return
         parsed = parse_confirmation_custom_id(action_id)
@@ -160,7 +167,7 @@ async def _edit(
             posted.client.chat_update(  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # slack_sdk **kwargs: Unknown
                 channel=posted.channel,
                 ts=posted.ts,
-                text=confirmation_card_text(card),
+                text=_plain_message_text(confirmation_card_text(card)),
                 attachments=_attachment(card, posted.prompt),
                 mrkdwn=False,
                 parse="none",

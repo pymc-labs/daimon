@@ -54,19 +54,35 @@ def _json(sender: FakeSender, index: int) -> str:
     return sender.activities[index].model_dump_json(by_alias=True)
 
 
-def test_tool_words_stay_literal_in_title_and_details() -> None:
-    value = "*x* `x` @everyone <@123456789012345678>"
+@pytest.mark.parametrize(
+    "value",
+    [
+        "@everyone @here <@123456789012345678> <@&123456789012345678> <#123456789012345678>",
+        "<!channel> <!here> <@U123>",
+        "[text](https://example.test/path) <https://example.test/path|text>",
+        "*x* `x` ```x``` rest",
+    ],
+)
+def test_tool_words_stay_literal_in_title_and_details(value: str) -> None:
     prompt = _prompt().model_copy(
-        update={"title": f'Publish "{value}"?', "detail_lines": (f"File: {value}",)}
+        update={
+            "title": f'Publish "{value}"?',
+            "consequence": f"Sharing {value} is public.",
+            "detail_lines": (f"File: {value}",),
+        }
     )
     card = confirmation_adaptive_card(
         build_confirmation_card(prompt, state="pending", token="tok_abcdefgh"), prompt
     )
     payload = card.model_dump(by_alias=True, exclude_none=True)
     items = payload["body"][0]["items"]
-    assert items[0]["text"] == prompt.title
+    assert items[0]["type"] == "RichTextBlock"
+    assert items[0]["inlines"][0]["text"] == prompt.title
+    assert items[1]["type"] == "RichTextBlock"
+    assert items[1]["inlines"][0]["text"] == prompt.consequence
     details = next(item for item in items if item.get("id") == "approval-details")
-    assert details["items"][0]["text"] == f"File: {value}"
+    assert details["items"][0]["type"] == "RichTextBlock"
+    assert details["items"][0]["inlines"][0]["text"] == f"File: {value}"
 
 
 async def _post(

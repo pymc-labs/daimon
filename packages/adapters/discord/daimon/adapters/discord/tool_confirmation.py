@@ -13,6 +13,7 @@ was waiting dies with it and the card's buttons simply stop answering.
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
 
 import structlog
@@ -47,7 +48,8 @@ def _body(card: ConfirmationCard) -> list[str]:
 
 def _safe_text(value: str) -> str:
     """Keep tool-provided words literal in Discord text displays and replies."""
-    return discord.utils.escape_mentions(discord.utils.escape_markdown(value))
+    escaped = discord.utils.escape_mentions(discord.utils.escape_markdown(value))
+    return re.sub(r"<#(?=\d+>)", "<#\u200b", escaped)
 
 
 def _footer(card: ConfirmationCard, prompt: ConfirmationPrompt) -> str | None:

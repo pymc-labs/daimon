@@ -57,30 +57,44 @@ def test_a_pending_card_shows_the_write_and_two_buttons() -> None:
     assert [b.label for b in _buttons(view)] == ["Approve", "Deny", "Details"]
 
 
-async def test_tool_words_stay_literal_in_title_and_details() -> None:
-    value = "*x* `x` @everyone <@123456789012345678>"
+@pytest.mark.parametrize(
+    ("value", "safe"),
+    [
+        (
+            "@everyone @here <@123456789012345678> <@&123456789012345678> <#123456789012345678>",
+            "@\u200beveryone @\u200bhere <@\u200b123456789012345678> "
+            "<@\u200b&123456789012345678> <#\u200b123456789012345678>",
+        ),
+        ("[text](https://example.test/path)", "\\[text](https://example.test/path)"),
+        ("*x* `x` ```x``` rest", "\\*x\\* \\`x\\` \\`\\`\\`x\\`\\`\\` rest"),
+    ],
+)
+async def test_tool_words_stay_literal_in_title_and_details(value: str, safe: str) -> None:
     prompt = _prompt().model_copy(
-        update={"title": f'Publish "{value}"?', "detail_lines": (f"File: {value}",)}
+        update={
+            "title": f'Publish "{value}"?',
+            "consequence": f"Sharing {value} is public.",
+            "detail_lines": (f"File: {value}",),
+        }
     )
     view = build_confirmation_view(
         build_confirmation_card(prompt, state="pending", token="tok_abcdefgh"), prompt
     )
-    assert "\\*x\\* \\`x\\` @\u200beveryone <@\u200b123456789012345678>" in _texts(view)[0]
+    assert safe in _texts(view)[0]
+    assert safe in _texts(view)[1]
     click = _interaction(999)
     await _buttons(view)[2].callback(click)
     kwargs = click.response.send_message.await_args.kwargs
-    assert click.response.send_message.await_args.args[0] == (
-        "File: \\*x\\* \\`x\\` @\u200beveryone <@\u200b123456789012345678>"
-    )
+    assert click.response.send_message.await_args.args[0] == (f"File: {safe}")
     assert kwargs["ephemeral"] is True
-    assert kwargs["allowed_mentions"].everyone is False
+    assert kwargs["allowed_mentions"].to_dict() == {"parse": []}
 
     channel = MagicMock()
     channel.send = AsyncMock(return_value=MagicMock(edit=AsyncMock()))
     waiting = asyncio.create_task(discord_confirmation_hook(channel)(prompt))
     while not channel.send.await_count:
         await asyncio.sleep(0)
-    assert channel.send.await_args.kwargs["allowed_mentions"].everyone is False
+    assert channel.send.await_args.kwargs["allowed_mentions"].to_dict() == {"parse": []}
     waiting.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await waiting

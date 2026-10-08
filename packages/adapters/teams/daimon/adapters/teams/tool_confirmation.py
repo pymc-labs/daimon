@@ -14,7 +14,6 @@ from datetime import UTC
 import structlog
 from daimon.adapters.teams.card_actions import (
     button,
-    heading,
     replace_card,
     submitted_fields,
     toast,
@@ -45,7 +44,9 @@ from microsoft_teams.cards import (
     AdaptiveCard,
     CardElement,
     Container,
+    RichTextBlock,
     TextBlock,
+    TextRun,
     ToggleVisibilityAction,
 )
 
@@ -77,11 +78,14 @@ def confirmation_adaptive_card(
     card: ConfirmationCard, prompt: ConfirmationPrompt, *, answered_by: str | None = None
 ) -> AdaptiveCard:
     """`card` as an Adaptive Card; buttons only while pending."""
-    body: list[CardElement] = [heading(card.headline)]
+    # Teams parses Markdown in TextBlock. TextRun keeps tool-provided words literal.
+    body: list[CardElement] = [
+        RichTextBlock(inlines=[TextRun(text=card.headline, weight="Bolder", size="Medium")])
+    ]
     if card.body:
-        body.append(TextBlock(text=card.body, wrap=True))
+        body.append(RichTextBlock(inlines=[TextRun(text=card.body)]))
     if card.consequence:
-        body.append(TextBlock(text=card.consequence, wrap=True))
+        body.append(RichTextBlock(inlines=[TextRun(text=card.consequence)]))
     if card.token is not None:
         body.append(Container(items=[], separator=True))
         approve = button(
@@ -103,7 +107,7 @@ def confirmation_adaptive_card(
             Container(
                 id="approval-details",
                 is_visible=False,
-                items=[TextBlock(text=line, wrap=True) for line in detail_lines],
+                items=[RichTextBlock(inlines=[TextRun(text=line)]) for line in detail_lines],
             )
         )
         body.append(
