@@ -1,10 +1,10 @@
 # Configuration reference
 
-Every environment variable daimon reads. Generated from the settings models themselves
+Every environment variable Daimon reads. Generated from the settings models themselves
 by `scripts/generate_config_reference.py` — edit the `Field(description=...)` in the
 model, not this page. CI fails when the two disagree.
 
-Values come from the process environment and, for the daimon processes, from a `.env`
+Values come from the process environment and, for the Daimon processes, from a `.env`
 file in the working directory. `.env.example` lists the same `DAIMON_*` variables in
 copy-paste form; this page adds the types, the defaults and the two standalone services.
 Nested blocks use `__` as the delimiter, so `DAIMON_MCP__JWT_SECRET` is
@@ -57,10 +57,10 @@ section below is a nested block on this model, reached with the `__` delimiter.
 
 `int` · optional · default `90`
 
-Security audit retention age in days, default 90. Operators must schedule daimon audit
-prune TENANT_UUID for each tenant (for example daily). The command deletes older events.
-Set 0 to explicitly retain events forever; privacy erasure and tenant deletion still
-apply.
+Security audit retention age in days, default 90. Operators must schedule `daimon audit
+prune TENANT_UUID` for each tenant (for example daily). The command deletes older
+events. Set 0 to explicitly retain events forever; privacy erasure and tenant deletion
+still apply.
 
 ### `DAIMON_COMPLETION_PINGS`
 
@@ -426,7 +426,7 @@ listed so a harness can drive addressed turns end-to-end without a human. Severa
 supported because admin-gated tools need a caller holding Manage Server while the
 refusal paths need one without it. Leave empty outside test deployments -- an allow-
 listed bot spends real credit. As a tuple field this must be set as a JSON array, e.g.
-'["123","456"]'. daimon's own id is refused at the gate even if listed.
+'["123","456"]'. Daimon's own id is refused at the gate even if listed.
 
 ### `DAIMON_DISCORD__BOT_DISPLAY_NAME`
 
@@ -625,7 +625,7 @@ keeps running so ingress can be re-enabled without a redeploy.
 `HttpUrl | None` · optional · default unset
 
 Externally reachable base URL of the Teams service (the Bot Framework messaging endpoint
-without /api/messages). Enables the admin sign-in that grants daimon a team's SharePoint
+without /api/messages). Enables the admin sign-in that grants Daimon a team's SharePoint
 site; its callback is &lt;public_url&gt;/oauth/teams/files/callback, which must be a Web
 redirect URI on the app registration.
 
@@ -1002,7 +1002,7 @@ channel, nor Discord requests here. The bot must be a member of the channel.
 Slack workspace id (T…) that owns DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID, for a
 deployment installed in several workspaces: every workspace's requests are posted with
 that workspace's bot token. Unset posts with the requesting workspace's own token, which
-suits a single-workspace install. daimon must be installed in the named workspace.
+suits a single-workspace install. Daimon must be installed in the named workspace.
 
 ### `DAIMON_SUPPORT__CREDITS_PER_USER`
 
@@ -1216,12 +1216,12 @@ collide with mcp's 8080 or discord's 8081 on the shared host.
 Read from `notebook_host.config.Settings`. Prefix `DAIMON_NOTEBOOK__`.
 
 A standalone service in `apps/notebook-host`, deployed and configured separately from
-the daimon processes. It is not part of `docker-compose.yml`.
+the Daimon processes. It is not part of `docker-compose.yml`.
 
-This service shares the `DAIMON_NOTEBOOK__` prefix with a block on daimon's own
+This service shares the `DAIMON_NOTEBOOK__` prefix with a block on Daimon's own
 Settings, so `DAIMON_NOTEBOOK__ADMIN_SECRET`, `DAIMON_NOTEBOOK__ALLOW_EDITABLE`,
 `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES` appear twice on this page — once for the service and
-once for the daimon side that calls it. They are read by different processes; a single
+once for the Daimon side that calls it. They are read by different processes; a single
 shared env file would set both.
 
 ### `DAIMON_NOTEBOOK__DATA_DIR`
@@ -1364,7 +1364,7 @@ every tenant's id.
 Read from `report_host.config.Settings`. Prefix `DAIMON_REPORT__`.
 
 A standalone service in `apps/report-host`, deployed and configured separately from the
-daimon processes. It is not part of `docker-compose.yml`.
+Daimon processes. It is not part of `docker-compose.yml`.
 
 ### `DAIMON_REPORT__DATA_DIR`
 
@@ -1509,7 +1509,7 @@ read.
 
 ## Docker Compose
 
-Interpolated by `docker-compose.yml` itself; no daimon process reads them. They exist so
+Interpolated by `docker-compose.yml` itself; no Daimon process reads them. They exist so
 the compose file can build `DAIMON_DATABASE__URL` for every service from one password.
 
 ### `POSTGRES_USER`
