@@ -150,7 +150,7 @@ def _done_page(
     back = _back_to_chat(platform, external_id)
     if update_pending and agent_name:
         return github_page(
-            title=f"Repos connected. An operator will finish switching {html.escape(agent_name)}.",
+            title=f"Repos connected. An operator will finish switching {agent_name}.",
             body_html="<p>You can close this tab.</p>",
         )
     if agent_name:
