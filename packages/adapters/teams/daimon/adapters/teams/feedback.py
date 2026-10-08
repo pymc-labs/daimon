@@ -24,8 +24,8 @@ channel, and only for a tenant that turned that on
 (`SupportSettings.feedback_to_support`): then the form says so before it is
 sent, and each changed submission is posted there once, beside the person,
 the agent and a link to the answer (`support.post_to_support_channel`, the
-Ask a human path). Teams' built-in form said nothing of the kind, so its
-text is never posted.
+Ask a human path), marked when the answer's channel is read only from inside.
+Teams' built-in form said nothing of the kind, so its text is never posted.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from daimon.adapters.teams.answer_access import (
     clicker,
     may_start_turn_at,
     refusal_text,
+    sealed_at,
 )
 from daimon.adapters.teams.card_actions import (
     FAILED,
@@ -55,7 +56,7 @@ from daimon.adapters.teams.card_actions import (
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.adapters.teams.support import post_to_support_channel, routes_feedback
+from daimon.adapters.teams.support import SEALED_LINE, post_to_support_channel, routes_feedback
 from daimon.core.message_feedback import FEEDBACK_REASONS, Vote, known_feedback_reasons
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
@@ -187,6 +188,7 @@ class _Recorded:
 
     outcome: _Outcome
     row_id: uuid.UUID | None = None
+    sealed: bool = False
     ma_agent_id: str | None = None
     ma_session_id: str | None = None
     details_changed: bool = False
@@ -208,6 +210,8 @@ def feedback_post(
         )
     labels = [FEEDBACK_REASONS[code] for code in form.reasons]
     lines.append(f"**Reasons:** {', '.join(labels) if labels else 'none picked'}")
+    if recorded.sealed:
+        lines.append(SEALED_LINE)
     post = "\n".join(lines)
     return f"{post}\n\n{form.text}" if form.text else post
 
@@ -363,6 +367,7 @@ class TeamsFeedback:
         return _Recorded(
             "recorded",
             row_id=row.id,
+            sealed=sealed_at(policy, place),
             ma_agent_id=None if thread is None else thread.ma_agent_id,
             ma_session_id=None if thread is None else thread.ma_session_id,
             details_changed=changed,

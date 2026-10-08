@@ -75,6 +75,15 @@ answer can vote or ask. With `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` on, each
 submitted 👎 form is posted once to the support channel without spending a
 credit, and the form says it is shared. Feedback text is never logged.
 
+Support requests route as on Slack and Discord. One asked from a channel with
+channel admins goes to those admins in 1:1 chats first, then to the
+organisation's admins, and to the support channel only when no chat landed;
+each recipient must be allowed by the DM policy and be on the channel's team
+roster. A request asked from a channel is open to those who could start a
+turn there. When the channel is read only from inside (`readers: inside`),
+the form warns that the note leaves it, and the request and any routed 👎
+form say so, so whoever picks it up answers in the channel.
+
 ### People from another organisation
 
 Two kinds of people count as from another organisation: a shared channel's
@@ -136,7 +145,7 @@ longer goes to the agent. None of them runs an agent turn.
 | `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
 | `privacy` | See, export or delete what daimon stores about you. |
 | `billing` | Your usage this month and the credit left, with when timed credit expires; admins also see the month's spend, the top spenders and channel budgets, add credit and redeem promo codes. |
-| `support` | Ask a person for help: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked. |
+| `support` | Ask a person for help: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked; one from a channel with channel admins goes to them first (above). |
 
 A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
 setup conversation for the chosen agent, with its own session. The chat's

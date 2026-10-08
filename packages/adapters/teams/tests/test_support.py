@@ -18,17 +18,22 @@ from daimon.adapters.teams.commands import parse_command
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.support import SupportCommand
 from daimon.core._models import SupportEscalation
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.channel_admins import set_channel_admins
+from daimon.core.stores.tenants import get_tenant
+from daimon.testing.factories import make_platform_principal
 from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    CHANNEL_ID,
     CONVERSATION_ID,
+    DIRECT_CHAT_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     THREAD_ID,
@@ -46,6 +51,7 @@ from .conftest import (
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
 OPS = "19:ops@thread.tacv2"
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+LEAD = "00000000-0000-0000-0000-00000000000d"
 
 
 def _running(
@@ -275,3 +281,74 @@ async def test_ask_a_human_is_refused_to_someone_who_could_not_ask_there(
         sent = await post_activity(service, _ask("send", message="m-7", note="help"))
     assert opened["task"]["value"] == sent["task"]["value"] == NOT_ALLOWED
     assert await _rows(db_session_factory) == [] and _posts_to(teams_api_fake, OPS) == []
+
+
+async def _grant_lead(db_factory: async_sessionmaker[AsyncSession]) -> None:
+    """`LEAD` admins the channel `make_channel_activity` posts in, and has chatted before."""
+    async with db_factory.begin() as session:
+        tenant = await get_tenant(session, TENANT)
+        await make_platform_principal(session, platform="teams", external_id=LEAD, tenant=tenant)
+        await set_channel_admins(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            channel_id=CHANNEL_ID,
+            role_ids=[],
+            user_ids=[LEAD],
+            actor_account_id=None,
+        )
+
+
+@pytest.mark.parametrize("on_roster", [True, False])
+async def test_a_channel_with_its_own_admins_sends_the_request_to_them_first(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    on_roster: bool,
+) -> None:
+    await _grant_lead(db_session_factory)
+    if not on_roster:
+        teams_api_fake.absent.add(LEAD)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        card = await _form(service, teams_api_fake, make_channel_activity(text="support"))
+        reply = await _send(service, _token(card), "the routine broke")
+
+    assert support.RECEIVED.format(remaining=2) in reply, "delivered either way"
+    lookups = [r.url for r in teams_api_fake.requests if f"/members/{LEAD}" in r.url]
+    assert lookups and CHANNEL_ID in lookups[0], "the admin is looked up on the channel's roster"
+    chats = [p for p in _posts_to(teams_api_fake, DIRECT_CHAT_ID) if "Human support requested" in p]
+    ops = _posts_to(teams_api_fake, OPS)
+    if on_roster:
+        assert len(chats) == 1 and "the routine broke" in chats[0], "the admin's 1:1 chat"
+        assert ops == [], "the escalation channel only when no admin got it"
+    else:
+        assert chats == [] and len(ops) == 1, "no admin reachable: the escalation channel"
+
+
+async def test_a_sealed_channel_warns_in_the_form_and_marks_the_post(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    policy = TenantAccessPolicy(channel_rules={CHANNEL_ID: ChannelRule(readers="inside")})
+    async with db_session_factory.begin() as session:
+        await set_access_policy(session, tenant_id=TENANT, policy=policy)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        card = await _form(service, teams_api_fake, make_channel_activity(text="support"))
+        await _send(service, _token(card), "help")
+        chat = await _form(service, teams_api_fake, make_message_activity(text="support"))
+
+    assert support.SEALED_HINT in card, "told the note leaves the channel before sending it"
+    assert support.SEALED_HINT not in chat, "the 1:1 chat is nobody's sealed channel"
+    [posted] = _posts_to(teams_api_fake, OPS)
+    assert support.SEALED_LINE in posted, "whoever picks it up knows to answer there"
+
+
+async def test_support_from_a_channel_is_refused_to_someone_who_could_not_ask_there(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    policy = TenantAccessPolicy(invoker_user_ids=(OTHER_AAD_OBJECT_ID,))
+    async with db_session_factory.begin() as session:
+        await set_access_policy(session, tenant_id=TENANT, policy=policy)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        reply = await _form(service, teams_api_fake, make_channel_activity(text="support"))
+
+    assert support.NOT_ALLOWED_THERE in reply and '"ask"' not in reply, "no form to send"
+    assert await _rows(db_session_factory) == []

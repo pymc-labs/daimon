@@ -9,11 +9,11 @@ from typing import Any
 
 import pytest
 import structlog
-from daimon.adapters.teams import feedback
+from daimon.adapters.teams import feedback, support
 from daimon.adapters.teams.answer_access import IN_DIRECT_CHAT, NOT_ALLOWED, AnswerPlace
 from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, feedback_text, form_details
 from daimon.adapters.teams.http_service import TeamsHttpService
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.message_feedback import FEEDBACK_REASONS
@@ -25,9 +25,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    CHANNEL_ID,
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
+    THREAD_ID,
     USER_NAME,
     TeamsApiFake,
     assert_card_renders,
@@ -270,3 +272,23 @@ async def test_forms_stay_in_the_database_when_routing_is_off(
     assert _posts_to_ops(teams_api_fake) == [], "off by default: nothing leaves the database"
     [row] = await _rows(db_session_factory)
     assert row["feedback_text"] == CRITICISM
+
+
+async def test_a_routed_form_from_a_sealed_channel_is_marked(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    policy = TenantAccessPolicy(channel_rules={CHANNEL_ID: ChannelRule(readers="inside")})
+    async with db_session_factory.begin() as session:
+        await set_access_policy(session, tenant_id=TENANT, policy=policy)
+    data = {"action": FEEDBACK_DIALOG, "message": ANSWER, "reasons": "other", "text": ""}
+    submit = make_invoke("task/submit", {"data": data})
+    submit["conversation"] = {
+        "id": THREAD_ID,
+        "conversationType": "channel",
+        "tenantId": ENTRA_TENANT_ID,
+    }
+    async with _running(db_session_factory, teams_api_fake, routed=True) as service:
+        await post_activity(service, submit)
+
+    [posted] = _posts_to_ops(teams_api_fake)
+    assert support.SEALED_LINE in posted, "whoever reads it knows to answer in the channel"

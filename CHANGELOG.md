@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   up, answers carry an Ask a human button that opens the support form for
   that answer. Turns that only ran tools get both on their finished card;
   cancelled turns get neither.
+- **Teams support requests reach a channel's own admins first.** As on Slack
+  and Discord, a request asked from a Teams channel with channel admins now
+  goes to them in 1:1 chats, then to the organisation's admins, and to the
+  support channel only when no chat landed. Only people who could start a
+  turn in that channel can ask from it. A channel read only from inside
+  is marked in the request and in a routed 👎 form, and the form warns that
+  the note leaves the channel.
 - **Teams files in private and shared channels, turned on by asking.** The
   Enable files sign-in now starts from a channel and grants daimon that
   channel's own SharePoint site: the team's for a standard channel, a site of
