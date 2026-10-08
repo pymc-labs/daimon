@@ -1,11 +1,12 @@
 # Discord webhook posting under concurrent turns
 
 `WebhookLoad.tla` checks posting capacity and route changes for concurrent
-turns sharing parent channels. `Cadence.tla` checks two render windows with
-the event's parent-channel spread and both global rate-limit modes.
+turns sharing parent channels. `Cadence.tla` checks the render tick and
+lifecycle debounce over ten ticks with the event's parent-channel spread and
+both Discord global rate-limit modes.
 `CardRecovery.tla` checks the durable initial card, ambiguous post response,
 terminal edit, and restart reconciliation.
-Run both through `TLA2TOOLS_JAR=... formal/check.sh` from the repository root.
+Run all three through `TLA2TOOLS_JAR=... formal/check.sh` from the repository root.
 These are finite abstractions of the code, not a proof of Discord or discord.py.
 
 ## Code paths and assumptions
@@ -51,11 +52,16 @@ creation, network latency, other traffic on the same egress IP or bot token,
 answer overflow, or a permanent platform outage. Cross-process hook
 creation is not serialized; concurrent processes can create more than the
 intended three in one parent, though the Discord channel cap is 15. The
-production worker cap of 200 concurrent turns is planned, not live. The
+Discord's process-wide `max_concurrent_turns` defaults to `None` (no cap);
+200 is a proposed deployment cap, not a live default. The per-tenant default
+is three, with a separate event-guild override proposed at 200. The
 `WebhookLoad` interleaving model checks two or three turns across one or two
 parents and one to three hooks. `Cadence` deterministically checks 15 and 200
-active-turn request counts across 40 or 65 parents. It does not explore 200
-independent turn interleavings or prove a latency bound.
+active-turn request counts across 40 or 65 parents. It models Discord's
+10-second edit debounce and Slack's 5-second debounce on top of the two-second
+driver tick. Balanced edit phases are an explicit steady-state assumption,
+not a property guaranteed by the code. It does not explore 200 independent
+turn interleavings or prove a latency bound.
 
 ## Checked configurations
 
@@ -71,10 +77,13 @@ independent turn interleavings or prove a latency bound.
 | `LoadUnsafeFallback` | Dropping the bot route with identity off violates `FallbackRoute`. Discord and MCP transport tests pin the bot route when identity is disabled or webhooks are unavailable. |
 | `LoadUnsafeBackoff` | Ignoring `retry_after` permits repeated 429s in one window and violates `NoBusyRetry`. The safe model waits for the next window. |
 | `LoadUnsafeBound` | Claiming completion within two windows when six calls share a hook that accepts two per window violates `BoundedPosting`. The corrected three-window bound is checked by `LoadSafe`. |
-| `CadenceExpected` | 15 active turns across 40 parents, one state-change edit per turn per two-second window: route and IP global backlogs stay zero. |
-| `CadenceWebhookRoutes`, `CadenceSixtyFiveRoutes` | At 200 active turns, 40 parents with three evenly selected hooks can absorb an initial post plus edit per turn at the assumed hook quota; 65 parents can absorb one edit per turn even if each parent has one hook. These check route capacity only. |
-| `CadenceWebhookIPUnsafe`, `CadenceBotGlobalUnsafe` | At 200 active turns, one edit per turn per window is 200 requests against either global allowance of 100 per window. Both modes leave 100 requests queued after the first window. Transport tests pin that final webhook and bot 429s propagate; no fallback can promise delivery after global exhaustion. |
-| `CadenceWebhookSkewUnsafe` | Five turns per parent, all mapped to one hook, plus simultaneous initial post and edit require ten calls in one window against five. `test_same_parent_threads_can_select_one_webhook` pins the hash-collision route. |
+| `CadenceExpected` | Fifteen ongoing Discord turns obey the ten-second debounce over two-second render ticks. |
+| `CadenceWebhookGlobalSafe`, `CadenceBotGlobalSafe` | At 200 ongoing Discord turns with balanced edit phases, 40 edits plus six other requests per two-second tick stay below either modeled 100-request global allowance. The six other requests represent roughly three initial, terminal, or answer operations per second. |
+| `CadenceSlackDebounce` | Slack's five-second lifecycle debounce permits at most one edit per turn every three two-second driver ticks. This checks cadence only; it does not assign a Discord global limit to Slack. |
+| `CadenceWebhookRoutes`, `CadenceSixtyFiveRoutes` | At 200 cold starts, 40 parents with three balanced hooks or 65 parents with one hook can carry initial cards; first progress edits wait five ticks. These check route capacity only. |
+| `CadenceWebhookNoDebounceUnsafe`, `CadenceBotNoDebounceUnsafe` | Counterfactuals with the lifecycle debounce removed permit 200 edits every tick and violate the modeled global allowance. The current code cannot produce this steady rate. |
+| `CadenceColdBurstGlobalUnsafe` | A synchronized 200-card initial-post burst can exceed one modeled global window even with debounce. This is a real burst risk. |
+| `CadenceWebhookSkewUnsafe` | The no-debounce counterfactual combines five initial posts and five edits on one hook in one window. `test_same_parent_threads_can_select_one_webhook` pins the hash-collision route, while the simultaneous edit assumption is deliberately unsafe. |
 | `CardSafe` | A committed intent, one remote card, terminal edit or token-available recovery: no duplicate card/answer and no pending card after a finished turn, retirement, or recovery. |
 | `CardUnsafeDuplicate` | Retrying an accepted initial post after losing its response creates two cards and violates `NoDuplicateCard`. The durable intent and history lookup avoid blind repost; Discord recovery tests cover the ambiguous response and duplicate discovery. |
 | `CardUnsafeFinish` | Marking a turn finished before clearing its card violates `NoPendingAfterTurnEnds`. The lifecycle finishes the card before revealing the answer. |
@@ -101,39 +110,44 @@ pre-created threads; the final soak used 40 channels and 120 threads, three
 threads per parent. The expected rate is 50–60 turns/min, with roughly 15
 turns in flight inferred from the lower-rate soak. A 200-turn cold burst was
 observed with 195 sampled turns in flight. The final soak used each thread
-eight to ten times. The planned worker and event-guild caps are 200; current
-defaults are an unset global cap and three per tenant. These figures come
-from the private R3 staging rehearsal report and are summarized here without
+eight to ten times. A process-wide cap of 200 and an event-guild cap of 200
+were proposed for the event; `max_concurrent_turns` currently defaults to
+`None`, and the per-tenant default is three. These figures come from the
+private R3 staging rehearsal report and are summarized here without
 identifiers or operational details. R3 recorded zero Discord 429s in its
 later cold and soak stages, but all synthetic prompts came from one QA bot
 account and the rehearsal predates webhook identity mode. It does not
 validate webhook mode.
 
-At roughly 15 in flight, the maximum render cadence adds about 7.5 edits/s;
-50–60 turns/min add about 2.5–3 initial/terminal/answer requests/s at the
-three-request baseline. Both posting modes fit a free 50/s global allowance
-under this estimate. At 200 in flight, the render ceiling is 100 edits/s,
-before new cards and terminal updates: **both webhook IP and bot-token global
-budgets are overloaded if every card changes on every tick**. The model
-retains this counterexample for each mode. Edits occur only when card state
-changes, so 100/s is a stress ceiling, not an observed steady rate.
+The two-second driver tick only checks for changed state. Discord's lifecycle
+allows a working-card edit after ten seconds, and Slack's after five seconds;
+the next driver tick performs it. With a continuous two-second tick, that is
+at least five ticks between Discord edits and three between Slack edits.
+Terminal edits bypass this debounce. At roughly 15 Discord turns in flight,
+the maximum sustained progress rate is about 1.5 edits/s. At 200 it is about
+20 edits/s. The 50–60 turns/min expectation adds about 2.5–3 initial,
+terminal, and answer requests/s at the three-request baseline. With staggered
+edits, both webhook-IP and bot-token modes remain below their separate 50/s
+global allowances in the model. Slack's 200-turn progress ceiling is about
+33 edits/s after tick rounding; this Discord global allowance does not apply
+to Slack.
 
-The 200-card cold burst alone requires at least two global two-second windows
-in either mode. Spread evenly over 40 parents, five initial posts per parent
-exactly fill one hook's assumed route bucket; over 65 parents, each needs at
-most four. If an edit lands in the same window, 40 parents with three evenly
-used hooks still fit the route quota, but one-hook collisions create local
-backlog. Thread IDs can collide modulo three, so three threads do not
-guarantee three active hooks. The IP global bucket remains the bottleneck even
-when route capacity is sufficient. This is a capacity lower bound, not a
-delivery guarantee; hook creation, `retry_after`, other egress traffic, and
-answer overflow can add windows.
+The 200-card cold burst alone needs at least two global two-second windows in
+either mode. Spread over 40 parents, five initial posts per parent fill one
+hook's assumed route bucket; over 65 parents, each needs at most four. The
+first progress edit cannot land in that same window because of debounce.
+Thread IDs can still collide modulo three, and an uneven burst can create
+local backlog. A synchronized wave of 200 edits after the debounce can also
+exceed a single global window even though the sustained average is below
+50/s. This is a capacity calculation, not a delivery guarantee; hook
+creation, `retry_after`, other egress traffic, and answer overflow add load.
 
 **Answer:** webhook mode has better per-route distribution and keeps its
-requests out of the bot-token global bucket, but it is not intrinsically safe
-at the 200-turn maximum cadence because its unauthenticated requests share an
-IP-based global ceiling. Bot mode has no per-webhook collision risk, but its
-50/s bot-token ceiling also overloads at that cadence. Monitor actual
+requests out of the bot-token global bucket. With lifecycle debounce, the
+modeled 200-turn sustained progress rate plus baseline turn traffic fits the
+50/s global ceiling in both webhook-IP and bot-token modes. Cold starts,
+synchronized edits, terminal traffic and one-second clustering can still
+trigger 429s. Bot mode has no per-webhook collision risk. Monitor actual
 `X-RateLimit-Scope`, bucket headers, 429 counts and card-edit rate in staging;
 the R3 zero-429 result does not settle webhook capacity. Automatic fallback
 uses a bot post with the agent name on the first answer chunk when webhook
