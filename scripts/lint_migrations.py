@@ -170,23 +170,6 @@ def lint_file(path: Path) -> list[Finding]:
         )
     elif marker_value is not None:
         shape = _classify_downgrade_body(downgrade_func)
-        merge_noop = (
-            marker_value == "safe"
-            and shape == "trivial"
-            and any(
-                isinstance(node, ast.AnnAssign)
-                and isinstance(node.target, ast.Name)
-                and node.target.id == "down_revision"
-                and isinstance(node.value, ast.Tuple)
-                for node in tree.body
-            )
-            and any(
-                isinstance(node, ast.FunctionDef)
-                and node.name == "upgrade"
-                and _classify_downgrade_body(node) == "trivial"
-                for node in tree.body
-            )
-        )
         if marker_value == "unsupported" and shape != "raises":
             findings.append(
                 Finding(
@@ -199,7 +182,7 @@ def lint_file(path: Path) -> list[Finding]:
                     ),
                 )
             )
-        elif marker_value in {"safe", "destructive"} and shape != "real" and not merge_noop:
+        elif marker_value in {"safe", "destructive"} and shape != "real":
             findings.append(
                 Finding(
                     file=source_path,
