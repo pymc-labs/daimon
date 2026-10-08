@@ -23,6 +23,7 @@ predicate and exists only to give message feedback an attribution hint.
 from __future__ import annotations
 
 import uuid as _uuid
+from collections.abc import Collection
 from datetime import datetime
 from typing import Any, cast
 
@@ -580,6 +581,29 @@ async def thread_ids_for_sessions(
         )
     )
     return {ma_session_id: thread_id for ma_session_id, thread_id in rows.all()}
+
+
+async def recorded_thread_parents(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, thread_ids: Collection[str]
+) -> dict[str, frozenset[str]]:
+    """Of `thread_ids`, the ones a session ran in as a thread, each with its
+    channels. Any status, any account."""
+    if not thread_ids:
+        return {}
+    rows = await session.execute(
+        select(ThreadSession.thread_id, ThreadSession.channel_id)
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.thread_id.in_(thread_ids),
+            ThreadSession.channel_id.is_not(None),
+            ThreadSession.channel_id != ThreadSession.thread_id,
+        )
+        .distinct()
+    )
+    parents: dict[str, set[str]] = {}
+    for thread_id, channel_id in rows.tuples():
+        parents.setdefault(thread_id, set()).add(cast(str, channel_id))
+    return {t: frozenset(c) for t, c in parents.items()}
 
 
 async def record_session_seals(

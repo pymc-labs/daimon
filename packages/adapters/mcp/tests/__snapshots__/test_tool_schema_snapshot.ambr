@@ -442,11 +442,17 @@
         Archive the MA environment and delete from the tenant pool.
         
         Channels and the workspace default that picked it are cleared, so they
-        fall through to the next tier; read ``note`` back to the user.
+        fall through to the next tier; read ``note`` back to the user. When that
+        leaves a sealed channel on an environment with unrestricted networking,
+        pass ``confirm_open_network=true`` only after the caller confirms it.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'confirm_open_network': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
           'name': dict({
             'type': 'string',
           }),
@@ -792,7 +798,9 @@
         default. The workspace default requires Manage Server (admin); an admin of the
         channel may clear that channel's environment, unless it is sealed and the
         default has unrestricted networking; then a server admin must confirm it, as
-        for ``set_channel_environment``. A thread id resolves to its parent channel.
+        for ``set_channel_environment``, and as when clearing the workspace default
+        leaves sealed channels on such a default. A thread id resolves to its parent
+        channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2412,7 +2420,8 @@
         its turn is still running, and unless the person asking started that
         turn, opened the thread, or is a server admin. channel_id is where
         the message is (Discord: the thread id for a message in a thread;
-        Slack: the channel id, and message_id is the message ts). Pass this
+        Slack: the channel id, and message_id is the message ts; Teams: the
+        conversation_id and activity_id send_message returned). Pass this
         turn's origin_context_id. Limited to 10 edits or deletes per turn and
         40 per hour. Refused in protected channels, channels you may not post
         in, sealed channels outside their own conversations and the support
@@ -2447,6 +2456,25 @@
           'message_id',
           'content',
         ]),
+        'type': 'object',
+      }),
+    }),
+    'enable_channel_files': dict({
+      'description': '''
+        Post the Enable files card in this Teams channel, right after your reply.
+        
+        Call it only in a Teams channel whose ``<channel>`` element has a
+        ``files_hint`` naming this tool, when an admin asks for a file there or
+        to turn files on, before offering anything else (an artifact, report
+        or notebook). Elsewhere no card can follow. A Microsoft 365 admin who
+        is a member of the channel signs in with the card once; daimon can then
+        save and read files in that channel, private and shared channels
+        included. Admins only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
         'type': 'object',
       }),
     }),
@@ -4809,8 +4837,8 @@
         ``19:…@thread.tacv2;messageid=…``. Markdown, capped at 6,000
         characters, and you must be a member of that conversation. In a
         channel, files are saved to its Files tab and the message links
-        them; that needs the team's SharePoint site granted to daimon, and
-        a private or shared channel takes none. In a 1:1 chat each file
+        them; that needs the channel's SharePoint site granted to daimon
+        (``enable_channel_files`` offers the sign-in). In a 1:1 chat each file
         is a card the person accepts to save it to their OneDrive; content
         may be empty when sending files. A group chat takes no files.
         Channels the workspace marked protected, and threads under them,
@@ -5087,7 +5115,8 @@
         (``list_environments``). Conversations pick it up from their next message.
         The workspace default requires Manage Server (admin); an admin of the channel
         may set that channel's environment, except one with unrestricted networking in
-        a sealed channel, which needs a server admin and their confirmation: pass
+        a sealed channel, which needs a server admin and their confirmation, as does a
+        workspace default sealed channels would run in: pass
         ``confirm_open_network=true`` only after the caller confirms it.
         
         Pass the parent channel's id: Discord
@@ -6042,7 +6071,13 @@
       }),
     }),
     'update_environment': dict({
-      'description': 'Patch-update an environment. Omitted (None) fields are preserved.',
+      'description': '''
+        Patch-update an environment. Omitted (None) fields are preserved.
+        
+        Opening the network of an environment a sealed channel runs in needs the
+        caller's confirmation: pass ``confirm_open_network=true`` only after they
+        confirm it.
+      ''',
       'parameters': dict({
         '$defs': dict({
           'BetaCloudConfigParams': dict({
@@ -6255,6 +6290,10 @@
               }),
             ]),
             'default': None,
+          }),
+          'confirm_open_network': dict({
+            'default': False,
+            'type': 'boolean',
           }),
           'description': dict({
             'anyOf': list([

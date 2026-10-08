@@ -4,8 +4,9 @@ A grant's group ids are Discord roles, Slack user groups and Teams teams (whose
 owners count). Discord sends a member's roles with each event; Slack and Teams
 look up only grant-named groups, so each has its own lookup module and both
 store what a turn matched. Outside a turn the stored Slack and Teams groups are
-looked up again; Discord's stored roles stand. No platform parametrization, no
-database.
+looked up again, and a stored Discord role against the member's current roles
+where a lookup runs; without one Discord's stand. No platform parametrization,
+no database.
 """
 
 from __future__ import annotations

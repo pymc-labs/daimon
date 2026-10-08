@@ -946,6 +946,12 @@ async def test_mapped_app_vault_closes_without_issued_tokens(db_session: AsyncSe
     db_session.add(mapping)
     await db_session.flush()
     assert (
+        await github_issued_tokens.touch_unmapped_app_session(
+            db_session, session_id="mapped-zero-grants"
+        )
+        is None
+    )
+    assert (
         await github_issued_tokens.list_closed_app_sessions(db_session, now=datetime.now(UTC)) == []
     )
     mapping.status = "dead"

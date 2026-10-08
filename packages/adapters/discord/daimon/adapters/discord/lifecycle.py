@@ -39,6 +39,7 @@ from daimon.adapters.discord.embed import (
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
+from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.ops_alerts import alert_ops
@@ -61,7 +62,7 @@ import discord
 log = structlog.get_logger()
 
 SendFn = Callable[..., Awaitable[discord.Message]]
-EditFn = Callable[..., Awaitable[None]]
+EditFn = Callable[..., Awaitable[discord.Message | None]]
 DeleteFn = Callable[[discord.Message], Awaitable[None]]
 
 _DEBOUNCE_S = 10.0
@@ -131,6 +132,7 @@ class DiscordTurnLifecycle:
         send: SendFn,
         edit: EditFn,
         agent_name: str,
+        fallback_active: Callable[[], bool] | None = None,
         model_id: str,
         cancel_view: discord.ui.View | None = None,
         requester_id: int | None = None,
@@ -142,6 +144,7 @@ class DiscordTurnLifecycle:
         delete: DeleteFn | None = None,
         unprompted: bool = False,
         on_first_post: Callable[[discord.Message], Awaitable[None]] | None = None,
+        on_replacement: Callable[[discord.Message], Awaitable[None]] | None = None,
         request_id: Callable[[], str] = bound_request_id,
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         tenant_id: uuid.UUID | None = None,
@@ -166,6 +169,7 @@ class DiscordTurnLifecycle:
         # the push notification.
         self._unprompted = unprompted
         self._agent_name = agent_name
+        self._fallback_active = fallback_active
         self._model_id = model_id
         self._clock = clock
         self._state = EmbedState(
@@ -186,6 +190,7 @@ class DiscordTurnLifecycle:
         self._terminal: bool = False
         self._cancel_view = cancel_view
         self._on_first_post = on_first_post
+        self._on_replacement = on_replacement
         self._first_post_attempted: bool = False
         self._persisted_sealed_indices: set[int] = set()
         self._was_answered: bool = False
@@ -258,6 +263,18 @@ class DiscordTurnLifecycle:
             kwargs["silent"] = True
         return await self._send(**kwargs)
 
+    async def _edit_message(
+        self,
+        message: discord.Message | None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> None:
+        assert message is not None
+        replacement = await self._edit(message, **kwargs)
+        if isinstance(replacement, discord.Message) and replacement.id != message.id:
+            self._message_ref = replacement
+            if self._on_replacement is not None:
+                await self._on_replacement(replacement)
+
     def _build_embeds(self, now: float) -> list[discord.Embed]:
         """Render the one status embed: headline, tool lines and the latest draft."""
         return [build_discord_embed(to_embed_data(self._state, now=now))]
@@ -288,7 +305,7 @@ class DiscordTurnLifecycle:
             self._on_first_post = None
         elif now - self._last_flush >= _DEBOUNCE_S:
             # Debounce elapsed — edit
-            await self._edit(
+            await self._edit_message(
                 self._message_ref, embeds=self._build_embeds(now), view=self._cancel_view
             )
             self._last_flush = now
@@ -347,7 +364,7 @@ class DiscordTurnLifecycle:
             self._message_ref = await self._send_message(embeds=[embed], view=None)
             self._card_message_ref = self._message_ref
         else:
-            await self._edit(self._message_ref, embeds=[embed], view=None)
+            await self._edit_message(self._message_ref, embeds=[embed], view=None)
 
     async def _persist_sealed_responses(self, state: TurnState) -> None:
         """Post sealed answers (text blocks a later tool call made immutable)
@@ -360,6 +377,8 @@ class DiscordTurnLifecycle:
             if index in self._persisted_sealed_indices:
                 continue
             self._persisted_sealed_indices.add(index)
+            if self._fallback_active is not None and self._fallback_active():
+                text = fallback_name_prefix(self._agent_name, text)
             for chunk in split_for_discord_safe(text):
                 await self._send_message(
                     content=chunk, allowed_mentions=discord.AllowedMentions.none()
@@ -385,7 +404,7 @@ class DiscordTurnLifecycle:
         cancelled = state.termination == TerminationReason.INTERRUPTED
         if cancelled:
             if not response_text:
-                await self._edit(
+                await self._edit_message(
                     self._message_ref, content="Turn cancelled.", embed=None, view=None
                 )
                 log.info("turn.terminal_success", has_text=False, cancelled=True)
@@ -406,7 +425,9 @@ class DiscordTurnLifecycle:
                     )
                 log.info("turn.terminal_success", has_text=False, tool_only=True)
                 return
-            await self._edit(self._message_ref, content="Turn cancelled.", embed=None, view=None)
+            await self._edit_message(
+                self._message_ref, content="Turn cancelled.", embed=None, view=None
+            )
             log.info("turn.terminal_success", has_text=False)
             return
 
@@ -419,6 +440,8 @@ class DiscordTurnLifecycle:
         degraded_notice = render_degraded_notice(state.mcp_failures)
         if degraded_notice is not None:
             response_text = f"{response_text}\n\n{degraded_notice}"
+        if self._fallback_active is not None and self._fallback_active():
+            response_text = fallback_name_prefix(self._agent_name, response_text)
         notify = (
             self._notify_on_completion
             and self._requester_id is not None
@@ -449,7 +472,7 @@ class DiscordTurnLifecycle:
                     **({"files": files} if files else {}),
                 )
             else:
-                await self._edit(
+                await self._edit_message(
                     self._message_ref,
                     content=content,
                     view=None,
@@ -488,10 +511,19 @@ class DiscordTurnLifecycle:
         """
         if self._revealed_first_chunk is None or self._message_ref is None:
             return False
-        updated = f"{notice}\n\n{self._revealed_first_chunk}"
+        first_chunk = self._revealed_first_chunk
+        prefix = fallback_name_prefix(self._agent_name, "")
+        if (
+            self._fallback_active is not None
+            and self._fallback_active()
+            and first_chunk.startswith(prefix)
+        ):
+            updated = f"{prefix}{notice}\n\n{first_chunk[len(prefix) :]}"
+        else:
+            updated = f"{notice}\n\n{first_chunk}"
         if len(split_for_discord_safe(updated)) > 1:
             return False
-        await self._edit(
+        await self._edit_message(
             self._message_ref,
             content=updated,
             view=None,

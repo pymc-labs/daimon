@@ -547,6 +547,77 @@ async def test_verifier_rechecks_a_stored_slack_group_live(
     assert await claims(blind) == ([], []), "no lookup at all grants nothing"
 
 
+async def test_verifier_rechecks_a_stored_discord_role_against_the_members_roles(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A role taken away lapses before the member's next turn; Discord is read per member."""
+    import httpx
+    from daimon.adapters.mcp.auth.group_members import DiscordMembers, GroupLookups
+    from daimon.core.channel_admins import GroupMembersCache
+    from daimon.core.stores.accounts import set_platform_role_ids
+    from daimon.core.stores.channel_admins import set_channel_admins
+    from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+
+    guild, user = "111111111111111111", "222222222222222222"
+    async with sessionmaker() as s, s.begin():
+        tenant = await make_tenant(s, platform="discord", workspace_id=guild)
+        account = await make_account(s, tenant=tenant)
+        await make_platform_principal(
+            s, platform="discord", external_id=user, tenant=tenant, account=account
+        )
+        await set_platform_role_ids(s, account.id, ["333333333333333333"])
+        await set_channel_admins(
+            s,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="444444444444444444",
+            role_ids=["333333333333333333"],
+            user_ids=[],
+            actor_account_id=None,
+        )
+    answers = [
+        httpx.Response(200, json={"roles": ["333333333333333333"]}),
+        httpx.Response(200, json={"roles": []}),
+        httpx.Response(404, json={"code": 10007}),
+        httpx.Response(500),
+        httpx.Response(200, text="<html>"),
+        httpx.Response(200, json=["333333333333333333"]),
+    ]
+    asked: list[httpx.Request] = []
+
+    def discord(request: httpx.Request) -> httpx.Response:
+        asked.append(request)
+        return answers[len(asked) - 1]
+
+    lookups = GroupLookups(
+        sessionmaker=sessionmaker,
+        fernet=None,
+        teams_client=None,
+        discord=DiscordMembers(
+            "bot-token", httpx.AsyncClient(transport=httpx.MockTransport(discord))
+        ),
+        cache=GroupMembersCache(ttl_s=0, failure_ttl_s=0),
+    )
+    verifier = DaimonJWTVerifier(
+        secret=SECRET, sessionmaker=sessionmaker, group_members=lookups.members
+    )
+    token = pyjwt.encode({"sub": str(account.id), "iat": 0}, SECRET, algorithm="HS256")
+
+    async def administered() -> object:
+        access = await verifier.verify_token(token)
+        assert access is not None, "the token verifies either way"
+        return access.claims["administered_channel_ids"]
+
+    assert await administered() == ["444444444444444444"], "still holds the role"
+    assert str(asked[0].url).endswith(f"/guilds/{guild}/members/{user}"), "the member is read"
+    assert asked[0].headers["authorization"] == "Bot bot-token"
+    assert await administered() == [], "the role was taken away"
+    assert await administered() == [], "left the guild"
+    assert await administered() == [], "a failed read grants nothing"
+    assert await administered() == [], "neither does a body that isn't JSON"
+    assert await administered() == [], "or isn't a member object"
+
+
 async def _agent_token(
     sessionmaker: async_sessionmaker[AsyncSession], *, platform: str | None, channel_id: str | None
 ) -> str:

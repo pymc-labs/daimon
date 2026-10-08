@@ -17,6 +17,7 @@ from typing import Any
 
 import structlog
 from daimon.adapters.discord.lifecycle import SendFn
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.channel_tidy import record_turn_post
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -64,11 +65,20 @@ class TurnPostRecorder:
             source="auto_thread",
         )
 
-    def sender(self, thread: discord.Thread, *, turn_card_intent_id: uuid.UUID) -> SendFn:
+    def sender(
+        self,
+        thread: discord.Thread,
+        *,
+        turn_card_intent_id: uuid.UUID,
+        transport: DiscordPostTransport | None = None,
+    ) -> SendFn:
         """`thread.send` that records each message it sends for this turn."""
 
         async def send(*args: Any, **kwargs: Any) -> discord.Message:  # noqa: ANN401
-            sent = await thread.send(*args, **kwargs)
+            if transport is not None:
+                sent = await transport.send(*args, **kwargs)
+            else:
+                sent = await thread.send(*args, **kwargs)
             await self.message(thread, sent, turn_card_intent_id=turn_card_intent_id)
             return sent
 

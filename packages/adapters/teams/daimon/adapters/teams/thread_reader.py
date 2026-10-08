@@ -134,7 +134,9 @@ class ThreadReader:
         found, files = history_media(messages, group_id=group, channel_id=inbound.channel_id)
         downloads: dict[str, str] = {}
         if files and self._files is not None and await self._files.is_available(inbound):
-            resolved = await self._files.resolve(ChannelMedia(files=tuple(files)), group_id=group)
+            resolved = await self._files.resolve(
+                ChannelMedia(files=tuple(files)), group_id=group, channel_id=inbound.channel_id
+            )
             downloads = {
                 f.content_url: f.download_url
                 for f in resolved.files
@@ -169,7 +171,7 @@ class ThreadReader:
     async def read_media(self, inbound: TeamsInbound) -> ChannelMedia | None:
         """The images and files of every message the turn answers, or None if one is unreadable.
 
-        Shared files get a download URL when the team's site is granted.
+        Shared files get a download URL when the channel's site is granted.
         """
         root = root_id(inbound.conversation_id)
         if inbound.kind != "channel" or root is None:
@@ -193,7 +195,7 @@ class ThreadReader:
         media = ChannelMedia(image_urls=tuple(images), files=tuple(files), group_id=group)
         if self._files is None or not media.files:
             return media
-        return await self._files.resolve(media, group_id=group)
+        return await self._files.resolve(media, group_id=group, channel_id=inbound.channel_id)
 
     async def find_card(
         self, conversation_id: str, marker: str, *, group_ids: Sequence[str]

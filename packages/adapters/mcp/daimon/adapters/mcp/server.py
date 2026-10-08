@@ -19,7 +19,7 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.adapters.mcp.artifacts import build_artifact_store
-from daimon.adapters.mcp.auth.group_members import GroupLookups
+from daimon.adapters.mcp.auth.group_members import DiscordMembers, GroupLookups
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
@@ -62,6 +62,7 @@ from daimon.adapters.mcp.tools.channel_skills import register_channel_skill_tool
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
+from daimon.adapters.mcp.tools.enable_files import register_enable_files_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.here import register_here_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
@@ -247,8 +248,16 @@ def create_mcp_app(
         if effective_settings.teams is not None
         else None
     )
+    discord = effective_settings.discord
     group_lookups = GroupLookups(
-        sessionmaker=effective_sessionmaker, fernet=fernet, teams_client=teams_client
+        sessionmaker=effective_sessionmaker,
+        fernet=fernet,
+        teams_client=teams_client,
+        discord=DiscordMembers(
+            discord.bot_token.get_secret_value(), httpx.AsyncClient(timeout=10.0)
+        )
+        if discord is not None
+        else None,
     )
 
     effective_auth = auth
@@ -408,6 +417,7 @@ def create_mcp_app(
     register_cli_token_tool(mcp, runtime)
     if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):
         register_channel_tools(mcp, runtime)
+        register_enable_files_tools(mcp)  # tagged `teams`; the Teams adapter posts the card
         if effective_settings.discord is not None or effective_settings.slack is not None:
             register_tidy_tools(mcp, runtime)  # edit/delete the agent's own posts
     else:

@@ -174,6 +174,15 @@ that identity in Slack's message header. The built-in Daimon agent uses the
 app header. Slack is expected to keep the header when the status card is edited into an
 answer; each new turn post is recorded under the turn's agent and card intent.
 
+Discord starts a turn on a direct bot mention or a reply to a recorded bot or
+application-owned webhook post in the same tenant and channel. The usual
+admission path follows either trigger. Agent turn posts use a pool of up to
+three application-owned webhooks per text or forum channel, with each thread
+assigned by its ID; built-in Daimon posts use the bot. If a webhook is
+unavailable, the first answer chunk carries a bold agent name. The bot and MCP
+Discord tools resolve the webhook matching a message's webhook ID to edit or
+delete that agent's recorded post.
+
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
 `thread_participation_scopes`. In a followed thread it joins a quiet-timer
 batch; once the thread goes quiet the shared gates in
@@ -449,7 +458,10 @@ workspace should limit group management to admins; outside a turn (the MCP
 verifier, hub reads, an OAuth callback, channel admin DMs) a stored Slack
 group or Teams team counts only while a live lookup still admits the person
 (`confirm_stored_group_ids`), and a private form's submit, which runs under
-the policy lock, ignores them. A channel admin may do what a server admin may for
+the policy lock, ignores them. A stored Discord role is checked there against
+the member's current roles (`GET /guilds/{id}/members/{user}`, cached a
+minute), since listing a role's members needs a privileged intent; where no
+lookup runs it stands. A channel admin may do what a server admin may for
 an agent of theirs that is local to their channels -- not the tenant default or anyone's
 personal default, answering or running somewhere and only in channels they
 run (channel-scope rows, thread bindings, and other people's live sessions
@@ -607,14 +619,21 @@ judge the same one; conversations pick it up from their next message, keeping
 their files and their recorded readers, and `explain_agent_resolution` reports each tier's
 environment. `authorize(SET_CHANNEL_ENVIRONMENT)` decides every pick: in a
 channel with limited readers, or one holding such a thread (a Slack
-`channel:ts`, or a Discord thread the pick names), an environment with unrestricted
+`channel:ts`, or a Discord thread the pick names or a session ran in under
+it), an environment with unrestricted
 networking (any network beyond package managers and MCP servers: anything but
 a cloud environment on limited networking with no allowed hosts) needs a
 server admin, and so does clearing a pick onto a default that has one. Even a
 server admin's such pick waits for a confirmation (`EnvironmentPick.needs_confirm`):
 `set_channel_environment` and `clear_channel_environment` take
 `confirm_open_network`, which the model passes only once the caller confirms,
-and the panels write nothing and point to chat. A pick
+and the panels write nothing and point to chat. Changes beyond one channel ask
+the same when they move a channel with limited readers onto such a network: a
+workspace default that such channels without a pick of their own follow, an
+`update_environment` that opens the network of an environment one runs in, and
+an `archive_environment` whose cleared picks fall through onto one; both tools
+take `confirm_open_network` too. A limited Discord thread no session has run in
+yet counts as following the workspace default. A pick
 made before the rule never met it, so limiting a channel's readers when its
 own pick is open warns that a server admin should confirm it; who made
 a pick isn't recorded. An operator token's
@@ -1063,9 +1082,8 @@ A thread can move to another agent without a new thread. Two triggers:
   Teams.
 - When a channel's agent changes, a thread whose session belongs to the old
   agent can't run a turn, and its next mention gets a notice instead. On
-  Discord and Slack the notice has a Hand over button that moves the thread to
-  the channel's agent for whoever clicks it. Teams has no button; the notice
-  there says to start a new conversation.
+  Discord, Slack and Teams the notice has a Hand over button that moves the
+  thread to the channel's agent for whoever clicks it.
 
 Asking the agent is the default because it is how every other thread change
 works (keys, repo, fresh start). The button exists because no agent can answer

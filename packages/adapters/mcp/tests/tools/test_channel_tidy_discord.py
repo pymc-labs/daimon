@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import discord
@@ -181,6 +181,8 @@ class _FakeDiscord:
         method, path = route.method, route.path
         tail = route.url.rsplit("/", 1)[-1]
         self.calls.append((method, route.url))
+        if path == "/oauth2/applications/@me":
+            return {"id": _BOT}
         if path == "/guilds/{guild_id}":
             return {
                 "id": _GUILD,
@@ -241,6 +243,10 @@ class _FakeDiscord:
                 body = {"content": kwargs["form"][0]["value"]}
             message_id = self.add(str(route.channel_id), content=str(body.get("content", "")))
             return self.messages[message_id]
+        if path == "/channels/{channel_id}/webhooks" and method == "GET":
+            return []
+        if path == "/channels/{channel_id}/webhooks" and method == "POST":
+            raise discord.Forbidden(MagicMock(status=403), {"message": "Missing Manage Webhooks"})
         if path == "/channels/{channel_id}/messages" and method == "GET":
             in_channel = [
                 m for m in self.messages.values() if m["channel_id"] == str(route.channel_id)
@@ -267,6 +273,33 @@ class _FakeDiscord:
 
     def did(self, method: str, url_tail: str) -> bool:
         return any(m == method and url.endswith(url_tail) for m, url in self.calls)
+
+
+async def test_owned_webhook_message_passes_tidy_author_check() -> None:
+    from daimon.adapters.mcp.tools.discord import _tidy
+
+    client = MagicMock(spec=discord.Client)
+    client.application_id = 10
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 20
+    message = MagicMock(spec=discord.Message)
+    message.author.id = 900
+    message.webhook_id = 900
+    message.application_id = 10
+    channel.fetch_message = AsyncMock(return_value=message)
+    target = _tidy._Target(  # pyright: ignore[reportPrivateUsage]
+        channel=channel, parent_id=None, bot_user_id=10, requester_is_admin=False
+    )
+    fetched = await _tidy._fetch_own_bot_message(  # pyright: ignore[reportPrivateUsage]
+        client,
+        MagicMock(),
+        MagicMock(),
+        target,
+        tool_name="edit_message",
+        operation="message.edit",
+        message_id="123",
+    )
+    assert fetched is message
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +406,56 @@ async def _post(world: _World, auth: AuthIdentity, *, channel_id: str = _CHANNEL
     return row.id
 
 
+async def test_deleted_webhook_edit_records_replacement(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: _FakeDiscord,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.mcp.tools.discord import _post_transport
+
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    old_id = await _post(world, auth)
+    fake.messages[old_id]["webhook_id"] = "900"
+    fake.messages[old_id]["application_id"] = _BOT
+    fake.messages[old_id]["author"] = _user("900", bot=True)
+    hook = MagicMock(spec=discord.Webhook)
+    hook.id = 900
+    hook.edit_message = AsyncMock(
+        side_effect=discord.NotFound(
+            MagicMock(status=404), {"code": 10015, "message": "Unknown Webhook"}
+        )
+    )
+    monkeypatch.setattr(_post_transport, "own_webhook", AsyncMock(side_effect=[hook, None]))
+    result = await _edit_message_impl(
+        world.runtime,
+        auth,
+        channel_id=_CHANNEL,
+        message_id=old_id,
+        content="updated",
+        origin_context_id=origin,
+    )
+    assert result.message_id != old_id
+    assert fake.messages[result.message_id]["content"] == "**user900** updated"
+    async with committing_sessionmaker() as session:
+        old_post = await get_post(
+            session,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            channel_id=_CHANNEL,
+            message_id=old_id,
+        )
+        new_post = await get_post(
+            session,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            channel_id=_CHANNEL,
+            message_id=result.message_id,
+        )
+    assert old_post is None
+    assert new_post is not None and new_post.agent_id == auth.chat_agent_id
+
+
 # ---------------------------------------------------------------------------
 # Own messages
 # ---------------------------------------------------------------------------
@@ -417,7 +500,7 @@ async def test_an_agent_edits_then_deletes_its_own_message_and_each_is_audited_w
         ("delete_message", "allowed"),
     ], "each action writes one allowed audit row"
     first, second = rows
-    assert first.content_hmac == _hmac("first draft"), (
+    assert first.content_hmac == _hmac("**ag_acme** first draft"), (
         "the edit row records a hash of the text it replaced"
     )
     assert second.content_hmac == _hmac("second draft"), (
@@ -616,7 +699,7 @@ async def test_a_pinned_agent_cannot_tidy_outside_its_channels(
             content="moved",
             origin_context_id=origin,
         )
-    assert fake.messages[message_id]["content"] == "first draft", "nothing was edited"
+    assert fake.messages[message_id]["content"] == "**ag_acme** first draft", "nothing was edited"
 
 
 def _isolate(channel_id: str, *, own_agent: str) -> TenantAccessPolicy:
@@ -645,7 +728,7 @@ async def test_no_other_agent_edits_into_an_isolated_channel(
             content="moved",
             origin_context_id=origin,
         )
-    assert fake.messages[message_id]["content"] == "first draft", "nothing was edited"
+    assert fake.messages[message_id]["content"] == "**ag_acme** first draft", "nothing was edited"
 
 
 async def test_a_turn_inside_an_isolated_channel_edits_nothing_outside_it(
@@ -668,7 +751,7 @@ async def test_a_turn_inside_an_isolated_channel_edits_nothing_outside_it(
             content="what C said",
             origin_context_id=setup,
         )
-    assert fake.messages[message_id]["content"] == "first draft", "nothing was edited"
+    assert fake.messages[message_id]["content"] == "**ag_acme** first draft", "nothing was edited"
 
 
 async def test_a_sealed_channel_is_tidied_only_from_a_turn_inside_it(

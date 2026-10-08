@@ -32,6 +32,34 @@ def test_gate_rejects_human_when_not_mentioned() -> None:
     ), "an unmentioned message must not start a turn"
 
 
+def test_reply_to_recorded_agent_post_is_addressed() -> None:
+    assert should_process_message(
+        author_is_bot=False,
+        author_id=HUMAN_ID,
+        bot_mentioned=False,
+        reply_to_recorded_post=True,
+        guild_id="g1",
+    )
+    assert not should_process_message(
+        author_is_bot=False,
+        author_id=HUMAN_ID,
+        bot_mentioned=False,
+        reply_to_recorded_post=False,
+        guild_id="g1",
+    )
+
+
+def test_own_webhook_post_is_rejected_even_if_it_mentions_bot() -> None:
+    assert not should_process_message(
+        author_is_bot=True,
+        author_id=QA_BOT_ID,
+        bot_mentioned=True,
+        author_is_webhook=True,
+        guild_id="g1",
+        qa_bot_user_ids=(QA_BOT_ID,),
+    )
+
+
 def test_gate_rejects_human_mention_in_dm() -> None:
     assert not should_process_message(
         author_is_bot=False,

@@ -96,10 +96,12 @@ below your reply; reference files by filename. Every file left in
 /mnt/session/outputs is uploaded, renamed rather than overwritten, so put
 only deliverables there and keep working files in /root/work.
 `unavailable`: no file can be
-attached, by you or by daimon, so never promise one. Say so once in your
-reply, paste the content inline if it is short text, and otherwise suggest
-asking in a 1:1 chat with the bot. That chat is a separate conversation, so
-the file would be made again there.
+attached, by you or by daimon, so never promise one. Follow the channel's
+`files_hint` first: when an admin asks for a file or to turn files on, it
+has you call enable_channel_files before offering anything else. Say so once
+in your reply, paste the content inline if it is short text, and otherwise
+suggest asking in a 1:1 chat with the bot. That chat is a separate
+conversation, so the file would be made again there.
 
 On Discord, /mnt/session/outputs is NOT a delivery path. When asked to post,
 attach, or share a file, call create_file_upload_url, PUT the bytes to the URL

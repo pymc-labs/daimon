@@ -2372,7 +2372,10 @@ async def test_continue_turn_gates_on_the_sessions_own_budget_channel(billed: bo
     assert sent == [], "a refused follow-up must never reach the session"
 
 
-async def test_continue_turn_returns_boundary_from_its_own_send() -> None:
+@pytest.mark.parametrize("touch_result", [None, True], ids=["mapped-vault", "unmapped-vault"])
+async def test_continue_turn_returns_boundary_from_its_own_send(
+    touch_result: bool | None,
+) -> None:
     """continue_turn's turn_event_id is THIS send's accepted event, not session
     history; turn_started_at is the caller's own clock, captured before THIS
     send, not the echo's timestamp (the live API never populates one on the
@@ -2411,7 +2414,7 @@ async def test_continue_turn_returns_boundary_from_its_own_send() -> None:
 
     with patch(
         "daimon.adapters.mcp.tools.agent_chat.touch_unmapped_app_session",
-        new=AsyncMock(),
+        new=AsyncMock(return_value=touch_result),
     ) as touch_app:
         result = await _continue_turn_impl(runtime, auth, "ses_test001", "again", now=now)
 

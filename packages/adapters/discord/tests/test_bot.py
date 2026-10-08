@@ -11,9 +11,11 @@ import uuid
 from contextlib import suppress
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
+import pytest
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import BillingSettings, McpSettings, ThreadNamingSettings
 from daimon.core.errors import DaimonError
@@ -102,6 +104,118 @@ def _make_channel_message(
     message.add_reaction = AsyncMock()
     message.mentions = [SimpleNamespace(id=999)]
     return message
+
+
+@pytest.mark.parametrize(
+    ("source", "resolved_author_id", "resolved_webhook_id", "resolved_application_id", "expected"),
+    [
+        ("tool", 999, None, None, True),
+        ("auto_thread", 999, None, None, False),
+        ("tool", 777, None, None, False),
+        ("tool", 777, 900, 10, True),
+        ("tool", 777, 901, 11, False),
+    ],
+)
+async def test_reply_to_recorded_agent_post_starts_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    source: Literal["tool", "auto_thread"],
+    resolved_author_id: int,
+    resolved_webhook_id: int | None,
+    resolved_application_id: int | None,
+    expected: bool,
+) -> None:
+    from daimon.core.defaults.provisioning import provision_tenant
+    from daimon.core.stores.agent_posts import record_post
+
+    guild_id = "801000098"
+    result = await provision_tenant(
+        db_session_factory,
+        platform="discord",
+        workspace_id=guild_id,
+        signup_credit=Decimal("5.00"),
+    )
+    async with db_session_factory() as session, session.begin():
+        await record_post(
+            session,
+            tenant_id=result.tenant_id,
+            platform="discord",
+            channel_id="789",
+            message_id="123",
+            agent_id=uuid.uuid4(),
+            source=source,
+        )
+    bot = make_bot(_make_runtime(db_session_factory))
+    bot._connection.application_id = 10  # pyright: ignore[reportPrivateUsage]
+    bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue,reportMethodAssign]
+    message = _make_channel_message(guild_id=int(guild_id))
+    message.mentions = []
+    message.webhook_id = None
+    message.reference = discord.MessageReference(
+        message_id=123, channel_id=789, guild_id=int(guild_id)
+    )
+    resolved = MagicMock(spec=discord.Message)
+    resolved.author.id = resolved_author_id
+    resolved.webhook_id = resolved_webhook_id
+    resolved.application_id = resolved_application_id
+    message.reference.resolved = resolved
+    await bot.on_message(message)
+    if expected:
+        bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+    else:
+        bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+
+
+async def test_reply_to_unrecorded_post_does_not_start_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bot = make_bot(_make_runtime(db_session_factory))
+    bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue,reportMethodAssign]
+    message = _make_channel_message(guild_id=801000097)
+    message.mentions = []
+    message.webhook_id = None
+    message.reference = discord.MessageReference(message_id=123, channel_id=789, guild_id=801000097)
+    resolved = MagicMock(spec=discord.Message)
+    resolved.author.id = bot.user.id
+    resolved.webhook_id = None
+    message.reference.resolved = resolved
+    await bot.on_message(message)
+    bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+
+
+async def test_reply_lookup_failure_does_not_start_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bot = make_bot(_make_runtime(db_session_factory))
+    bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue,reportMethodAssign]
+    message = _make_channel_message(guild_id=801000096)
+    message.mentions = []
+    message.webhook_id = None
+    message.reference = discord.MessageReference(message_id=123, channel_id=789, guild_id=801000096)
+    resolved = MagicMock(spec=discord.Message)
+    resolved.author.id = bot.user.id
+    resolved.webhook_id = None
+    message.reference.resolved = resolved
+    with patch("daimon.adapters.discord.bot.get_post", new_callable=AsyncMock) as get_post:
+        get_post.side_effect = RuntimeError("database unavailable")
+        await bot.on_message(message)
+    bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+
+
+async def test_mention_skips_reply_lookup(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bot = make_bot(_make_runtime(db_session_factory))
+    bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue,reportMethodAssign]
+    message = _make_channel_message(guild_id=801000095)
+    message.webhook_id = None
+    message.reference = discord.MessageReference(message_id=123, channel_id=789, guild_id=801000095)
+    resolved = MagicMock(spec=discord.Message)
+    resolved.author.id = bot.user.id
+    resolved.webhook_id = None
+    message.reference.resolved = resolved
+    with patch("daimon.adapters.discord.bot.get_post", new_callable=AsyncMock) as get_post:
+        await bot.on_message(message)
+    get_post.assert_not_awaited()
 
 
 class TestInflightCapRejection:

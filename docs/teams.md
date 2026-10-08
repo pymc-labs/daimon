@@ -75,7 +75,9 @@ included), commands go to the agent as plain text, and the agent sees
 conversation's tools: reading, searching and posting in it, files into it,
 their own sessions and timers, and signing in to an MCP server the agent
 already has. Anything else, including tools added later, returns a tool
-error the agent relays. Files can't be saved in a shared channel.
+error the agent relays. Files are saved in a shared channel this
+organisation hosts once an admin turned them on there (below); one hosted by
+another organisation keeps its files on that organisation's site.
 
 A sender is placed from these signals, cheapest first: a foreign tenant on
 the activity (`channelData.tenant.id`, `from.tenantId`,
@@ -207,11 +209,13 @@ consent above) a followed thread stays mention-only.
   OneDrive. Offers live in memory, so a restart drops them and the next turn
   that uses a tool offers the file again.
 - **Channels.** Teams sends the bot only a channel message's text, so the bot
-  reads each message it answers from Graph and passes its images to the agent. Files live in the team's SharePoint site, which no
-  team-scoped permission reaches: they work only in teams whose site an admin
-  granted (below). There, a shared file from that site (never another one)
-  reaches the agent as a short-lived download link, and each file the agent
-  writes is uploaded to the channel's Files tab (never overwriting) and linked
+  reads each message it answers from Graph and passes its images to the agent.
+  Files live in SharePoint: a standard channel's on the team's site, a private
+  or shared channel's on a site of its own. No team-scoped permission reaches
+  either, so files work only in channels whose site an admin granted (below).
+  There, a shared file from that site (never another one, so not the team's
+  in a private or shared channel whose own site is granted) reaches the agent
+  as a short-lived download link, and each file the agent writes is uploaded to the channel's Files tab (never overwriting) and linked
   below its answer, or in one message when the answer has no room (never
   after an unprompted answer); a failed upload is only logged.
   Elsewhere, or when Graph refuses, the agent is told the shared file's name
@@ -221,6 +225,10 @@ consent above) a followed thread stays mention-only.
   workspace. The turn context tells the agent which case applies
   (`files="available"` or `"unavailable"`), learned per channel from the last
   folder lookup or upload and rechecked every 10 minutes while unavailable.
+  Where they are unavailable, `files_hint` tells the agent, asked for a file or
+  to turn files on, to call `enable_channel_files` first rather than offer an
+  artifact, report or notebook; the bot posts the Enable files card (below)
+  after that answer, for a daimon admin who asked.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and
@@ -235,7 +243,7 @@ confirmation card.
 ### Channel files (optional)
 
 Grant the app `Sites.Selected`, which reaches only the sites granted to it,
-then grant each team's site. The manifest does not change and no restart is
+then grant each channel's site. The manifest does not change and no restart is
 needed.
 
 1. Entra portal → App registrations → the bot's app → API permissions → Add
@@ -245,12 +253,16 @@ needed.
    (the messaging endpoint without `/api/messages`). Same app →
    Authentication → Add a platform → Web → redirect URI
    `<DAIMON_TEAMS__PUBLIC_URL>/oauth/teams/files/callback`.
-3. When a daimon admin shares a file in a team whose site is not granted,
-   the bot posts an **Enable files** card (at most every 15 minutes per team).
-   A SharePoint or global admin clicks it and signs in once (the first in the
-   organisation must be a global admin, who consents for everyone); the Teams service
-   then grants the app write on that team's site, and its next message sees
-   the files.
+3. When a daimon admin asks daimon to turn files on in a channel (or for a
+   file there), or shares a file it cannot open, the bot posts an **Enable
+   files** card (unasked, at most every 15 minutes per channel). A SharePoint
+   or global admin who is a member of the channel clicks it and signs in once,
+   granting the delegated `Sites.FullControl.All` and `Files.Read.All` (the
+   first in the organisation must be a global admin, who consents for
+   everyone). The Teams service finds the channel's Files folder with that
+   sign-in, grants the app write on the site holding it (the team's, or a
+   private or shared channel's own) and stores the folder; the channel's next
+   message sees the files.
 
 Or grant a site by hand as a SharePoint or global admin holding
 `Sites.FullControl.All`:
@@ -264,10 +276,10 @@ POST https://graph.microsoft.com/v1.0/sites/{site-id}/permissions
 ```
 
 The group id is in the team's link (team → ⋯ → Get link to team → `groupId=`).
-
-Standard channels only: private and shared channels keep files in a site of
-their own, where outputs are not uploaded. Removing the site permission
-(`DELETE /sites/{site-id}/permissions/{id}`) returns the team to names only.
+This covers the team's standard channels only: the app cannot look up a
+private or shared channel's folder, so those need the card. Removing the site
+permission (`DELETE /sites/{site-id}/permissions/{id}`) returns its channels to
+names only.
 
 ### Keys and sign-ins
 
@@ -299,17 +311,18 @@ registration:
 - **Posting.** `send_message` and `create_thread` (up to 6,000 characters,
   only into a conversation the requester belongs to). Files ride along: in a
   channel whose site is granted they are saved to its Files tab and linked; in
-  a 1:1 chat they are offered with a file consent card.
+  a 1:1 chat they are offered with a file consent card. An agent can edit or
+  delete what it posted (`edit_message`, `delete_message`); closing a thread
+  (`delete_thread`, `archive_thread`) is not on Teams.
 - **`send_direct_message`** opens a 1:1 chat with someone who shares a team
   with the caller and daimon, named by Entra object ID.
 - **`post_wizard`** posts its form as an Adaptive Card that only the asker can
   fill in (no step images); Submit starts their turn.
 - Task handoff and fresh starts, timers (`create_timer`, `list_timers`,
   `cancel_timer`), routines that post to a channel or thread (below),
-  `bind_public_repo` and the GitHub App install link. A handoff is asked of
-  the agent; the Hand over button that Discord and Slack show when a channel's
-  agent changed under a thread is not on Teams, where the notice says to start
-  a new conversation.
+  `bind_public_repo` and the GitHub App install link. When a channel's agent
+  changed under a conversation, its notice carries a Hand over button, as on
+  Discord and Slack; a refused click is answered only to the clicker.
 
 With tool safety on (`DAIMON_TOOL_SAFETY__ENABLED`), an attached tool's write
 waits on an Approve/Deny card in the conversation that only the requester can
@@ -357,5 +370,5 @@ different agent posts a notice instead of running. A deployment with
 ### Not supported
 
 Group chats, reactions, `/dm` conversations, files in channels whose site is
-not granted or in private and shared channels. Removing the app does not
+not granted or that another organisation hosts. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.

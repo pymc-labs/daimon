@@ -20,6 +20,7 @@ import discord
 import pytest
 from daimon.adapters.discord import feedback_reactions
 from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.message_feedback import CUSTOM_ID_PATTERN
 from daimon.core.stores.domain import RecordVoteResult
 from daimon.core.stores.identity import find_platform_principal
@@ -31,6 +32,168 @@ _BOT_USER_ID = 999999999999999999
 _REACTOR_ID = 100000000000000001
 _OTHER_REACTOR_ID = 100000000000000002
 _GUILD_ID = 555555555555555555
+
+
+async def test_application_webhook_post_counts_as_bot_authored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    message = MagicMock(spec=discord.Message)
+    message.author.id = 900
+    message.author.name = "Research"
+    message.webhook_id = 900
+    message.application_id = _BOT_USER_ID
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
+    owns = AsyncMock(return_value=True)
+    monkeypatch.setattr(DiscordPostTransport, "owns_message", owns)
+    cog = FeedbackReactionCog(bot)
+    payload = _build_payload(
+        message_id=123,
+        channel_id=456,
+        user_id=_REACTOR_ID,
+        guild_id=_GUILD_ID,
+        emoji_name="👍",
+        message_author_id=900,
+    )
+    assert await cog._is_bot_message_via_fetch(payload, bot_user_id=_BOT_USER_ID)  # pyright: ignore[reportPrivateUsage]
+    owns.assert_awaited_once()
+
+
+async def test_known_human_author_never_fetches_message() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.fetch_message = AsyncMock()
+    bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
+    cog = FeedbackReactionCog(bot)
+    payload = _build_payload(
+        message_id=123,
+        channel_id=456,
+        user_id=_REACTOR_ID,
+        guild_id=_GUILD_ID,
+        emoji_name="👍",
+        message_author_id=1234,
+    )
+    await cog._record_vote_from_reaction(payload)  # pyright: ignore[reportPrivateUsage]
+    channel.fetch_message.assert_not_awaited()
+
+
+async def test_human_reactions_reuse_channel_webhook_listing() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 456
+    channel.fetch_message = AsyncMock()
+    bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
+    bot.http = MagicMock()
+    bot.http.channel_webhooks = AsyncMock(return_value=[])
+    cog = FeedbackReactionCog(bot)
+    for author_id in (1234, 1235):
+        payload = _build_payload(
+            message_id=author_id,
+            channel_id=456,
+            user_id=_REACTOR_ID,
+            guild_id=_GUILD_ID,
+            emoji_name="👍",
+            message_author_id=author_id,
+        )
+        await cog._record_vote_from_reaction(payload)  # pyright: ignore[reportPrivateUsage]
+    bot.http.channel_webhooks.assert_awaited_once_with(456)
+    channel.fetch_message.assert_not_awaited()
+
+
+async def test_webhook_listing_403_is_cached_and_does_not_fetch_human_messages() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 456
+    channel.fetch_message = AsyncMock()
+    bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
+    bot.http = MagicMock()
+    bot.http.channel_webhooks = AsyncMock(
+        side_effect=discord.Forbidden(MagicMock(status=403), {"message": "Missing Permissions"})
+    )
+    cog = FeedbackReactionCog(bot)
+    for message_id in (1234, 1235):
+        payload = _build_payload(
+            message_id=message_id,
+            channel_id=456,
+            user_id=_REACTOR_ID,
+            guild_id=_GUILD_ID,
+            emoji_name="👍",
+            message_author_id=message_id,
+        )
+        await cog._record_vote_from_reaction(payload)  # pyright: ignore[reportPrivateUsage]
+    bot.http.channel_webhooks.assert_awaited_once_with(456)
+    channel.fetch_message.assert_not_awaited()
+
+
+async def test_webhook_after_restart_is_discovered_without_application_id() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 456
+    message = MagicMock(spec=discord.Message)
+    message.author.id = 900
+    message.author.name = "Research"
+    message.webhook_id = 900
+    message.application_id = None
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
+    bot.http = MagicMock()
+    bot.http.channel_webhooks = AsyncMock(
+        return_value=[{"id": "900", "application_id": str(_BOT_USER_ID), "channel_id": "456"}]
+    )
+    cog = FeedbackReactionCog(bot)
+    payload = _build_payload(
+        message_id=123,
+        channel_id=456,
+        user_id=_REACTOR_ID,
+        guild_id=_GUILD_ID,
+        emoji_name="👍",
+        message_author_id=900,
+    )
+    assert await cog._possible_own_author(payload)  # pyright: ignore[reportPrivateUsage]
+    assert await cog._is_bot_message_via_fetch(payload, bot_user_id=_BOT_USER_ID)  # pyright: ignore[reportPrivateUsage]
+    bot.http.channel_webhooks.assert_awaited_once_with(456)
+
+
+async def test_unresolved_webhook_application_is_not_memoized_false() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    message = MagicMock(spec=discord.Message)
+    message.author.id = 900
+    message.webhook_id = 900
+    message.author.name = "Research"
+    message.application_id = None
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
+    cog = FeedbackReactionCog(bot)
+    cog._is_recorded_agent_post = AsyncMock(return_value=False)  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    payload = _build_payload(
+        message_id=123,
+        channel_id=456,
+        user_id=_REACTOR_ID,
+        guild_id=_GUILD_ID,
+        emoji_name="👍",
+        message_author_id=None,
+    )
+    assert not await cog._is_bot_message_via_fetch(payload, bot_user_id=_BOT_USER_ID)  # pyright: ignore[reportPrivateUsage]
+    assert 123 not in cog._author_is_bot  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_recorded_webhook_post_survives_unavailable_webhook_lookup() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    message = MagicMock(spec=discord.Message)
+    message.author.id = 900
+    message.author.name = "Research"
+    message.webhook_id = 900
+    message.application_id = None
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
+    cog = FeedbackReactionCog(bot)
+    cog._is_recorded_agent_post = AsyncMock(return_value=True)  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    payload = _build_payload(
+        message_id=123,
+        channel_id=456,
+        user_id=_REACTOR_ID,
+        guild_id=_GUILD_ID,
+        emoji_name="👍",
+        message_author_id=900,
+    )
+    assert await cog._is_bot_message_via_fetch(payload, bot_user_id=_BOT_USER_ID)  # pyright: ignore[reportPrivateUsage]
 
 
 def _build_payload(
@@ -79,6 +242,7 @@ def _fake_bot(
     get_user/fetch_user are read."""
     return SimpleNamespace(
         user=SimpleNamespace(id=_BOT_USER_ID),
+        application_id=_BOT_USER_ID,
         runtime=SimpleNamespace(sessionmaker=sessionmaker),
         get_channel=get_channel or MagicMock(return_value=None),
         fetch_channel=fetch_channel or AsyncMock(),

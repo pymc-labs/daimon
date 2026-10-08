@@ -7,7 +7,7 @@ import functools
 import json
 import re
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from decimal import Decimal
 from pathlib import Path
@@ -27,7 +27,7 @@ from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
-from daimon.core.turn.state import TextBlock, TurnState
+from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing import (
     build_fake_anthropic,
     ma_session,
@@ -452,13 +452,18 @@ async def post_activity(service: TeamsHttpService, payload: dict[str, object]) -
 
 
 @contextmanager
-def patched_turns(answer: str = "On it.") -> Iterator[list[dict[str, Any]]]:
-    """Admission patched and every MA turn answering `answer`; yields each turn's kwargs."""
+def patched_turns(
+    answer: str = "On it.", *, tools: Sequence[ToolUseBlock] = ()
+) -> Iterator[list[dict[str, Any]]]:
+    """Admission patched and every MA turn calling `tools`, then answering `answer`.
+
+    Yields each turn's kwargs.
+    """
     turns: list[dict[str, Any]] = []
 
     async def fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
         turns.append(kwargs)
-        state = TurnState(content=[TextBlock(kind="text", text=answer)])
+        state = TurnState(content=[*tools, TextBlock(kind="text", text=answer)])
         await lifecycle.on_terminal_success(state)
         return state
 

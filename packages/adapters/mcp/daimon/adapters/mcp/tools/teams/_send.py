@@ -22,6 +22,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
 from daimon.adapters.mcp.tools._file_handles import staged_uploads
+from daimon.adapters.mcp.tools._tidy import PostRecord, record_agent_posts
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.mcp.tools.teams._directory import split_thread
 from daimon.adapters.mcp.tools.teams._files import CHANNEL as _CHANNEL
@@ -140,7 +141,28 @@ async def _teams_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
             activity_id = await client.send(conversation_id, content)
     except (httpx.HTTPError, ValueError) as err:
         raise _post_failed(err) from err
+    await _record(runtime, auth, conversation_id, activity_id, content)
     return TeamsMessageRow(conversation_id=conversation_id, activity_id=activity_id, text=content)
+
+
+async def _record(
+    runtime: McpRuntime, auth: AuthIdentity, conversation_id: str, activity_id: str, content: str
+) -> None:
+    """The executing agent's post, keyed as edit_message and delete_message name it."""
+    channel, _ = split_thread(conversation_id)
+    await record_agent_posts(
+        runtime,
+        auth,
+        platform="teams",
+        posts=[
+            PostRecord(
+                channel_id=conversation_id,
+                message_id=activity_id,
+                parent_channel_id=channel if channel != conversation_id else None,
+                content=content,
+            )
+        ],
+    )
 
 
 async def _teams_create_thread_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
@@ -158,6 +180,7 @@ async def _teams_create_thread_impl(  # pyright: ignore[reportUnusedFunction]  #
         thread_id, activity_id = await client.create_thread(channel, content)
     except (httpx.HTTPError, ValueError) as err:
         raise _post_failed(err) from err
+    await _record(runtime, auth, thread_id, activity_id, content)
     return TeamsMessageRow(conversation_id=thread_id, activity_id=activity_id, text=content)
 
 

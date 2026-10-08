@@ -368,12 +368,12 @@ async def touch_unmapped_app_session(session: AsyncSession, *, session_id: str) 
     )
     if result.scalar_one_or_none() is not None:
         return True
-    exists = await session.scalar(
-        select(GitHubAppSessionVault.session_id).where(
+    is_unmapped = await session.scalar(
+        select(GitHubAppSessionVault.is_unmapped).where(
             GitHubAppSessionVault.session_id == session_id
         )
     )
-    return False if exists is not None else None
+    return False if is_unmapped else None
 
 
 async def mark_headless_app_session_closed(session: AsyncSession, *, session_id: str) -> None:
