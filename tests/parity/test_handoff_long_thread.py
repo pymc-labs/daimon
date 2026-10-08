@@ -31,7 +31,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.context import DEFAULT_PAGE_LIMIT
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.config import SlackSettings
+from daimon.core.config import SlackSettings, TurnRenderSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
@@ -153,6 +153,7 @@ def _make_runtime(
     from daimon.testing.ma import build_fake_anthropic
 
     settings = MagicMock()
+    settings.turn_render = TurnRenderSettings()
     settings.crypto.keys = (SecretStr(fernet_key),)
     settings.slack = SlackSettings(
         signing_secret=SecretStr("long-thread-signing-secret"),
