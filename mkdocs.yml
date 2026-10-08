@@ -27,6 +27,12 @@ nav:
   - Teams: teams.md
   - Claude Code plugin: plugin.md
 
+# Every page in docs/ is published, listed or not, so a page left out of the
+# nav fails the strict build instead of shipping unreachable.
+validation:
+  nav:
+    omitted_files: warn
+
 theme:
   name: material
   # The readme's sticker, downscaled, for the header and the sidebar; the
