@@ -11,8 +11,9 @@ sequence: user_skills -> github_credentials -> agent_github_binding ->
 github_oauth_states (both kinds where the table permits) -> credential_requests
 (both kinds, platform-user-scoped like github_oauth_states) -> wizard_session
 (both kinds, platform-user-scoped like credential_requests) -> message_feedback
-(platform only, platform-user-scoped) -> routines (platform only) ->
-principal_links -> principal row. Account-level deletes (mcp_tokens,
+(platform only, platform-user-scoped) -> platform_user_names (platform
+only, platform-user-scoped) -> routines (platform only) -> principal_links ->
+principal row. Account-level deletes (mcp_tokens,
 message_feedback, user_configs, accounts) run in `purge_account` after all
 principal rows are gone; mcp_tokens and message_feedback are keyed by
 account_id and are deleted before delete_account so their CASCADE FKs to
@@ -112,6 +113,7 @@ from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
+from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import security_audit as security_audit_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
@@ -155,6 +157,7 @@ class PurgeReport(BaseModel):
     support_escalations: int = 0
     channel_admins: int = 0
     agent_post_requesters: int = 0
+    platform_user_names: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
@@ -181,6 +184,7 @@ class PurgeReport(BaseModel):
             support_escalations=self.support_escalations + other.support_escalations,
             channel_admins=self.channel_admins + other.channel_admins,
             agent_post_requesters=self.agent_post_requesters + other.agent_post_requesters,
+            platform_user_names=self.platform_user_names + other.platform_user_names,
         )
 
 
@@ -205,6 +209,7 @@ async def _purge_principal_in_session(
     propagate so the caller's transaction rolls back.
     """
     agent_post_requesters_count = 0
+    platform_user_names_count = 0
     if isinstance(principal, PlatformPrincipalRow):
         routines_count = await routines_store.delete_for_principal(
             session,
@@ -280,6 +285,15 @@ async def _purge_principal_in_session(
         # A turn's posts and an auto-opened thread name who asked; the posts
         # are the agent's, so only the person's id leaves them.
         agent_post_requesters_count = await agent_posts_store.clear_requester(
+            session,
+            tenant_id=principal.tenant_id,
+            platform=principal.platform,
+            platform_user_id=principal.external_id,
+        )
+        # The name the platform last gave for them (the billing panel's
+        # fallback), keyed like the grants above: it can be stored before the
+        # person has a principal, so no accounts FK would reach it.
+        platform_user_names_count = await platform_names_store.delete_user_names_for_platform_user(
             session,
             tenant_id=principal.tenant_id,
             platform=principal.platform,
@@ -381,6 +395,7 @@ async def _purge_principal_in_session(
         support_escalations=support_escalations_count,
         channel_admins=channel_admins_count,
         agent_post_requesters=agent_post_requesters_count,
+        platform_user_names=platform_user_names_count,
     )
 
 

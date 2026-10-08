@@ -2813,3 +2813,69 @@ class DirectMessageConversation(Base):
     history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
     recent_message_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     active_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PlatformUserName(Base):
+    """The last name a chat platform gave for one of a tenant's people.
+
+    Written whenever an adapter already holds it (an inbound message, a click,
+    a lookup that succeeded), so the billing panel can name someone the
+    platform no longer answers for. No accounts FK: a name may be seen before
+    the person has a principal. A privacy purge deletes the row by
+    (tenant, platform, platform user); a tenant's deletion cascades to it.
+    """
+
+    __tablename__ = "platform_user_names"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "platform", "platform_user_id", name="pk_platform_user_names"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_platform_user_names_tenants"
+        ),
+        CheckConstraint(
+            "display_name IS NOT NULL OR handle IS NOT NULL",
+            name="ck_platform_user_names_some_name",
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    platform: Mapped[str] = mapped_column(Text)
+    platform_user_id: Mapped[str] = mapped_column(Text)
+    #: What the platform shows for them: a Discord server nickname or global
+    #: name, a Slack display or real name, a Teams name.
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Their account handle: a Discord username, a Slack username.
+    handle: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PlatformChannelName(Base):
+    """The last name a chat platform gave for one of a tenant's channels.
+
+    Teams shows channels by name only from a live listing; this keeps the last
+    one seen, so the billing panel never shows a raw `19:…` id.
+    """
+
+    __tablename__ = "platform_channel_names"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "platform", "channel_id", name="pk_platform_channel_names"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            ondelete="CASCADE",
+            name="fk_platform_channel_names_tenants",
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    platform: Mapped[str] = mapped_column(Text)
+    channel_id: Mapped[str] = mapped_column(Text)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

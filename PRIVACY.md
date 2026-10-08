@@ -22,6 +22,10 @@ organisation a Teams deployment serves), daimon stores:
   list them. Removing the app from a team deletes its record. Channel history
   is read through Microsoft Graph when a turn needs it and sent to the agent
   with that turn; daimon keeps no copy of its own.
+- **Names** — the display name and username the chat platform last sent for
+  each person who messaged or clicked something, and the last name of each
+  channel, so the billing panel can name people and channels the platform no
+  longer answers for. A privacy deletion removes your stored name.
 - **Usage and billing events** — turn counts and credit/usage records used
   to enforce the operator's configured usage limits. Promo code redemptions
   record which account redeemed; a privacy deletion clears that link.
