@@ -1,4 +1,15 @@
 # ---------------------------------------------------------------------------
+# Stage 0: manifest — the root pyproject without its tool tables
+# ---------------------------------------------------------------------------
+# Ruff, pyright, import-linter and pytest settings change far more often than
+# dependencies. COPY keys on content, so dropping them here keeps the builder
+# below cached across those edits.
+FROM python:3.12-slim AS manifest
+COPY pyproject.toml /src/pyproject.toml
+RUN awk '/^\[/ { keep = /^\[(project|dependency-groups|tool\.uv)[].]/ } keep' \
+    /src/pyproject.toml > /pyproject.toml
+
+# ---------------------------------------------------------------------------
 # Stage 1: builder — install build deps + compile third-party wheels
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim AS builder
@@ -15,11 +26,13 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.11 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
+COPY --from=manifest /pyproject.toml ./
 # World-readable: the runtime stage mounts uv.lock for its non-root sync.
-COPY --chmod=644 pyproject.toml uv.lock* ./
+COPY --chmod=644 uv.lock* ./
 
-# Third-party dependencies only, from the lockfile alone: nothing here reads
-# the source tree, so the venv this stage produces changes only with uv.lock.
+# Third-party dependencies only: nothing here reads the source tree, so the
+# venv this stage produces changes only with uv.lock or the project's
+# dependency tables.
 RUN uv sync --frozen --no-dev --extra billing --no-install-workspace
 
 # ---------------------------------------------------------------------------
