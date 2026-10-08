@@ -18,6 +18,15 @@ from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.web.async_slack_response import AsyncSlackResponse
 
 
+def _confirmed_agent_header(response: AsyncSlackResponse, name: str) -> bool:
+    """Trust Slack's returned message, not acceptance of identity parameters."""
+    data = response.data  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if not isinstance(data, dict):
+        return False
+    message = cast(dict[str, object], data).get("message")
+    return isinstance(message, dict) and cast(dict[str, object], message).get("username") == name
+
+
 async def post_as_agent(
     client: AsyncWebClient,
     identity: AgentIdentity | None,
@@ -37,7 +46,7 @@ async def post_as_agent(
     try:
         response = await client.chat_postMessage(**kwargs, **custom)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
         if on_customized is not None:
-            on_customized(True)
+            on_customized(_confirmed_agent_header(response, identity.name))
         return response
     except SlackApiError as exc:
         raw_data = exc.response.data  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
