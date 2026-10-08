@@ -169,6 +169,12 @@ async def record_turn_card_recovery_failure(
     return count
 
 
+async def get_turn_card_intent(session: AsyncSession, *, id: uuid.UUID) -> TurnCardIntentRow | None:
+    """Read the current row after recovery may have recorded its message ID."""
+    orm = await session.scalar(select(TurnCardIntent).where(TurnCardIntent.id == id))
+    return TurnCardIntentRow.model_validate(orm) if orm is not None else None
+
+
 async def list_recoverable_turn_card_intents(
     session: AsyncSession,
     *,

@@ -596,6 +596,7 @@ async def run_wizard_submit_turn_observed(
             thread_id=thread_id,
             make_lifecycle=_make_lifecycle,
         )
+        bot._track_live_turn_card(turn_card_intent.id)  # pyright: ignore[reportPrivateUsage]
 
         # lifecycle_holder tracks whichever DiscordTurnLifecycle actually
         # completed the turn -- recovery_lifecycle rebuilds a fresh one

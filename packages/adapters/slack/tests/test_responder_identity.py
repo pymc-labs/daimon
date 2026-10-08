@@ -54,8 +54,10 @@ class _Thread:
 
     def __init__(self) -> None:
         self.cards: list[str] = []
+        self.posts: list[dict[str, Any]] = []
 
     def post(self, _url: Any, **_kwargs: Any) -> CallbackResult:
+        self.posts.append(_kwargs)
         ts = f"1900000001.{len(self.cards) + 1:06d}"
         self.cards.append(ts)
         return CallbackResult(payload={"ok": True, "ts": ts, "channel": _CHANNEL})
@@ -140,11 +142,13 @@ def _event(ts: str, text: str, *, in_thread: bool = True) -> dict[str, Any]:
     return event
 
 
+@pytest.mark.parametrize("excluded", [False, True])
 async def test_fresh_reseed_and_queued_messages_name_the_mentioned_account_as_the_responder(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     thread: _Thread,
     web_client: AsyncWebClient,
+    excluded: bool,
 ) -> None:
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=_TEAM_ID)
     await provision_tenant(
@@ -154,6 +158,8 @@ async def test_fresh_reseed_and_queued_messages_name_the_mentioned_account_as_th
         db_session_factory,
         deployment_default=DeploymentDefault(agent_name=_AGENT_NAME, environment_name="default"),
     )
+    app.runtime.settings.agent_identity.enabled = True
+    app.runtime.settings.agent_identity.excluded_slack_team_ids = [_TEAM_ID] if excluded else []
     # What the mention gate leaves behind after auth.test for this workspace.
     app._bot_user_ids[_TEAM_ID] = _BOT_USER_ID  # pyright: ignore[reportPrivateUsage]
 
@@ -185,6 +191,10 @@ async def test_fresh_reseed_and_queued_messages_name_the_mentioned_account_as_th
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as run_turn,
         patch("daimon.adapters.slack.app.run_prepared_turn", side_effect=record),
+        patch(
+            "daimon.adapters.slack.app.resolve_agent_identity",
+            wraps=slack_app.resolve_agent_identity,
+        ) as resolve_identity,
     ):
         agent.return_value = "agent_custom_qa"
         env.return_value = "env_custom_qa"
@@ -202,6 +212,17 @@ async def test_fresh_reseed_and_queued_messages_name_the_mentioned_account_as_th
             event_ts=_THREAD_TS,
             web_client=web_client,
             tenant_id=tenant_id,
+        )
+
+    assert resolve_identity.await_count == 2
+    assert all(
+        call.kwargs["enabled"] == (not excluded) for call in resolve_identity.await_args_list
+    )
+    if excluded:
+        assert all(
+            "username" not in str(post.get("data", ""))
+            and "icon_url" not in str(post.get("data", ""))
+            for post in thread.posts
         )
 
     assert [path for path, _, _ in sent] == ["turn", "reseed", "turn", "reseed"], (

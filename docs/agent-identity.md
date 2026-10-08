@@ -21,6 +21,7 @@ guilds and Slack workspaces. Each is a JSON array of IDs, for example
 uses the switch-off behavior throughout turns, tool posts, reply routing and
 setup panels. Existing webhook posts can still be edited or deleted. The
 Slack OAuth consent scope remains controlled by the deployment-wide switch.
+Discord and Slack DMs with no guild or workspace ID follow the global switch.
 
 ## Problem
 

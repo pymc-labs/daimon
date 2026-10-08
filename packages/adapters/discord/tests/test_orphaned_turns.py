@@ -14,6 +14,7 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -39,10 +40,12 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.stores.turn_card_intents import (
     create_turn_card_intent,
     list_recoverable_turn_card_intents,
+    record_turn_card_message,
 )
 from daimon.testing import build_fake_anthropic, ma_session
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -807,6 +810,89 @@ async def test_repeated_incomplete_recovery_passes_retire_an_aged_intent(
         async with db_session_factory() as session:
             rows = await list_recoverable_turn_card_intents(session, platform="discord")
         assert len(rows) == (1 if attempt < 3 else 0)
+
+
+async def test_exhausted_recovery_uses_found_candidates_and_refreshed_message_id(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    intent = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="456",
+        turn_token=uuid.uuid4(),
+    )
+    old_at = datetime.now(UTC) - timedelta(days=2)
+    await db_session.execute(
+        text("UPDATE turn_card_intents SET created_at = :at WHERE id = :id"),
+        {"at": old_at, "id": intent.id},
+    )
+    await db_session.commit()
+    aged = intent.model_copy(update={"created_at": old_at})
+    bot = _make_bot(db_session_factory)
+    bot.wait_until_ready = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+    thread = MagicMock(spec=discord.Thread)
+    thread.guild.me = MagicMock()
+    bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+    found = 0
+
+    async def incomplete(*_args: object, **kwargs: Any) -> None:
+        nonlocal found
+        found += 1
+        kwargs["candidate_message_ids"].add(124)
+        if found == 1:
+            async with db_session_factory.begin() as session:
+                await record_turn_card_message(session, id=intent.id, message_id="123")
+
+    monkeypatch.setattr("daimon.adapters.discord.bot.reconcile_turn_card_intent", incomplete)
+    expire = AsyncMock(return_value=True)
+    monkeypatch.setattr("daimon.adapters.discord.bot.expire_unrecoverable_turn_card", expire)
+    for _ in range(3):
+        await bot._reconcile_turn_card_intent(aged)  # pyright: ignore[reportPrivateUsage]
+    assert found == 3
+    assert expire.await_args.kwargs["candidate_message_ids"] == {124}
+    assert expire.await_args.kwargs["intent"].message_id == "123"
+
+
+@pytest.mark.parametrize("error", [TimeoutError(), SQLAlchemyError("temporary")])
+async def test_database_or_timeout_recovery_failures_count_even_without_guild_member(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    tenant = await make_tenant(db_session)
+    intent = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="456",
+        turn_token=uuid.uuid4(),
+    )
+    await db_session.execute(
+        text("UPDATE turn_card_intents SET created_at = :at WHERE id = :id"),
+        {"at": datetime.now(UTC) - timedelta(days=2), "id": intent.id},
+    )
+    await db_session.commit()
+    aged = intent.model_copy(update={"created_at": datetime.now(UTC) - timedelta(days=2)})
+    monkeypatch.setattr(
+        "daimon.adapters.discord.bot.reconcile_turn_card_intent", AsyncMock(side_effect=error)
+    )
+    bot = _make_bot(db_session_factory)
+    bot.wait_until_ready = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+    thread = MagicMock(spec=discord.Thread)
+    thread.guild.me = None
+    thread.fetch_message = AsyncMock()
+    bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+    for attempt in range(3):
+        await bot._reconcile_turn_card_intent(aged, sleep=AsyncMock())  # pyright: ignore[reportPrivateUsage]
+        async with db_session_factory() as session:
+            active = await list_recoverable_turn_card_intents(session, platform="discord")
+        assert len(active) == (1 if attempt < 2 else 0)
+    thread.fetch_message.assert_not_awaited()
 
 
 async def test_boot_card_snapshot_excludes_intents_created_after_the_sweep(

@@ -37,7 +37,10 @@ def identity_enabled_for(
     platform: Literal["discord", "slack", "teams"],
     workspace_id: str | int | None,
 ) -> bool:
-    """Apply the deployment switch and a platform's workspace exclusions."""
+    """Apply the deployment switch and workspace exclusions when an ID is known.
+
+    A platform DM has no guild or workspace ID, so it follows the global switch.
+    """
     identity = getattr(settings, "agent_identity", None)
     if identity is None:
         return False
@@ -52,7 +55,7 @@ def identity_enabled_for(
     if not isinstance(excluded, (list, tuple, set, frozenset)):
         excluded = ()
     if workspace_id is None:
-        return not excluded
+        return True
     return str(workspace_id) not in excluded
 
 

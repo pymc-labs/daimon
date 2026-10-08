@@ -35,8 +35,8 @@ def test_discord_and_slack_exclusions_are_platform_specific() -> None:
     assert not identity_enabled_for(settings, "slack", "T1")
     assert identity_enabled_for(settings, "slack", "T2")
     assert identity_enabled_for(settings, "teams", "123")
-    assert not identity_enabled_for(settings, "discord", None)
-    assert not identity_enabled_for(settings, "slack", None)
+    assert identity_enabled_for(settings, "discord", None)
+    assert identity_enabled_for(settings, "slack", None)
 
 
 @pytest.mark.asyncio

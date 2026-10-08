@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Identity exclusions now leave unscoped DMs on the deployment switch, and Discord card recovery retires aged pending cards after repeated lookup failures without dropping cards found during a pass.
 - Discord card recovery now keeps the hourly pass away from live turns and startup reconciliation, retires aged intents after repeated failed passes, and uses "Stopped." for cards found while the bot is running.
 - The Discord webhook capacity model now accounts for lifecycle edit debounce; its overload cases distinguish cold bursts from the removed-debounce counterfactual.
 - Discord restart recovery does not replace an uneditable orphan card. Aged intents stop blocking channel tidy only after a definite recovery failure; a periodic pass revisits them. The bot deletes a known stale card only while it still carries that turn's pending button. Missing messages no longer count as failed deletes, while unknown webhooks do.
