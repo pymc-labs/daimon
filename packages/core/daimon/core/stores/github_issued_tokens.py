@@ -330,6 +330,54 @@ async def mark_session_tokens_superseded(
     await session.flush()
 
 
+async def keep_failed_rotation_tokens(
+    session: AsyncSession, *, session_id: str, token_ids: frozenset[uuid.UUID], now: datetime
+) -> frozenset[uuid.UUID]:
+    """Keep new tokens a failed active-turn refresh already handed to MA.
+
+    A running tool may hold one, so each is recorded as a superseded token of
+    the session and left to expire like any other. One wider than what the
+    session still holds (write where it holds read, or a repo it no longer
+    holds) is not kept; the caller revokes it now. Returns the kept ids.
+    """
+    if not token_ids:
+        return frozenset()
+    rows = list(
+        await session.scalars(
+            select(GitHubIssuedToken).where(
+                GitHubIssuedToken.token_id.in_(token_ids),
+                GitHubIssuedToken.status.in_(("stored", "delivered")),
+            )
+        )
+    )
+    current = await session.scalars(
+        select(GitHubIssuedToken).where(
+            GitHubIssuedToken.session_id == session_id,
+            GitHubIssuedToken.status == "delivered",
+            GitHubIssuedToken.superseded_at.is_(None),
+            GitHubIssuedToken.token_id.not_in(token_ids),
+        )
+    )
+    held = {repo_id: row.permissions for row in current for repo_id in row.repo_ids}
+    rank = {"none": 0, "read": 1, "write": 2}
+    kept: set[uuid.UUID] = set()
+    for row in rows:
+        wider = any(
+            rank.get(held.get(repo_id, {}).get(key, "none"), 0) < rank.get(value, 0)
+            for repo_id in row.repo_ids
+            for key, value in row.permissions.items()
+        )
+        if wider:
+            continue
+        row.session_id = session_id
+        row.status = "delivered"
+        row.superseded_at = now
+        row.revoke_after = row.expires_at + timedelta(minutes=6)
+        kept.add(row.token_id)
+    await session.flush()
+    return frozenset(kept)
+
+
 async def restore_session_tokens(session: AsyncSession, *, token_ids: frozenset[uuid.UUID]) -> None:
     """Undo a failed rotation's pending revocation of the old tokens."""
     if not token_ids:

@@ -27,6 +27,7 @@ from daimon.core._models import (
     GitHubConnectFlow,
     GitHubConnectInvitation,
     GitHubConnectRequest,
+    GitHubIssuedToken,
     GitHubUserLink,
     PlatformPrincipal,
     Tenant,
@@ -2036,6 +2037,127 @@ async def test_app_rotation_keeps_old_session_when_first_resource_update_fails(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("narrowing", [False, True])
+async def test_active_turn_failure_keeps_delivered_tokens_unless_wider(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    narrowing: bool,
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    expires_at = datetime.now(UTC) + timedelta(minutes=55)
+
+    async def issue(session_id: str, label: str, contents: str) -> AppToken:
+        row = await github_issued_tokens.create_pending(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            installation_id=101,
+            repo_ids=[11],
+            permissions={"contents": contents},
+            grant_versions={"grant:11": 1, "authorization:11": 1},
+            expires_at=expires_at,
+        )
+        await github_issued_tokens.store_token(
+            db_session, token_id=row.token_id, token=label, fernet=fernet
+        )
+        return AppToken(row.token_id, label, 101, (11,), contents, f"GH_TOKEN_{label.upper()}")
+
+    old = await issue("running-session", "old", "read")
+    await github_issued_tokens.mark_delivered(db_session, token_id=old.token_id)
+    await db_session.commit()
+    url = "https://github.com/acme/repo"
+    new_contents = "write" if narrowing else "read"
+
+    async def prepare(*_args: object, provisional_session_id: str, **_kwargs: object):
+        mounted = await issue(provisional_session_id, "mounted", new_contents)
+        undelivered = await issue(provisional_session_id, "undelivered", new_contents)
+        await db_session.commit()
+        return AppSessionAccess(
+            resources=(
+                {
+                    "type": "github_repository",
+                    "url": url,
+                    "authorization_token": "mounted",
+                    "mount_path": "/workspace/acme/repo",
+                },
+            ),
+            tokens=(mounted, undelivered),
+            working_token="mounted",
+        )
+
+    async def credentials_fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("vault update failed")
+
+    monkeypatch.setattr(
+        github_app_session,
+        "_current_app_access",
+        AsyncMock(side_effect=ValueError("current App token cannot be restored")),
+    )
+    monkeypatch.setattr(github_app_session, "prepare_app_access", prepare)
+    monkeypatch.setattr(github_app_session, "add_app_credentials", credentials_fail)
+    revoked: list[str] = []
+
+    async def fake_revoke(_client: httpx.AsyncClient, token: str) -> None:
+        revoked.append(token)
+
+    monkeypatch.setattr(github_app_session, "revoke_token", fake_revoke)
+    archive = AsyncMock()
+    anthropic = SimpleNamespace(
+        beta=SimpleNamespace(
+            sessions=SimpleNamespace(resources=SimpleNamespace(update=AsyncMock()), archive=archive)
+        )
+    )
+    with pytest.raises(RuntimeError, match="vault update failed"):
+        await github_app_session.rotate_live_app_tokens(
+            anthropic,
+            db_session_factory,
+            session_id="running-session",
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=None,
+            is_external=False,
+            vault_id="running-vault",
+            resource_ids={url: "resource-1"},
+            config=GithubAppSettings(app_id="1", private_key="dummy"),
+            fernet=fernet,
+            active_turn=True,
+        )
+    archive.assert_not_awaited()
+    async with db_session_factory() as session:
+        rows = {
+            row.token_id: row
+            for row in await session.scalars(
+                select(GitHubIssuedToken).where(GitHubIssuedToken.tenant_id == tenant_id)
+            )
+        }
+    by_label = {
+        github_issued_tokens.decrypt_issued_token(
+            github_issued_tokens.IssuedToken.model_validate(row), fernet=fernet
+        ): row
+        for row in rows.values()
+    }
+    assert by_label["old"].status == "delivered"
+    assert by_label["old"].superseded_at is None
+    assert by_label["undelivered"].status == "revoked"
+    mounted = by_label["mounted"]
+    if narrowing:
+        # Wider than the read token the session still holds: revoked now.
+        assert sorted(revoked) == ["mounted", "undelivered"]
+        assert mounted.status == "revoked"
+    else:
+        # Only the token MA never received is revoked; the mounted one expires.
+        assert revoked == ["undelivered"]
+        assert mounted.session_id == "running-session"
+        assert mounted.status == "delivered"
+        assert mounted.superseded_at is not None
+        assert mounted.revoke_after == mounted.expires_at + timedelta(minutes=6)
+
+
 async def test_active_turn_failure_after_swap_without_snapshot_is_not_archived(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
