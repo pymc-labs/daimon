@@ -249,9 +249,6 @@
             'type': 'markdown',
           }),
           dict({
-            'type': 'divider',
-          }),
-          dict({
             'elements': list([
               dict({
                 'text': 'Atlas',

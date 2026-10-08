@@ -219,6 +219,19 @@ class TestToBlocks:
             "*Details*\nTime: 12s\nCost: $0.04\nTokens: 1.5k in / 320 out\nBalance: $12.50 left"
         )
 
+    def test_done_with_visible_answer_starts_with_details(self) -> None:
+        state = _make_state(phase=TurnPhase.DONE, agent_name="Atlas", started_at=0.0)
+        blocks = to_blocks(state, now=12.0, answer_visible=True)
+        assert [block["type"] for block in blocks] == ["context", "context"]
+        assert blocks[0]["elements"][0]["text"] == "Atlas"
+        assert blocks[1]["elements"][0]["text"].startswith("*Details*\nTime: 12s")
+
+        customized = to_blocks(
+            replace(state, header_customized=True), now=12.0, answer_visible=True
+        )
+        assert [block["type"] for block in customized] == ["context"]
+        assert customized[0]["elements"][0]["text"].startswith("*Details*\nTime: 12s")
+
     def test_error_state_summary_context_has_cross_emoji_and_reason(self) -> None:
         """ERROR state's summary context block carries the cross emoji + the reason."""
         state = update(

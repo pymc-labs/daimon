@@ -161,7 +161,8 @@ def to_blocks(
                 )
         elif not answer_visible and state.text_preview is None:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "Done."}})
-        blocks.append({"type": "divider"})
+        if blocks:
+            blocks.append({"type": "divider"})
         if state.agent_name and not state.header_customized:
             blocks.append(
                 {"type": "context", "elements": [{"type": "mrkdwn", "text": state.agent_name}]}
