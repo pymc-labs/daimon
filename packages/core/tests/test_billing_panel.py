@@ -24,10 +24,10 @@ from daimon.core.billing_panel import (
     fmt_usd,
     load_billing_snapshot,
     lookup_line,
-    member_label,
     panel_tone,
     spender_line,
     timed_credit_note,
+    turns_phrase,
 )
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.errors import DaimonError
@@ -36,6 +36,7 @@ from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenants, usage_events
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
+from daimon.core.stores.platform_names import KnownName, upsert_user_names
 from daimon.testing import ma_model_usage
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from pydantic import SecretStr
@@ -74,11 +75,6 @@ def test_fmt_usd_formats_cents_and_thousands() -> None:
     assert fmt_usd(Decimal("-12.5")) == "-$12.50", "the sign goes before the dollar"
 
 
-def test_member_label_is_the_ids_last_four() -> None:
-    assert member_label("100000000000004993") == "User 4993"
-    assert member_label("ab") == "<unknown user>", "too short to slice"
-
-
 def _ends(day: int) -> datetime:
     return datetime(2025, 1, day, tzinfo=UTC)
 
@@ -99,11 +95,11 @@ def test_expiry_rows_list_five_soonest_first_and_count_the_rest() -> None:
     credits = [ActiveTimedCredit(Decimal(n), _ends(10 + n)) for n in (7, 1, 2, 3, 4, 5, 6)]
     rows = expiry_rows(credits, when=lambda moment: f"{moment:%b} {moment.day}")
     assert rows == [
-        "$1.00 · Jan 11",
-        "$2.00 · Jan 12",
-        "$3.00 · Jan 13",
-        "$4.00 · Jan 14",
-        "$5.00 · Jan 15",
+        "$1.00 on Jan 11",
+        "$2.00 on Jan 12",
+        "$3.00 on Jan 13",
+        "$4.00 on Jan 14",
+        "$5.00 on Jan 15",
         "+ 2 more",
     ]
 
@@ -123,9 +119,13 @@ def test_panel_tone_flags_no_credit_over_cap_and_soon_expiring_credit() -> None:
 
 def test_the_month_summary_and_own_use_lines() -> None:
     since = datetime(2026, 10, 1, tzinfo=UTC)
-    assert admin_summary(since, spend=48.17, people=9) == "October 2026 · $48.17 spent by 9 people"
-    assert admin_summary(since, spend=1.0, people=1) == "October 2026 · $1.00 spent by 1 person"
-    assert admin_summary(since, spend=0.0, people=0) == "October 2026 · nothing used yet"
+    assert admin_summary(since, spend=48.17, people=9) == (
+        "October 2026",
+        "$48.17 spent by 9 people",
+    ), "the month and the spend are two lines, no separator"
+    assert admin_summary(since, spend=1.0, people=1) == ("October 2026", "$1.00 spent by 1 person")
+    assert admin_summary(since, spend=0.0, people=0) == ("October 2026", "Nothing used yet")
+    assert turns_phrase(1250) == "about 1,250 turns"
     assert caller_line(11.5, Decimal("25"), 71) == "$11.50 of your $25.00 this month"
     assert caller_line(11.5, None, 71) == "$11.50 used this month"
     assert caller_line(0.0, Decimal("25"), 0) == "Nothing used this month"
@@ -234,6 +234,41 @@ async def test_load_billing_snapshot_admin_sorts_members_by_spend(
     )
     assert state.member_rows[1].is_caller, "the caller's own row is flagged"
     assert state.guild_distinct_members == 2, "both spenders are counted"
+    assert [row.display_name for row in state.member_rows] == [None, None], (
+        "without a platform no stored name is read, and no `User 1234` stands in"
+    )
+
+
+async def test_load_billing_snapshot_names_rows_from_the_stored_names(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = await _tenant_with_usage(db_session)
+    await upsert_user_names(
+        db_session,
+        tenant_id=tenant_id,
+        platform="slack",
+        names={_OTHER_ID: KnownName(display_name="Maya Chen", handle="maya")},
+    )
+    await upsert_user_names(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        names={_CALLER_ID: KnownName(display_name="Wrong platform")},
+    )
+
+    state = await load_billing_snapshot(
+        db_session,
+        tenant_id=tenant_id,
+        platform_user_id=_CALLER_ID,
+        is_admin=True,
+        since=_SINCE,
+        now=_NOW,
+        platform="slack",
+    )
+
+    assert [row.display_name for row in state.member_rows] == ["Maya Chen", None], (
+        "a stored name for this platform names the row; another platform's does not"
+    )
 
 
 async def test_load_billing_snapshot_admin_caps_at_25_members(db_session: AsyncSession) -> None:

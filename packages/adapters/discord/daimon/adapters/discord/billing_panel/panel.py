@@ -42,6 +42,7 @@ from daimon.adapters.discord.billing_panel.state import (
     COLOR_OVER_CAP,
     COLOR_WARNING,
     BillingPanelState,
+    MemberRow,
 )
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
@@ -74,10 +75,12 @@ from daimon.core.billing_panel import (
     panel_tone,
     spender_line,
     timed_credit_note,
+    turns_phrase,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.mcp_auth import mint_jwt
+from daimon.core.platform_names import remember_user_name
 from daimon.core.stores.usage_events import (
     cost_for_user_in_tenant_since,
     turn_count_for_user_in_tenant_since,
@@ -104,6 +107,17 @@ def plain_name(name: str) -> str:
     """A display name as literal text: no markdown, no mention, no line break."""
     flat = " ".join(name.splitlines())
     return discord.utils.escape_mentions(discord.utils.escape_markdown(flat))
+
+
+def spender_name(row: MemberRow) -> str:
+    """The row's name as literal text, or for someone Discord never named to us a
+    `<@id>` mention: the client shows it as their name, and the panel's
+    `AllowedMentions.none()` keeps it from notifying them."""
+    if row.display_name:
+        return plain_name(row.display_name)
+    if row.platform_user_id.isdigit():
+        return f"<@{row.platform_user_id}>"
+    return "Unknown member"
 
 
 def _discord_date(moment: datetime) -> str:
@@ -169,7 +183,7 @@ def estimate_turns(
 def _spenders_text(state: BillingPanelState) -> str:
     """`**Top spenders**`, the top five by name, then `+ N more — look one up below`."""
     rows = [
-        spender_line(rank, plain_name(row.display_name), cost=row.cost_usd, is_caller=row.is_caller)
+        spender_line(rank, spender_name(row), cost=row.cost_usd, is_caller=row.is_caller)
         for rank, row in enumerate(state.member_rows[:TOP_SPENDERS_SHOWN], start=1)
     ] or [NOTHING_USED]
     if overflow := more_spenders(len(state.member_rows), state.over_cap_count):
@@ -197,7 +211,7 @@ def build_billing_container(
 ) -> Container:
     """The /billing panel: one container, its sections set apart by separators.
 
-      - header: `## Billing` + `-# October 2026 · $48.17 spent by 9 people`
+      - header: `## Billing` + `-# October 2026` + `-# $48.17 spent by 9 people`
         (a member's subtext is the month alone)
       - a member's own use: `**You**` + `$11.50 of your $25.00 this month`
       - credit: `### $62.40` + `total credit left` + the timed credit it includes
@@ -214,7 +228,7 @@ def build_billing_container(
     subtext = (
         admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
         if state.is_admin
-        else month_label(since)
+        else (month_label(since),)
     )
     sections: list[str] = []
     if not state.is_admin:
@@ -228,7 +242,8 @@ def build_billing_container(
         sections.append(_spenders_text(state))
         if state.channel_budgets:
             sections.append(_channel_budgets_text(state, now))
-    children: list[discord.ui.Item[discord.ui.LayoutView]] = [layout.header(TITLE, subtext=subtext)]
+    header = Text("\n".join([f"## {TITLE}", *(f"-# {line}" for line in subtext)]))
+    children: list[discord.ui.Item[discord.ui.LayoutView]] = [header]
     for section in sections:
         children += [_gap(), Text(section)]
     if controls:
@@ -274,9 +289,11 @@ class _TopUpSelect(discord.ui.Select["BillingPanelView"]):
             discord.SelectOption(
                 label=f"${amount}",
                 value=str(amount),
-                description=f"≈ {estimate_turns(float(amount), guild_spend=state.guild_spend, guild_turns=state.guild_turns):,} turns"[  # noqa: E501
-                    :100
-                ],
+                description=turns_phrase(
+                    estimate_turns(
+                        float(amount), guild_spend=state.guild_spend, guild_turns=state.guild_turns
+                    )
+                )[:100],
             )
             for amount in TOPUP_AMOUNTS
         ]
@@ -348,6 +365,15 @@ class _MemberLookupSelect(discord.ui.UserSelect["BillingPanelView"]):
                     platform_user_id=str(selected.id),
                     since=since,
                 )
+            # The picker hands over their name: remembered like any other.
+            remember_user_name(
+                self.view.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="discord",
+                user_id=str(selected.id),
+                display_name=selected.display_name,
+                handle=selected.name,
+            )
             lookup_container = build_member_lookup_container(
                 display_name=selected.display_name,
                 spend_usd=spend,
@@ -560,6 +586,8 @@ async def _rerender(
             since=since,
             channel_id=invoking_channel_id(bot_interaction),
             now=now,
+            client=interaction.client,
+            sessionmaker=runtime.sessionmaker,
         )
     new_view = BillingPanelView(
         new_state,

@@ -436,6 +436,7 @@ none back. No operator token can open a top-up: `/billing/checkout` answers 403.
 | `promo_redemptions` | one row per code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`). |
 | `promo_redeem_failures` | refused redemption attempts per tenant, for the throttle. |
 | `channel_budgets` | per-channel spend limits and their windows; no row means no limit. |
+| `platform_user_names`, `platform_channel_names` | the last name each platform sent for a person (display name and handle) or a channel, so `/billing` can name them when the platform does not answer; see [What you can see](#what-you-can-see). |
 
 These tables are declared in `packages/core/daimon/core/_models.py` with stores
 beside them in `packages/core/daimon/core/stores/`. Ledger reasons in use:
@@ -533,15 +534,46 @@ Teams. Admin-only figures are not fetched for a non-admin rather than fetched
 and hidden. On Discord the panel's accent is red with no credit left or the
 viewer over their cap, and amber while timed credit expires within a week.
 
-The top spenders are shown by name, never as a ping. Discord takes each
-from the member cache or one member fetch (no privileged intent), all within
-1.5 seconds, and escapes markdown and mentions in it. Slack writes a user
-mention, which a modal shows as the name without notifying anyone; the panel is
-only ever a modal. Teams looks each person up on the rosters of the teams the
-bot is installed in, within 2 seconds, as plain text. Anyone who cannot be
-named (left the server, in no installed team, a lookup that failed or timed
-out, an id that is not a Slack user id) is shown as `User` and the last four
-characters of their id.
+The top spenders are shown by name, never as a ping and never as an id. Each
+shown person is named in this order, all lookups side by side under one short
+timeout:
+
+1. **The platform's name for them now.** Discord takes the member cache, else
+   one member fetch (no privileged intent), within 1.5 seconds. Slack calls
+   `users.info` (display name, else real name) within 2 seconds and shows it as
+   escaped plain text. Teams looks the person up on the rosters of the teams
+   the bot is installed in, within 2 seconds.
+2. **The name stored when we last saw them.** Whenever an adapter already holds
+   a name it is kept in `platform_user_names`, one row per (tenant, platform,
+   user), in the background so it never delays or fails a turn
+   (`packages/core/daimon/core/platform_names.py`): the author of a Discord
+   mention and the user of any Discord interaction (server display name and
+   username), the `user_profile` on a Slack message and the username on a
+   Slack slash command or click, the sender of every Teams message and card
+   click, and every name a panel lookup returns. Someone who left the server,
+   is in no installed team, or whose lookup failed or timed out gets this one.
+3. **Their account's own name**, on Discord only, for someone with no stored
+   name: `fetch_user` answers for people who left (global name, else
+   username). Slack's `users.info` already answers for deactivated people.
+4. **Never named to us at all**: Discord writes a `<@id>` mention, which the
+   client shows as their name and which pings nobody (the panel is ephemeral
+   and sent with no allowed mentions); Slack writes a `<@U…>` mention, which a
+   modal shows as the name (the panel is only ever a modal); Teams says
+   `Name unavailable`, since an `<at>` mention there would notify them.
+
+Names are escaped: markdown and mentions on Discord, `&`, `<` and `>` on Slack,
+markdown and tags on Teams. Discord and Slack show channel budgets as channel
+mentions, which the client names. Teams shows each channel's name: from the
+channel listings of the installed teams, else the name stored from the last
+message there (`platform_channel_names`), else `General` for a team's own
+channel, else `Channel name unavailable`; never the `19:…` id.
+
+The panel has no `·` separators: the admin subtitle is two lines (`October
+2026`, `$48.17 spent by 9 people`), an expiry date reads `$20.00 on Oct 12`,
+and a top-up amount is `$10` with `about 100 turns` under it.
+
+A privacy deletion removes the person's stored name with the rest of their
+records; deleting a tenant removes its stored names.
 
 Two things those numbers are not. They are pre-markup, as above. And tenant
 aggregates exclude rows with no platform user attached, so spend recovered by

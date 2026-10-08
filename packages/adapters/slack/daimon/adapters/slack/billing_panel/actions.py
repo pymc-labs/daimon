@@ -27,6 +27,7 @@ via views.update. Never stripe.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -35,9 +36,11 @@ import httpx
 import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.billing_panel.names import lookup_name, name_shown_spenders
 from daimon.adapters.slack.billing_panel.views import (
     EXPIRY_OPEN_ACTION_ID,
     LOOKUP_ACTION_ID,
+    Lookup,
     build_billing_view,
     build_expiry_view,
     build_loading_view,
@@ -52,6 +55,7 @@ from daimon.core.billing_panel import (
     load_billing_snapshot,
     lookup_line,
     month_start,
+    stored_name_labels,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -108,10 +112,11 @@ async def handle_billing_command(
         # Load billing snapshot from DB
         now = datetime.now(UTC)
         since = month_start(now)
+        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         async with runtime.sessionmaker() as session:
             state = await load_billing_snapshot(
                 session,
-                tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
+                tenant_id=tenant_id,
                 platform_user_id=user_id,
                 is_admin=is_admin,
                 since=since,
@@ -119,6 +124,9 @@ async def handle_billing_command(
                 channel_id=channel_id or None,
                 now=now,
             )
+        state = await name_shown_spenders(
+            client, state, sessionmaker=runtime.sessionmaker, tenant_id=tenant_id
+        )
 
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id,
@@ -337,12 +345,28 @@ async def handle_panel_action(runtime: SlackRuntime, payload: dict[str, Any]) ->
             turns = await turn_count_for_user_in_tenant_since(
                 session, tenant_id=tenant_id, platform_user_id=picked, since=since
             )
+            stored = await stored_name_labels(
+                session, tenant_id=tenant_id, platform="slack", user_ids=[picked]
+            )
+        # Both under the same short timeout, side by side.
+        state, name = await asyncio.gather(
+            name_shown_spenders(
+                client, state, sessionmaker=runtime.sessionmaker, tenant_id=tenant_id
+            ),
+            lookup_name(
+                client,
+                picked,
+                sessionmaker=runtime.sessionmaker,
+                tenant_id=tenant_id,
+                stored=stored.get(picked),
+            ),
+        )
         view = build_billing_view(
             state,
             now=now,
             since=since,
             channel_id=channel_id,
-            lookup=(picked, lookup_line(spend, turns)),
+            lookup=Lookup(user_id=picked, name=name, line=lookup_line(spend, turns)),
         )
         # The hash makes a slower, earlier lookup lose to a newer one instead of
         # overwriting it.

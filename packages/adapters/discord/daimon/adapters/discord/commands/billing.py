@@ -67,6 +67,8 @@ class BillingCog(commands.Cog):
                     since=since,
                     channel_id=invoking_channel_id(interaction),
                     now=now,
+                    client=interaction.client,
+                    sessionmaker=runtime.sessionmaker,
                 )
                 # Tenant ids are derived deterministically from (platform, guild) —
                 # the same uuid the turn pipeline bills against.

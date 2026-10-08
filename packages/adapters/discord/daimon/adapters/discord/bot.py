@@ -30,6 +30,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.gating import is_participation_candidate, should_process_message
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.names import remember_guild_user
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.post_transport import DiscordPostTransport, known_webhook_ids
@@ -1516,6 +1517,12 @@ class DaimonBot(commands.Bot):
             self._release_inflight(tenant_id)
             self.release_global_turn()
 
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Remember the clicker's name for /billing; the command tree handles the rest."""
+        remember_guild_user(
+            self.runtime.sessionmaker, guild_id=interaction.guild_id, user=interaction.user
+        )
+
     async def on_message(self, message: discord.Message) -> None:
         """Gate on mention, resolve TenantContext once + run the non-ready self-heal gate,
         then orchestrate a turn in a thread."""
@@ -1609,6 +1616,8 @@ class DaimonBot(commands.Bot):
         guild = message.guild
         guild_id = str(guild.id)
         bot_display_name = _resolve_bot_display_name(self.runtime.settings)
+        # For /billing's top spenders; in the background, never failing the turn.
+        remember_guild_user(self.runtime.sessionmaker, guild_id=guild.id, user=message.author)
 
         # --- Unified non-ready self-heal gate through turn completion,
         # guarded end-to-end. A DB hiccup or an unclassified bug

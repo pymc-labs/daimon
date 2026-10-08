@@ -1247,6 +1247,16 @@ tool `redeem_promo_code`; each surface calls
 timed credit windows through `daimon.core.promo_settlement`. See
 [billing.md](billing.md#promo-codes).
 
+Each adapter remembers the names it is handed on the way in: the author of a
+Discord mention and the user of any Discord interaction (`DaimonBot.on_interaction`),
+the name a Slack event, slash command or click carries (right after the ack in
+`SlackApp.on_request`), and the sender and channel of every Teams message and
+card click. `daimon.core.platform_names` writes them to `platform_user_names`
+and `platform_channel_names` in a background task, skipping a name this process
+already wrote, so it adds no wait to a turn and a failed write is only logged.
+The billing panel names people and Teams channels from them when the platform
+does not answer live. See [billing.md](billing.md#what-you-can-see).
+
 ### Invocation context fragments
 
 Core adds a `turn_context` block before the user message, chosen by the trusted

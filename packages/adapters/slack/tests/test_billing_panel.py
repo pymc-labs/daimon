@@ -10,6 +10,7 @@ The shared figures and the snapshot read are covered in core's test_billing_pane
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import json
@@ -26,6 +27,7 @@ from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores.domain import ChannelBudgetRow
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
+from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _SINCE = datetime(2025, 1, 1, tzinfo=UTC)
@@ -303,14 +305,14 @@ def test_the_admin_panel_is_month_credit_channel_and_actions_apart() -> None:
     view = build_billing_view(state, now=_NOW, since=_SINCE)
     assert view["type"] == "modal" and view["title"]["text"] == "Billing"
     assert _shape(view["blocks"]) == [
-        "context: January 2025 · $10.00 spent by 2 people",
+        "context: January 2025\n$10.00 spent by 2 people",
         "divider",
         "section: *$50.00* total credit left",
         "context: Includes $25.00 that expires. It's used first.",
         "divider",
         "section: *This channel*\n$1.20 of $5.00 used this month",
         "divider",
-        "section: *Top spenders*\n1. <@U0123ABCD>  $2.00",
+        "section: *Top spenders*\n1. Ann Lee  $2.00",
         "divider",
         "section: *Channel budgets*\n<#C1>  $1.20 of $5.00 used this month",
         "divider",
@@ -359,8 +361,8 @@ def test_expiry_dates_lists_each_credit_soonest_first() -> None:
     epoch = int(last.ends_at.timestamp())
     assert _shape(view["blocks"])[0] == (
         "section: Unused credit expires:\n"
-        f"$20.00 · <!date^{epoch}^{{date_short_pretty}}|2025-01-20>\n"
-        f"$5.00 · <!date^{int(first.ends_at.timestamp())}^{{date_short_pretty}}|2025-01-31>"
+        f"$20.00 on <!date^{epoch}^{{date_short_pretty}}|2025-01-20>\n"
+        f"$5.00 on <!date^{int(first.ends_at.timestamp())}^{{date_short_pretty}}|2025-01-31>"
     )
 
 
@@ -372,30 +374,87 @@ def _spender_rows(state: BillingPanelState) -> list[str]:
     return text.splitlines()[1:]
 
 
-def _row(user_id: str, *, is_caller: bool = False) -> MemberRow:
-    return MemberRow(user_id, f"User {user_id[-4:]}", 2.0, 3, is_caller)
+def _row(user_id: str, *, is_caller: bool = False, name: str | None = "Ann Lee") -> MemberRow:
+    return MemberRow(user_id, name, 2.0, 3, is_caller)
 
 
-def test_top_spenders_are_mentions_which_a_modal_shows_as_names() -> None:
+def test_top_spenders_are_named_in_escaped_plain_text() -> None:
     state = dataclasses.replace(
-        _make_admin_state(), member_rows=(_row("U0123ABCD"), _row("W0456EFGH", is_caller=True))
+        _make_admin_state(),
+        member_rows=(
+            _row("U0123ABCD", name="<!channel> & *Bo*\nX"),
+            _row("W0456EFGH", is_caller=True),
+        ),
     )
-    assert _spender_rows(state) == ["1. <@U0123ABCD>  $2.00", "2. <@W0456EFGH> _(you)_  $2.00"]
+    assert _spender_rows(state) == [
+        "1. &lt;!channel&gt; &amp; *Bo* X  $2.00",
+        "2. Ann Lee _(you)_  $2.00",
+    ], "a name is plain text on one line: no mention, no broadcast"
 
 
-def test_an_id_that_is_not_a_slack_user_id_keeps_the_escaped_label() -> None:
-    odd = MemberRow("U1|<!channel>", "User <!channel>", 1.0, 1, False)
+def test_someone_never_named_to_us_is_a_mention_the_modal_names() -> None:
+    odd = MemberRow("U1|<!channel>", None, 1.0, 1, False)
     state = dataclasses.replace(
-        _make_admin_state(), member_rows=(odd, _row("u0123abcd"), _row("B0123ABCD"))
+        _make_admin_state(),
+        member_rows=(_row("U0123ABCD", name=None), odd, _row("B0123ABCD", name=None)),
     )
     lines = _spender_rows(state)
-    assert "<!channel>" not in "\n".join(lines) and "<@" not in "\n".join(lines), lines
-    assert lines[1].startswith("2. User abcd"), "a lowercase id is not a user id"
-    assert lines[2].startswith("3. User ABCD"), "a bot id is not a user id"
+    assert lines[0] == "1. <@U0123ABCD>  $2.00", "a modal shows the mention as their name"
+    assert lines[1].startswith("2. That person") and lines[2].startswith("3. That person"), (
+        "an id that is not a user id is never put in a mention"
+    )
+    assert "<!channel>" not in "\n".join(lines) and "User " not in "\n".join(lines)
+
+
+def test_no_rendered_panel_has_a_dot_separator_or_a_user_label() -> None:
+    from daimon.adapters.slack.billing_panel.views import (
+        Lookup,
+        build_billing_view,
+        build_expiry_view,
+    )
+
+    rows = tuple(_row(f"U{i:08d}", name=None if i % 2 else f"n{i}") for i in range(7))
+    for state in (
+        dataclasses.replace(
+            _make_admin_state(),
+            member_rows=rows,
+            timed_credit=(_credit("20", 20),),
+            channel_budget=_budget("C1", "1.2", "5"),
+            channel_budgets=(_budget("C1", "1.2", "5"),),
+            has_redeemable_promo_code=True,
+        ),
+        dataclasses.replace(_make_member_state(), timed_credit=(_credit("5", 20),)),
+    ):
+        view = build_billing_view(
+            state, now=_NOW, since=_SINCE, lookup=Lookup("U00000001", None, "$2.00 this month")
+        )
+        text = json.dumps(view, ensure_ascii=False) + json.dumps(
+            build_expiry_view(state.timed_credit), ensure_ascii=False
+        )
+        assert "·" not in text and "≈" not in text and "User " not in text, text
+    options = json.dumps(_make_admin_view_options())
+    assert "about " in options and "turns" in options
+
+
+def _make_admin_view_options() -> list[dict[str, Any]]:
+    from daimon.adapters.slack.billing_panel.views import build_billing_container
+
+    blocks = build_billing_container(_make_admin_state(), now=_NOW, since=_SINCE)
+    select = next(
+        element
+        for block in blocks
+        if block["type"] == "actions"
+        for element in block["elements"]
+        if element["type"] == "static_select"
+    )
+    for option in select["options"]:
+        assert option["text"]["text"] == f"${option['value']}", "the amount alone"
+        assert option["description"]["text"].startswith("about "), option
+    return select["options"]
 
 
 def test_top_spenders_and_channel_budgets_count_the_rest_and_a_lookup_shows_below() -> None:
-    from daimon.adapters.slack.billing_panel.views import build_billing_container
+    from daimon.adapters.slack.billing_panel.views import Lookup, build_billing_container
 
     rows = tuple(_row(f"U{i:08d}") for i in range(7))
     budgets = tuple(_budget(f"C{i}", str(9 - i)) for i in range(7))
@@ -403,7 +462,7 @@ def test_top_spenders_and_channel_budgets_count_the_rest_and_a_lookup_shows_belo
         _make_admin_state(), member_rows=rows, over_cap_count=1, channel_budgets=budgets
     )
     blocks = build_billing_container(
-        state, now=_NOW, since=_SINCE, lookup=("U00000001", "$2.00 this month")
+        state, now=_NOW, since=_SINCE, lookup=Lookup("U00000001", "Cy & Di", "$2.00 this month")
     )
     shape = _shape(blocks)
     spenders = next(i for i, line in enumerate(shape) if "*Top spenders*" in line)
@@ -413,7 +472,7 @@ def test_top_spenders_and_channel_budgets_count_the_rest_and_a_lookup_shows_belo
         "section: *Channel budgets*\n<#C0>  $9.00 of $10.00 used this month"
     )
     assert "<#C5>" not in shape[budgets_at] and shape[budgets_at + 1] == "context: + 2 more"
-    assert shape[-2:] == ["actions: billing_lookup", "section: *<@U00000001>*\n$2.00 this month"]
+    assert shape[-2:] == ["actions: billing_lookup", "section: *Cy &amp; Di*\n$2.00 this month"]
     assert blocks[-1]["block_id"] == "billing_lookup_result"
 
 
@@ -518,6 +577,96 @@ async def test_a_pick_redraws_the_panel_with_that_persons_spend(
     assert json.loads(updated["view"]["private_metadata"]) == {"channel_id": "C1"}
     result = updated["view"]["blocks"][-1]
     assert result["block_id"] == "billing_lookup_result"
-    assert result["text"]["text"] == "*<@U0123ABCD>*\nNothing used this month", (
-        "the pick shows that person's spend under the picker"
+    assert result["text"]["text"] == "*tester*\nNothing used this month", (
+        "the pick shows that person's name from users.info and their spend under the picker"
+    )
+
+
+class _UsersInfo:
+    """A client whose `users.info` answers from `users`; a `slow` id never answers in time."""
+
+    def __init__(
+        self, users: dict[str, dict[str, Any] | Exception], *, slow: frozenset[str] = frozenset()
+    ) -> None:
+        self.users, self.slow, self.calls = users, slow, list[str]()
+
+    async def users_info(self, *, user: str) -> dict[str, Any]:
+        self.calls.append(user)
+        if user in self.slow:
+            await asyncio.sleep(10)
+        answer = self.users.get(user)
+        if answer is None:
+            raise SlackApiError("user_not_found", {"ok": False, "error": "user_not_found"})
+        if isinstance(answer, Exception):
+            raise answer
+        return {"ok": True, "user": answer}
+
+
+async def _named(
+    client: _UsersInfo, state: BillingPanelState, session_factory: Any, tenant_id: uuid.UUID
+) -> list[str | None]:
+    from daimon.adapters.slack.billing_panel.names import name_shown_spenders
+
+    named = await name_shown_spenders(
+        client,  # type: ignore[arg-type]
+        state,
+        sessionmaker=session_factory,
+        tenant_id=tenant_id,
+        timeout_s=0.2,
+    )
+    return [row.display_name for row in named.member_rows]
+
+
+async def test_spenders_are_named_from_users_info_and_remembered(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core import platform_names
+    from daimon.core.stores.platform_names import KnownName, get_user_names
+
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_NAMES")
+    await db_session.commit()
+    client = _UsersInfo(
+        {
+            "U001": {"name": "maya", "profile": {"display_name": "Maya", "real_name": "Maya Chen"}},
+            "U002": {"name": "jonas", "real_name": "Jonas R.", "profile": {"display_name": ""}},
+            "U003": {"name": "gone", "deleted": True, "profile": {"real_name": "Former Person"}},
+        }
+    )
+    state = dataclasses.replace(
+        _make_admin_state(),
+        member_rows=tuple(_row(uid, name=None) for uid in ("U001", "U002", "U003")),
+    )
+
+    names = await _named(client, state, db_session_factory, tenant.id)
+    await platform_names.settle()
+
+    assert names == ["Maya", "Jonas R.", "Former Person"], (
+        "display name, else real name; users.info answers for deactivated people too"
+    )
+    stored = await get_user_names(
+        db_session, tenant_id=tenant.id, platform="slack", user_ids=["U001", "U002", "U003"]
+    )
+    assert stored["U001"] == KnownName("Maya", "maya"), "what Slack said is stored for next time"
+
+
+async def test_a_slow_or_failed_users_info_shows_the_stored_name() -> None:
+    client = _UsersInfo(
+        {"U001": {"name": "a", "profile": {"display_name": "Live"}}, "U002": TimeoutError()},
+        slow=frozenset({"U003"}),
+    )
+    state = dataclasses.replace(
+        _make_admin_state(),
+        member_rows=(
+            _row("U001", name="Stored A"),
+            _row("U002", name="Stored B"),
+            _row("U003", name="Stored C"),
+            _row("U004", name=None),
+        ),
+    )
+
+    async with asyncio.timeout(2):
+        names = await _named(client, state, MagicMock(), uuid.uuid4())
+
+    assert names == ["Live", "Stored B", "Stored C", None], (
+        "live wins; a failure or a timeout shows the stored name; never named stays None"
     )

@@ -64,6 +64,7 @@ from daimon.adapters.teams.lifecycle import (
     TeamsTurnLifecycle,
     TimedSender,
 )
+from daimon.adapters.teams.names import remember_inbound
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.participation import TeamsParticipation
 from daimon.adapters.teams.provisioning import provision_configured_tenant
@@ -643,6 +644,8 @@ class TeamsApp:
         """
         if not await self._may_post(inbound.channel_id, inbound.thread_id):
             return
+        # For the billing card's names; in the background, never failing the turn.
+        remember_inbound(self.runtime.sessionmaker, self._tenant_id, inbound)
         inbound = await self._classified(inbound)
         if inbound.is_external:
             # Type and tenant only: who sent it stays out of the log.

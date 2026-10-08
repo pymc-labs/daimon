@@ -6,20 +6,22 @@ chat-neutral ones in daimon.core.billing_panel.
 
 The panel is a modal: the month, the credit left, the channel's budget, for an
 admin the top spenders and channel budgets, and the actions, set apart by
-dividers. "Expiry dates" pushes a view of its own over it. These blocks only
-ever go into a modal (views.open, views.update, views.push), where a `<@U…>`
-mention renders as the person's name and notifies nobody; that is how
-spenders are named. Never post them as a message: there a mention pings.
+dividers. "Expiry dates" pushes a view of its own over it. People are named in
+plain escaped text (`names.py` resolves them). Only someone Slack never named
+to us is shown as a `<@U…>` mention, which a modal renders as their name and
+notifies nobody. These blocks only ever go into a modal (views.open,
+views.update, views.push); never post them as a message, where a mention pings.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
-import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from daimon.adapters.slack.billing_panel.names import is_user_id
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.billing_panel import (
     ADD_CREDIT,
@@ -52,6 +54,7 @@ from daimon.core.billing_panel import (
     spend_over_cap,
     spender_line,
     timed_credit_note,
+    turns_phrase,
 )
 from daimon.core.promo_credit import ActiveTimedCredit
 
@@ -62,8 +65,17 @@ LOOKUP_ACTION_ID = "billing_lookup"
 # The panel's own actions besides the top-up select and the redeem form.
 PANEL_ACTION_IDS = frozenset({EXPIRY_OPEN_ACTION_ID, LOOKUP_ACTION_ID})
 LOOKUP_BLOCK_ID = "billing_lookup_result"
-# A Slack user id, as a mention may carry it; anything else is shown as `User XXXX`.
-_USER_ID = re.compile(r"^[UW][A-Z0-9]{2,}$")
+UNKNOWN_PERSON = "That person"
+
+
+@dataclasses.dataclass(frozen=True)
+class Lookup:
+    """A "Look up a person" pick: who, their name if known, and their spend line."""
+
+    user_id: str
+    name: str | None
+    line: str
+
 
 # ---------------------------------------------------------------------------
 # Block Kit builders (pure raw dicts — S4 pattern)
@@ -120,14 +132,21 @@ def _credit_blocks(state: BillingPanelState) -> list[dict[str, Any]]:
     return blocks
 
 
-def spender_name(row: MemberRow) -> str:
-    """A mention of the person, which a modal shows as their name without notifying them.
+def person_name(user_id: str, name: str | None) -> str:
+    """A person's name as escaped plain text on one line.
 
-    An id that is not a Slack user id falls back to the row's escaped `User XXXX` label.
+    Someone with no known name is a `<@U…>` mention, which a modal shows as their
+    name without notifying them; an id that is not a Slack user id reads
+    `That person`.
     """
-    if _USER_ID.fullmatch(row.platform_user_id):
-        return f"<@{row.platform_user_id}>"
-    return escape_mrkdwn(row.display_name)
+    if name and (flat := " ".join(name.split())):
+        return escape_mrkdwn(flat)
+    return f"<@{user_id}>" if is_user_id(user_id) else UNKNOWN_PERSON
+
+
+def spender_name(row: MemberRow) -> str:
+    """The row's name, as `person_name` writes it."""
+    return person_name(row.platform_user_id, row.display_name)
 
 
 def _topup_select(state: BillingPanelState) -> dict[str, Any]:
@@ -140,7 +159,7 @@ def _topup_select(state: BillingPanelState) -> dict[str, Any]:
             {
                 "text": {"type": "plain_text", "text": f"${amount}"},
                 "value": str(amount),
-                "description": {"type": "plain_text", "text": f"≈ {turns:,} turns"[:75]},
+                "description": {"type": "plain_text", "text": turns_phrase(turns)[:75]},
             }
         )
     return {
@@ -157,7 +176,7 @@ def build_loading_view() -> dict[str, Any]:
 
 
 def _spenders_blocks(state: BillingPanelState) -> list[dict[str, Any]]:
-    """`*Top spenders*` as mentions, then a grey `+ N more`."""
+    """`*Top spenders*` by name, then a grey `+ N more`."""
     rows = [
         spender_line(
             rank, spender_name(row), cost=row.cost_usd, is_caller=row.is_caller, you=" _(you)_"
@@ -187,29 +206,29 @@ def build_billing_container(
     *,
     now: datetime,
     since: datetime,
-    lookup: tuple[str, str] | None = None,
+    lookup: Lookup | None = None,
 ) -> list[dict[str, Any]]:
     """Block Kit blocks for the /billing modal, its sections set apart by dividers.
 
-      - context: `October 2026 · $48.17 spent by 9 people` (a member: the month)
+      - context: `October 2026` over `$48.17 spent by 9 people` (a member: the month)
       - a member's own use: `*You*` + `$11.50 of your $25.00 this month`
       - credit: `*$62.40* total credit left` + context with the timed credit it
         includes (and for a member `Ask an admin to add credit.`)
       - `*This channel*` + `$1.20 of $5.00 used this month`, when the
         invoking channel has one
-      - admin only: `*Top spenders*` as mentions, then `*Channel budgets*`
+      - admin only: `*Top spenders*` by name, then `*Channel budgets*`
       - actions: `Add credit` and `Redeem code` (admin), `Expiry dates` with
         timed credit; for an admin a `Look up a person` picker, and under it
-        ``lookup``, a picked (user id, spend line)
+        ``lookup``, the picked person's name and spend
 
     No color fields anywhere; the modal's own title is the panel's title.
     """
     subtext = (
         admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
         if state.is_admin
-        else month_label(since)
+        else (month_label(since),)
     )
-    blocks: list[dict[str, Any]] = [_context(subtext), _divider()]
+    blocks: list[dict[str, Any]] = [_context("\n".join(subtext)), _divider()]
     if not state.is_admin:
         own = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
         over = "  ⚠️ Over your cap" if spend_over_cap(state.caller_spend, state.caller_cap) else ""
@@ -240,9 +259,8 @@ def build_billing_container(
         }
         blocks.append({"type": "actions", "elements": [picker]})
         if lookup is not None:
-            user_id, line = lookup
-            name = f"<@{user_id}>" if _USER_ID.fullmatch(user_id) else "That person"
-            result = _section(f"*{name}*\n{line}")
+            name = person_name(lookup.user_id, lookup.name)
+            result = _section(f"*{name}*\n{lookup.line}")
             blocks.append(result | {"block_id": LOOKUP_BLOCK_ID})
     return blocks
 
@@ -253,7 +271,7 @@ def build_billing_view(
     now: datetime,
     since: datetime,
     channel_id: str | None = None,
-    lookup: tuple[str, str] | None = None,
+    lookup: Lookup | None = None,
 ) -> dict[str, Any]:
     """The /billing modal around ``build_billing_container``.
 
@@ -267,6 +285,6 @@ def build_billing_view(
 
 
 def build_expiry_view(credits: Sequence[ActiveTimedCredit]) -> dict[str, Any]:
-    """Pushed by "Expiry dates": `Unused credit expires:` and `$20.00 · Oct 12` rows."""
+    """Pushed by "Expiry dates": `Unused credit expires:` and `$20.00 on Oct 12` rows."""
     rows = expiry_rows(credits, when=slack_date)
     return _modal(EXPIRY_DATES, [_section("\n".join([EXPIRY_INTRO, *rows]))], close="Back")

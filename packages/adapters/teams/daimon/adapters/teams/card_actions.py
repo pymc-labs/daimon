@@ -21,6 +21,7 @@ from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.platform_names import remember_user_name
 from daimon.core.stores.accounts import get_external
 from daimon.core.stores.identity import (
     find_platform_principal,
@@ -101,6 +102,14 @@ async def card_actor(
     tenant_id = await live_tenant_id(runtime.sessionmaker, teams.tenant_id)
     if tenant_id is None:
         return None
+    # For the billing card's names; in the background, never failing the click.
+    remember_user_name(
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="teams",
+        user_id=user_id,
+        display_name=activity.from_.name,
+    )
     is_external = is_known = home is not None
     if runtime.externals is not None:
         channel = channel_data.channel if channel_data is not None else None
