@@ -5,7 +5,7 @@ turns sharing parent channels. `Cadence.tla` checks two render windows with
 the event's parent-channel spread and both global rate-limit modes.
 `CardRecovery.tla` checks the durable initial card, ambiguous post response,
 terminal edit, and restart reconciliation.
-Run both through `TLA2TOOLS_JAR=... formal/check.sh` from the repository root.
+Run them through `TLA2TOOLS_JAR=... formal/check.sh` from the repository root.
 These are finite abstractions of the code, not a proof of Discord or discord.py.
 
 ## Code paths and assumptions
@@ -75,6 +75,7 @@ independent turn interleavings or prove a latency bound.
 | `CadenceWebhookRoutes`, `CadenceSixtyFiveRoutes` | At 200 active turns, 40 parents with three evenly selected hooks can absorb an initial post plus edit per turn at the assumed hook quota; 65 parents can absorb one edit per turn even if each parent has one hook. These check route capacity only. |
 | `CadenceWebhookIPUnsafe`, `CadenceBotGlobalUnsafe` | At 200 active turns, one edit per turn per window is 200 requests against either global allowance of 100 per window. Both modes leave 100 requests queued after the first window. Transport tests pin that final webhook and bot 429s propagate; no fallback can promise delivery after global exhaustion. |
 | `CadenceWebhookSkewUnsafe` | Five turns per parent, all mapped to one hook, plus simultaneous initial post and edit require ten calls in one window against five. `test_same_parent_threads_can_select_one_webhook` pins the hash-collision route. |
+| `CadenceWebhookStretched`, `CadenceBotStretched` | At 200 active turns, one edit per turn per five-second window plus 15 baseline initial/terminal/answer requests fits a global allowance of 250 per window in both modes. This checks window-average capacity, not one-second burst safety. |
 | `CardSafe` | A committed intent, one remote card, terminal edit or token-available recovery: no duplicate card/answer and no pending card after a finished turn, retirement, or recovery. |
 | `CardUnsafeDuplicate` | Retrying an accepted initial post after losing its response creates two cards and violates `NoDuplicateCard`. The durable intent and history lookup avoid blind repost; Discord recovery tests cover the ambiguous response and duplicate discovery. |
 | `CardUnsafeFinish` | Marking a turn finished before clearing its card violates `NoPendingAfterTurnEnds`. The lifecycle finishes the card before revealing the answer. |
@@ -112,11 +113,16 @@ validate webhook mode.
 At roughly 15 in flight, the maximum render cadence adds about 7.5 edits/s;
 50–60 turns/min add about 2.5–3 initial/terminal/answer requests/s at the
 three-request baseline. Both posting modes fit a free 50/s global allowance
-under this estimate. At 200 in flight, the render ceiling is 100 edits/s,
-before new cards and terminal updates: **both webhook IP and bot-token global
-budgets are overloaded if every card changes on every tick**. The model
-retains this counterexample for each mode. Edits occur only when card state
-changes, so 100/s is a stress ceiling, not an observed steady rate.
+under this estimate. At 200 in flight with the normal two-second check,
+the ceiling is 100 edits/s, before new cards and terminal updates: **both
+webhook IP and bot-token global budgets are overloaded if every card changes
+on every tick**. The model retains this counterexample for each mode. Above
+50 in-flight turns in one process, Discord and Slack stretch periodic checks
+to five seconds by default, configurable from four to six. At 200 turns,
+that is 40 edits/s on a window average. The stretched configs add 15
+initial/terminal/answer requests per five-second window, the baseline at
+60 turns/min, yielding 43 requests/s in either mode. Edits occur only when
+card state changes. Terminal edits bypass the periodic timer.
 
 The 200-card cold burst alone requires at least two global two-second windows
 in either mode. Spread evenly over 40 parents, five initial posts per parent
@@ -129,11 +135,15 @@ when route capacity is sufficient. This is a capacity lower bound, not a
 delivery guarantee; hook creation, `retry_after`, other egress traffic, and
 answer overflow can add windows.
 
-**Answer:** webhook mode has better per-route distribution and keeps its
-requests out of the bot-token global bucket, but it is not intrinsically safe
-at the 200-turn maximum cadence because its unauthenticated requests share an
-IP-based global ceiling. Bot mode has no per-webhook collision risk, but its
-50/s bot-token ceiling also overloads at that cadence. Monitor actual
+**Answer:** at the planned 200-turn cap, the stretched interval gives both
+modes room under a free 50/s global allowance at the stated average arrival
+rate. This is not a hard posting bound: synchronized edits, cold initial
+posts, simultaneous turn completions, and other traffic can exceed a
+one-second quota inside the modeled five-second window. Webhook mode has
+better per-route distribution and keeps its requests out of the bot-token
+global bucket, but its unauthenticated requests share an IP-based global
+ceiling. Bot mode has no per-webhook collision risk and uses the bot-token
+global bucket. Monitor actual
 `X-RateLimit-Scope`, bucket headers, 429 counts and card-edit rate in staging;
 the R3 zero-429 result does not settle webhook capacity. Automatic fallback
 uses a bot post with the agent name on the first answer chunk when webhook

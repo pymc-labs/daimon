@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import discord
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.config import TurnRenderSettings
 
 
 def make_bot(runtime: DiscordRuntime) -> DaimonBot:
@@ -19,6 +20,8 @@ def make_bot(runtime: DiscordRuntime) -> DaimonBot:
     mentioned in every message, so `on_message` reaches orchestration."""
     intents = discord.Intents.default()
     intents.message_content = True
+    if not isinstance(runtime.settings.turn_render, TurnRenderSettings):
+        runtime.settings.turn_render = TurnRenderSettings()
     bot = DaimonBot(runtime=runtime, intents=intents)
     bot._connection.user = MagicMock(spec=discord.ClientUser)  # pyright: ignore[reportPrivateUsage]
     bot._connection.user.id = 999  # pyright: ignore[reportPrivateUsage]

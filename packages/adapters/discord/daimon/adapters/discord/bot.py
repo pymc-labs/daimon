@@ -118,6 +118,7 @@ from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
+from daimon.core.turn.render_interval import AdaptiveRenderInterval
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
@@ -492,6 +493,11 @@ class DaimonBot(commands.Bot):
         # the whole drain loop so the slot is always released.
         self._inflight: dict[uuid.UUID, int] = {}
         self._global_inflight = 0
+        self._render_interval = AdaptiveRenderInterval(
+            platform="discord",
+            threshold=self.runtime.settings.turn_render.stretch_threshold,
+            stretched_interval_s=self.runtime.settings.turn_render.stretched_interval_s,
+        )
         # Organic thread participation: per-thread quiet-period batches, keyed
         # by thread id. Populated only for threads that resolved to `on`.
         self._participation_pending: dict[int, _ParticipationBatch] = {}
@@ -1301,10 +1307,12 @@ class DaimonBot(commands.Bot):
         if self.draining or (isinstance(cap, int) and self._global_inflight >= cap):
             return False
         self._global_inflight += 1
+        self._render_interval.observe(self._global_inflight)
         return True
 
     def release_global_turn(self) -> None:
         self._global_inflight -= 1
+        self._render_interval.observe(self._global_inflight)
 
     def _cancel_participation_batch(self, thread_id: int) -> None:
         """Drop a thread's pending auto batch and its timer, if any."""
@@ -2434,7 +2442,7 @@ class DaimonBot(commands.Bot):
                     cancel=cancel,
                     reseed_user_message=_reseed_continuation_message,
                     recovery_lifecycle=_recovery_lifecycle,
-                    render_interval_s=2.0,
+                    render_interval_s=self._render_interval.current,
                     deadline=turn_deadline_at,
                     confirm_write=discord_confirmation_hook(thread),
                 )
@@ -3285,7 +3293,7 @@ class DaimonBot(commands.Bot):
                     reseed_user_message=_reseed_user_message,
                     recovery_lifecycle=_recovery_lifecycle,
                     image_blocks=image_blocks,
-                    render_interval_s=2.0,
+                    render_interval_s=self._render_interval.current,
                     deadline=turn_deadline_at,
                     confirm_write=discord_confirmation_hook(thread),
                 )

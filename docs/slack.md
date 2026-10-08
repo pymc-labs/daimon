@@ -3,6 +3,10 @@
 This page documents how daimon's Slack adapter handles per-user access and
 what operators should understand about the resulting trust model.
 
+Working cards are checked for changes every two seconds. When a Slack process
+has more than the configured number of turns in flight, checks use the longer
+configured interval. Finished and stopped cards render immediately.
+
 ### `/here` card
 
 `/here` sends only the caller a compact channel card. Its title names the agent

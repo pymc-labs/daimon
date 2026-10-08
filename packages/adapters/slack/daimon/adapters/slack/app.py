@@ -240,6 +240,7 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
+from daimon.core.turn.render_interval import AdaptiveRenderInterval
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
@@ -380,6 +381,11 @@ class SlackApp:
         self._deferred_dispatch: dict[str, dict[str, Any]] = {}
         # Per-tenant in-flight cap.
         self._inflight: dict[uuid.UUID, int] = {}
+        self._render_interval = AdaptiveRenderInterval(
+            platform="slack",
+            threshold=self.runtime.settings.turn_render.stretch_threshold,
+            stretched_interval_s=self.runtime.settings.turn_render.stretched_interval_s,
+        )
         # Background task references (prevent GC before done-callbacks fire).
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # Mention handlers can be acked and running before they acquire a
@@ -1150,6 +1156,11 @@ class SlackApp:
         self._inflight[tenant_id] = self._inflight.get(tenant_id, 1) - 1
         if self._inflight[tenant_id] <= 0:
             self._inflight.pop(tenant_id, None)
+        self._render_interval.observe(sum(self._inflight.values()))
+
+    def _claim_inflight(self, tenant_id: uuid.UUID, current_count: int) -> None:
+        self._inflight[tenant_id] = current_count + 1
+        self._render_interval.observe(sum(self._inflight.values()))
 
     async def _handle_teardown(self, *, team_id: str, event_time: datetime | None = None) -> None:
         """Archive the install: soft-archive the tenant, delete the bot token.
@@ -1589,7 +1600,7 @@ class SlackApp:
                 ),
             )
             return
-        self._inflight[tenant_id] = count + 1
+        self._claim_inflight(tenant_id, count)
 
         # (3) Run turn + (4) drain loop, (5) finally release.
         self._processing.add(thread_id)
@@ -2598,7 +2609,7 @@ class SlackApp:
                         reseed_user_message=_reseed_user_message,
                         recovery_lifecycle=_recovery_lifecycle,
                         image_blocks=image_blocks or None,
-                        render_interval_s=2.0,
+                        render_interval_s=self._render_interval.current,
                         deadline=turn_deadline_at,
                         confirm_write=self._confirmations.hook(
                             web_client,
@@ -3101,7 +3112,7 @@ class SlackApp:
                     cancel=follow_cancel,
                     reseed_user_message=_follow_up_reseed_user_message,
                     recovery_lifecycle=_follow_up_recovery_lifecycle,
-                    render_interval_s=2.0,
+                    render_interval_s=self._render_interval.current,
                     deadline=follow_deadline,
                     confirm_write=self._confirmations.hook(
                         web_client,

@@ -1186,6 +1186,30 @@ class AgentIdentitySettings(BaseModel):
     )
 
 
+class TurnRenderSettings(BaseModel):
+    """Periodic Discord and Slack turn-card edit cadence."""
+
+    stretch_threshold: int = Field(
+        default=50,
+        ge=1,
+        description=(
+            "When Discord or Slack turns in flight in one process exceed this count, "
+            "periodic card edits use the stretched interval. Default 50. Initial "
+            "posts and terminal edits remain immediate."
+        ),
+    )
+    stretched_interval_s: float = Field(
+        default=5.0,
+        ge=4.0,
+        le=6.0,
+        description=(
+            "Seconds between periodic Discord or Slack card-edit checks above "
+            "the turn render stretch threshold. Default 5; allowed 4 to 6. "
+            "Below the threshold, checks use 2 seconds. Terminal edits stay immediate."
+        ),
+    )
+
+
 class Settings(BaseSettings):
     security_audit_retention_days: int = Field(
         default=90,
@@ -1252,6 +1276,7 @@ class Settings(BaseSettings):
     mcp: McpSettings = Field(default_factory=McpSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
     agent_identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
+    turn_render: TurnRenderSettings = Field(default_factory=TurnRenderSettings)
     discord: DiscordSettings | None = None
     thread_participation: ThreadParticipationSettings = Field(
         default_factory=ThreadParticipationSettings,

@@ -25,6 +25,7 @@ typo is silent — check the spelling here.
 - [MCP Server](#mcp-server)
 - [Hub](#hub)
 - [Agent Identity](#agent-identity)
+- [Turn Render](#turn-render)
 - [Discord](#discord)
 - [Thread Participation](#thread-participation)
 - [Slack](#slack)
@@ -366,6 +367,28 @@ Read from `daimon.core.config.AgentIdentitySettings`. Prefix `DAIMON_AGENT_IDENT
 Enable per-agent display names and avatars on Slack and Discord, agent name prefixes on
 Teams, and reply-to-agent routing on Discord. Off by default; set
 DAIMON_AGENT_IDENTITY__ENABLED=true after platform setup is ready.
+
+## Turn Render
+
+Read from `daimon.core.config.TurnRenderSettings`. Prefix `DAIMON_TURN_RENDER__`.
+
+Periodic Discord and Slack turn-card edit cadence.
+
+### `DAIMON_TURN_RENDER__STRETCH_THRESHOLD`
+
+`int` · optional · default `50`
+
+When Discord or Slack turns in flight in one process exceed this count, periodic card
+edits use the stretched interval. Default 50. Initial posts and terminal edits remain
+immediate.
+
+### `DAIMON_TURN_RENDER__STRETCHED_INTERVAL_S`
+
+`float` · optional · default `5.0`
+
+Seconds between periodic Discord or Slack card-edit checks above the turn render stretch
+threshold. Default 5; allowed 4 to 6. Below the threshold, checks use 2 seconds.
+Terminal edits stay immediate.
 
 ## Discord
 

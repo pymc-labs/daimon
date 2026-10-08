@@ -12,6 +12,7 @@ import httpx
 from anthropic import AsyncAnthropic
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.config import TurnRenderSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import build_turn_deps
@@ -78,6 +79,7 @@ def make_orchestrate_app(
     path (a real signing secret is set alongside it).
     """
     settings = MagicMock()
+    settings.turn_render = TurnRenderSettings()
     settings.crypto.keys = (SecretStr(crypto_key),) if crypto_key is not None else ()
     settings.slack.max_concurrent_turns_per_tenant = max_concurrent_turns_per_tenant
     settings.slack.history_page_limit = 100

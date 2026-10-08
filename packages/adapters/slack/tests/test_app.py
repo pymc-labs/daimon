@@ -34,6 +34,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.config import TurnRenderSettings
 from daimon.core.continuity.messages import render_unexpected_loss
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError
@@ -153,6 +154,7 @@ def _make_app(
 ) -> SlackApp:
     """Build a SlackApp with injected dependencies for testing."""
     settings = MagicMock()
+    settings.turn_render = TurnRenderSettings()
     if crypto_key is not None:
         settings.crypto.keys = (SecretStr(crypto_key),)
     else:

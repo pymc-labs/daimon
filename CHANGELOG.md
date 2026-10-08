@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Discord and Slack stretch periodic working-card edit checks when a process
+  has more than 50 turns in flight. The threshold and stretched interval are
+  configurable; terminal cards and answers still render immediately.
 - Agent identity now has a deployment switch, `DAIMON_AGENT_IDENTITY__ENABLED`,
   off by default. When off, Slack and Discord post as the app, Discord replies
   need a mention, Teams omits the agent name prefix, and setup panels hide
