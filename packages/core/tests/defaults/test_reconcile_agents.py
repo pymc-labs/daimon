@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.core.agent_guidance import (
     CREDENTIAL_GUIDANCE_BLOCK,
     apply_credential_guidance,
@@ -22,7 +22,7 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.report import Action
 from daimon.core.specs import AgentSpec, SkillRef
-from daimon.testing.ma import MARouter, list_response
+from daimon.testing.ma import MARouter, list_response, sdk_http_client
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
 from daimon.testing.ma_models import ma_agent
 
@@ -1101,8 +1101,10 @@ async def test_reconcile_agent_retries_once_on_version_conflict() -> None:
     # update_agent_with_version_retry's own retry logic is exercised in isolation.
     no_retry_client = AsyncAnthropic(
         api_key="test",
-        http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+        http_client=sdk_http_client(
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+            )
         ),
         max_retries=0,
     )

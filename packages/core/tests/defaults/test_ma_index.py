@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import httpx
 import structlog
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.core.defaults.ma_index import (
     _SKILLS_PAGE_LIMIT,  # pyright: ignore[reportPrivateUsage]
     find_agent_by_daimon_tag,

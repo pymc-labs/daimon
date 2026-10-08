@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+import httpx2
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaManagedAgentsSession
@@ -243,6 +244,95 @@ def combine_handlers(
 # ---------------------------------------------------------------------------
 
 
+class _HttpxErrorBridge:
+    """Re-raise an `httpx` (0.x) error as its `httpx2` twin.
+
+    Fakes raise `httpx.ReadTimeout` and friends; the SDK (and production code
+    catching what the SDK surfaces) sees `httpx2` classes, so the bridge maps
+    them by name to keep the test path faithful to production.
+    """
+
+    @staticmethod
+    def convert(err: httpx.HTTPError, request: httpx2.Request) -> Exception:
+        twin = getattr(httpx2, type(err).__name__, None)
+        if isinstance(twin, type) and issubclass(twin, httpx2.TransportError):
+            return twin(str(err), request=request)
+        return err
+
+
+class _BridgedStream(httpx2.AsyncByteStream):
+    def __init__(self, inner: httpx.Response, request: httpx2.Request) -> None:
+        self._inner = inner
+        self._request = request
+
+    async def __aiter__(self):
+        if self._inner.is_stream_consumed:
+            # `httpx.Response(json=...)`/`content=bytes` is read eagerly.
+            yield self._inner.content
+            return
+        try:
+            async for chunk in self._inner.aiter_raw():
+                yield chunk
+        except httpx.HTTPError as err:
+            raise _HttpxErrorBridge.convert(err, self._request) from err
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+class HttpxToHttpx2Transport(httpx2.AsyncBaseTransport):
+    """Run an `httpx` (0.x) transport, such as `httpx.MockTransport`, under
+    the `httpx2` client the anthropic SDK 1.x requires.
+
+    Requests are rebuilt as `httpx.Request`, responses are streamed back as
+    `httpx2.Response`, and transport errors are mapped to their `httpx2`
+    twins, so existing `httpx`-typed handlers keep working unchanged.
+    """
+
+    def __init__(self, inner: httpx.AsyncBaseTransport) -> None:
+        self._inner = inner
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        body = await request.aread()
+        legacy = httpx.Request(
+            request.method,
+            str(request.url),
+            headers=request.headers.multi_items(),
+            content=body,
+        )
+        try:
+            response = await self._inner.handle_async_request(legacy)
+        except httpx.HTTPError as err:
+            raise _HttpxErrorBridge.convert(err, request) from err
+        return httpx2.Response(
+            response.status_code,
+            headers=response.headers.multi_items(),
+            stream=_BridgedStream(response, request),
+            request=request,
+        )
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def sdk_http_client(
+    source: httpx.AsyncBaseTransport
+    | httpx.AsyncClient
+    | Callable[[httpx.Request], httpx.Response],
+) -> httpx2.AsyncClient:
+    """An `httpx2.AsyncClient` for `AsyncAnthropic(http_client=...)` that
+    routes to an `httpx` handler, transport or `httpx.AsyncClient`'s transport."""
+    if isinstance(source, httpx.AsyncClient):
+        transport: httpx.AsyncBaseTransport = source._transport  # pyright: ignore[reportPrivateUsage]
+    elif isinstance(source, httpx.AsyncBaseTransport):
+        transport = source
+    else:
+        transport = httpx.MockTransport(source)
+    return httpx2.AsyncClient(
+        transport=HttpxToHttpx2Transport(transport), base_url="https://api.anthropic.com"
+    )
+
+
 def build_fake_anthropic(
     handler: Callable[[httpx.Request], httpx.Response],
 ) -> AsyncAnthropic:
@@ -252,9 +342,7 @@ def build_fake_anthropic(
     combine_handlers / make_fake_ma_handler) and pass it here. The real SDK
     code path runs in full (parameter validation, response parsing).
     """
-    transport = httpx.MockTransport(handler)
-    http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    return AsyncAnthropic(api_key="test", http_client=http_client)
+    return AsyncAnthropic(api_key="test", http_client=sdk_http_client(handler))
 
 
 def build_stub_anthropic(
@@ -284,10 +372,7 @@ def build_no_retry_anthropic(
     is accepted directly so callers need not spell `.dispatch`.
     """
     dispatch = handler.dispatch if isinstance(handler, MARouter) else handler
-    http_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(dispatch), base_url="https://api.anthropic.com"
-    )
-    return AsyncAnthropic(api_key="test", http_client=http_client, max_retries=0)
+    return AsyncAnthropic(api_key="test", http_client=sdk_http_client(dispatch), max_retries=0)
 
 
 @pytest.fixture

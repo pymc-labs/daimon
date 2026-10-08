@@ -39,7 +39,12 @@ from daimon.core.turn.admission import AdmissionDenied, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing import build_turn_router
 from daimon.testing.factories import make_ledger_entry, make_tenant
-from daimon.testing.ma import build_fake_anthropic, combine_handlers, make_fake_memory_store_handler
+from daimon.testing.ma import (
+    build_fake_anthropic,
+    combine_handlers,
+    make_fake_memory_store_handler,
+    sdk_http_client,
+)
 from daimon.testing.ma_models import ma_session
 from fastmcp.server.context import Context
 from sqlalchemy import text as sql_text
@@ -171,7 +176,10 @@ async def _setup(
             return handler(request)
 
         client = AsyncAnthropic(
-            api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(transport))
+            api_key="test",
+            http_client=sdk_http_client(
+                httpx.AsyncClient(transport=httpx.MockTransport(transport))
+            ),
         )
     deps = TurnDeps(
         anthropic=client,

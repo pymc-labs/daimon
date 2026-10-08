@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.skills import resolve_refs
 from daimon.core.errors import DefaultsError

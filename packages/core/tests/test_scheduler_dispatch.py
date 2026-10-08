@@ -9,6 +9,7 @@ from daimon.core.scheduler import RoutineDispatcher, run_one_tick
 from daimon.core.stores.domain import CatchUpPolicy, RoutineRow
 from daimon.core.stores.routines import create_routine, get_routine, update_routine
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma import sdk_http_client
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
@@ -400,7 +401,8 @@ async def test_dispatch_timeout_through_headless_records_ceiling(
         raise AssertionError("unreachable")
 
     async with AsyncAnthropic(
-        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(stall))
+        api_key="test",
+        http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(stall))),
     ) as client:
 
         async def fire(row: RoutineRow) -> None:

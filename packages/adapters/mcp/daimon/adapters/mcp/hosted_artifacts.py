@@ -12,7 +12,7 @@ from pathlib import PurePosixPath
 
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta.file_metadata import FileMetadata
+from anthropic.types.beta.beta_file_metadata import BetaFileMetadata
 from daimon.core.artifacts import ArtifactStore
 from daimon.core.config import ArtifactsSettings
 from PIL import Image
@@ -163,7 +163,7 @@ async def _discover_chart_outputs(
     if turn_started_at.tzinfo is None:
         turn_started_at = turn_started_at.replace(tzinfo=dt.UTC)
     cutoff = turn_started_at - _CLOCK_SLACK
-    candidates: list[FileMetadata] = []
+    candidates: list[BetaFileMetadata] = []
     async for item in anthropic.beta.files.list(
         scope_id=session_id,
         limit=min(_MAX_SCANNED, 1000),

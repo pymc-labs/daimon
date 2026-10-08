@@ -917,51 +917,6 @@
       ''',
       'parameters': dict({
         '$defs': dict({
-          'BetaManagedAgentsAgentToolConfigParams': dict({
-            'description': 'Configuration override for a specific tool within a toolset.',
-            'properties': dict({
-              'enabled': dict({
-                'anyOf': list([
-                  dict({
-                    'type': 'boolean',
-                  }),
-                  dict({
-                    'type': 'null',
-                  }),
-                ]),
-              }),
-              'name': dict({
-                'enum': list([
-                  'bash',
-                  'edit',
-                  'read',
-                  'write',
-                  'glob',
-                  'grep',
-                  'web_fetch',
-                  'web_search',
-                ]),
-                'type': 'string',
-              }),
-              'permission_policy': dict({
-                'anyOf': list([
-                  dict({
-                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
-                  }),
-                  dict({
-                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
-                  }),
-                  dict({
-                    'type': 'null',
-                  }),
-                ]),
-              }),
-            }),
-            'required': list([
-              'name',
-            ]),
-            'type': 'object',
-          }),
           'BetaManagedAgentsAgentToolset20260401Params': dict({
             'description': '''
               Configuration for built-in agent tools.
@@ -971,7 +926,32 @@
             'properties': dict({
               'configs': dict({
                 'items': dict({
-                  '$ref': '#/$defs/BetaManagedAgentsAgentToolConfigParams',
+                  'anyOf': list([
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsBashToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsEditToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsReadToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsWriteToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsGlobToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsGrepToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsWebFetchToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsWebSearchToolConfigParams',
+                    }),
+                  ]),
                 }),
                 'type': 'array',
               }),
@@ -1017,6 +997,9 @@
                     '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
                   }),
                   dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
                     'type': 'null',
                   }),
                 ]),
@@ -1047,6 +1030,62 @@
             }),
             'required': list([
               'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsAutoPolicyParam': dict({
+            'description': 'The server decides each tool call individually: it judges, from the tool, its input, and the session content so far, whether the call is safe to execute or high-risk, and evaluates it to allow when judged safe and to deny when judged high-risk. A call the server cannot reach a judgement on evaluates to ask.',
+            'properties': dict({
+              'type': dict({
+                'const': 'auto',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsBashToolConfigParams': dict({
+            'description': 'Configuration override for the bash tool.',
+            'properties': dict({
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'bash',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'bash',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
             ]),
             'type': 'object',
           }),
@@ -1117,6 +1156,135 @@
             ]),
             'type': 'object',
           }),
+          'BetaManagedAgentsEditToolConfigParams': dict({
+            'description': 'Configuration override for the edit tool.',
+            'properties': dict({
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'edit',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'edit',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsGlobToolConfigParams': dict({
+            'description': 'Configuration override for the glob tool.',
+            'properties': dict({
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'glob',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'glob',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsGrepToolConfigParams': dict({
+            'description': 'Configuration override for the grep tool.',
+            'properties': dict({
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'grep',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'grep',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
+            ]),
+            'type': 'object',
+          }),
           'BetaManagedAgentsMCPToolConfigParams': dict({
             'description': 'Configuration override for a specific MCP tool.',
             'properties': dict({
@@ -1140,6 +1308,9 @@
                   }),
                   dict({
                     '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
                   }),
                   dict({
                     'type': 'null',
@@ -1172,6 +1343,9 @@
                   }),
                   dict({
                     '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
                   }),
                   dict({
                     'type': 'null',
@@ -1214,6 +1388,49 @@
             ]),
             'type': 'object',
           }),
+          'BetaManagedAgentsReadToolConfigParams': dict({
+            'description': 'Configuration override for the read tool.',
+            'properties': dict({
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'read',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'read',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
+            ]),
+            'type': 'object',
+          }),
           'BetaManagedAgentsURLMCPServerParams': dict({
             'description': 'URL-based MCP server connection.',
             'properties': dict({
@@ -1232,6 +1449,407 @@
               'name',
               'type',
               'url',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsUserLocationParam': dict({
+            'description': 'Approximate user location for search result localization.',
+            'properties': dict({
+              'city': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'country': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'region': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'timezone': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'approximate',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchToolConfigParams': dict({
+            'description': 'Configuration override for the web_fetch tool.',
+            'properties': dict({
+              'allowed_domains': dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              'blocked_domains': dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'max_content_tokens': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'integer',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'web_fetch',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'web_fetch',
+                'type': 'string',
+              }),
+              'url_sources': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourcesParams',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+            }),
+            'required': list([
+              'name',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchURLSourceAllParam': dict({
+            'description': 'Every URL from this source may be fetched. This is the default.',
+            'properties': dict({
+              'type': dict({
+                'const': 'all',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchURLSourceExceptParam': dict({
+            'description': "Every tool's results contribute URLs that may be fetched, except the named tools' results.",
+            'properties': dict({
+              'tools': dict({
+                'items': dict({
+                  '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceToolReferenceParam',
+                }),
+                'type': 'array',
+              }),
+              'type': dict({
+                'const': 'except',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'tools',
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchURLSourceNoneParam': dict({
+            'description': 'This source contributes no URLs that may be fetched.',
+            'properties': dict({
+              'type': dict({
+                'const': 'none',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchURLSourceOnlyParam': dict({
+            'description': "Only the named tools' results contribute URLs that may be fetched.",
+            'properties': dict({
+              'tools': dict({
+                'items': dict({
+                  '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceToolReferenceParam',
+                }),
+                'type': 'array',
+              }),
+              'type': dict({
+                'const': 'only',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'tools',
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchURLSourceToolReferenceParam': dict({
+            'description': 'Names one tool in an only or except list.',
+            'properties': dict({
+              'name': dict({
+                'type': 'string',
+              }),
+              'type': dict({
+                'const': 'tool_reference',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchURLSourcesParams': dict({
+            'description': '''
+              Which sources contribute URLs the web_fetch tool may fetch.
+              
+              When web_fetch is limited to URLs the conversation has already shown the model (in a user message, a custom tool's result, or an earlier web_search or web_fetch result), each key narrows one of those sources and defaults to "all". Setting all three keys to "none" is rejected.
+            ''',
+            'properties': dict({
+              'client_tool_results': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'all',
+                      'none',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceAllParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceNoneParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceOnlyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceExceptParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'server_tool_results': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'all',
+                      'none',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceAllParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceNoneParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceOnlyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceExceptParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'user_input': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'all',
+                      'none',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceAllParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceNoneParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+            }),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebSearchToolConfigParams': dict({
+            'description': 'Configuration override for the web_search tool.',
+            'properties': dict({
+              'allowed_domains': dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              'blocked_domains': dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'web_search',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'web_search',
+                'type': 'string',
+              }),
+              'user_location': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsUserLocationParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+            }),
+            'required': list([
+              'name',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWriteToolConfigParams': dict({
+            'description': 'Configuration override for the write tool.',
+            'properties': dict({
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'write',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'write',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
             ]),
             'type': 'object',
           }),
@@ -1298,8 +1916,13 @@
             'anyOf': list([
               dict({
                 'enum': list([
+                  'claude-haiku-5-5',
+                  'claude-sonnet-5-5',
+                  'claude-opus-5-5',
+                  'claude-fable-5-1',
                   'claude-sonnet-5',
                   'claude-fable-5',
+                  'claude-opus-5',
                   'claude-opus-4-8',
                   'claude-opus-4-7',
                   'claude-opus-4-6',
@@ -1552,6 +2175,8 @@
               Specify packages (and optionally their versions) available in this environment.
               
               When versioning, use the version semantics relevant for the package manager, e.g. for `pip` use `package==1.0.0`. You are responsible for validating the package and version exist. Unversioned installs the latest.
+              
+              Under `limited` networking, requires `networking.allow_package_managers` to be `true`.
             ''',
             'properties': dict({
               'apt': dict({
@@ -5551,51 +6176,6 @@
       ''',
       'parameters': dict({
         '$defs': dict({
-          'BetaManagedAgentsAgentToolConfigParams': dict({
-            'description': 'Configuration override for a specific tool within a toolset.',
-            'properties': dict({
-              'enabled': dict({
-                'anyOf': list([
-                  dict({
-                    'type': 'boolean',
-                  }),
-                  dict({
-                    'type': 'null',
-                  }),
-                ]),
-              }),
-              'name': dict({
-                'enum': list([
-                  'bash',
-                  'edit',
-                  'read',
-                  'write',
-                  'glob',
-                  'grep',
-                  'web_fetch',
-                  'web_search',
-                ]),
-                'type': 'string',
-              }),
-              'permission_policy': dict({
-                'anyOf': list([
-                  dict({
-                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
-                  }),
-                  dict({
-                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
-                  }),
-                  dict({
-                    'type': 'null',
-                  }),
-                ]),
-              }),
-            }),
-            'required': list([
-              'name',
-            ]),
-            'type': 'object',
-          }),
           'BetaManagedAgentsAgentToolset20260401Params': dict({
             'description': '''
               Configuration for built-in agent tools.
@@ -5605,7 +6185,32 @@
             'properties': dict({
               'configs': dict({
                 'items': dict({
-                  '$ref': '#/$defs/BetaManagedAgentsAgentToolConfigParams',
+                  'anyOf': list([
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsBashToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsEditToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsReadToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsWriteToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsGlobToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsGrepToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsWebFetchToolConfigParams',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/BetaManagedAgentsWebSearchToolConfigParams',
+                    }),
+                  ]),
                 }),
                 'type': 'array',
               }),
@@ -5649,6 +6254,9 @@
                   }),
                   dict({
                     '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
                   }),
                   dict({
                     'type': 'null',
@@ -5708,6 +6316,62 @@
             'required': list([
               'skill_id',
               'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsAutoPolicyParam': dict({
+            'description': 'The server decides each tool call individually: it judges, from the tool, its input, and the session content so far, whether the call is safe to execute or high-risk, and evaluates it to allow when judged safe and to deny when judged high-risk. A call the server cannot reach a judgement on evaluates to ask.',
+            'properties': dict({
+              'type': dict({
+                'const': 'auto',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsBashToolConfigParams': dict({
+            'description': 'Configuration override for the bash tool.',
+            'properties': dict({
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'bash',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'bash',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
             ]),
             'type': 'object',
           }),
@@ -5805,6 +6469,135 @@
             ]),
             'type': 'object',
           }),
+          'BetaManagedAgentsEditToolConfigParams': dict({
+            'description': 'Configuration override for the edit tool.',
+            'properties': dict({
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'edit',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'edit',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsGlobToolConfigParams': dict({
+            'description': 'Configuration override for the glob tool.',
+            'properties': dict({
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'glob',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'glob',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsGrepToolConfigParams': dict({
+            'description': 'Configuration override for the grep tool.',
+            'properties': dict({
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'grep',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'grep',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
+            ]),
+            'type': 'object',
+          }),
           'BetaManagedAgentsMCPToolConfigParams': dict({
             'description': 'Configuration override for a specific MCP tool.',
             'properties': dict({
@@ -5828,6 +6621,9 @@
                   }),
                   dict({
                     '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
                   }),
                   dict({
                     'type': 'null',
@@ -5860,6 +6656,9 @@
                   }),
                   dict({
                     '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
                   }),
                   dict({
                     'type': 'null',
@@ -5902,6 +6701,49 @@
             ]),
             'type': 'object',
           }),
+          'BetaManagedAgentsReadToolConfigParams': dict({
+            'description': 'Configuration override for the read tool.',
+            'properties': dict({
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'read',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'read',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
+            ]),
+            'type': 'object',
+          }),
           'BetaManagedAgentsURLMCPServerParams': dict({
             'description': 'URL-based MCP server connection.',
             'properties': dict({
@@ -5920,6 +6762,407 @@
               'name',
               'type',
               'url',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsUserLocationParam': dict({
+            'description': 'Approximate user location for search result localization.',
+            'properties': dict({
+              'city': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'country': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'region': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'timezone': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'approximate',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchToolConfigParams': dict({
+            'description': 'Configuration override for the web_fetch tool.',
+            'properties': dict({
+              'allowed_domains': dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              'blocked_domains': dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'max_content_tokens': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'integer',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'web_fetch',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'web_fetch',
+                'type': 'string',
+              }),
+              'url_sources': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourcesParams',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+            }),
+            'required': list([
+              'name',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchURLSourceAllParam': dict({
+            'description': 'Every URL from this source may be fetched. This is the default.',
+            'properties': dict({
+              'type': dict({
+                'const': 'all',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchURLSourceExceptParam': dict({
+            'description': "Every tool's results contribute URLs that may be fetched, except the named tools' results.",
+            'properties': dict({
+              'tools': dict({
+                'items': dict({
+                  '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceToolReferenceParam',
+                }),
+                'type': 'array',
+              }),
+              'type': dict({
+                'const': 'except',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'tools',
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchURLSourceNoneParam': dict({
+            'description': 'This source contributes no URLs that may be fetched.',
+            'properties': dict({
+              'type': dict({
+                'const': 'none',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchURLSourceOnlyParam': dict({
+            'description': "Only the named tools' results contribute URLs that may be fetched.",
+            'properties': dict({
+              'tools': dict({
+                'items': dict({
+                  '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceToolReferenceParam',
+                }),
+                'type': 'array',
+              }),
+              'type': dict({
+                'const': 'only',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'tools',
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchURLSourceToolReferenceParam': dict({
+            'description': 'Names one tool in an only or except list.',
+            'properties': dict({
+              'name': dict({
+                'type': 'string',
+              }),
+              'type': dict({
+                'const': 'tool_reference',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
+              'type',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebFetchURLSourcesParams': dict({
+            'description': '''
+              Which sources contribute URLs the web_fetch tool may fetch.
+              
+              When web_fetch is limited to URLs the conversation has already shown the model (in a user message, a custom tool's result, or an earlier web_search or web_fetch result), each key narrows one of those sources and defaults to "all". Setting all three keys to "none" is rejected.
+            ''',
+            'properties': dict({
+              'client_tool_results': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'all',
+                      'none',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceAllParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceNoneParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceOnlyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceExceptParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'server_tool_results': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'all',
+                      'none',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceAllParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceNoneParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceOnlyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceExceptParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'user_input': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'all',
+                      'none',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceAllParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsWebFetchURLSourceNoneParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+            }),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWebSearchToolConfigParams': dict({
+            'description': 'Configuration override for the web_search tool.',
+            'properties': dict({
+              'allowed_domains': dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              'blocked_domains': dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'web_search',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'web_search',
+                'type': 'string',
+              }),
+              'user_location': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsUserLocationParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+            }),
+            'required': list([
+              'name',
+            ]),
+            'type': 'object',
+          }),
+          'BetaManagedAgentsWriteToolConfigParams': dict({
+            'description': 'Configuration override for the write tool.',
+            'properties': dict({
+              'enabled': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'name': dict({
+                'const': 'write',
+                'type': 'string',
+              }),
+              'permission_policy': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAlwaysAskPolicyParam',
+                  }),
+                  dict({
+                    '$ref': '#/$defs/BetaManagedAgentsAutoPolicyParam',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'type': dict({
+                'const': 'write',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
             ]),
             'type': 'object',
           }),
@@ -5966,8 +7209,13 @@
             'anyOf': list([
               dict({
                 'enum': list([
+                  'claude-haiku-5-5',
+                  'claude-sonnet-5-5',
+                  'claude-opus-5-5',
+                  'claude-fable-5-1',
                   'claude-sonnet-5',
                   'claude-fable-5',
+                  'claude-opus-5',
                   'claude-opus-4-8',
                   'claude-opus-4-7',
                   'claude-opus-4-6',
@@ -6177,6 +7425,8 @@
               Specify packages (and optionally their versions) available in this environment.
               
               When versioning, use the version semantics relevant for the package manager, e.g. for `pip` use `package==1.0.0`. You are responsible for validating the package and version exist. Unversioned installs the latest.
+              
+              Under `limited` networking, requires `networking.allow_package_managers` to be `true`.
             ''',
             'properties': dict({
               'apt': dict({

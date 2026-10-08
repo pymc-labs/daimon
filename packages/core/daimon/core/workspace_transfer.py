@@ -51,8 +51,8 @@ import anthropic
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
+    BetaFileMetadata,
     BetaManagedAgentsSystemContentBlockParam,
-    FileMetadata,
 )
 from anthropic.types.beta.beta_managed_agents_file_resource_params import (
     BetaManagedAgentsFileResourceParams,
@@ -280,7 +280,7 @@ async def _poll_for_bundle(
     *,
     session_id: str,
     sleep: Callable[[float], Awaitable[None]],
-) -> FileMetadata | None:
+) -> BetaFileMetadata | None:
     """The session's handoff bundle once its size stops changing, or None.
 
     Settles only once cumulative poll time has reached `_MIN_SETTLE_S` AND
@@ -288,7 +288,7 @@ async def _poll_for_bundle(
     returns the last observation, stable or not — the caller would rather
     try a possibly-truncated archive than silently drop the handoff.
     """
-    latest: FileMetadata | None = None
+    latest: BetaFileMetadata | None = None
     previous_size: int | None = None
     elapsed = 0.0
     for delay in _POLL_DELAYS_S:
@@ -317,7 +317,7 @@ async def _rehost_bundle(
     client: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
-    bundle: FileMetadata,
+    bundle: BetaFileMetadata,
     now: Callable[[], datetime],
 ) -> tuple[str, int] | GapReason:
     """Download the session output, drop it from the listing, re-upload it.

@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Any
 
 import anthropic
-import httpx
+import httpx2
 from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
@@ -153,13 +153,13 @@ class FakeEventsResource:
         default_factory=list[tuple[str, list[dict[str, Any]]]]
     )
     stream_calls: int = 0
-    stream_timeouts: list[float | httpx.Timeout | anthropic.NotGiven | None] = field(
-        default_factory=list[float | httpx.Timeout | anthropic.NotGiven | None]
+    stream_timeouts: list[float | httpx2.Timeout | anthropic.NotGiven | None] = field(
+        default_factory=list[float | httpx2.Timeout | anthropic.NotGiven | None]
     )
     streams: list[_FakeEventStream] = field(default_factory=list["_FakeEventStream"])
 
     async def stream(
-        self, *, session_id: str, timeout: float | httpx.Timeout | anthropic.NotGiven | None = None
+        self, *, session_id: str, timeout: float | httpx2.Timeout | anthropic.NotGiven | None = None
     ) -> _FakeEventStream:
         if not self.stream_scripts:
             raise AssertionError("FakeEventsResource: no stream_scripts left")
@@ -205,7 +205,7 @@ class _FakeEventStream:
             elif isinstance(step, RaiseConnection):
                 raise anthropic.APIConnectionError(request=_make_request())  # type: ignore[call-arg]
             elif isinstance(step, RaiseStreamDrop):
-                raise httpx.RemoteProtocolError(step.message, request=_make_request())
+                raise httpx2.RemoteProtocolError(step.message, request=_make_request())
             elif isinstance(step, RaiseStatus):
                 raise _make_status_error(step.status_code, step.message)
             elif isinstance(step, BlockForever):
@@ -213,7 +213,7 @@ class _FakeEventStream:
             elif isinstance(step, RaiseRateLimit):
                 raise AssertionError("RaiseRateLimit must be first step only")
             elif isinstance(step, RaiseReadTimeout):
-                raise httpx.ReadTimeout(step.message, request=_make_request())
+                raise httpx2.ReadTimeout(step.message, request=_make_request())
             else:
                 await asyncio.sleep(step.seconds)
                 yield step.event
@@ -312,19 +312,19 @@ class FakeAnthropic:
 # --- Error constructors (SDK exception shape) -----------------------------
 
 
-def _make_request() -> httpx.Request:
-    return httpx.Request("POST", "https://api.anthropic.com/v1/beta/sessions/events/stream")
+def _make_request() -> httpx2.Request:
+    return httpx2.Request("POST", "https://api.anthropic.com/v1/beta/sessions/events/stream")
 
 
 def _make_status_error(status_code: int, message: str) -> anthropic.APIStatusError:
     request = _make_request()
-    response = httpx.Response(status_code, request=request)
+    response = httpx2.Response(status_code, request=request)
     return anthropic.APIStatusError(message, response=response, body=None)
 
 
 def _make_rate_limit_error(retry_after_seconds: float) -> anthropic.RateLimitError:
     request = _make_request()
-    response = httpx.Response(
+    response = httpx2.Response(
         429,
         request=request,
         headers={"retry-after": str(int(retry_after_seconds))},

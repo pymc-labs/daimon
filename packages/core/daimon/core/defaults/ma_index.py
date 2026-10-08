@@ -21,7 +21,9 @@ from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
     BetaManagedAgentsSkillParams,
-    SkillListResponse,
+)
+from anthropic.types.beta import (
+    BetaSkill as SkillListResponse,
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,

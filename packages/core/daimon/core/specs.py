@@ -22,6 +22,9 @@ from typing import Annotated, Any, Literal, cast
 import yaml
 from anthropic.types.beta.agent_create_params import Tool
 from anthropic.types.beta.beta_cloud_config_params import BetaCloudConfigParams
+from anthropic.types.beta.beta_managed_agents_agent_tool_config_params import (
+    BetaManagedAgentsAgentToolConfigParams,
+)
 from anthropic.types.beta.beta_managed_agents_model_param import BetaManagedAgentsModelParam
 from anthropic.types.beta.beta_managed_agents_multiagent_params import (
     BetaManagedAgentsMultiagentParams,
@@ -254,7 +257,14 @@ class SystemConfigSpec(BaseModel):
 
 _TOOLSET_TYPES = frozenset({"agent_toolset_20260401", "mcp_toolset"})
 
-_BASE_AGENT_TOOL_NAMES = ("bash", "read", "edit", "grep", "glob", "write")
+_BASE_AGENT_TOOL_CONFIGS: tuple[BetaManagedAgentsAgentToolConfigParams, ...] = (
+    {"name": "bash"},
+    {"name": "read"},
+    {"name": "edit"},
+    {"name": "grep"},
+    {"name": "glob"},
+    {"name": "write"},
+)
 
 
 def merge_default_agent_toolset(existing: list[Tool] | None) -> list[Tool]:
@@ -274,7 +284,7 @@ def merge_default_agent_toolset(existing: list[Tool] | None) -> list[Tool]:
             return existing if existing is not None else current
     base_toolset: Tool = {
         "type": "agent_toolset_20260401",
-        "configs": [{"name": name} for name in _BASE_AGENT_TOOL_NAMES],
+        "configs": list(_BASE_AGENT_TOOL_CONFIGS),
     }
     current.append(base_toolset)
     return current

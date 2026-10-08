@@ -14,6 +14,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.core.defaults._reconcile import _reconcile_core
 from daimon.core.ma_resolver import new_resolver_cache, resolve_agent
+from daimon.testing.ma import sdk_http_client
 from daimon.testing.ma_models import ma_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -28,7 +29,7 @@ def _test_dsn() -> str:
 def _client(handler: Callable[[httpx.Request], httpx.Response]) -> AsyncAnthropic:
     return AsyncAnthropic(
         api_key="test",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(handler))),
         max_retries=0,
     )
 

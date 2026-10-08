@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import httpx
+import httpx2
 import pytest
 import structlog.testing
 from anthropic import AsyncAnthropic
@@ -33,6 +34,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.tenants import get_tenant, get_tenant_liveness, set_provision_status
+from daimon.testing.ma import HttpxToHttpx2Transport
 from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -58,8 +60,10 @@ async def test_fifty_joins_seed_after_skills_api_429() -> None:
     async with AsyncAnthropic(
         api_key="test",
         max_retries=8,
-        http_client=httpx.AsyncClient(
-            transport=SkillsRateLimitedTransport(6000, inner=httpx.MockTransport(handler))
+        http_client=httpx2.AsyncClient(
+            transport=SkillsRateLimitedTransport(
+                6000, inner=HttpxToHttpx2Transport(httpx.MockTransport(handler))
+            )
         ),
     ) as client:
         runtime = replace(

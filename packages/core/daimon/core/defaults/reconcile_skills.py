@@ -29,7 +29,7 @@ from pathlib import Path
 
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.core.defaults.loader import load_skill_spec
 from daimon.core.defaults.ma_index import (
     find_skills_by_display_title,

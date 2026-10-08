@@ -54,7 +54,7 @@ from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, build_stub_anthropic, list_response
+from daimon.testing.ma import MARouter, build_stub_anthropic, list_response, sdk_http_client
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
@@ -826,7 +826,7 @@ def _build_rt_with_url(
 ) -> CliRuntime:
     transport = httpx.MockTransport(router.dispatch)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    client = AsyncAnthropic(api_key="test", http_client=http_client)
+    client = AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_client))
     return CliRuntime(
         settings=cast(Settings, _FakeSettingsWithUrl()),
         anthropic=client,
@@ -1178,7 +1178,7 @@ def test_agents_list_with_guild_override_lists_that_guilds_agents(
     router.add("GET", r"/v1/agents", lambda req, m: list_response([guild_agent]))
     transport = httpx.MockTransport(router.dispatch)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    anthropic = AsyncAnthropic(api_key="test", http_client=http_client)
+    anthropic = AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_client))
 
     _install_agents_runtime(monkeypatch, anthropic=anthropic, sessionmaker=schema_sessionmaker)
 
@@ -1216,7 +1216,7 @@ def test_agents_list_with_tenant_override_accepts_a_uuid(
     router.add("GET", r"/v1/agents", lambda req, m: list_response([other_agent]))
     transport = httpx.MockTransport(router.dispatch)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    anthropic = AsyncAnthropic(api_key="test", http_client=http_client)
+    anthropic = AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_client))
 
     _install_agents_runtime(monkeypatch, anthropic=anthropic, sessionmaker=schema_sessionmaker)
 

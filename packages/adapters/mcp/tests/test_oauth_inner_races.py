@@ -5,6 +5,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.testing.ma import sdk_http_client
 
 from .test_oauth_mcp import _app, _fake_ma, _notion, _seed_flow
 
@@ -47,7 +48,8 @@ async def test_oauth_pin_during_inner_helper_await(db_session, db_session_factor
         return await inner.handle_async_request(req)
 
     anthropic = AsyncAnthropic(
-        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(changing))
+        api_key="test",
+        http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(changing))),
     )
     app = _app(db_session_factory, anthropic=anthropic, transport=_notion([]))
     async with httpx.AsyncClient(

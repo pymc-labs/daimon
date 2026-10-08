@@ -634,10 +634,15 @@ async def rotate_live_app_tokens(
                     # vault token works for API calls; the next turn replaces
                     # the session to mount the new checkout.
                     continue
+                token = resource.get("authorization_token")
+                if token is None:
+                    # anthropic 1.5 made the token optional (public repos);
+                    # daimon always mints one, so there is nothing to swap.
+                    continue
                 await anthropic.beta.sessions.resources.update(
                     resource_id,
                     session_id=session_id,
-                    authorization_token=resource["authorization_token"],
+                    authorization_token=token,
                 )
                 swapped = True
             await add_app_credentials(

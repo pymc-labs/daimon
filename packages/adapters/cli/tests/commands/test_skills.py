@@ -12,8 +12,9 @@ from typing import Any, cast
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import SkillCreateResponse, SkillListResponse
-from anthropic.types.beta.skills import VersionCreateResponse
+from anthropic.types.beta import BetaSkill as SkillCreateResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
+from anthropic.types.beta.skills import BetaSkillVersion as VersionCreateResponse
 from daimon.adapters.cli import main as main_mod
 from daimon.adapters.cli.commands import skills as skills_cmd
 from daimon.adapters.cli.commands.skills import (
@@ -33,7 +34,7 @@ from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.seeded_skills import record_seeded_skill
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, list_response
+from daimon.testing.ma import MARouter, list_response, sdk_http_client
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
@@ -67,7 +68,7 @@ def _build_rt_with_router(
 ) -> CliRuntime:
     transport = httpx.MockTransport(router.dispatch)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    client = AsyncAnthropic(api_key="test", http_client=http_client)
+    client = AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_client))
     return _make_rt(db_session_factory, client)
 
 
@@ -766,7 +767,7 @@ def test_skills_list_with_guild_override_lists_that_guilds_skills(
     )
     transport = httpx.MockTransport(router.dispatch)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    anthropic = AsyncAnthropic(api_key="test", http_client=http_client)
+    anthropic = AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_client))
 
     _install_skills_runtime(monkeypatch, anthropic=anthropic, sessionmaker=schema_sessionmaker)
 

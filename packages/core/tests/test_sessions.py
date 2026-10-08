@@ -11,9 +11,9 @@ import httpx
 import pytest
 from anthropic.types.beta import (
     BetaEnvironment,
+    BetaFileMetadata,
     BetaManagedAgentsAgent,
     BetaManagedAgentsSession,
-    FileMetadata,
 )
 from cryptography.fernet import Fernet, MultiFernet
 from cryptography.hazmat.primitives import serialization
@@ -369,7 +369,7 @@ def _files_and_session_handler(
         if request.method == "POST" and request.url.path == "/v1/files":
             return httpx.Response(
                 200,
-                json=FileMetadata(
+                json=BetaFileMetadata(
                     id=file_id,
                     created_at="2026-05-29T12:00:00Z",  # type: ignore[arg-type]
                     filename=".env",
@@ -773,7 +773,7 @@ async def test_create_session_composes_resources_alongside_vault_ids(
         if request.method == "POST" and request.url.path == "/v1/files":
             return httpx.Response(
                 200,
-                json=FileMetadata(
+                json=BetaFileMetadata(
                     id="file_both",
                     created_at="2026-05-29T12:00:00Z",  # type: ignore[arg-type]
                     filename=".env",

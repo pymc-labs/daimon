@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from typing import TypedDict, cast
 
-import httpx
+import httpx2
 import structlog
 from daimon.core.session_preparation_gate import preparation_counts
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -123,7 +123,7 @@ def _status(code: int) -> str:
     return "other"
 
 
-def record_anthropic_response(request: httpx.Request, response: httpx.Response) -> None:
+def record_anthropic_response(request: httpx2.Request, response: httpx2.Response) -> None:
     """Count one transport response, including responses retried by the SDK."""
     _responses[(_endpoint(request.url.path), _status(response.status_code))] += 1
     for name, value in response.headers.items():

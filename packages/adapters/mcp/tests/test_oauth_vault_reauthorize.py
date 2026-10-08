@@ -4,6 +4,7 @@ import httpx
 from anthropic import AsyncAnthropic
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.testing.ma import sdk_http_client
 
 from .test_oauth_mcp import _app, _fake_ma, _notion, _seed_flow
 
@@ -26,7 +27,9 @@ async def test_a_pin_added_during_vault_lookup_stores_no_grant(db_session, db_se
 
     anthropic = AsyncAnthropic(
         api_key="test",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(pin_during_vault_lookup)),
+        http_client=sdk_http_client(
+            httpx.AsyncClient(transport=httpx.MockTransport(pin_during_vault_lookup))
+        ),
     )
     app = _app(db_session_factory, anthropic=anthropic, transport=_notion([]))
     async with httpx.AsyncClient(

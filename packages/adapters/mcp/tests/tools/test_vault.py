@@ -13,7 +13,13 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.tools.vault import VaultCredentialSummary, _list_credentials_impl
 from daimon.core.mcp_vault import ensure_agent_mcp_vault
-from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
+from daimon.testing.ma import (
+    MARouter,
+    build_fake_anthropic,
+    json_body,
+    list_response,
+    sdk_http_client,
+)
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -32,7 +38,7 @@ def _auth() -> AuthIdentity:
 def _make_client(handler: httpx.MockTransport) -> AsyncAnthropic:
     return AsyncAnthropic(
         api_key="test",
-        http_client=httpx.AsyncClient(transport=handler),
+        http_client=sdk_http_client(httpx.AsyncClient(transport=handler)),
     )
 
 

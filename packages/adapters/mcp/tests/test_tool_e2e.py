@@ -11,7 +11,7 @@ import json
 import uuid
 
 import httpx
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.adapters.mcp.middleware.mcp_identity import ClaimResolver
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (

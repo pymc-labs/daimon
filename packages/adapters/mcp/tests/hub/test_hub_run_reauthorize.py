@@ -26,7 +26,7 @@ from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.testing import AGENT_ID, build_turn_router, ma_session
 from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
-from daimon.testing.ma import session_response
+from daimon.testing.ma import sdk_http_client, session_response
 from daimon.testing.ma_models import DEFAULT_AGENT_NAME
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
@@ -95,7 +95,8 @@ async def _hub_call(
         return router.dispatch(req)
 
     client = AsyncAnthropic(
-        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(changing))
+        api_key="test",
+        http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(changing))),
     )
     runtime = _runtime(client, db_session_factory)
     mcp = build_hub_app(platform="discord", runtime=runtime, auth=auth, billing_config=None)

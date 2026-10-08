@@ -21,8 +21,8 @@ from typing import Literal
 
 import httpx
 import pytest
+from anthropic.types.beta.beta_file_metadata import BetaFileMetadata
 from anthropic.types.beta.beta_file_scope import BetaFileScope
-from anthropic.types.beta.file_metadata import FileMetadata
 from anthropic.types.beta.sessions.beta_managed_agents_delete_session_resource import (
     BetaManagedAgentsDeleteSessionResource,
 )
@@ -88,7 +88,7 @@ def _build_router(
 
     def _upload(request: httpx.Request, _match: object) -> httpx.Response:
         calls.append(("POST", "/v1/files"))
-        meta = FileMetadata(
+        meta = BetaFileMetadata(
             id=f"file_{uuid.uuid4().hex[:12]}",
             created_at=datetime.now(UTC),
             filename=".env",

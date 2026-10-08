@@ -11,8 +11,9 @@ from typing import Any
 
 import httpx
 import pytest
-from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
-from anthropic.types.beta.skills import VersionCreateResponse
+from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta import BetaSkill as SkillListResponse
+from anthropic.types.beta.skills import BetaSkillVersion as VersionCreateResponse
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid

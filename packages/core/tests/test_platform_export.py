@@ -10,6 +10,7 @@ import pytest
 from anthropic import APIStatusError, AsyncAnthropic
 from daimon.core.defaults.platform_export import export_platform
 from daimon.core.errors import SkillsListTruncatedError
+from daimon.testing.ma import sdk_http_client
 
 
 class ExportTransport:
@@ -86,7 +87,7 @@ def export_client(transport):
     return AsyncAnthropic(
         api_key="test-key",
         max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(transport)),
+        http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(transport))),
     )
 
 

@@ -34,7 +34,7 @@ from daimon.core.thread_naming import THREAD_NAMING_MODEL
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_session, resolved_agent_env_router
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma import MARouter, build_fake_anthropic, sdk_http_client
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -184,8 +184,10 @@ async def test_generate_thread_name_falls_back_without_metering_when_model_is_to
 
     anthropic = AsyncAnthropic(
         api_key="test",
-        http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(stall), base_url="https://api.anthropic.com"
+        http_client=sdk_http_client(
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(stall), base_url="https://api.anthropic.com"
+            )
         ),
     )
 

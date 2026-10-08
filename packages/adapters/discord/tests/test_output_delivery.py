@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import httpx
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import FileMetadata
+from anthropic.types.beta import BetaFileMetadata
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -34,7 +34,7 @@ def _client_with_file(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_chart",
                     created_at=NOW,
                     filename=filename,

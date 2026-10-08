@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from anthropic.types.beta import FileMetadata
+from anthropic.types.beta import BetaFileMetadata
 from daimon.core.output_delivery import (
     DeliverableFile,
     OutputDeliveryDeferred,
@@ -44,7 +44,7 @@ async def test_sweep_posts_file_when_it_first_appears_on_second_poll() -> None:
             return list_response([])
         return list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_late",
                     created_at=NOW,
                     filename="report.csv",
@@ -98,7 +98,7 @@ async def test_sweep_catches_straggler_when_new_file_appears_at_settle_floor() -
         nonlocal polls
         polls += 1
         rows = [
-            FileMetadata(
+            BetaFileMetadata(
                 id="file_a",
                 created_at=NOW,
                 filename="early.txt",
@@ -110,7 +110,7 @@ async def test_sweep_catches_straggler_when_new_file_appears_at_settle_floor() -
         ]
         if polls >= 3:
             rows.append(
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_b",
                     created_at=NOW,
                     filename="late.txt",
@@ -184,7 +184,7 @@ async def test_sweep_never_downloads_entry_when_downloadable_is_not_true() -> No
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_env",
                     created_at=NOW,
                     filename=".env",
@@ -193,7 +193,7 @@ async def test_sweep_never_downloads_entry_when_downloadable_is_not_true() -> No
                     type="file",
                     downloadable=False,
                 ).model_dump(mode="json"),
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_chart",
                     created_at=NOW,
                     filename="chart.png",
@@ -247,7 +247,7 @@ async def test_sweep_posts_before_deleting_and_deleted_entry_leaves_listing() ->
 
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         rows = [
-            FileMetadata(
+            BetaFileMetadata(
                 id="file_a",
                 created_at=NOW,
                 filename="a.txt",
@@ -256,7 +256,7 @@ async def test_sweep_posts_before_deleting_and_deleted_entry_leaves_listing() ->
                 type="file",
                 downloadable=True,
             ),
-            FileMetadata(
+            BetaFileMetadata(
                 id="file_b",
                 created_at=NOW,
                 filename="b.txt",
@@ -310,7 +310,7 @@ async def test_sweep_counts_post_when_delete_fails_afterwards() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_a",
                     created_at=NOW,
                     filename="a.txt",
@@ -319,7 +319,7 @@ async def test_sweep_counts_post_when_delete_fails_afterwards() -> None:
                     type="file",
                     downloadable=True,
                 ).model_dump(mode="json"),
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_b",
                     created_at=NOW,
                     filename="b.txt",
@@ -374,7 +374,7 @@ async def test_sweep_skips_oversize_file_with_notice_then_deletes_entry() -> Non
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_big",
                     created_at=NOW,
                     filename="huge.parquet",
@@ -433,7 +433,7 @@ async def test_sweep_keeps_oversize_entry_when_skip_notice_fails() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_big",
                     created_at=NOW,
                     filename="huge.bin",
@@ -442,7 +442,7 @@ async def test_sweep_keeps_oversize_entry_when_skip_notice_fails() -> None:
                     type="file",
                     downloadable=True,
                 ).model_dump(mode="json"),
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_ok",
                     created_at=NOW,
                     filename="ok.txt",
@@ -499,7 +499,7 @@ async def test_sweep_deletes_zero_byte_entry_without_download_or_notice() -> Non
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_empty",
                     created_at=NOW,
                     filename="empty.txt",
@@ -555,7 +555,7 @@ async def test_sweep_continues_when_post_fails_for_one_file() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_bad",
                     created_at=NOW,
                     filename="bad.txt",
@@ -564,7 +564,7 @@ async def test_sweep_continues_when_post_fails_for_one_file() -> None:
                     type="file",
                     downloadable=True,
                 ).model_dump(mode="json"),
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_good",
                     created_at=NOW,
                     filename="good.txt",
@@ -614,7 +614,7 @@ async def test_sweep_leaves_deferred_file_listed_without_counting_it() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_offered",
                     created_at=NOW,
                     filename="offered.txt",
@@ -623,7 +623,7 @@ async def test_sweep_leaves_deferred_file_listed_without_counting_it() -> None:
                     type="file",
                     downloadable=True,
                 ).model_dump(mode="json"),
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_posted",
                     created_at=NOW,
                     filename="posted.txt",
@@ -682,7 +682,7 @@ async def test_sweep_aborts_and_deletes_nothing_when_posting_unavailable() -> No
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_first",
                     created_at=NOW,
                     filename="first.txt",
@@ -691,7 +691,7 @@ async def test_sweep_aborts_and_deletes_nothing_when_posting_unavailable() -> No
                     type="file",
                     downloadable=True,
                 ).model_dump(mode="json"),
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_second",
                     created_at=NOW,
                     filename="second.txt",
@@ -741,7 +741,7 @@ async def test_sweep_skips_handoff_bundles_and_leaves_them_listed() -> None:
 
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         rows = [
-            FileMetadata(
+            BetaFileMetadata(
                 id="file_bundle",
                 created_at=NOW,
                 filename="daimon-handoff-0f9d1c4e.tar.gz",
@@ -750,7 +750,7 @@ async def test_sweep_skips_handoff_bundles_and_leaves_them_listed() -> None:
                 type="file",
                 downloadable=True,
             ),
-            FileMetadata(
+            BetaFileMetadata(
                 id="file_report",
                 created_at=NOW,
                 filename="report.csv",
@@ -806,7 +806,7 @@ async def test_sweep_posts_handoff_bundle_when_exclusions_are_cleared() -> None:
     deleted: set[str] = set()
 
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
-        row = FileMetadata(
+        row = BetaFileMetadata(
             id="file_bundle",
             created_at=NOW,
             filename="daimon-handoff-0f9d1c4e.tar.gz",

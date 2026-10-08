@@ -13,6 +13,7 @@ from daimon.core.turn.admission import AdmissionDenied, AdmissionGrant
 from daimon.core.turn.errors import SessionBusyError
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import _replace_dead_session
+from daimon.testing.ma import sdk_http_client
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .test_session_preparation import _NOW, _admission, _agent, _deps, _register, _Transport
@@ -123,7 +124,8 @@ async def test_successor_policy_change_during_predecessor_fetch(
         deps,
         "anthropic",
         AsyncAnthropic(
-            api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(changing))
+            api_key="test",
+            http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(changing))),
         ),
     )
     before = transport.creates

@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import FileMetadata
+from anthropic.types.beta import BetaFileMetadata
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core import bundle_handle
 from daimon.core.config import (
@@ -20,6 +20,7 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
+from daimon.testing.ma import sdk_http_client
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -32,7 +33,7 @@ _SECRET = "a" * 32
 
 
 class _FilesUploadCapture:
-    """Records POST /v1/files calls and serves a real FileMetadata.
+    """Records POST /v1/files calls and serves a real BetaFileMetadata.
 
     Transport-level fake per guideline:testing T3 — no method-level mock on
     the SDK's upload call. Counts calls so cap/gzip tests can assert zero
@@ -48,7 +49,7 @@ class _FilesUploadCapture:
         if request.url.path == "/v1/files" and request.method == "POST":
             self.upload_count += 1
             self.uploaded_bodies.append(request.content)
-            metadata = FileMetadata(
+            metadata = BetaFileMetadata(
                 id=self.file_id,
                 created_at=datetime.now(UTC),
                 filename="bundle.tar.gz",
@@ -63,7 +64,7 @@ class _FilesUploadCapture:
 def _client_for(capture: _FilesUploadCapture) -> AsyncAnthropic:
     transport = httpx.MockTransport(capture.handler)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    return AsyncAnthropic(api_key="test", http_client=http_client)
+    return AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_client))
 
 
 def _build_app(

@@ -49,7 +49,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar, cast
 
 import anthropic as _anthropic
-import httpx
+import httpx2
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
@@ -257,12 +257,12 @@ async def _decide_or_refuse_on_cancel(
 # case. Both mean the same thing to us (stream died, session still alive
 # server-side), so both take the reconnect-and-replay path.
 #
-# `httpx.ReadTimeout` is deliberately NOT in this tuple. A read stall is
+# `httpx2.ReadTimeout` is deliberately NOT in this tuple. A read stall is
 # handled as an eventless-cycle signal (see `_EventlessCycle` below), not a
 # connection error — the driver asks MA for the session's status before
 # deciding anything, so it does not consume the bounded 2-attempt retry
 # budget reserved for genuine connection loss.
-_CONNECTION_LOST = (_anthropic.APIConnectionError, httpx.RemoteProtocolError)
+_CONNECTION_LOST = (_anthropic.APIConnectionError, httpx2.RemoteProtocolError)
 
 # Guarded single-render: no-op if `diff(prev, state)` is empty; else calls
 # `lifecycle.on_render(state)` and advances the render anchor. Finalizers
@@ -295,7 +295,7 @@ class _InterruptInConsume(Exception):
 
 class _EventlessCycle(Exception):
     """The SSE stream ended without a terminal event: either a clean close
-    (`StopAsyncIteration`) or a mid-body read stall (`httpx.ReadTimeout`).
+    (`StopAsyncIteration`) or a mid-body read stall (`httpx2.ReadTimeout`).
 
     Neither is itself a decision -- a stream can end this way while the
     session is still healthily running (the server's ~600s clean-close
@@ -1030,7 +1030,7 @@ async def _consume_with_reconnect(
     # it unconditionally regardless of which exit path is taken -- a clean
     # close, a read timeout, a mid-consume cancel, or a `wait_for` ceiling
     # cancellation landing inside the consume loop all leave an open SSE
-    # response otherwise. `httpx.Response.aclose()` is idempotent, so this is
+    # response otherwise. `httpx2.Response.aclose()` is idempotent, so this is
     # safe even when an explicit path above already closed it. Does NOT cover
     # the stream-open race in `_await_or_cancel` below: a stream that opens on
     # the losing side of that race never reaches this assignment, and its own
@@ -1070,7 +1070,7 @@ async def _consume_with_reconnect(
         async def _open_stream() -> _anthropic.AsyncStream[BetaManagedAgentsStreamSessionEvents]:
             return await anthropic.beta.sessions.events.stream(
                 session_id=session_id,
-                timeout=httpx.Timeout(stream_read_timeout_s, connect=5.0),
+                timeout=httpx2.Timeout(stream_read_timeout_s, connect=5.0),
             )
 
         stream = await _await_or_cancel(
@@ -1131,7 +1131,7 @@ async def _consume_with_reconnect(
                 # The `finally` below closes the abandoned stream; hand the
                 # decision to `_pump`'s status check.
                 raise _EventlessCycle(reason="clean_close") from None
-            except httpx.ReadTimeout:
+            except httpx2.ReadTimeout:
                 # No bytes for `stream_read_timeout_s`: same status-checked
                 # path as a clean close, not an unhandled crash and not a
                 # connection error (it does not consume the bounded
@@ -1229,7 +1229,7 @@ async def _consume_with_reconnect(
             # every exit path -- clean close, read timeout, mid-consume
             # cancel, and (new) a ceiling `wait_for` cancellation landing
             # here all leave an open SSE response otherwise.
-            # `httpx.Response.aclose()` is idempotent, so this is safe even
+            # `httpx2.Response.aclose()` is idempotent, so this is safe even
             # when an explicit path above already closed it. Cleanup
             # boundary (guideline:architecture): a transport that is
             # already broken must not replace the real exception with a

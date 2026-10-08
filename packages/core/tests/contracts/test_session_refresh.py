@@ -39,11 +39,11 @@ from anthropic import AsyncAnthropic, BadRequestError
 from anthropic.types.beta import (
     BetaCloudConfigParams,
     BetaEnvironment,
+    BetaFileMetadata,
     BetaManagedAgentsAgent,
     BetaManagedAgentsAgentToolConfigParams,
     BetaManagedAgentsAgentToolset20260401Params,
     BetaManagedAgentsFileResourceParams,
-    FileMetadata,
 )
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsAgentMessageEvent,
@@ -187,7 +187,7 @@ async def _poll_for_output_file(
     filename: str,
     *,
     timeout_s: float = _OUTPUT_INDEX_WINDOW_S,
-) -> FileMetadata | None:
+) -> BetaFileMetadata | None:
     """Poll `files.list(scope_id=...)` every second until `filename` is
     indexed, or None once `timeout_s` elapses."""
     deadline = asyncio.get_running_loop().time() + timeout_s

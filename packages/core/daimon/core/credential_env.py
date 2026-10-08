@@ -18,7 +18,7 @@ import uuid
 
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import FileMetadata
+from anthropic.types.beta import BetaFileMetadata
 from anthropic.types.beta.beta_managed_agents_file_resource_params import (
     BetaManagedAgentsFileResourceParams,
 )
@@ -81,7 +81,7 @@ async def upload_env_file(
     bytes, same disposable-object retention, different mount call.
     """
     content = assemble_env_bytes(rows)
-    uploaded: FileMetadata = await anthropic.beta.files.upload(
+    uploaded: BetaFileMetadata = await anthropic.beta.files.upload(
         file=(_MOUNT_PATH, io.BytesIO(content), "text/plain"),
     )
 

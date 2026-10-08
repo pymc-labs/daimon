@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.adapters.slack import agent_policy
 from daimon.adapters.slack.agent_policy import MANAGED_AGENT_MESSAGE, NEEDS_ADMIN_SKILL_MESSAGE
 from daimon.adapters.slack.agent_setup import add_skill

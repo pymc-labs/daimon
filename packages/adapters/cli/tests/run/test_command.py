@@ -27,7 +27,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.ceiling import CEILING_MESSAGE
 from daimon.core.turn.state import TurnState
-from daimon.testing.ma import MARouter, sse_response
+from daimon.testing.ma import MARouter, sdk_http_client, sse_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
 
@@ -169,7 +169,7 @@ async def test_run_conversation_past_deadline_exits_nonzero_with_a_ceiling_termi
 
     transport = httpx.MockTransport(_slow_stream)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    client = anthropic.AsyncAnthropic(api_key="test", http_client=http_client)
+    client = anthropic.AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_client))
 
     rt = CliRuntime(
         settings=cast(Settings, object()),

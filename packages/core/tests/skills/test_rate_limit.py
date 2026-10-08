@@ -9,6 +9,7 @@ from anthropic import (
     RateLimitError,
 )
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
+from daimon.testing.ma import HttpxToHttpx2Transport
 
 
 async def test_skills_transport_keeps_sdk_connection_limits() -> None:
@@ -52,7 +53,9 @@ async def test_spend_cap_stops_sdk_retries_but_ordinary_429_retries(
         attempts += 1
         return httpx.Response(429, json=body, headers=headers, request=request)
 
-    transport = SkillsRateLimitedTransport(80, inner=httpx.MockTransport(respond))
+    transport = SkillsRateLimitedTransport(
+        80, inner=HttpxToHttpx2Transport(httpx.MockTransport(respond))
+    )
     async with AsyncAnthropic(
         api_key="test", max_retries=1, http_client=DefaultAsyncHttpxClient(transport=transport)
     ) as client:

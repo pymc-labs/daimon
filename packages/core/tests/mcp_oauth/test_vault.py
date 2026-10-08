@@ -10,6 +10,7 @@ import httpx
 from anthropic import AsyncAnthropic
 from daimon.core.mcp_oauth.models import ClientRegistration, TokenResponse
 from daimon.core.mcp_oauth.vault import build_mcp_oauth_auth, put_mcp_oauth_credential
+from daimon.testing.ma import sdk_http_client
 
 _NOW = dt.datetime(2026, 9, 15, 12, 0, tzinfo=dt.UTC)
 _URL = "https://mcp.notion.com/mcp"
@@ -133,7 +134,8 @@ async def test_put_mcp_oauth_credential_replaces_the_credential_at_the_same_url(
         return httpx.Response(404)
 
     anthropic = AsyncAnthropic(
-        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        api_key="sk-test",
+        http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(handler))),
     )
     credential_id = await put_mcp_oauth_credential(
         anthropic,

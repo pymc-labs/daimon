@@ -14,7 +14,7 @@ from typing import Any, cast
 import httpx
 import pytest
 import structlog
-from anthropic.types.beta import FileMetadata
+from anthropic.types.beta import BetaFileMetadata
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.output_delivery import (
     FILE_CONSENT_CONTENT_TYPE,
@@ -67,7 +67,7 @@ class _Harness:
 
 def _harness(
     db_factory: async_sessionmaker[AsyncSession],
-    listing: list[FileMetadata] | None = None,
+    listing: list[BetaFileMetadata] | None = None,
     channel_files: ChannelFiles | None = None,
 ) -> _Harness:
     """MA serves `listing` (a small CSV by default) minus deleted entries."""
@@ -143,8 +143,8 @@ def _consent(
     )
 
 
-def _csv(file_id: str = "file_csv", size: int = 4, filename: str = "data.csv") -> FileMetadata:
-    return FileMetadata(
+def _csv(file_id: str = "file_csv", size: int = 4, filename: str = "data.csv") -> BetaFileMetadata:
+    return BetaFileMetadata(
         id=file_id,
         created_at=NOW,
         filename=filename,

@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from anthropic.types.beta import FileMetadata
+from anthropic.types.beta import BetaFileMetadata
 from daimon.adapters.slack.output_delivery import deliver_session_outputs
 from daimon.core.output_delivery import MAX_BYTES_PER_FILE
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
@@ -62,7 +62,7 @@ async def test_delivery_uploads_via_three_request_flow_without_content_type(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_report",
                     created_at=NOW,
                     filename="report",
@@ -140,7 +140,7 @@ async def test_delivery_posts_scope_notice_and_deletes_nothing_on_missing_scope(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_one",
                     created_at=NOW,
                     filename="chart.png",
@@ -205,7 +205,7 @@ async def test_delivery_posts_storage_notice_and_deletes_nothing_on_storage_limi
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_one",
                     created_at=NOW,
                     filename="report.csv",
@@ -267,7 +267,7 @@ async def test_delivery_posts_abort_notice_once_per_team_per_code(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_one",
                     created_at=NOW,
                     filename="chart.png",
@@ -345,7 +345,7 @@ async def test_delivery_continues_after_bytes_post_failure_on_one_file(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_first",
                     created_at=NOW,
                     filename="a.txt",
@@ -354,7 +354,7 @@ async def test_delivery_continues_after_bytes_post_failure_on_one_file(
                     type="file",
                     downloadable=True,
                 ).model_dump(mode="json"),
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_second",
                     created_at=NOW,
                     filename="b.txt",
@@ -425,7 +425,7 @@ async def test_delivery_continues_after_non_scope_api_error_on_one_file(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_first",
                     created_at=NOW,
                     filename="a.txt",
@@ -434,7 +434,7 @@ async def test_delivery_continues_after_non_scope_api_error_on_one_file(
                     type="file",
                     downloadable=True,
                 ).model_dump(mode="json"),
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_second",
                     created_at=NOW,
                     filename="b.txt",
@@ -495,7 +495,7 @@ async def test_delivery_posts_oversize_notice_and_deletes_entry_without_upload(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                BetaFileMetadata(
                     id="file_big",
                     created_at=NOW,
                     filename="big data.bin",

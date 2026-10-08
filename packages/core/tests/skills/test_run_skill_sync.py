@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.core.defaults.report import Action
 from daimon.core.errors import DaimonError
 from daimon.core.skills.fetch import FetchResult

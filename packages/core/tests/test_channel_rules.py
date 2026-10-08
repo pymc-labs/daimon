@@ -12,7 +12,7 @@ import httpx
 import pytest
 import structlog.testing
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.core import channel_rules
 from daimon.core.access_policy import AgentRule, ChannelReaders, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_fork import AgentCopy, fork_agent

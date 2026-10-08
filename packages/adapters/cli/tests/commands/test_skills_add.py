@@ -16,7 +16,8 @@ from typing import cast
 import httpx
 import pytest
 import typer
-from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
+from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.adapters.cli.commands.skills import add_skill
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.adapters.cli.tenant import TenantSelector

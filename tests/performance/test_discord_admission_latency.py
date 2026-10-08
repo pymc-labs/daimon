@@ -46,7 +46,7 @@ from daimon.core.turn.admission import admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
-from daimon.testing.ma import MARouter
+from daimon.testing.ma import MARouter, sdk_http_client
 from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -391,7 +391,9 @@ async def test_discord_admission_100_and_200_one_tenant(
 
         anthropic = AsyncAnthropic(
             api_key="test",
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(delayed_ma)),
+            http_client=sdk_http_client(
+                httpx.AsyncClient(transport=httpx.MockTransport(delayed_ma))
+            ),
         )
 
         def warm_cache() -> ResolverCache:

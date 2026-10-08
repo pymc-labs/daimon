@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import cast
 
 import anthropic
-import httpx
+import httpx2
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions import (
@@ -64,7 +64,7 @@ async def test_run_turn_passes_default_stream_read_timeout_to_events_stream() ->
 
     assert len(fa.beta.sessions.events.stream_timeouts) == 1
     timeout = fa.beta.sessions.events.stream_timeouts[0]
-    assert isinstance(timeout, httpx.Timeout)
+    assert isinstance(timeout, httpx2.Timeout)
     assert timeout.read == 120.0
     assert timeout.connect == 5.0
 
@@ -89,7 +89,7 @@ async def test_run_turn_forwards_explicit_stream_read_timeout_verbatim() -> None
 
     assert len(fa.beta.sessions.events.stream_timeouts) == 1
     timeout = fa.beta.sessions.events.stream_timeouts[0]
-    assert isinstance(timeout, httpx.Timeout)
+    assert isinstance(timeout, httpx2.Timeout)
     assert timeout.read == 7.5
     assert timeout.connect == 5.0
 
@@ -300,8 +300,8 @@ async def test_status_check_error_finalizes_as_upstream_turn_error() -> None:
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [[]]  # immediate clean close
     fa.beta.sessions.events.replay_events = []
-    request = httpx.Request("GET", "https://api.anthropic.com/v1/beta/sessions/sess_1")
-    response = httpx.Response(500, request=request)
+    request = httpx2.Request("GET", "https://api.anthropic.com/v1/beta/sessions/sess_1")
+    response = httpx2.Response(500, request=request)
     fa.beta.sessions.retrieve_raises = anthropic.APIStatusError(
         "boom", response=response, body=None
     )

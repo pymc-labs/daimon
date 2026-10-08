@@ -30,7 +30,7 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
-    FileMetadata,
+    BetaFileMetadata,
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent
 from anthropic.types.beta.sessions.beta_managed_agents_agent_message_event import (
@@ -76,6 +76,7 @@ from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
     list_response,
+    sdk_http_client,
     session_response,
     sse_response,
 )
@@ -952,7 +953,7 @@ def _build_client_with_files(
     def handle_files(request: httpx.Request, match: Any) -> httpx.Response:
         return httpx.Response(
             200,
-            json=FileMetadata(
+            json=BetaFileMetadata(
                 id=file_id,
                 created_at=_NOW,
                 filename=".env",
@@ -1285,7 +1286,7 @@ async def test_run_turn_composes_resources_alongside_vault_ids(
     def handle_files(request: httpx.Request, match: Any) -> httpx.Response:
         return httpx.Response(
             200,
-            json=FileMetadata(
+            json=BetaFileMetadata(
                 id="file_both_hr",
                 created_at=_NOW,
                 filename=".env",
@@ -1375,7 +1376,7 @@ async def test_run_turn_past_deadline_raises_a_ceiling_turn_error_from_session_a
 
     transport = httpx.MockTransport(_slow_agent_retrieve)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    client = anthropic.AsyncAnthropic(api_key="test", http_client=http_client)
+    client = anthropic.AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_client))
 
     with pytest.raises(TurnError) as exc_info:
         await run_turn(
@@ -1416,7 +1417,7 @@ async def test_run_turn_ceiling_breach_during_the_drain_raises_a_ceiling_turn_er
 
     transport = httpx.MockTransport(_slow_stream)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    client = anthropic.AsyncAnthropic(api_key="test", http_client=http_client)
+    client = anthropic.AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_client))
 
     with pytest.raises(TurnError) as exc_info:
         await run_turn(

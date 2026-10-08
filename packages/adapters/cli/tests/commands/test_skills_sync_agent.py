@@ -18,7 +18,7 @@ from typing import cast
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.adapters.cli.commands.skills import (
     _parse_repo_arg,

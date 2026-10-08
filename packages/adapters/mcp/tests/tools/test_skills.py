@@ -12,7 +12,9 @@ import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     BetaManagedAgentsCustomSkill,
-    SkillListResponse,
+)
+from anthropic.types.beta import (
+    BetaSkill as SkillListResponse,
 )
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.runtime import McpRuntime

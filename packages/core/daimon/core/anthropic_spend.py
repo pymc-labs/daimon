@@ -5,18 +5,18 @@ from __future__ import annotations
 from typing import Literal, cast
 
 import anthropic
-import httpx
+import httpx2
 
 SpendLimit = Literal["org_cap", "user_limit"]
 
 
-def spend_limit_response(response: httpx.Response) -> SpendLimit | None:
+def spend_limit_response(response: httpx2.Response) -> SpendLimit | None:
     """Classify a buffered Anthropic response, ignoring ordinary rate limits."""
     if response.status_code not in (400, 429):
         return None
     try:
         payload: object = response.json()
-    except (ValueError, httpx.ResponseNotRead):
+    except (ValueError, httpx2.ResponseNotRead):
         return None
     if not isinstance(payload, dict):
         return None

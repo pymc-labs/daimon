@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import FileMetadata
+from anthropic.types.beta import BetaFileMetadata
 from daimon.core import bundle_handle
 from daimon.core.config import McpSettings
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -125,7 +125,7 @@ def build_bundles_route(
             if magic != _GZIP_MAGIC:
                 return PlainTextResponse("bundle must be a gzip archive", status_code=415)
 
-            uploaded: FileMetadata = await anthropic.beta.files.upload(
+            uploaded: BetaFileMetadata = await anthropic.beta.files.upload(
                 file=("bundle.tar.gz", spooled, "application/gzip"),
             )
 

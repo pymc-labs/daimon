@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 from anthropic import AsyncAnthropic
-from anthropic.types.beta.file_metadata import FileMetadata
+from anthropic.types.beta.beta_file_metadata import BetaFileMetadata
 from daimon.adapters.mcp.hosted_artifacts import (
     HostedChartDelivery,
     _ChartOutput,
@@ -104,7 +104,7 @@ def _file(
     created_at: dt.datetime,
     size_bytes: int = len(_PNG),
 ) -> dict[str, Any]:
-    return FileMetadata(
+    return BetaFileMetadata(
         id=file_id,
         type="file",
         filename=filename,

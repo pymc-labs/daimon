@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import httpx
 import pytest
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.adapters.discord.agent_setup import add_skill as add_skill_mod
 from daimon.adapters.discord.agent_setup.add_skill import (
     ADD_LABEL,

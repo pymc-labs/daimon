@@ -48,6 +48,7 @@ from daimon.testing.ma import (
     build_fake_anthropic,
     build_no_retry_anthropic,
     list_response,
+    sdk_http_client,
     sse_response,
 )
 from daimon.testing.ma_models import ma_agent, ma_session
@@ -734,8 +735,10 @@ async def test_interrupt_orphaned_session_gives_up_after_its_timeout() -> None:
     anthropic = AsyncAnthropic(
         api_key="test",
         max_retries=8,
-        http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(_never_answers), base_url="https://api.anthropic.com"
+        http_client=sdk_http_client(
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(_never_answers), base_url="https://api.anthropic.com"
+            )
         ),
     )
 

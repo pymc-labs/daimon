@@ -18,6 +18,7 @@ from daimon.core.runtime_health import (
     track_turn,
 )
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
+from daimon.testing.ma import HttpxToHttpx2Transport
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -42,7 +43,9 @@ async def test_sdk_retry_counts_each_attempt_and_window_resets() -> None:
             request=request,
         )
 
-    transport = SkillsRateLimitedTransport(80, inner=httpx.MockTransport(respond))
+    transport = SkillsRateLimitedTransport(
+        80, inner=HttpxToHttpx2Transport(httpx.MockTransport(respond))
+    )
     async with AsyncAnthropic(
         api_key="test", max_retries=1, http_client=DefaultAsyncHttpxClient(transport=transport)
     ) as client:

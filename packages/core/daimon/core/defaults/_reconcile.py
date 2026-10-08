@@ -15,7 +15,7 @@ from pathlib import Path
 
 import structlog
 from anthropic import APIError, AsyncAnthropic
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.core.defaults.loader import (
     load_agent_specs,
     load_environment_specs,

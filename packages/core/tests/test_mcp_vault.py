@@ -20,6 +20,7 @@ import jwt as pyjwt
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.core.mcp_vault import add_external_mcp_credential, ensure_agent_mcp_vault
+from daimon.testing.ma import sdk_http_client
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -30,7 +31,7 @@ from sqlalchemy.ext.asyncio import (
 def _make_client(handler: httpx.MockTransport) -> AsyncAnthropic:
     return AsyncAnthropic(
         api_key="sk-test",
-        http_client=httpx.AsyncClient(transport=handler),
+        http_client=sdk_http_client(httpx.AsyncClient(transport=handler)),
     )
 
 

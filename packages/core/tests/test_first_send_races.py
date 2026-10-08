@@ -7,6 +7,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.core.turn.run import run_prepared_turn
+from daimon.testing.ma import sdk_http_client
 from daimon.testing.turn_fakes import RecordingLifecycle
 
 from .test_action_time_races import setup
@@ -52,7 +53,9 @@ async def test_normal_turn_policy_change_during_stream_open(db_session, db_nullp
         "anthropic",
         AsyncAnthropic(
             api_key="test",
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(during_stream)),
+            http_client=sdk_http_client(
+                httpx.AsyncClient(transport=httpx.MockTransport(during_stream))
+            ),
         ),
     )
 
@@ -134,7 +137,8 @@ async def test_checkpoint_policy_change_during_checkpoint_stream_open(
         deps,
         "anthropic",
         AsyncAnthropic(
-            api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(lookup))
+            api_key="test",
+            http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(lookup))),
         ),
     )
 

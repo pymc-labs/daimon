@@ -38,6 +38,7 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.stores.turn_card_intents import create_turn_card_intent
 from daimon.testing import build_fake_anthropic, ma_session
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma import sdk_http_client
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -563,8 +564,10 @@ async def test_a_hung_interrupt_does_not_hold_the_sweep(
     anthropic = AsyncAnthropic(
         api_key="test",
         max_retries=MA_MAX_RETRIES,
-        http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(_never_answers), base_url="https://api.anthropic.com"
+        http_client=sdk_http_client(
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(_never_answers), base_url="https://api.anthropic.com"
+            )
         ),
     )
     bot = _make_bot(db_session_factory, anthropic=anthropic)

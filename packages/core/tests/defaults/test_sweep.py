@@ -6,8 +6,10 @@ from typing import Any
 import httpx
 import pytest
 from anthropic.types.beta import (
-    SkillDeleteResponse,
-    SkillListResponse,
+    BetaDeletedSkill as SkillDeleteResponse,
+)
+from anthropic.types.beta import (
+    BetaSkill as SkillListResponse,
 )
 from daimon.core.defaults.ma_index import _SKILLS_PAGE_LIMIT  # pyright: ignore[reportPrivateUsage]
 from daimon.core.defaults.metadata import (

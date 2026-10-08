@@ -29,6 +29,7 @@ from daimon.core.mcp_credential_sweep import (
     partition_daimon_mcp_vault_ids,
     sweep_stale_admin_credentials,
 )
+from daimon.testing.ma import sdk_http_client
 
 # asyncio_mode = "auto" in pyproject.toml — no pytestmark needed; async tests run automatically.
 
@@ -55,7 +56,7 @@ def _vault(vault_id: str, display_name: str) -> BetaManagedAgentsVault:
 def _make_client(handler: httpx.MockTransport) -> AsyncAnthropic:
     return AsyncAnthropic(
         api_key="sk-test",
-        http_client=httpx.AsyncClient(transport=handler),
+        http_client=sdk_http_client(httpx.AsyncClient(transport=handler)),
     )
 
 

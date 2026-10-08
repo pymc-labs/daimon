@@ -17,7 +17,8 @@ import anthropic
 import httpx
 import pytest
 from aioresponses import aioresponses
-from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
+from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import skill_uploads

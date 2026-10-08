@@ -75,6 +75,7 @@ from daimon.testing.factories import (  # isort: skip
     make_tenant,
     make_thread_session,
 )
+from daimon.testing.ma import sdk_http_client
 
 _NOW = datetime(2026, 7, 28, tzinfo=UTC)
 
@@ -1419,7 +1420,9 @@ async def test_ceiling_breach_during_recovery_marks_the_new_mapping_dead_not_the
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
     deps = dataclasses.replace(
         _deps(sessionmaker=db_session_factory, router=router),
-        anthropic=anthropic.AsyncAnthropic(api_key="test", http_client=http_client),
+        anthropic=anthropic.AsyncAnthropic(
+            api_key="test", http_client=sdk_http_client(http_client)
+        ),
     )
     agent = ma_agent(id="ag_1", tenant_id=tenant.id)
     env = ma_environment(id="env_1", tenant_id=tenant.id)
@@ -2441,8 +2444,10 @@ async def test_two_turns_recovering_one_dead_session_leave_one_live_row(
             ),
             anthropic=anthropic.AsyncAnthropic(
                 api_key="test",
-                http_client=httpx.AsyncClient(
-                    transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+                http_client=sdk_http_client(
+                    httpx.AsyncClient(
+                        transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+                    )
                 ),
                 max_retries=0,
             ),
@@ -2646,8 +2651,10 @@ async def test_a_rolled_back_recovery_archives_the_session_it_created(
             ),
             anthropic=anthropic.AsyncAnthropic(
                 api_key="test",
-                http_client=httpx.AsyncClient(
-                    transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+                http_client=sdk_http_client(
+                    httpx.AsyncClient(
+                        transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+                    )
                 ),
                 max_retries=0,
             ),
@@ -2710,8 +2717,10 @@ async def test_orphan_archive_timeout_does_not_wait_and_logs_late_failure(
 
     anthropic_client = anthropic.AsyncAnthropic(
         api_key="test",
-        http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+        http_client=sdk_http_client(
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+            )
         ),
         max_retries=0,
     )
@@ -2744,7 +2753,7 @@ def test_orphan_archive_returns_after_successful_archive_with_timeout() -> None:
     script = """
 import asyncio
 import anthropic
-import httpx
+import httpx2 as httpx
 from daimon.core.turn.run import _archive_orphaned_session
 from daimon.testing.ma_models import ma_session
 
@@ -2789,8 +2798,10 @@ async def test_orphan_archive_second_cancel_preserves_the_unwinding_error(
 
     anthropic_client = anthropic.AsyncAnthropic(
         api_key="test",
-        http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+        http_client=sdk_http_client(
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+            )
         ),
         max_retries=0,
     )

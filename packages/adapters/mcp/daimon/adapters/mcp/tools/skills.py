@@ -15,7 +15,9 @@ import httpx
 from anthropic.types.beta import (
     BetaManagedAgentsAgent,
     BetaManagedAgentsSkillParams,
-    SkillListResponse,
+)
+from anthropic.types.beta import (
+    BetaSkill as SkillListResponse,
 )
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime

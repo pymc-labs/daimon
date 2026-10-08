@@ -6,8 +6,8 @@ from typing import Any
 
 import httpx
 import pytest_asyncio
-from anthropic.types.beta import SkillListResponse
-from anthropic.types.beta.skills import VersionCreateResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
+from anthropic.types.beta.skills import BetaSkillVersion as VersionCreateResponse
 from daimon.core.defaults.reconcile_skills import reconcile_skill
 from daimon.core.defaults.report import Action
 from daimon.core.stores.seeded_skills import load_seeded_skill

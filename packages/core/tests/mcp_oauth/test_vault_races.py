@@ -51,7 +51,7 @@ from daimon.core.stores.domain import McpOAuthFlowRow
 from daimon.testing.crypto import make_fernet
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import list_response, session_response
+from daimon.testing.ma import list_response, sdk_http_client, session_response
 from daimon.testing.ma_models import ma_agent, ma_environment
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -148,7 +148,9 @@ class FakeVault:
     def client(self) -> AsyncAnthropic:
         transport = httpx.MockTransport(self.handler)
         http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-        return AsyncAnthropic(api_key="test", http_client=http_client, max_retries=0)
+        return AsyncAnthropic(
+            api_key="test", http_client=sdk_http_client(http_client), max_retries=0
+        )
 
 
 def _static(cred_id: str, version: str) -> dict[str, Any]:

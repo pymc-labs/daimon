@@ -19,7 +19,7 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from cryptography.fernet import MultiFernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa

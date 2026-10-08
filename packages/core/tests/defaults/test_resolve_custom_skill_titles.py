@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 
 import httpx
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.testing import ma_agent
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response

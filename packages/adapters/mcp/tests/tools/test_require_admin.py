@@ -244,7 +244,7 @@ async def test_list_impl_does_not_raise_admin_gate_for_non_admin(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Reads are ungated — non-admin callers can list skills."""
-    from anthropic.types.beta import SkillListResponse
+    from anthropic.types.beta import BetaSkill as SkillListResponse
 
     router = MARouter()
     router.add(

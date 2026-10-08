@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.middleware.mcp_identity import (
@@ -3229,8 +3229,8 @@ async def test_update_agent_impl_unions_tools_with_existing_ma_tools(
                         {
                             "type": "agent_toolset_20260401",
                             "configs": [
-                                {"name": "bash", **_ALLOW_ALL},
-                                {"name": "read", **_ALLOW_ALL},
+                                {"name": "bash", "type": "bash", **_ALLOW_ALL},
+                                {"name": "read", "type": "read", **_ALLOW_ALL},
                             ],
                             "default_config": _ALLOW_ALL,
                         },
@@ -3262,8 +3262,8 @@ async def test_update_agent_impl_unions_tools_with_existing_ma_tools(
                     {
                         "type": "agent_toolset_20260401",
                         "configs": [
-                            {"name": "bash", **_ALLOW_ALL},
-                            {"name": "read", **_ALLOW_ALL},
+                            {"name": "bash", "type": "bash", **_ALLOW_ALL},
+                            {"name": "read", "type": "read", **_ALLOW_ALL},
                         ],
                         "default_config": _ALLOW_ALL,
                     },
@@ -3464,8 +3464,8 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
                         {
                             "type": "agent_toolset_20260401",
                             "configs": [
-                                {"name": "bash", **_ALLOW_ALL},
-                                {"name": "read", **_ALLOW_ALL},
+                                {"name": "bash", "type": "bash", **_ALLOW_ALL},
+                                {"name": "read", "type": "read", **_ALLOW_ALL},
                             ],
                             "default_config": _ALLOW_ALL,
                         },
@@ -3500,8 +3500,8 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
                     {
                         "type": "agent_toolset_20260401",
                         "configs": [
-                            {"name": "bash", **_ALLOW_ALL},
-                            {"name": "read", **_ALLOW_ALL},
+                            {"name": "bash", "type": "bash", **_ALLOW_ALL},
+                            {"name": "read", "type": "read", **_ALLOW_ALL},
                         ],
                         "default_config": _ALLOW_ALL,
                     },
@@ -4397,7 +4397,7 @@ async def test_update_agent_skips_tools_when_agent_already_has_base_toolset(
                     tools=[
                         {
                             "type": "agent_toolset_20260401",
-                            "configs": [{"name": "bash", **_ALLOW_ALL}],
+                            "configs": [{"name": "bash", "type": "bash", **_ALLOW_ALL}],
                             "default_config": _ALLOW_ALL,
                         }
                     ],
@@ -4421,7 +4421,7 @@ async def test_update_agent_skips_tools_when_agent_already_has_base_toolset(
                 tools=[
                     {
                         "type": "agent_toolset_20260401",
-                        "configs": [{"name": "bash", **_ALLOW_ALL}],
+                        "configs": [{"name": "bash", "type": "bash", **_ALLOW_ALL}],
                         "default_config": _ALLOW_ALL,
                     }
                 ],

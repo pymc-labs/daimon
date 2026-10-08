@@ -15,7 +15,7 @@ import uuid
 
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
 from daimon.core.defaults.ma_index import (
     list_agents_by_tenant,
     list_environments_by_tenant,

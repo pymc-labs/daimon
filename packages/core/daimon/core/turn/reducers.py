@@ -138,7 +138,8 @@ def _apply_agent_message(
 ) -> TurnState:
     """Concatenate `agent.message` text onto the last `TextBlock`, or open
     a new one if the last block is a tool use."""
-    incoming = "".join(part.text for part in event.content)
+    # anthropic 1.x types a redacted block alongside text; it carries no text.
+    incoming = "".join(part.text for part in event.content if part.type == "text")
     if not incoming:
         return dataclasses.replace(state, seen_event_ids=seen)
 

@@ -15,6 +15,7 @@ from daimon.core.mcp_vault_janitor import (
     partition_orphan_vault_ids,
 )
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma import sdk_http_client
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -35,7 +36,7 @@ def _vault(vault_id: str, display_name: str) -> BetaManagedAgentsVault:
 def _make_client(handler: httpx.MockTransport) -> AsyncAnthropic:
     return AsyncAnthropic(
         api_key="sk-test",
-        http_client=httpx.AsyncClient(transport=handler),
+        http_client=sdk_http_client(httpx.AsyncClient(transport=handler)),
     )
 
 

@@ -37,6 +37,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.agent_repo_binding import get_binding, set_binding
 from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma import sdk_http_client
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -393,7 +394,7 @@ def _make_stub_anthropic_for_vaults(
 
     transport = httpx.MockTransport(handler)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    return AsyncAnthropic(api_key="test", http_client=http_client)
+    return AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_client))
 
 
 # ---------------------------------------------------------------------------

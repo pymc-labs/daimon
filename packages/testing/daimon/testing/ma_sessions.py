@@ -62,6 +62,8 @@ from typing import Any, Literal, cast
 import httpx
 from anthropic import BaseModel
 from anthropic.types.beta import BetaManagedAgentsSession
+from anthropic.types.beta.beta_deleted_file import BetaDeletedFile
+from anthropic.types.beta.beta_file_metadata import BetaFileMetadata
 from anthropic.types.beta.beta_file_scope import BetaFileScope
 from anthropic.types.beta.beta_managed_agents_deleted_session import BetaManagedAgentsDeletedSession
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
@@ -72,8 +74,6 @@ from anthropic.types.beta.beta_managed_agents_system_message_event import (
 from anthropic.types.beta.beta_managed_agents_user_tool_result_event import (
     BetaManagedAgentsUserToolResultEvent,
 )
-from anthropic.types.beta.deleted_file import DeletedFile
-from anthropic.types.beta.file_metadata import FileMetadata
 from anthropic.types.beta.sessions.beta_managed_agents_delete_session_resource import (
     BetaManagedAgentsDeleteSessionResource,
 )
@@ -168,8 +168,8 @@ class FakeSessionsState:
     resources: dict[str, list[SessionResource]] = field(
         default_factory=dict[str, list[SessionResource]]
     )
-    files: dict[str, tuple[FileMetadata, bytes]] = field(
-        default_factory=dict[str, tuple[FileMetadata, bytes]]
+    files: dict[str, tuple[BetaFileMetadata, bytes]] = field(
+        default_factory=dict[str, tuple[BetaFileMetadata, bytes]]
     )
     events: dict[str, list[dict[str, Any]]] = field(default_factory=dict[str, list[dict[str, Any]]])
     sandbox: dict[str, dict[str, bytes]] = field(default_factory=dict[str, dict[str, bytes]])
@@ -190,7 +190,9 @@ class FakeSessionsState:
     delete_unmounts: bool = False
     events_listable_after_archive: bool = True
 
-    def write_output(self, session_id: str, filename: str, content: bytes | str) -> FileMetadata:
+    def write_output(
+        self, session_id: str, filename: str, content: bytes | str
+    ) -> BetaFileMetadata:
         """Test helper: synthesize a downloadable session OUTPUT file, as if
         the agent had written it to `/mnt/session/outputs/` during a turn.
 
@@ -203,7 +205,7 @@ class FakeSessionsState:
         """
         data = content.encode() if isinstance(content, str) else content
         file_id = _ma_id("file")
-        meta = FileMetadata(
+        meta = BetaFileMetadata(
             id=file_id,
             created_at=_now(),
             filename=filename,
@@ -261,25 +263,16 @@ def _paginate(items: list[dict[str, Any]], params: httpx.QueryParams) -> httpx.R
     )
 
 
-def _page_response(items: list[FileMetadata], params: httpx.QueryParams) -> httpx.Response:
-    """`{data, has_more, first_id, last_id}` envelope for files.list
-    (`SyncPage[FileMetadata]`) -- distinct from the cursor-page shape above,
-    per the installed SDK's `pagination.SyncPage`."""
+def _page_response(items: list[BetaFileMetadata], params: httpx.QueryParams) -> httpx.Response:
+    """`{data, next_page}` envelope for files.list (`AsyncPageCursor[BetaFileMetadata]`
+    since anthropic 1.2, which moved the beta Files namespace to the GA shape)."""
     limit = int(params.get("limit", "20"))
-    after_id = params.get("after_id")
-    before_id = params.get("before_id")
-    if after_id is not None:
-        idx = next((i for i, m in enumerate(items) if m.id == after_id), None)
-        items = items[idx + 1 :] if idx is not None else []
-    if before_id is not None:
-        idx = next((i for i, m in enumerate(items) if m.id == before_id), None)
-        items = items[:idx] if idx is not None else []
-    page_items = items[:limit]
+    start = int(params.get("page") or 0)
+    page_items = items[start : start + limit]
+    end = start + len(page_items)
     body = {
         "data": [m.model_dump(mode="json") for m in page_items],
-        "has_more": len(items) > limit,
-        "first_id": page_items[0].id if page_items else None,
-        "last_id": page_items[-1].id if page_items else None,
+        "next_page": str(end) if end < len(items) else None,
     }
     return httpx.Response(200, json=body)
 
@@ -988,7 +981,7 @@ def _handle_files_list(state: FakeSessionsState, request: httpx.Request) -> http
 def _handle_files_upload(state: FakeSessionsState, request: httpx.Request) -> httpx.Response:
     filename, mime_type, content = _parse_multipart_file(request)
     file_id = _ma_id("file")
-    meta = FileMetadata(
+    meta = BetaFileMetadata(
         id=file_id,
         created_at=_now(),
         filename=filename,
@@ -1018,7 +1011,7 @@ def _handle_files_delete(state: FakeSessionsState, file_id: str) -> httpx.Respon
     if state.delete_unmounts:
         for sid, path in state.mount_index.pop(file_id, []):
             state.sandbox.get(sid, {}).pop(path, None)
-    deleted = DeletedFile(id=file_id, type="file_deleted")
+    deleted = BetaDeletedFile(id=file_id, type="file_deleted")
     return httpx.Response(200, json=deleted.model_dump(mode="json"))
 
 

@@ -11,7 +11,7 @@ import asyncio
 from functools import lru_cache
 from time import monotonic
 
-import httpx
+import httpx2
 from anthropic import DEFAULT_CONNECTION_LIMITS
 from daimon.core.anthropic_spend import spend_limit_response
 from daimon.core.runtime_health import record_anthropic_response
@@ -37,20 +37,20 @@ def _process_pacer(requests_per_minute: int) -> _Pacer:
     return _Pacer(requests_per_minute)
 
 
-class SkillsRateLimitedTransport(httpx.AsyncBaseTransport):
+class SkillsRateLimitedTransport(httpx2.AsyncBaseTransport):
     """Pace Skills requests and stop SDK retries at the monthly spend cap."""
 
     def __init__(
-        self, requests_per_minute: int, *, inner: httpx.AsyncBaseTransport | None = None
+        self, requests_per_minute: int, *, inner: httpx2.AsyncBaseTransport | None = None
     ) -> None:
         self._pacer = _process_pacer(requests_per_minute)
         self._inner = (
             inner
             if inner is not None
-            else httpx.AsyncHTTPTransport(limits=DEFAULT_CONNECTION_LIMITS)
+            else httpx2.AsyncHTTPTransport(limits=DEFAULT_CONNECTION_LIMITS)
         )
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         if request.url.path.startswith("/v1/skills"):
             await self._pacer.wait()
         response = await self._inner.handle_async_request(request)

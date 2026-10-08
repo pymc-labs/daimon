@@ -16,7 +16,11 @@ def test_environment_spec_mirrors_sdk() -> None:
     sdk_fields = set(environment_create_params.EnvironmentCreateParams.__annotations__)
     spec_fields = set(EnvironmentSpec.model_fields)
     # metadata synthesized at upload from (account_id, name); betas not author-facing.
-    exempt = {"metadata", "betas"}
+    exempt = {
+        "metadata",
+        "betas",
+        "workspace_id",
+    }  # workspace_id: anthropic 1.4, routing not authoring
     assert spec_fields == sdk_fields - exempt, (
         "EnvironmentSpec drifted from the SDK. "
         f"spec={spec_fields}, sdk-exempt={sdk_fields - exempt}"
@@ -28,7 +32,11 @@ def test_agent_spec_mirrors_sdk() -> None:
     spec_fields = set(AgentSpec.model_fields)
     # metadata synthesized at upload; betas not author-facing; skills is the
     # identity-reference exception (authoring names, not SDK skill params).
-    exempt = {"metadata", "betas"}
+    exempt = {
+        "metadata",
+        "betas",
+        "workspace_id",
+    }  # workspace_id: anthropic 1.4, routing not authoring
     # The spec's `skills`, `skill_repos`, and `isolated` are sibling authoring
     # fields not sent to the SDK (skills resolved at upload; skill_repos
     # consumed by the sync subsystem; isolated is a daimon-side authoring

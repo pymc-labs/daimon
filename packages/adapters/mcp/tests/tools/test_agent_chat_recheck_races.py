@@ -19,7 +19,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing import AGENT_ID, build_turn_router
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import session_response
+from daimon.testing.ma import sdk_http_client, session_response
 from daimon.testing.ma_models import DEFAULT_AGENT_NAME
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -83,7 +83,8 @@ async def test_pin_changed_during_recheck_agent_lookup_prevents_send(
         return router.dispatch(req)
 
     client = AsyncAnthropic(
-        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(changing))
+        api_key="test",
+        http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(changing))),
     )
     token = "sol-review-token"
     claims = {

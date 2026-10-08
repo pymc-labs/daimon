@@ -17,7 +17,9 @@ from typing import Any
 import httpx
 from anthropic.types.beta import (
     BetaManagedAgentsModelConfig,
-    SkillListResponse,
+)
+from anthropic.types.beta import (
+    BetaSkill as SkillListResponse,
 )
 from daimon.core._models import Account, Tenant
 from daimon.core.defaults.ma_index import (

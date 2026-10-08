@@ -33,6 +33,7 @@ from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
     list_response,
+    sdk_http_client,
 )
 from daimon.testing.ma_models import ma_agent, ma_environment
 
@@ -93,7 +94,8 @@ async def test_resource_retrieves_share_inflight_and_expire(
         return router.dispatch(request)
 
     client = AsyncAnthropic(
-        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(dispatch))
+        api_key="test",
+        http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(dispatch))),
     )
     try:
         await asyncio.gather(
@@ -468,7 +470,8 @@ async def test_concurrent_tag_misses_share_listing_and_cache_every_name(
         return router.dispatch(request)
 
     client = AsyncAnthropic(
-        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        api_key="test",
+        http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(handler))),
     )
     cache = new_resolver_cache()
     try:
@@ -543,7 +546,8 @@ async def test_failed_shared_listing_allows_retry(tenant_id: uuid.UUID) -> None:
         return list_response([_agent_payload(agent)])
 
     client = AsyncAnthropic(
-        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        api_key="test",
+        http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(handler))),
     )
     cache = new_resolver_cache()
     try:

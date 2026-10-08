@@ -30,11 +30,11 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     BetaCloudConfigParams,
     BetaEnvironment,
+    BetaFileMetadata,
     BetaManagedAgentsAgent,
     BetaManagedAgentsDeltaEvent,
     BetaManagedAgentsSession,
     BetaManagedAgentsStartEvent,
-    FileMetadata,
 )
 from anthropic.types.beta.sessions.beta_managed_agents_session_error_event import (
     BetaManagedAgentsSessionErrorEvent,
@@ -154,14 +154,14 @@ async def _run_command_turn(client: AsyncAnthropic, session_id: str, command: st
     await asyncio.wait_for(_drain(), timeout=_TURN_TIMEOUT_S)
 
 
-async def _list_entries(client: AsyncAnthropic, session_id: str) -> dict[str, FileMetadata]:
+async def _list_entries(client: AsyncAnthropic, session_id: str) -> dict[str, BetaFileMetadata]:
     page = await client.beta.files.list(scope_id=session_id, betas=[_MA_BETA], limit=1000)
     return {meta.filename: meta for meta in page.data}
 
 
 async def _poll_for_filename(
     client: AsyncAnthropic, session_id: str, filename: str
-) -> FileMetadata | None:
+) -> BetaFileMetadata | None:
     """Poll the listing every 0.5s for up to the index window; None if absent."""
     deadline = asyncio.get_running_loop().time() + _INDEX_WINDOW_S
     while asyncio.get_running_loop().time() < deadline:

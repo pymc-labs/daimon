@@ -10,7 +10,9 @@ import httpx
 import pytest
 from anthropic.types.beta import (
     BetaManagedAgentsModelConfig,
-    SkillListResponse,
+)
+from anthropic.types.beta import (
+    BetaSkill as SkillListResponse,
 )
 from daimon.core.defaults import apply_defaults
 from daimon.core.defaults.metadata import (

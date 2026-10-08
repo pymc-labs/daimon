@@ -23,9 +23,11 @@ import pytest
 from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import (
     BetaManagedAgentsCustomSkill,
-    SkillListResponse,
 )
-from anthropic.types.beta.skills import VersionCreateResponse
+from anthropic.types.beta import (
+    BetaSkill as SkillListResponse,
+)
+from anthropic.types.beta.skills import BetaSkillVersion as VersionCreateResponse
 from cryptography.fernet import MultiFernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -57,6 +59,7 @@ from daimon.testing.ma import (
     build_fake_anthropic,
     list_response,
     not_found_response,
+    sdk_http_client,
 )
 from daimon.testing.ma_models import ma_agent
 from pydantic import SecretStr
@@ -3145,9 +3148,11 @@ async def test_attach_retries_once_on_version_conflict(
 
     anthropic_client = AsyncAnthropic(
         api_key="test",
-        http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(router.dispatch),
-            base_url="https://api.anthropic.com",
+        http_client=sdk_http_client(
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(router.dispatch),
+                base_url="https://api.anthropic.com",
+            )
         ),
         max_retries=0,
     )
@@ -3239,9 +3244,11 @@ async def test_attach_over_cap_records_failure_instead_of_raising(
     router.add("POST", r"/v1/agents/ag_cap", on_update)
     anthropic_client = AsyncAnthropic(
         api_key="test",
-        http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(router.dispatch),
-            base_url="https://api.anthropic.com",
+        http_client=sdk_http_client(
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(router.dispatch),
+                base_url="https://api.anthropic.com",
+            )
         ),
         max_retries=0,
     )

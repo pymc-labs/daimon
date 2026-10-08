@@ -32,8 +32,12 @@ from anthropic.types.beta import (
     BetaManagedAgentsAgent,
     BetaManagedAgentsAnthropicSkill,
     BetaManagedAgentsCustomSkill,
-    SkillCreateResponse,
-    SkillListResponse,
+)
+from anthropic.types.beta import (
+    BetaSkill as SkillCreateResponse,
+)
+from anthropic.types.beta import (
+    BetaSkill as SkillListResponse,
 )
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from daimon.adapters.cli.commands.skills_backfill import (
@@ -47,7 +51,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.user_skills import list_user_skills_for_tenant, upsert_user_skill
-from daimon.testing.ma import MARouter, list_response
+from daimon.testing.ma import MARouter, list_response, sdk_http_client
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -575,7 +579,7 @@ async def test_apply_updates_user_skills_anthropic_id_for_synced(
 
     ma_client_transport = httpx.MockTransport(router.dispatch)
     ma_http = httpx.AsyncClient(transport=ma_client_transport, base_url="https://api.anthropic.com")
-    client = AsyncAnthropic(api_key="test", http_client=ma_http)
+    client = AsyncAnthropic(api_key="test", http_client=sdk_http_client(ma_http))
 
     class _FakeCli:
         local_user = "testuser"

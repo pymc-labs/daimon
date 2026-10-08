@@ -8,12 +8,13 @@ import anthropic
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import DeletedFile
+from anthropic.types.beta import BetaDeletedFile
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.stores.pending_file_deletes import (
     enqueue_pending_file_delete,
     list_due_pending_file_deletes,
 )
+from daimon.testing.ma import sdk_http_client
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = dt.datetime(2026, 5, 29, 12, 0, 0, tzinfo=dt.UTC)
@@ -48,12 +49,13 @@ async def test_sweep_deletes_due_rows_and_leaves_not_due(
             deleted_via_sdk.append(file_id)
             return httpx.Response(
                 200,
-                json=DeletedFile(id=file_id, type="file_deleted").model_dump(mode="json"),
+                json=BetaDeletedFile(id=file_id, type="file_deleted").model_dump(mode="json"),
             )
         raise AssertionError(f"unexpected call: {request.method} {request.url}")
 
     client = AsyncAnthropic(
-        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        api_key="sk-test",
+        http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(handler))),
     )
 
     swept = await sweep_pending_file_deletes(client, db_session_factory, now=NOW)
@@ -90,7 +92,8 @@ async def test_sweep_treats_404_as_success_and_removes_row(
         raise AssertionError(f"unexpected call: {request.method} {request.url}")
 
     client = AsyncAnthropic(
-        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        api_key="sk-test",
+        http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(handler))),
     )
 
     swept = await sweep_pending_file_deletes(client, db_session_factory, now=NOW)
@@ -124,7 +127,8 @@ async def test_sweep_propagates_non_404_and_leaves_row(
         raise AssertionError(f"unexpected call: {request.method} {request.url}")
 
     client = AsyncAnthropic(
-        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        api_key="sk-test",
+        http_client=sdk_http_client(httpx.AsyncClient(transport=httpx.MockTransport(handler))),
     )
 
     with pytest.raises(anthropic.APIError):

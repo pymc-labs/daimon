@@ -26,7 +26,7 @@ import anthropic
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
-from anthropic.types.beta.skill_list_response import SkillListResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse  # SPIKE-SHIM
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.authz import Action, Decision, Place, Subject, authorize

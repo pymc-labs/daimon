@@ -37,6 +37,7 @@ from daimon.core.stores.thread_sessions import (
     mark_turn_active,
 )
 from daimon.testing import build_fake_anthropic
+from daimon.testing.ma import sdk_http_client
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import CHAT_OK_PAYLOAD
@@ -459,8 +460,10 @@ async def test_a_hung_interrupt_does_not_hold_the_sweep(
     anthropic = AsyncAnthropic(
         api_key="test",
         max_retries=MA_MAX_RETRIES,
-        http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(_never_answers), base_url="https://api.anthropic.com"
+        http_client=sdk_http_client(
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(_never_answers), base_url="https://api.anthropic.com"
+            )
         ),
     )
     runtime = build_slack_runtime(fernet_key, db_session_factory, anthropic=anthropic)

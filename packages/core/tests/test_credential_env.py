@@ -9,12 +9,13 @@ import httpx
 import pytest
 import structlog.testing
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import FileMetadata
+from anthropic.types.beta import BetaFileMetadata
 from daimon.core.credential_env import assemble_env_bytes, upload_env_and_mount
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma import sdk_http_client
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _NOW = dt.datetime(2026, 5, 29, 12, 0, 0, tzinfo=dt.UTC)
@@ -105,7 +106,7 @@ def test_assemble_env_bytes_unicode_roundtrips_byte_exact() -> None:
 
 
 class _UploadCapture:
-    """Records POST /v1/files calls and serves a real FileMetadata.
+    """Records POST /v1/files calls and serves a real BetaFileMetadata.
 
     Uploaded multipart body bytes are captured so tests can assert the .env
     content; the handler counts hits so the no-secrets path can assert zero
@@ -121,7 +122,7 @@ class _UploadCapture:
         if request.url.path == "/v1/files" and request.method == "POST":
             self.upload_count += 1
             self.uploaded_bodies.append(request.content)
-            metadata = FileMetadata(
+            metadata = BetaFileMetadata(
                 id=self.file_id,
                 created_at=_NOW,
                 filename=".env",
@@ -136,7 +137,7 @@ class _UploadCapture:
 def _client_for(capture: _UploadCapture) -> AsyncAnthropic:
     transport = httpx.MockTransport(capture.handler)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    return AsyncAnthropic(api_key="test", http_client=http_client)
+    return AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_client))
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 import pytest
-from anthropic.types.beta import FileMetadata
+from anthropic.types.beta import BetaFileMetadata
 from daimon.adapters.teams.attachments import InboundFile
 from daimon.adapters.teams.identity import (
     DENIED,
@@ -348,7 +348,7 @@ async def _consent(
     monkeypatch.setattr(output_delivery, "_POLL_DELAYS_S", (0.0,))  # One listing settles.
     uploads: list[httpx.Request] = []
     deletes: list[str] = []
-    listing = FileMetadata(
+    listing = BetaFileMetadata(
         id="file_1",
         created_at="2026-09-01T00:00:00Z",
         filename="file_example.txt",

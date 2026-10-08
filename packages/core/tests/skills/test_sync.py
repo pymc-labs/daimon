@@ -13,14 +13,14 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from anthropic.types.beta import SkillListResponse
-from anthropic.types.beta.skills import VersionCreateResponse
+from anthropic.types.beta import BetaSkill as SkillListResponse
+from anthropic.types.beta.skills import BetaSkillVersion as VersionCreateResponse
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.skills.discover import DiscoveredSkill
 from daimon.core.skills.sync import summarize_failed_imports, sync_skills
 from daimon.core.specs import SkillSpec
-from daimon.testing.ma import MARouter, list_response
+from daimon.testing.ma import MARouter, list_response, sdk_http_client
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
 
 _TENANT_A = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
@@ -216,7 +216,7 @@ async def test_sync_continues_after_failure(tmp_path: Path) -> None:
 
     transport = httpx.MockTransport(router.dispatch)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    client = AsyncAnthropic(api_key="test", http_client=http_client, max_retries=0)
+    client = AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_client), max_retries=0)
 
     outcomes = await sync_skills(
         client,
@@ -287,7 +287,7 @@ async def test_sync_creates_distinct_skills_when_two_tenants_sync_same_named_ski
 
     transport_a = httpx.MockTransport(router_a.dispatch)
     http_a = httpx.AsyncClient(transport=transport_a, base_url="https://api.anthropic.com")
-    client_a = AsyncAnthropic(api_key="test", http_client=http_a, max_retries=0)
+    client_a = AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_a), max_retries=0)
 
     skill_a = _skill(tmp_path / "a", name="brainstorming")
     outcomes_a = await sync_skills(
@@ -304,7 +304,7 @@ async def test_sync_creates_distinct_skills_when_two_tenants_sync_same_named_ski
 
     transport_b = httpx.MockTransport(router_b.dispatch)
     http_b = httpx.AsyncClient(transport=transport_b, base_url="https://api.anthropic.com")
-    client_b = AsyncAnthropic(api_key="test", http_client=http_b, max_retries=0)
+    client_b = AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_b), max_retries=0)
 
     skill_b = _skill(tmp_path / "b", name="brainstorming")
     outcomes_b = await sync_skills(
@@ -348,7 +348,7 @@ async def test_sync_records_failed_outcome_when_list_is_truncated(tmp_path: Path
 
     transport = httpx.MockTransport(router.dispatch)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
-    client = AsyncAnthropic(api_key="test", http_client=http_client, max_retries=0)
+    client = AsyncAnthropic(api_key="test", http_client=sdk_http_client(http_client), max_retries=0)
 
     outcomes = await sync_skills(
         client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True

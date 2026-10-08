@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import FileMetadata
+from anthropic.types.beta import BetaFileMetadata
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsSpanModelRequestEndEvent,
     BetaManagedAgentsSpanModelUsage,
@@ -1892,8 +1892,8 @@ def _isolated_agent_and_env_router(*, ma_agent_id: str = _MA_AGENT_ID) -> MARout
 
 
 def _file_metadata_payload(file_id: str) -> dict[str, Any]:
-    """A minimal valid ``FileMetadata`` payload for a ``retrieve_metadata`` fake."""
-    return FileMetadata.model_validate(
+    """A minimal valid ``BetaFileMetadata`` payload for a ``retrieve_metadata`` fake."""
+    return BetaFileMetadata.model_validate(
         {
             "id": file_id,
             "created_at": "2026-09-01T00:00:00Z",

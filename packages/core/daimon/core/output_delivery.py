@@ -32,7 +32,7 @@ from dataclasses import dataclass
 import anthropic
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import FileMetadata
+from anthropic.types.beta import BetaFileMetadata
 from daimon.core.checkpoint_prompt import HANDOFF_FILENAME_PREFIX
 from daimon.core.errors import DaimonError
 from daimon.core.media.filenames import sanitize_title
@@ -98,14 +98,14 @@ async def _poll_until_settled(
     *,
     session_id: str,
     sleep: Callable[[float], Awaitable[None]],
-) -> dict[str, FileMetadata]:
+) -> dict[str, BetaFileMetadata]:
     """Poll the session listing until it settles; return downloadable entries by id.
 
     A poll "settles" the sweep only once cumulative elapsed time has reached
     ``_MIN_SETTLE_S`` AND that poll contributed no new downloadable file id.
     An exhausted schedule settles unconditionally.
     """
-    seen: dict[str, FileMetadata] = {}
+    seen: dict[str, BetaFileMetadata] = {}
     elapsed = 0.0
     polls = 0
     for delay in _POLL_DELAYS_S:
