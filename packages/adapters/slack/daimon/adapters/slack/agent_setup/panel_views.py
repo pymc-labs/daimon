@@ -576,6 +576,7 @@ def build_avatar_upload_form(*, meta: PanelMetadata) -> dict[str, Any]:
                     "max_files": 1,
                 },
             },
+            {"type": "divider"},
             _context("File types: PNG, JPG, GIF or WebP."),
         ],
         private_metadata=encode_panel_metadata(meta),
@@ -592,6 +593,8 @@ def build_avatar_details_view(*, meta: PanelMetadata) -> dict[str, Any]:
         blocks=[
             _section("Anyone who sees a message can open the picture."),
             _section("The old picture may still appear for a while."),
+            {"type": "divider"},
+            _context("Agent setup · Picture"),
         ],
         private_metadata=encode_panel_metadata(meta),
         callback_id="agent_setup__avatar_details_view",
@@ -609,9 +612,9 @@ def build_avatar_status_view(
         blocks=[
             _section(title + ("." if separator else "")),
             *([_section(next_step)] if next_step else []),
+            {"type": "divider"},
             *(
                 [
-                    {"type": "divider"},
                     {
                         "type": "actions",
                         "elements": [
@@ -626,6 +629,7 @@ def build_avatar_status_view(
                 if retry
                 else []
             ),
+            _context("Agent setup · Picture"),
         ],
         private_metadata=encode_panel_metadata(meta),
         callback_id=CALLBACK_AVATAR_UPLOAD,
