@@ -19,7 +19,7 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.github_credentials import build_multifernet
-from daimon.core.stores import github_access, github_connect
+from daimon.core.stores import github_access, github_app_installations, github_connect
 from daimon.core.stores.accounts import set_external, set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import list_events
@@ -68,6 +68,7 @@ def test_routes_not_mounted_when_unconfigured(
 @pytest.mark.asyncio
 async def test_connection_happy_path_and_rechecks(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessionmaker = committing_sessionmaker
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
@@ -83,6 +84,7 @@ async def test_connection_happy_path_and_rechecks(
         )
     repo_admin = True
     repo_two_admin = False
+    installation_available = True
     requests: list[httpx.Request] = []
 
     def github_handler(request: httpx.Request) -> httpx.Response:
@@ -96,6 +98,19 @@ async def test_connection_happy_path_and_rechecks(
             assert request.headers["authorization"].startswith("Basic ")
             assert request.content == b'{"access_token":"user-token"}'
             return httpx.Response(204)
+        if request.url.path == "/app/installations/77":
+            assert request.headers["authorization"] == "Bearer app-jwt"
+            if not installation_available:
+                return httpx.Response(404)
+            return httpx.Response(
+                200,
+                json={
+                    "id": 77,
+                    "account": {"id": 55, "login": "example", "type": "Organization"},
+                    "repository_selection": "selected",
+                    "suspended_at": None,
+                },
+            )
         assert request.headers["authorization"] == "Bearer user-token"
         if request.url.path == "/user":
             return httpx.Response(200, json={"id": 17})
@@ -136,6 +151,10 @@ async def test_connection_happy_path_and_rechecks(
     key = Fernet.generate_key().decode()
     settings = _settings(key)
     fernet = build_multifernet((key,))
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.oauth_github.build_app_jwt",
+        lambda *_args, **_kwargs: "app-jwt",
+    )
 
     def client_factory() -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(github_handler))
@@ -230,6 +249,14 @@ async def test_connection_happy_path_and_rechecks(
         async with sessionmaker.begin() as session:
             await set_external(session, account_id, False)
             await set_role(session, account_id, Role.ADMIN)
+        installation_available = False
+        unavailable = await browser.post(
+            "/oauth/github/confirm", data={"state": state, "repo": "101"}
+        )
+        assert unavailable.status_code == 502
+        async with sessionmaker() as session:
+            assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
+        installation_available = True
         confirmed = await browser.post(
             "/oauth/github/confirm",
             data={
@@ -244,6 +271,18 @@ async def test_connection_happy_path_and_rechecks(
             repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
             assert {repo.repo_id: repo.max_access for repo in repos} == {101: "write", 102: "read"}
             assert all(repo.installation_id == 77 for repo in repos)
+            installation = await github_app_installations.get(session, installation_id=77)
+            assert installation is not None
+            assert installation.app == "github_app"
+            assert installation.account_login == "example"
+            assert installation.account_id == 55
+            assert installation.account_type == "Organization"
+            assert installation.repository_selection == "selected"
+            assert set(installation.repo_full_names) == {"example/one", "example/two"}
+            assert (
+                await github_app_installations.get_for_repo(session, repo_full_name="example/one")
+                is None
+            )
             events = await list_events(session, tenant_id=tenant_id)
             assert len(events) == 1
             assert events[0].operation == "github_connect"

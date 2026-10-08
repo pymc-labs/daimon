@@ -7,6 +7,7 @@ import hashlib
 import html
 import logging
 import secrets
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlencode
@@ -15,9 +16,10 @@ import httpx
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.branded_pages import branded_page
 from daimon.core.config import Settings
+from daimon.core.github_app_auth import build_app_jwt, get_app_installation_details
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.github_requester_access import list_github_pages
-from daimon.core.stores import github_connect
+from daimon.core.stores import github_app_installations, github_connect
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, Field
@@ -139,11 +141,15 @@ def build_oauth_github_routes(
         or config.client_id is None
         or config.client_secret is None
         or config.app_slug is None
+        or config.app_id is None
+        or config.private_key is None
     ):
         raise ValueError("GitHub connection is not configured")
     factory = client_factory or (lambda: httpx.AsyncClient(timeout=20.0, follow_redirects=False))
     client_id = config.client_id
     secret = config.client_secret.get_secret_value()
+    app_id = config.app_id
+    private_key = config.private_key.get_secret_value()
     callback_url = f"{root}/oauth/github/callback"
 
     async def connect(request: Request) -> Response:
@@ -305,6 +311,26 @@ def build_oauth_github_routes(
                         max_access=access,
                     )
                 )
+            app_jwt = build_app_jwt(private_key, app_id, now=int(time.time()))
+            by_installation = {installation.id: installation for installation in installations}
+            try:
+                async with factory() as client:
+                    details = [
+                        await get_app_installation_details(
+                            client, jwt=app_jwt, installation_id=installation_id
+                        )
+                        for installation_id in sorted({repo.installation_id for repo in repos})
+                    ]
+            except (httpx.HTTPError, ValueError):
+                return _error("GitHub could not verify the App installation.", 502)
+            if any(
+                detail.account_id != by_installation[detail.installation_id].owner_id
+                or detail.account_login.casefold()
+                != by_installation[detail.installation_id].owner_login.casefold()
+                or detail.suspended_at is not None
+                for detail in details
+            ):
+                return _error("GitHub App installation is unavailable.", 403)
             async with sessionmaker.begin() as session:
                 saved = await github_connect.confirm(
                     session,
@@ -314,6 +340,16 @@ def build_oauth_github_routes(
                     repos=repos,
                 )
                 if saved:
+                    for detail in details:
+                        await github_app_installations.upsert_github_app(
+                            session,
+                            installation_id=detail.installation_id,
+                            account_id=detail.account_id,
+                            account_login=detail.account_login,
+                            account_type=detail.account_type,
+                            repository_selection=detail.repository_selection,
+                            suspended_at=detail.suspended_at,
+                        )
                     await append_event(
                         session,
                         tenant_id=invitation.tenant_id,

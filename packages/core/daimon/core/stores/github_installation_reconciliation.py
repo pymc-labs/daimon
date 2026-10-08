@@ -81,7 +81,8 @@ async def enqueue(
         # order so a deletion cannot deadlock an in-flight snapshot write.
         await session.execute(
             delete(GitHubAppInstallation).where(
-                GitHubAppInstallation.installation_id == installation_id
+                GitHubAppInstallation.installation_id == installation_id,
+                GitHubAppInstallation.app == "legacy",
             )
         )
     return True
@@ -204,14 +205,15 @@ async def finish(
     if account_login is None:
         await session.execute(
             delete(GitHubAppInstallation).where(
-                GitHubAppInstallation.installation_id == job.installation_id
+                GitHubAppInstallation.installation_id == job.installation_id,
+                GitHubAppInstallation.app == "legacy",
             )
         )
     else:
         if repos is None:
             raise ValueError("a live installation requires a complete repository snapshot")
         previous = await session.get(GitHubAppInstallation, job.installation_id)
-        if previous is not None:
+        if previous is not None and previous.app == "legacy":
             await queue_new_repos(
                 session,
                 installation_id=job.installation_id,
@@ -233,6 +235,7 @@ async def finish(
                     "repo_full_names": repos,
                     "updated_at": now,
                 },
+                where=GitHubAppInstallation.app == "legacy",
             )
         )
         await session.execute(stmt)

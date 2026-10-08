@@ -9,7 +9,10 @@ No module-level singletons.
 
 from __future__ import annotations
 
-from daimon.core._models import GitHubAppInstallation
+from datetime import datetime
+from typing import Literal
+
+from daimon.core._models import GitHubAppInstallation, TenantGitHubRepo
 from daimon.core.stores.domain import GitHubAppInstallationRow
 from sqlalchemy import any_, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -38,11 +41,54 @@ async def upsert(
                 "repo_full_names": repo_full_names,
                 "updated_at": func.now(),
             },
+            where=GitHubAppInstallation.app == "legacy",
         )
         .returning(GitHubAppInstallation)
     )
     result = await session.execute(stmt.execution_options(populate_existing=True))
     orm = result.scalar_one()
+    await session.flush()
+    return GitHubAppInstallationRow.model_validate(orm)
+
+
+async def upsert_github_app(
+    session: AsyncSession,
+    *,
+    installation_id: int,
+    account_id: int,
+    account_login: str,
+    account_type: str,
+    repository_selection: Literal["all", "selected"],
+    suspended_at: datetime | None,
+) -> GitHubAppInstallationRow:
+    """Record new-App metadata and the confirmed repository set in one transaction."""
+    await session.flush()
+    names = await session.scalars(
+        select(TenantGitHubRepo.repo_full_name).where(
+            TenantGitHubRepo.installation_id == installation_id,
+            TenantGitHubRepo.status == "active",
+        )
+    )
+    repo_full_names = sorted(set(names))
+    values = {
+        "account_id": account_id,
+        "account_login": account_login,
+        "account_type": account_type,
+        "repository_selection": repository_selection,
+        "suspended_at": suspended_at,
+        "repo_full_names": repo_full_names,
+        "app": "github_app",
+    }
+    stmt = (
+        pg_insert(GitHubAppInstallation)
+        .values(installation_id=installation_id, **values)
+        .on_conflict_do_update(
+            index_elements=["installation_id"],
+            set_={**values, "updated_at": func.now()},
+        )
+        .returning(GitHubAppInstallation)
+    )
+    orm = (await session.execute(stmt.execution_options(populate_existing=True))).scalar_one()
     await session.flush()
     return GitHubAppInstallationRow.model_validate(orm)
 
@@ -71,7 +117,8 @@ async def get_for_repo(
     Returns the first matching row or None.
     """
     stmt = select(GitHubAppInstallation).where(
-        any_(GitHubAppInstallation.repo_full_names) == repo_full_name
+        GitHubAppInstallation.app == "legacy",
+        any_(GitHubAppInstallation.repo_full_names) == repo_full_name,
     )
     result = await session.execute(stmt)
     orm = result.scalar_one_or_none()

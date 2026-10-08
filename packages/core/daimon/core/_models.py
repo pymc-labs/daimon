@@ -1384,10 +1384,14 @@ class GitHubAppInstallation(Base):
     """
 
     __tablename__ = "github_app_installations"
+    __table_args__ = (
+        CheckConstraint("app IN ('legacy', 'github_app')", name="ck_github_app_installations_app"),
+    )
 
     installation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     account_login: Mapped[str] = mapped_column(Text, nullable=False)
     repo_full_names: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    app: Mapped[str] = mapped_column(Text, nullable=False, server_default="legacy")
     account_id: Mapped[int | None] = mapped_column(BigInteger)
     account_type: Mapped[str | None] = mapped_column(Text)
     repository_selection: Mapped[str | None] = mapped_column(Text)
