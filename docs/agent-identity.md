@@ -170,13 +170,15 @@ Named-agent routing is tracked separately from this identity work.
 ## Avatars
 
 - Table `agent_avatars (tenant_id, agent_name, token, sha256, png, source,
-  face_combo, updated_by_account_id, updated_at)`, keyed by tenant and the agent's daimon
+  face_combo, face_thumbnail, updated_by_account_id, updated_at)`, keyed by tenant and the agent's daimon
   name normalized as #409 normalizes names (NFKC, casefolded), so an agent the
   resolver recreates keeps its avatar. A rename moves the row; archiving or
   deleting the agent, and tenant purge, delete it, so a later agent reusing
   the name starts from a fresh default. Uploads remain 256×256 PNG, at most 256 KB.
-- With the identity switch on, the default is a 512×512 mascot face generated
-  once at first use. The production mascot supplies the base face and the
+- With the identity switch on, the first turn reads the current picture without
+  waiting for artwork. A missing face is generated after the turn proceeds; an
+  existing initials URL stays valid until the new PNG is stored. The default is
+  a 512×512 mascot face. The production mascot supplies the base face and the
   canonical expression sprites supply relaxed closed eyes; the remaining eyes
   are small plain ovals. The production laugh mouth and two restrained warm
   smiles complete the expressions. Relaxed brows, a 72-colour background palette,
@@ -184,11 +186,11 @@ Named-agent routing is tracked separately from this identity work.
   60% production mouths, followed by friendly smiles.
   Blue, teal, muted green and lavender backgrounds are favoured over bright
   yellow and lime. Candidates are compared as 20 px circular thumbnails against
-  existing faces in the tenant; hue is spread against previously assigned faces
+  stored 20 px thumbnails of existing faces in the tenant; hue is spread against previously assigned faces
   and the built-in Daimon before expression distance.
   The layer files, their hashes, and draw weights are listed in the package's
   face manifest. The selected layer IDs, including the base, and PNG are stored
-  together, so later catalogue edits
+  with a 20 px thumbnail, so later catalogue edits
   do not change earlier assignments. Retired layers stay available to render
   stored variants. Reset renders the same combination with a new token. The
   built-in agent keeps its fixed classic platform avatar.

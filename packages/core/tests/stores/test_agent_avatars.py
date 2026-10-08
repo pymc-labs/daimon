@@ -58,6 +58,16 @@ async def test_avatar_lifecycle_and_resolver(db_session: AsyncSession) -> None:
     )
     assert built_in.builtin and built_in.avatar_url is None
 
+    pending = await resolve_agent_identity(
+        db_session,
+        tenant_id=tenant.id,
+        agent_name="ＡＤＡ",
+        is_builtin=False,
+        public_base_url="https://example.test/",
+        enabled=True,
+    )
+    assert pending.avatar_url is None
+    row = await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="ada")
     identity = await resolve_agent_identity(
         db_session,
         tenant_id=tenant.id,
@@ -67,7 +77,6 @@ async def test_avatar_lifecycle_and_resolver(db_session: AsyncSession) -> None:
         enabled=True,
     )
     assert identity.name == "ＡＤＡ"
-    row = await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="ada")
     assert normalize_agent_name("ＡＤＡ") == "ada"
     assert identity.avatar_url == f"https://example.test/avatars/{row.token}/{row.sha256[:12]}.png"
     assert (
@@ -130,4 +139,39 @@ async def test_avatar_url_absent_without_public_base(db_session: AsyncSession) -
         enabled=True,
     )
     assert identity.avatar_url is None
-    assert await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="Helper")
+    assert (
+        await db_session.scalar(
+            text("SELECT count(*) FROM agent_avatars WHERE tenant_id = :tenant_id"),
+            {"tenant_id": tenant.id},
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_stored_face_keeps_png_url_and_does_not_block_other_agents(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    row = await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="Analyst")
+    await db_session.execute(
+        text(
+            "UPDATE agent_avatars SET face_combo = :bad "
+            "WHERE tenant_id = :tenant_id AND agent_name = 'analyst'"
+        ),
+        {"bad": '{"v":2,"variant":["unknown"]}', "tenant_id": tenant.id},
+    )
+    db_session.expire_all()
+    identity = await resolve_agent_identity(
+        db_session,
+        tenant_id=tenant.id,
+        agent_name="Analyst",
+        is_builtin=False,
+        public_base_url="https://example.test",
+        enabled=True,
+    )
+    assert identity.avatar_url == f"https://example.test/avatars/{row.token}/{row.sha256[:12]}.png"
+    other = await get_or_create_avatar(
+        db_session, tenant_id=tenant.id, agent_name="Research", face_enabled=True
+    )
+    assert other.face_combo is not None

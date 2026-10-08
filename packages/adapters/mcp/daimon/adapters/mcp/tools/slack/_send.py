@@ -244,6 +244,7 @@ async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dic
                 ),
                 public_base_url=runtime.settings.mcp.app_root_url,
                 enabled=runtime.settings.agent_identity.enabled,
+                background_sessionmaker=runtime.session_factory,
             )
     except (anthropic.APIError, SQLAlchemyError) as exc:
         log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)

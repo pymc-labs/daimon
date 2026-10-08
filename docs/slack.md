@@ -335,7 +335,7 @@ missing-scope result immediately; otherwise the result expires within 15 minutes
 Workspace admins can open `/agent-setup`, select an agent, then use the Picture
 row's **Change** button to upload one PNG, JPG, GIF, or WebP image (up to 2 MB).
 The image is center-cropped to a 256×256 PNG. **Reset** restores the assigned
-Daimon face when identity is on, or the initials picture when it is off. Each
+default Daimon face. The Picture control is hidden when identity is off. Each
 change gets a new URL. Pictures are public: anyone who sees a message can open
 its image, and platform caches can keep a copy after the picture changes.
 Uploaded files stay in the uploader's Slack files until

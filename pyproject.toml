@@ -292,7 +292,7 @@ testpaths = ["packages/core/tests", "packages/adapters/cli/tests", "packages/ada
 addopts = "--import-mode=importlib -m 'not contract and not slow'"
 markers = [
     "contract: live MA API tests -- opt-in only, never gate CI",
-    "slow: spawns real marimo subprocesses (port 8100-8199) — opt-in",
+    "slow: expensive image distributions or real marimo subprocesses (port 8100-8199) — opt-in",
     "no_cli_local_seed: CLI test manages its own tenant lifecycle -- skip the autouse cli:local seed",
     "fresh_schema: DB test runs DDL -- give it a private throwaway schema instead of the wiped per-worker one",
 ]

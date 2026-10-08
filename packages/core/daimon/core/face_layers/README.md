@@ -5,9 +5,13 @@ layer has a stable `id`, a `weight`, and a `retired` flag. Layer entries also na
 their PNG and placement. The renderer bundles these files with `daimon-core`.
 
 The avatar row stores a variant made of seven IDs: background, eyes, mouth, hat,
-eyewear, brows, and base. It also stores the rendered PNG. Posting reuses that row;
+eyewear, brows, and base. It also stores the rendered PNG and a compact 20 px
+thumbnail used when assigning other agents. Posting reuses that row;
 uploading a picture retains the variant; Reset renders the same variant again.
 The identity switch must be on for a new default face to be assigned.
+The first turn uses the current picture or none and queues missing artwork in a
+background database session. The stored PNG's URL remains valid until the new
+face is ready.
 
 ## Edit the catalogue
 

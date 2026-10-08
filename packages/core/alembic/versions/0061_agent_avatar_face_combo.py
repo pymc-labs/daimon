@@ -14,7 +14,9 @@ depends_on: str | None = None
 
 def upgrade() -> None:
     op.add_column("agent_avatars", sa.Column("face_combo", sa.Text(), nullable=True))
+    op.add_column("agent_avatars", sa.Column("face_thumbnail", sa.LargeBinary(), nullable=True))
 
 
 def downgrade() -> None:
+    op.drop_column("agent_avatars", "face_thumbnail")
     op.drop_column("agent_avatars", "face_combo")

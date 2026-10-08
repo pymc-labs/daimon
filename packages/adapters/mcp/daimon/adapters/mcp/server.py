@@ -10,6 +10,7 @@ any collaborator the caller supplied.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from datetime import timedelta
@@ -177,18 +178,7 @@ def _build_avatar_route(
             return Response(status_code=404)
         png = row.png
         if size_arg is not None:
-            from io import BytesIO
-
-            from PIL import Image
-
-            with Image.open(BytesIO(png)) as original:
-                target = int(size_arg)
-                if original.size != (target, target):
-                    output = BytesIO()
-                    original.convert("RGB").resize((target, target), Image.Resampling.LANCZOS).save(
-                        output, format="PNG"
-                    )
-                    png = output.getvalue()
+            png = await asyncio.to_thread(_avatar_at_size, png, int(size_arg))
         return Response(
             png,
             media_type="image/png",
@@ -196,6 +186,21 @@ def _build_avatar_route(
         )
 
     return avatar
+
+
+def _avatar_at_size(png: bytes, target: int) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    with Image.open(BytesIO(png)) as original:
+        if original.size == (target, target):
+            return png
+        output = BytesIO()
+        original.convert("RGB").resize((target, target), Image.Resampling.LANCZOS).save(
+            output, format="PNG"
+        )
+        return output.getvalue()
 
 
 def create_mcp_app(

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import cast
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 from pydantic import BaseModel, Field
 
 type FaceCombo = tuple[int, str, str, int, str, str, str]
@@ -354,6 +354,8 @@ def _assets(
         if spec.file not in files:
             with Image.open(_LAYER_DIR / spec.file) as source:
                 layer = source.convert("RGBA")
+            if spec.file == "hat-cap.png":
+                layer = _repair_cap(layer)
             box = layer.getchannel("A").getbbox()
             if box is None:
                 raise ValueError(f"empty face layer: {spec.id}")
@@ -382,6 +384,24 @@ def _recolour(part: Image.Image, colour: str) -> Image.Image:
     shade = np.clip(luminosity / max(lit, 1), 0.6, 1.3)
     new_rgb = np.where(body, np.clip(_rgb(colour) * shade, 0, 255), rgb)
     return Image.fromarray(np.dstack([new_rgb, pixels[..., 3]]).astype(np.uint8), "RGBA")
+
+
+def _repair_cap(part: Image.Image) -> Image.Image:
+    """Fill transparent extraction gaps inside the cap and brim."""
+    pixels = np.array(part)
+    closed = np.asarray(
+        part.getchannel("A").filter(ImageFilter.MaxFilter(21)).filter(ImageFilter.MinFilter(21))
+    )
+    holes = (pixels[..., 3] < 128) & (closed >= 128)
+    pixels[holes] = (52, 133, 140, 255)
+    for row in pixels:
+        occupied = np.flatnonzero(row[:, 3] >= 128)
+        if len(occupied) < 2:
+            continue
+        inner = row[occupied[0] : occupied[-1] + 1]
+        gaps = inner[:, 3] < 128
+        inner[gaps] = (52, 133, 140, 255)
+    return Image.fromarray(pixels, "RGBA")
 
 
 def render_image(combo: FaceCombo, size: int = 512) -> Image.Image:
@@ -469,7 +489,7 @@ def render(combo: FaceCombo, size: int = 512) -> bytes:
     return output.getvalue()
 
 
-@lru_cache(maxsize=32768)
+@lru_cache(maxsize=4096)
 def thumbnail(combo: FaceCombo) -> np.ndarray:
     mask = Image.new("L", (80, 80), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, 79, 79), fill=255)
@@ -536,7 +556,12 @@ def candidates(agent_key: str, count: int = 48) -> list[FaceCombo]:
 
 
 def choose(
-    agent_key: str, existing: list[FaceCombo], *, count: int | None = None, min_plain: float = 4.0
+    agent_key: str,
+    existing: list[FaceCombo],
+    *,
+    count: int | None = None,
+    min_plain: float = 4.0,
+    existing_thumbnails: list[np.ndarray] | None = None,
 ) -> FaceCombo:
     """Balance colours first, then prefer distinct plain canonical faces."""
     used = set(existing)
@@ -556,7 +581,11 @@ def choose(
                 combo[0],
             ),
         )
-    previous = np.stack([thumbnail(combo) for combo in existing])
+    previous = np.stack(
+        existing_thumbnails
+        if existing_thumbnails is not None
+        else [thumbnail(combo) for combo in existing]
+    )
     previous_colours = [combo[0] for combo in existing]
     category_uses = Counter(catalogue.colours[colour].group for colour in previous_colours)
     eye_uses = Counter(combo[1] for combo in existing)
@@ -619,6 +648,23 @@ def choose(
             ),
         )
 
+    # Keep props in the minority even when a dense tenant needs distinction.
+    hat_share = sum(combo[3] != CLASSIC[3] for combo in existing) / (len(existing) + 1)
+    shade_share = sum(combo[4] != "eyewear-none" for combo in existing) / (len(existing) + 1)
+    balanced = [
+        combo
+        for combo in options
+        if (combo[3] == CLASSIC[3] or hat_share < catalogue.manifest.draw.headwear_share)
+        and (combo[4] == "eyewear-none" or shade_share < catalogue.manifest.draw.shades_share)
+    ]
+    options = balanced or options
+    plain = [combo for combo in options if combo[3] == CLASSIC[3] and combo[4] == "eyewear-none"]
+    classic_share = sum(_is_classic(combo) for combo in existing) / (len(existing) + 1)
+    classic_plain = [combo for combo in plain if _is_classic(combo)]
+    if classic_plain and len(existing) < 24 and classic_share < 0.55:
+        distinct_classic = [combo for combo in classic_plain if distance(combo) >= 3]
+        if distinct_classic:
+            return pick(distinct_classic)
     distinct_plain = [combo for combo in plain if distance(combo) >= min_plain]
     if distinct_plain:
         return pick(distinct_plain)

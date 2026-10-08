@@ -2204,6 +2204,7 @@ class DaimonBot(commands.Bot):
                     is_builtin=agent.name.casefold() == "daimon",
                     public_base_url=self.runtime.settings.mcp.app_root_url,
                     enabled=self.runtime.settings.agent_identity.enabled,
+                    background_sessionmaker=self.runtime.sessionmaker,
                 )
         except Exception as exc:
             log.warning("discord.identity_resolution_failed", error_type=type(exc).__name__)
@@ -2780,6 +2781,7 @@ class DaimonBot(commands.Bot):
                     is_builtin=agent.name.casefold() == "daimon",
                     public_base_url=self.runtime.settings.mcp.app_root_url,
                     enabled=self.runtime.settings.agent_identity.enabled,
+                    background_sessionmaker=self.runtime.sessionmaker,
                 )
         except Exception as exc:
             log.warning("discord.identity_resolution_failed", error_type=type(exc).__name__)

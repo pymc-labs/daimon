@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Daimon face built from the production mascot and canonical expressions.
   Layer IDs and draw weights live in a manifest; stored variants keep their
   appearance when the draw table changes.
+  First-use face generation runs after a turn starts, and stored 20 px
+  thumbnails keep assignment fast in larger workspaces.
   Public avatar URLs can serve 128 px and 512 px images; uploads and the
   identity-off behavior keep their existing paths.
 - Agent identity now has a deployment switch, `DAIMON_AGENT_IDENTITY__ENABLED`,
