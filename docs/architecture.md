@@ -171,7 +171,8 @@ without an error reply.
 After admission, Slack resolves the answering agent's message name and avatar
 once for the turn. The status card and each answer or continuation post carry
 that identity in Slack's message header. The built-in Daimon agent uses the
-app header. Slack is expected to keep the header when the status card is edited into an
+app header. A missing face is queued for generation after the turn proceeds;
+the current picture remains in use until it is stored. Slack is expected to keep the header when the status card is edited into an
 answer; each new turn post is recorded under the turn's agent and card intent.
 
 Discord starts a turn on a direct bot mention or a reply to a recorded bot or

@@ -78,6 +78,7 @@ async def dispatch_pending_continuations(
                             is_builtin=row.target_name.casefold() == "daimon",
                             public_base_url=public_base_url,
                             enabled=identity_enabled,
+                            background_sessionmaker=sessionmaker,
                         )
                 except Exception as exc:
                     log.warning(

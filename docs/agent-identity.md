@@ -1,8 +1,8 @@
 # Agent identity on every message
 
-Status: delivery in progress; Slack identity merged, Slack avatar panel and Teams
-prefix in PR 3, Discord avatar panel in PR 4. Owner: the
-agent-identity effort.
+Status: delivery in progress. The per-agent name and avatar paths, setup panel
+controls, and deployment switch are implemented. The face generator is being
+validated on staging. Owner: the agent-identity effort.
 
 ## Switch
 
@@ -165,25 +165,47 @@ Agreed with the operator-model effort (2026-10-07):
 Where nothing is derivable (a bare channel message), the cascade answers as
 today, and the answer now shows who answered.
 
-This lands after #409 merges (after Oct 11) and is built on its code.
+Named-agent routing is tracked separately from this identity work.
 
 ## Avatars
 
-- Table `agent_avatars (tenant_id, agent_name, token, sha256, png, source,
+- Table `agent_avatars (tenant_id, agent_name, token, sha256, png, png_128,
+  png_512, previous_sha256, previous_png, previous_png_128,
+  previous_png_512, source, face_combo, face_thumbnail,
   updated_by_account_id, updated_at)`, keyed by tenant and the agent's daimon
   name normalized as #409 normalizes names (NFKC, casefolded), so an agent the
   resolver recreates keeps its avatar. A rename moves the row; archiving or
   deleting the agent, and tenant purge, delete it, so a later agent reusing
-  the name starts from a fresh default. PNG, 256×256, at most 256 KB.
-- Default: generated once on first use, the agent's initials on a colour
-  picked from a fixed palette by a hash of the name (Pillow,
-  `ImageFont.load_default(size=…)`, no font file shipped). `source='default'`.
+  the name starts from a fresh default. Uploads remain 256×256 PNG, at most 256 KB.
+- With the identity switch on, the first turn reads the current picture without
+  waiting for artwork. A missing face is generated after the turn proceeds; an
+  existing initials URL stays valid after the new PNG is stored, until an admin
+  changes or resets the picture. The default is
+  a 512×512 mascot face. The production mascot supplies the base face and the
+  canonical expression sprites supply relaxed closed eyes; the remaining eyes
+  are small plain ovals. The production laugh mouth and two restrained warm
+  smiles complete the expressions. Relaxed brows, a 72-colour background palette,
+  headwear and shades provide variation. Assignment targets 75% closed eyes and
+  60% production mouths, followed by friendly smiles.
+  Blue, teal, muted green and lavender backgrounds are favoured over bright
+  yellow and lime. Candidates are compared as 20 px circular thumbnails against
+  stored 20 px thumbnails of existing faces in the tenant; hue is spread against previously assigned faces
+  and the built-in Daimon before expression distance.
+  The layer files, their hashes, and draw weights are listed in the package's
+  face manifest. The selected layer IDs, including the base, and PNG are stored
+  with a 20 px thumbnail, so later catalogue edits
+  do not change earlier assignments. Retired layers stay available to render
+  stored variants. Reset renders the same combination with a new token. The
+  built-in agent keeps its fixed classic platform avatar.
+- With the switch off, no default row is created by message posting. The legacy
+  initials generator remains available to callers that explicitly request it.
 - Served publicly by the MCP service at `/avatars/{token}/{sha256[:12]}.png`
   (`token` random and replaced on every change, so the URL names no tenant or
   agent; the hash busts Slack's and Discord's caches; `Cache-Control:
   immutable`). Avatars are public by nature: anyone who sees a message can
   open its image, and platform and browser caches keep it after we delete it.
-  The panel says so.
+  The panel says so. The same route accepts `?size=128` or `?size=512` for a
+  resized PNG; a size without a query returns the stored bytes.
 - Setup panel: an Avatar row on the agent's detail screen with **Change** and
   **Reset** (back to the generated one). Change takes an uploaded image, never
   a URL we fetch: a Slack modal `file_input` (downloaded from Slack's file API

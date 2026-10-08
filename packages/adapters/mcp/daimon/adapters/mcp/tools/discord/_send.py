@@ -180,6 +180,7 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                             is_builtin=actor_name.casefold() == "daimon",
                             public_base_url=runtime.settings.mcp.app_root_url,
                             enabled=runtime.settings.agent_identity.enabled,
+                            background_sessionmaker=runtime.session_factory,
                         )
             except Exception as exc:
                 _log.warning(

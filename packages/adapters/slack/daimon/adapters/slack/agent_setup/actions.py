@@ -112,6 +112,7 @@ from daimon.adapters.slack.setup_conversations import (
     setup_link,
     setup_reply_button,
 )
+from daimon.core.agent_identity import resolve_agent_identity
 from daimon.core.answering_map import AnsweringMap, routed_agent_names
 from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
@@ -125,7 +126,6 @@ from daimon.core.panel_operator_tokens import list_panel_operator_tokens
 from daimon.core.roster import Roster, paginate
 from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.agent_avatars import get_or_create_avatar
 from daimon.core.stores.channel_admins import get_channel_admins, list_channel_admins
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -547,13 +547,16 @@ async def load_details_view(
             and not details.daimon_managed
             and details.name != runtime.deployment_default.agent_name
         ):
-            avatar = await get_or_create_avatar(
-                session, tenant_id=tenant_id, agent_name=details.name
+            identity = await resolve_agent_identity(
+                session,
+                tenant_id=tenant_id,
+                agent_name=details.name,
+                is_builtin=False,
+                public_base_url=runtime.settings.mcp.app_root_url,
+                enabled=True,
+                background_sessionmaker=runtime.sessionmaker,
             )
-            base = runtime.settings.mcp.app_root_url
-            if base:
-                avatar_url = f"{base.rstrip('/')}/avatars/{avatar.token}/{avatar.sha256[:12]}.png"
-            await session.commit()
+            avatar_url = identity.avatar_url
     view = build_details_view(
         details,
         meta=meta.with_view("details", agent_name=agent_name),

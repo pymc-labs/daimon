@@ -241,7 +241,7 @@ async def test_reset_rotates_token_and_restores_default(
         new = await get_or_create_avatar(session, tenant_id=tenant.id, agent_name="Ada")
     assert new.token != old.token and new.source == "default"
     async with db_session_factory() as session:
-        assert await get_avatar_by_token(session, token=old.token) is None
+        assert await get_avatar_by_token(session, token=old.token, sha12=old.sha256[:12]) is None
         events = await list_events(session, tenant_id=tenant.id)
     assert any(
         event.operation == "agent_avatar_reset" and event.agent_name == "Ada" for event in events

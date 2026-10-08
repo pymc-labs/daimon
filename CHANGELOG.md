@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Agents can offer an admin a private GitHub connect link bound to the current agent; members can record a setup request. `/github connect` is available in Discord and Slack with a private button. Self-serve links activate only agents with no saved GitHub key, working repo or skill repo, and no channel pin. An operator can issue an agent-bound CLI link for a saved-key agent; it stages an update that requires **Update and restart chats**. New selections default to **Read and write**: push branches, open issues and pull requests. **Read only** reads code, issues and pull requests.
+- With agent identity enabled, new default pictures use a tenant-assigned
+  Daimon face built from the production mascot and canonical expressions.
+  Layer IDs and draw weights live in a manifest; stored variants keep their
+  appearance when the draw table changes.
+  First-use face generation runs after a turn starts, and stored 20 px
+  thumbnails keep assignment fast in larger workspaces.
+  Public avatar URLs can serve pre-rendered 128 px and 512 px images. An
+  initials URL remains valid after its generated face is stored, until an
+  admin changes the picture. Uploads and the identity-off behavior keep their
+  existing paths.
 - Agent identity now has a deployment switch, `DAIMON_AGENT_IDENTITY__ENABLED`,
   off by default. When off, Slack and Discord post as the app, Discord replies
   need a mention, Teams omits the agent name prefix, and setup panels hide

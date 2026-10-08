@@ -237,6 +237,7 @@ async def reset_agent_avatar(
             tenant_id=tenant_id,
             agent_name=agent_name,
             updated_by_account_id=actor.account_id,
+            face_enabled=True,
         )
     await _audit(
         runtime,

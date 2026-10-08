@@ -168,12 +168,16 @@ def _build_avatar_route(
     async def avatar(req: Request) -> Response:
         token = req.path_params["token"]
         sha12 = req.path_params["sha12"]
+        size_arg = req.query_params.get("size")
+        if size_arg is not None and size_arg not in ("128", "512"):
+            return Response(status_code=400)
+        size = int(size_arg) if size_arg is not None else None
         async with sessionmaker() as session:
-            row = await get_avatar_by_token(session, token=token)
-        if row is None or row.sha256[:12] != sha12:
+            png = await get_avatar_by_token(session, token=token, sha12=sha12, size=size)
+        if png is None:
             return Response(status_code=404)
         return Response(
-            row.png,
+            png,
             media_type="image/png",
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )

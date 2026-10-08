@@ -51,6 +51,14 @@ class AgentAvatar(Base):
     token: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     sha256: Mapped[str] = mapped_column(Text, nullable=False)
     png: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    png_128: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    png_512: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    previous_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    previous_png: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    previous_png_128: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    previous_png_512: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    face_combo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    face_thumbnail: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     source: Mapped[str] = mapped_column(Text, nullable=False)
     updated_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
