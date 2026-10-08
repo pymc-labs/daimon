@@ -31,6 +31,33 @@ async def test_agent_header_and_builtin_app_header(fake_slack_web_client: Any) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "customized"),
+    [
+        ({"username": "Ada", "icons": {"image_48": "https://example.test/ada.png"}}, True),
+        ({"bot_profile": {"name": "daimon"}}, False),
+        ({}, False),
+    ],
+)
+async def test_customized_callback_uses_slacks_returned_header(
+    fake_slack_web_client: Any, message: dict[str, object], customized: bool
+) -> None:
+    fake = fake_slack_web_client
+    fake.mock.clear()
+    _NO_CUSTOMIZE_SCOPE.clear()
+    fake.mock.post(str(_POST_URL), payload={**CHAT_OK_PAYLOAD, "message": message})
+    observed: list[bool] = []
+    await post_as_agent(
+        fake.client,
+        AgentIdentity("Ada", "https://example.test/ada.png", False),
+        on_customized=observed.append,
+        channel="C_TEST",
+        text="answer",
+    )
+    assert observed == [customized]
+
+
+@pytest.mark.asyncio
 async def test_only_customize_missing_scope_retries_and_remembers_token(
     fake_slack_web_client: Any,
 ) -> None:
