@@ -88,11 +88,20 @@ def _token(card: str) -> str:
     return found.group(1)
 
 
+async def _delivered(service: TeamsHttpService) -> None:
+    """Wait for background deliveries, so the next form's reply is not one of their posts."""
+    async with asyncio.timeout(10):
+        while service.turns.in_flight:
+            await asyncio.sleep(0.01)
+
+
 async def _send(
     service: TeamsHttpService, token: str, note: str, *, user: str = AAD_OBJECT_ID
 ) -> str:
     click = make_card_action("support", "send", user=user, ask=token, note=note)
-    return json.dumps(await post_activity(service, click), ensure_ascii=False)
+    reply = json.dumps(await post_activity(service, click), ensure_ascii=False)
+    await _delivered(service)
+    return reply
 
 
 async def _rows(db_factory: async_sessionmaker[AsyncSession]) -> list[Any]:
@@ -139,7 +148,7 @@ async def test_a_request_asked_in_a_channel_links_back_to_it(
 
 
 def test_prose_starting_with_support_is_a_turn_not_a_request() -> None:
-    names = {"support": SupportCommand(MagicMock(), None).command}
+    names = {"support": SupportCommand(MagicMock(), None, spawn=MagicMock()).command}
     assert parse_command("support", names) == ("support", "")
     assert parse_command("support vector machines?", names) is None
 
@@ -209,9 +218,33 @@ async def test_a_failed_post_keeps_the_request_undelivered(
     async with _running(db_session_factory, teams_api_fake, channel="123456789", http=http) as svc:
         card = await _form(svc, teams_api_fake, make_message_activity(text="support"))
         reply = await _send(svc, _token(card), "help")
-    assert support.RECORDED_UNDELIVERED in reply
+    assert support.RECEIVED.format(remaining=2) in reply, "recorded, whatever delivery does"
     [row] = await _rows(db_session_factory)
-    assert row.delivered_at is None
+    assert row.delivered_at is None, "kept as undelivered"
+
+
+async def test_the_request_is_answered_before_its_delivery_lands(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    release = asyncio.Event()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await release.wait()
+        return httpx.Response(200, json={"id": "1"})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(slow))
+    async with _running(db_session_factory, teams_api_fake, channel="123456789", http=http) as svc:
+        card = await _form(svc, teams_api_fake, make_message_activity(text="support"))
+        click = make_card_action("support", "send", ask=_token(card), note="help")
+        reply = json.dumps(await post_activity(svc, click), ensure_ascii=False)
+        [pending] = await _rows(db_session_factory)
+        release.set()
+        await _delivered(svc)
+
+    assert support.RECEIVED.format(remaining=2) in reply, "the invoke does not wait for the post"
+    assert pending.delivered_at is None, "answered while the post was still in flight"
+    [row] = await _rows(db_session_factory)
+    assert row.delivered_at is not None, "stamped once the post lands"
 
 
 @pytest.mark.parametrize(
@@ -250,6 +283,7 @@ async def test_ask_a_human_on_an_answer_spends_a_credit_and_links_the_answer(
         form = opened["task"]["value"]["card"]["content"]
         [send] = form["actions"]
         sent = await post_activity(service, _ask("send", **send["data"], note="wrong totals"))
+        await _delivered(service)
 
     assert_card_renders(form)
     assert "You have 3 requests left" in json.dumps(form), "the support form, in a dialog"
@@ -266,6 +300,7 @@ async def test_ask_a_human_twice_on_one_answer_spends_one_credit(
 ) -> None:
     async with _running(db_session_factory, teams_api_fake) as service:
         await post_activity(service, _ask("send", message="m-7", note="wrong totals"))
+        await _delivered(service)
         again = await post_activity(service, _ask("send", message="m-7", note="still wrong"))
 
     assert again["task"]["value"] == support.ALREADY_REQUESTED, "told the first is in hand"

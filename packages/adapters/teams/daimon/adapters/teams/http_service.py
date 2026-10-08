@@ -352,7 +352,9 @@ def create_teams_http_service(
         "billing": billing.command,
     }
     direct = SdkDirectChats(teams_app, TimedSender(teams_app), entra_tenant_id=settings.tenant_id)
-    support = SupportCommand(runtime, direct) if support_enabled(runtime.settings) else None
+    support = (
+        SupportCommand(runtime, direct, spawn=spawn) if support_enabled(runtime.settings) else None
+    )
     if support is not None:
         commands["support"] = support.command
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
@@ -374,7 +376,7 @@ def create_teams_http_service(
         ),
     )
 
-    feedback = TeamsFeedback(runtime, direct)
+    feedback = TeamsFeedback(runtime, direct, spawn=spawn)
     teams_app.on_message(turns.handle_message)
     teams_app.on_install_add(installs.on_install)
     teams_app.on_install_remove(installs.on_uninstall)

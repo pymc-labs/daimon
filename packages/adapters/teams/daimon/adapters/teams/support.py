@@ -4,8 +4,11 @@ Discord asks with a reaction on an answer; here `support` posts a form in the
 1:1 chat, answered there like every command, and sending it spends the credit.
 It is a bare word, so prose such as "support vector machines" stays a turn. As
 on Discord, the row is committed before the post and stamped delivered only
-once the post lands, so a failed post loses nothing. `enabled` decides whether
-the command is registered at all.
+once the post lands, so a failed post loses nothing. Delivery runs in the
+background once the row is committed: a Teams invoke must be answered within
+seconds, and walking a tier of admins' chats can take longer, so the person is
+told the request is recorded before it lands. `enabled` decides whether the
+command is registered at all.
 
 A request asked from a channel is open to the people who could have asked the
 agent there (`answer_access`), as on Slack, decided when the form is shown and
@@ -69,6 +72,7 @@ from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.identity import DENIED, TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
+from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -83,7 +87,6 @@ from daimon.core.support_escalation import (
     ALREADY_REQUESTED,
     OUT_OF_CREDITS,
     RECEIVED,
-    RECORDED_UNDELIVERED,
     received_text,
     remaining_credits,
 )
@@ -112,7 +115,6 @@ __all__ = [
     "ALREADY_REQUESTED",
     "OUT_OF_CREDITS",
     "RECEIVED",
-    "RECORDED_UNDELIVERED",
     "SEALED_LINE",
     "VERB",
     "SupportCommand",
@@ -141,7 +143,7 @@ SEALED_HINT = (
     "so don't paste anything that has to stay there. They get a link, not the conversation."
 )
 SEALED_LINE = "_From a channel read only from inside: answer there, the conversation stays in it._"
-# ALREADY_REQUESTED, OUT_OF_CREDITS, RECEIVED and RECORDED_UNDELIVERED are the shared core copy
+# ALREADY_REQUESTED, OUT_OF_CREDITS and RECEIVED are the shared core copy
 # (`daimon.core.support_escalation`), re-exported for this module's callers.
 
 
@@ -262,9 +264,11 @@ class SupportCommand:
     else, the request names the 1:1 chat it was sent from.
     """
 
-    def __init__(self, runtime: TeamsRuntime, direct: DirectChats | None) -> None:
+    def __init__(self, runtime: TeamsRuntime, direct: DirectChats | None, *, spawn: Spawn) -> None:
         self._runtime = runtime
         self._direct = direct
+        # Tracked, so a shutdown waits for a request's delivery to finish.
+        self._spawn = spawn
         self._asked: OrderedDict[str, _Asked] = OrderedDict()
 
     async def command(self, context: CommandContext) -> None:
@@ -381,7 +385,7 @@ class SupportCommand:
         return remaining_credits(allowance=allowance, used=used)
 
     async def _escalate(self, actor: Actor, asked: _Asked, note: str, *, not_allowed: str) -> str:
-        """Record the request once per message, post it, and say how it went.
+        """Record the request once per message, start its delivery, and say so.
 
         A request from a channel is decided under the ledger and policy locks
         (`record_escalation_once`), so the policy it is allowed by is the one
@@ -437,19 +441,24 @@ class SupportCommand:
         if row is None:
             log.info("support.out_of_credits", tenant_id=str(tenant_id))
             return OUT_OF_CREDITS
-        # The row is committed; delivery below is best effort, and a failure
-        # only changes what the person is told.
+        log.info("support.escalation_recorded", escalation_id=str(row.id))
         body = replace(asked, sealed=sealed).body(note)
+        self._spawn(self._deliver(tenant_id, asked, body, row.id), name="teams.support.deliver")
+        return received_text(remaining=outcome.remaining)
+
+    async def _deliver(
+        self, tenant_id: uuid.UUID, asked: _Asked, body: str, escalation_id: uuid.UUID
+    ) -> None:
+        """Best effort: the row is committed, and stays undelivered unless a post lands."""
         delivered = await self._chat_admins(tenant_id, asked, body) or (
-            await post_to_support_channel(runtime, self._direct, body)
+            await post_to_support_channel(self._runtime, self._direct, body)
         )
         if delivered:
-            async with runtime.sessionmaker.begin() as session:
-                await mark_delivered(session, escalation_id=row.id)
-        log.info("support.escalation_recorded", escalation_id=str(row.id), delivered=delivered)
-        if not delivered:
-            return RECORDED_UNDELIVERED
-        return received_text(remaining=outcome.remaining)
+            async with self._runtime.sessionmaker.begin() as session:
+                await mark_delivered(session, escalation_id=escalation_id)
+        log.info(
+            "support.escalation_delivered", escalation_id=str(escalation_id), delivered=delivered
+        )
 
     async def _chat_admins(self, tenant_id: uuid.UUID, asked: _Asked, body: str) -> bool:
         """Message the channel's admins, else the tenant's admins. True once a tier got it.

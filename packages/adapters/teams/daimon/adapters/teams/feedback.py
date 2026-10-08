@@ -59,6 +59,7 @@ from daimon.adapters.teams.card_actions import (
 )
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.identity import DENIED
+from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.support import SEALED_LINE, post_to_support_channel, routes_feedback
 from daimon.core.message_feedback import FEEDBACK_REASONS, Vote, known_feedback_reasons
@@ -240,9 +241,11 @@ def feedback_post(
 class TeamsFeedback:
     """The feedback loop's invokes: the click, the form's submit, the built-in form."""
 
-    def __init__(self, runtime: TeamsRuntime, direct: DirectChats | None) -> None:
+    def __init__(self, runtime: TeamsRuntime, direct: DirectChats | None, *, spawn: Spawn) -> None:
         self._runtime = runtime
         self._direct = direct
+        # The routed post runs after the invoke is answered, which Teams wants within seconds.
+        self._spawn = spawn
 
     async def on_fetch(
         self, ctx: ActivityContext[MessageFetchTaskInvokeActivity]
@@ -336,12 +339,13 @@ class TeamsFeedback:
                 form=form,
                 recorded=recorded,
             )
-            # Best effort: the form is already recorded, whatever the post does.
-            delivered = await post_to_support_channel(self._runtime, self._direct, post)
-            log.info(
-                "feedback.routed_to_support", feedback_id=str(recorded.row_id), delivered=delivered
-            )
+            self._spawn(self._route(post, recorded.row_id), name="teams.feedback.route")
         return recorded
+
+    async def _route(self, post: str, feedback_id: uuid.UUID) -> None:
+        """Best effort: the form is already recorded, whatever the post does."""
+        delivered = await post_to_support_channel(self._runtime, self._direct, post)
+        log.info("feedback.routed_to_support", feedback_id=str(feedback_id), delivered=delivered)
 
     async def _record(
         self,
