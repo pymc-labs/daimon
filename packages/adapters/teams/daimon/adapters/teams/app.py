@@ -1158,7 +1158,9 @@ class TeamsApp:
                 image_blocks=attachments.image_blocks or None,
                 deadline=deadline,
                 confirm_write=self.confirmations.hook(
-                    conversation_id=inbound.conversation_id, service_url=inbound.service_url
+                    conversation_id=inbound.conversation_id,
+                    service_url=inbound.service_url,
+                    requester_display_name=inbound.user_name,
                 ),
             )
         if outcome.mapping_id is not None:

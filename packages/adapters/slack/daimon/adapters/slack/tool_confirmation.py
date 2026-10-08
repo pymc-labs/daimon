@@ -12,6 +12,7 @@ card runs in this process, and a restart ends both together.
 from __future__ import annotations
 
 import asyncio
+import html
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -27,11 +28,14 @@ from daimon.core.confirmation import (
 )
 from daimon.core.posted_controls.confirmation import (
     CONFIRMATION_CUSTOM_ID_PREFIX,
-    NO_LONGER_PENDING_MESSAGE,
+    NOT_YOURS_MESSAGE,
+    ConfirmationCard,
+    ConfirmationCardState,
     build_confirmation_blocks,
     build_confirmation_card,
     confirmation_card_text,
     parse_confirmation_custom_id,
+    parse_details_custom_id,
 )
 from daimon.core.posted_controls.lifecycle import PostedConfirmations
 from slack_sdk.errors import SlackApiError
@@ -41,6 +45,25 @@ from slack_sdk.webhook.async_client import AsyncWebhookClient
 __all__ = ["CONFIRMATION_CUSTOM_ID_PREFIX", "SlackConfirmationCards"]
 
 log = structlog.get_logger(__name__)
+_COLORS: dict[ConfirmationCardState, str] = {
+    "pending": "#FEE75C",
+    "approved": "#57F287",
+    "denied": "#99AAB5",
+    "expired": "#99AAB5",
+    "stopped": "#99AAB5",
+}
+
+
+def _plain_message_text(value: str) -> str:
+    """Keep Slack control characters literal in fallback and private messages."""
+    return html.escape(value, quote=False)
+
+
+def _attachment(card: ConfirmationCard, prompt: ConfirmationPrompt) -> list[dict[str, Any]]:
+    return [
+        {"color": _COLORS[card.state], "blocks": build_confirmation_blocks(card, prompt=prompt)}
+    ]
+
 
 #: Most time a card edit may take.
 EDIT_TIMEOUT_S = 2.0
@@ -79,15 +102,17 @@ class SlackConfirmationCards:
                     identity,
                     channel=channel,
                     thread_ts=thread_ts,
-                    text=confirmation_card_text(card),
-                    blocks=build_confirmation_blocks(card, prompt=prompt),
+                    text=_plain_message_text(confirmation_card_text(card)),
+                    attachments=_attachment(card, prompt),
+                    mrkdwn=False,
+                    parse="none",
                 )
                 ts = str(response.get("ts") or "")  # pyright: ignore[reportUnknownMemberType]
                 if record_post is not None and ts:
                     await record_post(ts)
                 return _PostedCard(prompt=prompt, client=client, channel=channel, ts=ts)
 
-            async def retire(posted: _PostedCard, state: ConfirmationAnswer) -> None:
+            async def retire(posted: _PostedCard, state: ConfirmationCardState) -> None:
                 await _edit(posted, state, answered_by=None)
 
             return await self._controls.confirm(
@@ -100,6 +125,17 @@ class SlackConfirmationCards:
         """Route an Approve/Deny `block_actions` click to its waiting turn."""
         actions: list[dict[str, Any]] = payload.get("actions") or []
         action_id = str(actions[0].get("action_id") or "") if actions else ""
+        if details_token := parse_details_custom_id(action_id):
+            posted = self._controls.cards.get(details_token)
+            if posted is not None:
+                details_user: dict[str, Any] = payload.get("user") or {}
+                await _ephemeral(
+                    posted,
+                    str(details_user.get("id") or ""),
+                    _plain_message_text("\n".join(posted.prompt.detail_lines))
+                    or "No additional details.",
+                )
+            return
         parsed = parse_confirmation_custom_id(action_id)
         if parsed is None:
             return
@@ -108,15 +144,19 @@ class SlackConfirmationCards:
         clicker = str(user.get("id") or "")
         posted = self._controls.cards.get(token)
         if posted is None:
-            await _ephemeral_from_payload(payload, clicker, NO_LONGER_PENDING_MESSAGE)
+            await _ephemeral_from_payload(payload, clicker, self._controls.missing_message(token))
             return
         if refusal := self._controls.claim(token, clicker, answer):
+            if refusal == NOT_YOURS_MESSAGE:
+                refusal = refusal.format(requester=f"<@{posted.prompt.requester_platform_user_id}>")
             await _ephemeral(posted, clicker, refusal)
             return
         await _edit(posted, answer, answered_by=clicker)
 
 
-async def _edit(posted: _PostedCard, state: ConfirmationAnswer, *, answered_by: str | None) -> None:
+async def _edit(
+    posted: _PostedCard, state: ConfirmationCardState, *, answered_by: str | None
+) -> None:
     card = build_confirmation_card(
         posted.prompt, state=state, answered_by_platform_user_id=answered_by
     )
@@ -127,8 +167,10 @@ async def _edit(posted: _PostedCard, state: ConfirmationAnswer, *, answered_by: 
             posted.client.chat_update(  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # slack_sdk **kwargs: Unknown
                 channel=posted.channel,
                 ts=posted.ts,
-                text=confirmation_card_text(card),
-                blocks=build_confirmation_blocks(card, prompt=posted.prompt),
+                text=_plain_message_text(confirmation_card_text(card)),
+                attachments=_attachment(card, posted.prompt),
+                mrkdwn=False,
+                parse="none",
             ),
             timeout=EDIT_TIMEOUT_S,
         )
@@ -139,7 +181,7 @@ async def _edit(posted: _PostedCard, state: ConfirmationAnswer, *, answered_by: 
 async def _ephemeral(posted: _PostedCard, user: str, text: str) -> None:
     try:
         await posted.client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=posted.channel, user=user, text=text
+            channel=posted.channel, user=user, text=text, mrkdwn=False, parse="none"
         )
     except SlackApiError as err:
         log.warning("slack.tool_confirmation.ephemeral_failed", error=str(err))

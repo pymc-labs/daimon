@@ -12,12 +12,11 @@ send.
 `tool_calls_for` turns the blocked ids into `ToolCall`s from the folded
 state, and `build_decision_events` sends each call's own allow/deny.
 
-The two decider builders are the policy shells over
+The decider builders are the policy shells over
 `daimon.core.tool_safety.decide_tool_call`. `unattended_decider` never waits
 on anyone; `interactive_decider` hands `ask` verdicts to the adapter's
 `ConfirmationHook`. Neither does I/O of its own — the hook is the only thing
-that talks to a platform, and a hook that raises counts as a refusal.
-"""
+that talks to a platform, and a hook that raises counts as a refusal."""
 
 from __future__ import annotations
 

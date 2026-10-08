@@ -109,10 +109,10 @@ _COPY: dict[TerminationReason, _Copy] = {
         f"Wait a moment, then send your message again. {_SHARE_RID}",
     ),
     TerminationReason.REQUIRES_ACTION: _Copy(
-        "Approval needed",
-        "The agent asked for approval to run a tool, which cannot be given here yet.",
+        "Approval didn't go through",
+        "The agent stopped because it couldn't confirm your approval.",
         _KEPT,
-        "Ask for the result another way, or ask an admin to change that tool's permission.",
+        "Send your message again.",
     ),
     # "Retired" holds because both ceiling handlers mark the thread's mapping
     # dead; a headless routine has no mapping, but it also has no one to read this.

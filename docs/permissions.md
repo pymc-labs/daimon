@@ -100,8 +100,14 @@ allow.
 
 A turn whose admission would refuse `PUBLISH` gets its session's publish
 tools (`PUBLISH_TOOLS`) on `always_ask`, so the platform shows an Approve
-card before the call runs. The MCP server checks for itself: it reads the
-live session (`_session_gate.session_asks_first`) and only then authorizes
+card before the call runs. The card names the action and who may answer, shows
+the consequence, and shows a few plain labelled inputs behind Details. It
+never shows raw payloads or tool and server identifiers. Approve and Deny
+only work for the requester. Each call gets its own card and confirmation
+event, even when several calls pause together. The card expires after
+ten minutes, and a stopped turn removes its buttons. The MCP server checks
+for itself: it reads the live session (`_session_gate.session_asks_first`)
+and only then authorizes
 with `approved=True`. A session without that card, an agent key or a run
 nobody watches is refused, so a plumbing failure refuses rather than
 publishes.

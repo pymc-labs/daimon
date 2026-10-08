@@ -453,7 +453,7 @@ async def test_auto_approve_does_not_re_confirm_on_the_idle_branch_ids_already_c
     )
     assert final.error is not None
     assert final.error.kind == "requires_action"
-    assert "did not confirm" in final.error.message
+    assert final.error.message == "The agent stopped because it couldn't confirm your approval."
 
 
 async def test_auto_approve_replay_echo_after_stale_pause_is_not_a_reask() -> None:
@@ -514,7 +514,9 @@ async def test_auto_approve_replay_echo_followed_by_reask_stops() -> None:
 
     assert fa.beta.sessions.events.stream_calls == 1
     assert len(fa.beta.sessions.events.sent_events) == 2
-    assert final.error is not None and "re-requested" in final.error.message
+    assert final.error is not None
+    assert final.error.kind == "requires_action"
+    assert final.error.message == "The agent stopped because it couldn't confirm your approval."
 
 
 async def test_auto_approve_never_sends_confirmations_into_a_terminated_session() -> None:
@@ -590,7 +592,7 @@ async def test_require_approval_still_finalizes_a_requires_action_found_on_the_i
     ], "no confirmation payload should ever be sent under RequireApproval"
     assert final.error is not None
     assert final.error.kind == "requires_action"
-    assert "not supported on this surface" in final.error.message
+    assert "Approvals aren't available here" in final.error.message
 
 
 async def test_auto_approve_eventless_reconnect_keeps_pre_approval_content_when_an_event_follows_the_pause() -> (

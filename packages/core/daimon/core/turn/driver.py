@@ -121,8 +121,8 @@ async def _decide_blocked(
 ) -> list[BetaManagedAgentsUserToolConfirmationEventParams]:
     """The `user.tool_confirmation` batch for `fresh` under an answering posture.
 
-    `PolicyApproval` awaits its decider once per id, concurrently: two writes
-    in one pause post two cards, and neither waits on the other's click.
+    `PolicyApproval` decides each blocked call independently, then returns
+    one event per id.
     """
     match tool_confirmation:
         case AutoApprove():
@@ -568,7 +568,6 @@ async def _pump(
     seen_requires_action_event_ids: set[str] = set()
     pending_confirmation_reconnects = 0
     pending_confirmation_retry_ids: frozenset[str] = frozenset()
-    confirmation_echo_timed_out = False
     delivered_event_ids: set[str] = set()
     # Per-turn billing dedup, shared by the live consume loop and both replay
     # folds: a model call MA emitted while no stream was attached exists only
@@ -809,7 +808,6 @@ async def _pump(
                                         eventless_reconnect = True
                                         eventless_reason = cycle.reason
                                         continue
-                                    confirmation_echo_timed_out = True
                             case RequireApproval():
                                 pass  # fall through -- unchanged interactive behavior
                     break
@@ -881,8 +879,6 @@ async def _pump(
             events_folded=events_folded_cell[0],
             renders_failed=renders_failed_cell[0],
             tool_confirmation=tool_confirmation,
-            confirmed_tool_use_ids=confirmed_tool_use_ids,
-            confirmation_echo_timed_out=confirmation_echo_timed_out,
         )
     finally:
         if not render_task.done():
@@ -1331,8 +1327,6 @@ async def _finalize_success_or_error(
     events_folded: int,
     renders_failed: int,
     tool_confirmation: ToolConfirmation,
-    confirmed_tool_use_ids: set[str],
-    confirmation_echo_timed_out: bool,
 ) -> TurnState:
     final_state = state_cell[0]
     if (
@@ -1340,50 +1334,13 @@ async def _finalize_success_or_error(
         and final_state.stop_reason is not None
         and final_state.stop_reason.type == "requires_action"
     ):
-        # Four distinct paths reach a requires_action idle here:
-        # - RequireApproval (interactive, Discord/CLI): no approval/resume
-        #   UX is wired -- the consume loop exits on ANY idle, including
-        #   requires_action, so this surfaces it as an actionable failure
-        #   instead of silently dropping the agent's tool-approval request.
-        # - AutoApprove, exhausted: MA re-asked for tool_use_ids already in
-        #   `confirmed_tool_use_ids` -- confirmations really were sent, so
-        #   the "already confirmed" wording stays.
-        # - AutoApprove, never sent: the eventless-cycle idle branch found a
-        #   `terminated` session paused on `requires_action` -- it
-        #   deliberately does not send into a session that cannot accept
-        #   events, so those ids are still unconfirmed here. The "already
-        #   confirmed" wording would be a lie in this case; a second wording
-        #   names what actually happened.
-        # - AutoApprove, echo timeout: the eventless branch retried twice but
-        #   still found no post-echo re-ask or terminal event.
+        # A held approval, a repeated request, or a missing echo can leave the
+        # turn here. The person sees the same actionable message in each case.
         match tool_confirmation:
             case AutoApprove() | PolicyApproval():
-                unsent = pending_confirmation_ids(
-                    final_state.stop_reason, confirmed=confirmed_tool_use_ids
-                )
-                if unsent:
-                    message = (
-                        "The agent requested tool approval but the session was "
-                        "no longer accepting events, so the turn was abandoned "
-                        "without sending confirmations."
-                    )
-                elif confirmation_echo_timed_out:
-                    message = (
-                        "The agent did not confirm the sent tool approval before the turn "
-                        "timed out, so the turn ended."
-                    )
-                else:
-                    message = (
-                        "The agent re-requested approval for tool call(s) already "
-                        "confirmed — the confirmation(s) were sent but not accepted, "
-                        "so the turn was abandoned rather than spin."
-                    )
+                message = "The agent stopped because it couldn't confirm your approval."
             case RequireApproval():
-                message = (
-                    "The agent requested tool approval — not supported on this "
-                    "surface yet. Interrupt-free approval/resume UX is a future "
-                    "feature; routines auto-approve tools."
-                )
+                message = "Approvals aren't available here. Ask in Discord, Slack or Teams."
         err = TurnError(kind="requires_action", message=message)
         final_state = dataclasses.replace(
             final_state, error=err, termination=TerminationReason.REQUIRES_ACTION

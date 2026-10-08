@@ -1,14 +1,11 @@
-"""Platform-neutral confirmation card: the copy, its states, and Block Kit.
+"""Platform-neutral approval card words, states and Slack Block Kit rendering.
 
-One card per `ConfirmationPrompt`. It is posted `pending` with Approve and
-Deny, then edited in place to the answer. Discord and Slack draw the same
-`ConfirmationCard`; the words and the state machine live only here, the same
-split `cards.PostedCard` uses for the credential cards.
+The card is posted pending and edited in place when answered, expired or
+stopped. Discord, Slack and Teams draw the same ``ConfirmationCard`` so the
+action and consequence stay consistent. Button tokens only route clicks to
+the waiting turn; they are never shown as card copy.
 
-Button ids are `dcf:<token>:approve` / `dcf:<token>:deny`; the token is the
-one `daimon.core.confirmation.PendingConfirmations.open` handed out.
-
-Pure module — no I/O, no clock.
+Pure module: no I/O or clock reads.
 """
 
 from __future__ import annotations
@@ -27,6 +24,7 @@ __all__ = [
     "ConfirmationCardState",
     "NOT_YOURS_MESSAGE",
     "NO_LONGER_PENDING_MESSAGE",
+    "EXPIRED_MESSAGE",
     "build_confirmation_blocks",
     "build_confirmation_card",
     "confirmation_card_text",
@@ -34,34 +32,25 @@ __all__ = [
     "parse_confirmation_custom_id",
 ]
 
-ConfirmationCardState = Literal["pending", "approved", "denied", "expired"]
-ConfirmationChoice = Literal["approve", "deny"]
-
+ConfirmationCardState = Literal["pending", "approved", "denied", "expired", "stopped"]
+ConfirmationChoice = Literal["approve", "deny", "details"]
 CONFIRMATION_CUSTOM_ID_PREFIX: Final[str] = "dcf:"
 CONFIRMATION_ACTION_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^dcf:(?P<token>[A-Za-z0-9_-]{8,64}):(?P<choice>approve|deny)$"
+    r"^dcf:(?P<token>[A-Za-z0-9_-]{8,64}):(?P<choice>approve|deny|details)$"
 )
-
-NOT_YOURS_MESSAGE: Final[str] = "Only the person who asked can answer this."
-NO_LONGER_PENDING_MESSAGE: Final[str] = "This was already answered or has expired."
-
-_HEADLINE_MARK: Final[dict[ConfirmationCardState, str]] = {
-    "pending": "✋",
-    "approved": "✅",
-    "denied": "🛡️",
-    "expired": "⌛",
-}
+NOT_YOURS_MESSAGE: Final[str] = "Only {requester} can approve or deny this request."
+NO_LONGER_PENDING_MESSAGE: Final[str] = "This request was already answered."
+EXPIRED_MESSAGE: Final[str] = "This request expired."
 
 
 class ConfirmationCard(BaseModel):
     model_config = ConfigDict(frozen=True)
-
     state: ConfirmationCardState
     headline: str
-    fields: tuple[tuple[str, str], ...]
-    detail: str | None
+    detail_lines: tuple[str, ...] = ()
+    consequence: str | None = None
+    body: str | None = None
     footer: str | None
-    #: Present only while `pending`.
     token: str | None = None
 
 
@@ -70,12 +59,19 @@ def confirmation_custom_id(token: str, choice: ConfirmationChoice) -> str:
 
 
 def parse_confirmation_custom_id(custom_id: str) -> tuple[str, ConfirmationAnswer] | None:
-    """`(token, answer)` for a confirmation button id, else `None`."""
+    """Return ``(token, answer)`` for an approval button, else ``None``.
+
+    Details has its own handler and is never interpreted as an answer.
+    """
     match = CONFIRMATION_ACTION_PATTERN.match(custom_id)
-    if match is None:
+    if match is None or match["choice"] == "details":
         return None
-    answer: ConfirmationAnswer = "approved" if match["choice"] == "approve" else "denied"
-    return match["token"], answer
+    return match["token"], "approved" if match["choice"] == "approve" else "denied"
+
+
+def parse_details_custom_id(custom_id: str) -> str | None:
+    match = CONFIRMATION_ACTION_PATTERN.match(custom_id)
+    return match["token"] if match is not None and match["choice"] == "details" else None
 
 
 def build_confirmation_card(
@@ -85,31 +81,31 @@ def build_confirmation_card(
     token: str | None = None,
     answered_by_platform_user_id: str | None = None,
 ) -> ConfirmationCard:
-    """The card for `prompt` in `state`.
+    """Build the card for ``prompt`` in ``state``.
 
-    `token` is required for `pending` (the buttons carry it) and refused
-    otherwise, so an answered card can never be drawn with live buttons.
+    ``token`` is required only while pending, when its buttons can be used.
+    Answered and retired cards cannot carry live buttons.
     """
     if (token is not None) != (state == "pending"):
         raise ValueError("token belongs to state='pending' only")
     if state == "pending":
-        headline = f"{_HEADLINE_MARK[state]} {prompt.title}"
-        footer = "Only {requester} can answer. Expires {expires}."
-    elif state == "approved":
-        who = answered_by_platform_user_id or prompt.requester_platform_user_id
-        headline = f"{_HEADLINE_MARK[state]} Approved — running it."
-        footer = f"Approved by <@{who}>."
-    elif state == "denied":
-        headline = f"{_HEADLINE_MARK[state]} Denied — it did not run."
-        footer = None
+        headline = prompt.title
+        body = None
+        footer = "Only {requester} can approve or deny\nExpires {expires}"
     else:
-        headline = f"{_HEADLINE_MARK[state]} No answer in time — it did not run."
-        footer = None
+        headline = state.capitalize()
+        body = (
+            prompt.action or prompt.title.removesuffix("?")
+            if state == "approved"
+            else prompt.denied_action or f"{prompt.title.removesuffix('?')} not completed"
+        )
+        footer = "by {requester}" if state in {"approved", "denied"} else None
     return ConfirmationCard(
         state=state,
         headline=headline,
-        fields=prompt.fields,
-        detail=prompt.detail,
+        body=body,
+        consequence=prompt.consequence if state == "pending" else None,
+        detail_lines=prompt.detail_lines if state == "pending" else (),
         footer=footer,
         token=token,
     )
@@ -118,27 +114,27 @@ def build_confirmation_card(
 def _slack_expires(expires_at: datetime) -> str:
     unix = int(expires_at.timestamp())
     fallback = datetime.fromtimestamp(unix, UTC).strftime("%H:%M")
-    return f"<!date^{unix}^{{time}}|{fallback} UTC>"
+    return f"at <!date^{unix}^{{time}}|{fallback} UTC>"
 
 
 def build_confirmation_blocks(
     card: ConfirmationCard, *, prompt: ConfirmationPrompt
 ) -> list[dict[str, Any]]:
-    """Render `card` as Slack Block Kit, buttons only while pending."""
+    """Render the shared card as Slack Block Kit, with buttons only while pending.
+
+    The two pending footer facts occupy separate lines in one context element.
+    Details are sent privately by the Slack adapter when clicked.
+    """
     blocks: list[dict[str, Any]] = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{card.headline}*"}},
+        {"type": "header", "text": {"type": "plain_text", "text": card.headline[:150]}},
     ]
-    if card.fields:
-        field_elements: list[dict[str, Any]] = [
-            {"type": "mrkdwn", "text": f"*{label}*\n`{value}`"} for label, value in card.fields
-        ]
-        blocks.append({"type": "section", "fields": field_elements})
-    if card.detail:
-        blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"```{card.detail}```"}}
-        )
+    if card.body:
+        blocks.append({"type": "section", "text": {"type": "plain_text", "text": card.body}})
+    if card.consequence:
+        blocks.append({"type": "section", "text": {"type": "plain_text", "text": card.consequence}})
     if card.token is not None:
-        buttons: list[dict[str, Any]] = [
+        blocks.append({"type": "divider"})
+        buttons = [
             {
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Approve"},
@@ -153,6 +149,12 @@ def build_confirmation_blocks(
                 "action_id": confirmation_custom_id(card.token, "deny"),
                 "value": card.token,
             },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Details"},
+                "action_id": confirmation_custom_id(card.token, "details"),
+                "value": card.token,
+            },
         ]
         blocks.append({"type": "actions", "elements": buttons})
     if card.footer is not None:
@@ -165,6 +167,5 @@ def build_confirmation_blocks(
 
 
 def confirmation_card_text(card: ConfirmationCard) -> str:
-    """Plain-text fallback (notifications, screen readers, tests)."""
-    lines = [card.headline, *(f"{label}: {value}" for label, value in card.fields)]
-    return "\n".join(lines)
+    """Plain-text fallback with one card fact per line and no private details."""
+    return "\n".join(part for part in (card.headline, card.body, card.consequence) if part)

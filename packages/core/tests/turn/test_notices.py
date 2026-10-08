@@ -40,6 +40,14 @@ def test_every_early_end_explains_itself(reason: TerminationReason) -> None:
     assert "rid_1" in notice.plain_text()
 
 
+def test_unconfirmed_approval_notice_names_the_failed_confirmation() -> None:
+    notice = render_termination_notice(TerminationReason.REQUIRES_ACTION)
+    assert notice is not None
+    assert notice.headline == "Approval didn't go through"
+    assert notice.cause == "The agent stopped because it couldn't confirm your approval."
+    assert notice.next_step == "Send your message again."
+
+
 def test_reasons_a_turn_can_run_into_read_differently() -> None:
     """Every reason with its own copy says something no other reason says."""
     shared = {TerminationReason.REDUCER_BUG, TerminationReason.UNKNOWN}
