@@ -250,8 +250,12 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
         attribution=None,
         identity_enabled=False,
     )
-    assert "Avatars are public" not in _container_text(disabled)
+    assert "**Picture**" not in _container_text(disabled)
     assert not any(isinstance(item, discord.ui.Thumbnail) for item in _walk(disabled))
+    assert not any(
+        isinstance(item, discord.ui.Button) and item.label in {"Change", "Use default", "Details"}
+        for item in _walk(disabled)
+    )
 
 
 async def test_load_details_for_skips_avatar_with_identity_off(
