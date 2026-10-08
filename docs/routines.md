@@ -135,6 +135,10 @@ Each tick, 30 seconds apart by default:
    behavior even when a slow sibling runs past the freshness window. Additional
    unclaimed work remains in PostgreSQL when the bounded batch is full.
 
+The [usage sweep](billing.md#the-tables) runs on its own loop with the same
+pause between passes, so a long pass never delays a claim. Shutdown cancels a
+pass in flight; the next process starts a full pass.
+
 The per-routine catch-up policy controls downtime recovery:
 
 - **`skip` (default):** preserve the existing freshness window. A slot fires

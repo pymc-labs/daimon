@@ -178,8 +178,9 @@ Two boundaries of the design worth stating plainly:
   override) times one turn's cost. Discord's optional process-wide limit refuses
   excess guild mentions and DMs before `admit()`. An MCP `start_turn` session is
   worse. Its spend
-  reaches the ledger only when the scheduler's usage sweep next runs (after
-  the tick's routine fires, which can take up to the 45-minute turn ceiling).
+  reaches the ledger only when the scheduler's usage sweep next reads the
+  session (one tick interval after the previous pass ends, plus the time to
+  list the workspace's sessions).
   Until then the gate reads a balance that leaves out earlier headless turns,
   and MCP turns have no concurrency cap. The overdraft is therefore bounded
   by what a tenant can start between two sweeps, not by N concurrent turns.
@@ -453,9 +454,9 @@ after their Stripe events.
 
 **The sweep.** An MCP `start_turn` creates a session and sends a message but
 never drives the stream, so the inline hook never fires for it.
-`packages/core/daimon/core/usage_sweep.py` closes that hole: each scheduler
-tick it lists Managed Agents sessions, skips any without a `daimon_tenant`
-stamp, belonging to a tenant this deployment does not own, or stamped
+`packages/core/daimon/core/usage_sweep.py` closes that hole. On its own
+scheduler loop, pausing the tick interval between passes, it lists Managed
+Agents sessions, skips any without a `daimon_tenant` stamp, belonging to a tenant this deployment does not own, or stamped
 `daimon_billing_exempt`, and replays the rest's `span.model_request_end`
 events through the same recorder. It requests only that event type and skips
 events already in `usage_events` before writing, so a session that is fully
