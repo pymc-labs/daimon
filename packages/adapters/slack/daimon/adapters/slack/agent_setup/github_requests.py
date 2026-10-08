@@ -11,7 +11,7 @@ from daimon.adapters.slack.agent_setup.github_link import send_link
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.github_panel import connect_link, safe_github_error
+from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.github_access_requests import (
     cancel_request,
@@ -266,6 +266,13 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
         return
     try:
         async with runtime.sessionmaker.begin() as session:
+            await sync_connect_admin(
+                session,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                verified_tenant_admin=is_admin,
+            )
             url = await connect_link(
                 session,
                 settings=runtime.settings,

@@ -6,6 +6,8 @@ import uuid
 
 from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
+from daimon.core.stores.accounts import set_role
+from daimon.core.stores.domain import Role
 from daimon.core.stores.github_connect import (
     CLIENT_AGENT_MESSAGE,
     admin_account_for_platform_user,
@@ -23,6 +25,7 @@ from daimon.core.stores.github_panel_grants import (
     remove_panel_grant,
     stage_panel_grant,
 )
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.security_audit import append_event
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,10 +39,29 @@ __all__ = [
     "CONNECT_COPY",
     "connect_root",
     "connect_link",
+    "sync_connect_admin",
     "pending_connect_link",
 ]
 
 CONNECT_COPY = "Choose repos on GitHub. If someone else manages them, send them this link."
+
+
+async def sync_connect_admin(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    platform_user_id: str,
+    verified_tenant_admin: bool,
+) -> None:
+    """Record a live platform admin check before a connect entry point mints a link."""
+    if not verified_tenant_admin:
+        raise ValueError("Only a workspace admin can connect GitHub.")
+    principal = await get_or_create_platform_principal(
+        session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
+    )
+    await set_role(session, principal.account_id, Role.ADMIN)
+
 
 _PUBLIC_ERRORS = frozenset(
     {

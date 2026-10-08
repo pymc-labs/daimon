@@ -31,6 +31,7 @@ from daimon.core.github_panel import (
     pending_connect_link,
     remove_panel_grant,
     stage_panel_grant,
+    sync_connect_admin,
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import github_access, github_app_installations
@@ -595,6 +596,31 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
             verified_tenant_admin=False,
         )
     assert (await db_session.get(Account, member_id)).role == "user"
+    with pytest.raises(ValueError, match="workspace admin"):
+        await sync_connect_admin(
+            db_session,
+            tenant_id=tenant_id,
+            platform="discord",
+            platform_user_id="channel-admin",
+            verified_tenant_admin=False,
+        )
+    assert (await db_session.get(Account, member_id)).role == "user"
+    await sync_connect_admin(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        platform_user_id="channel-admin",
+        verified_tenant_admin=True,
+    )
+    assert (await db_session.get(Account, member_id)).role == "admin"
+    await connect_link(
+        db_session,
+        settings=settings,
+        tenant_id=tenant_id,
+        platform="discord",
+        platform_user_id="channel-admin",
+        verified_tenant_admin=True,
+    )
     with pytest.raises(ValueError, match="workspace admin"):
         await connect_link(
             db_session,

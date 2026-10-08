@@ -24,6 +24,7 @@ from daimon.core.github_panel import (
     safe_github_error,
     stage_panel_grant,
     suggested_repo,
+    sync_connect_admin,
 )
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.roster import RosterAgent
@@ -266,6 +267,13 @@ class GitHubAddReposView(PanelViewBase):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             async with self.runtime.sessionmaker.begin() as session:
+                await sync_connect_admin(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    platform_user_id=str(interaction.user.id),
+                    verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                )
                 url = await connect_link(
                     session,
                     settings=self.runtime.settings,

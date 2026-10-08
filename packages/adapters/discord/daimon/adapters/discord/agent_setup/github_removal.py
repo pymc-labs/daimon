@@ -6,7 +6,7 @@ import structlog
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
 from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.github_panel import connect_link
+from daimon.core.github_panel import connect_link, sync_connect_admin
 from daimon.core.stores.github_access_requests import list_server_admin_recipients
 from daimon.core.stores.github_removal_notices import RemovalNotice
 from daimon.core.stores.tenants import get_tenant
@@ -38,6 +38,13 @@ async def send_removal_dm(
             if not is_member_guild_admin(member, guild_owner_id=guild.owner_id):
                 continue
             async with runtime.sessionmaker.begin() as session:
+                await sync_connect_admin(
+                    session,
+                    tenant_id=notice.tenant_id,
+                    platform="discord",
+                    platform_user_id=recipient.platform_user_id,
+                    verified_tenant_admin=True,
+                )
                 url = await connect_link(
                     session,
                     settings=runtime.settings,

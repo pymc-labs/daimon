@@ -15,7 +15,7 @@ from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_notice_visibility import new_repo_notice_copy, visible_new_repo_names
-from daimon.core.github_panel import connect_link
+from daimon.core.github_panel import connect_link, sync_connect_admin
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.github_access_requests import list_server_admin_recipients
 from daimon.core.stores.github_connect import admin_account_for_platform_user
@@ -214,6 +214,13 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     url: str | None = None
     try:
         async with runtime.sessionmaker.begin() as session:
+            await sync_connect_admin(
+                session,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                verified_tenant_admin=True,
+            )
             account_id = await admin_account_for_platform_user(
                 session, tenant_id=tenant_id, external_id=user_id
             )
@@ -240,6 +247,13 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                     if notice.repo_full_name in visible
                 ]
             if action_id == ACTION_CONNECT:
+                await sync_connect_admin(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="slack",
+                    platform_user_id=user_id,
+                    verified_tenant_admin=await resolve_is_admin(client, user_id=user_id),
+                )
                 url = await connect_link(
                     session,
                     settings=runtime.settings,

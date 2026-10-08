@@ -21,7 +21,7 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.github_panel import connect_link, safe_github_error
+from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.github_request_cards import admin_card
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.operation_policy import decide_operation
@@ -426,6 +426,13 @@ async def handle(
                 team = cast("dict[str, Any]", payload.get("team") or {})
                 user = cast("dict[str, Any]", payload.get("user") or {})
                 async with runtime.sessionmaker.begin() as session:
+                    await sync_connect_admin(
+                        session,
+                        tenant_id=tenant_id,
+                        platform="slack",
+                        platform_user_id=user_id,
+                        verified_tenant_admin=is_admin,
+                    )
                     url = await connect_link(
                         session,
                         settings=runtime.settings,

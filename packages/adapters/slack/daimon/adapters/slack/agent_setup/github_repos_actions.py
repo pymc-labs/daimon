@@ -21,6 +21,7 @@ from daimon.core.github_panel import (
     remove_panel_grant,
     safe_github_error,
     stage_panel_grant,
+    sync_connect_admin,
 )
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.stores.accounts import get_account
@@ -135,6 +136,13 @@ async def _handle_add(
             return True
         try:
             async with runtime.sessionmaker.begin() as session:
+                await sync_connect_admin(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="slack",
+                    platform_user_id=user_id,
+                    verified_tenant_admin=is_admin,
+                )
                 url = await connect_link(
                     session,
                     settings=runtime.settings,

@@ -13,7 +13,12 @@ from daimon.adapters.discord.checks import is_guild_admin, is_member_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_notice_visibility import new_repo_notice_copy, visible_new_repo_names
-from daimon.core.github_panel import CONNECT_COPY, connect_link, safe_github_error
+from daimon.core.github_panel import (
+    CONNECT_COPY,
+    connect_link,
+    safe_github_error,
+    sync_connect_admin,
+)
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.github_access_requests import list_server_admin_recipients
 from daimon.core.stores.github_connect import admin_account_for_platform_user
@@ -113,13 +118,7 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
     async with runtime.sessionmaker() as session:
         tenant = await get_tenant(session, tenant_id)
         group = await notices_for_day(session, tenant_id=tenant_id, day=parts[2])
-        try:
-            account_id = await admin_account_for_platform_user(
-                session, tenant_id=tenant_id, external_id=str(interaction.user.id)
-            )
-        except ValueError:
-            account_id = None
-    if tenant is None or group is None or account_id is None:
+    if tenant is None or group is None:
         await interaction.response.send_message("This card is unavailable.", ephemeral=True)
         return True
     guild = interaction.client.get_guild(int(tenant.external_id))
@@ -137,6 +136,17 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
             "Only a server admin can connect repos.", ephemeral=True
         )
         return True
+    async with runtime.sessionmaker.begin() as session:
+        await sync_connect_admin(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            platform_user_id=str(interaction.user.id),
+            verified_tenant_admin=True,
+        )
+        account_id = await admin_account_for_platform_user(
+            session, tenant_id=tenant_id, external_id=str(interaction.user.id)
+        )
     visible: tuple[str, ...] = ()
     if runtime.settings.crypto.keys:
         fernet = build_multifernet(
@@ -171,6 +181,13 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
         return True
     try:
         async with runtime.sessionmaker.begin() as session:
+            await sync_connect_admin(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                platform_user_id=str(interaction.user.id),
+                verified_tenant_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
+            )
             url = await connect_link(
                 session,
                 settings=runtime.settings,
@@ -242,6 +259,13 @@ class NewRepoCard(discord.ui.View):
     async def connect(self, interaction: discord.Interaction) -> None:
         try:
             async with self.runtime.sessionmaker.begin() as session:
+                await sync_connect_admin(
+                    session,
+                    tenant_id=self.group.tenant_id,
+                    platform="discord",
+                    platform_user_id=str(interaction.user.id),
+                    verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                )
                 url = await connect_link(
                     session,
                     settings=self.runtime.settings,

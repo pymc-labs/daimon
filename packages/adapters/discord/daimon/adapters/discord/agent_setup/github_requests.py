@@ -10,7 +10,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.github_panel import connect_link, safe_github_error
+from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.stores.github_access_requests import (
     cancel_request,
@@ -268,6 +268,13 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         return True
     try:
         async with runtime.sessionmaker.begin() as session:
+            await sync_connect_admin(
+                session,
+                tenant_id=request.tenant_id,
+                platform="discord",
+                platform_user_id=str(member.id),
+                verified_tenant_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
+            )
             url = await connect_link(
                 session,
                 settings=runtime.settings,

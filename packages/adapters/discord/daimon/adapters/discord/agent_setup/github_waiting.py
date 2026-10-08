@@ -16,7 +16,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.github_panel import connect_link, safe_github_error
+from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.github_request_cards import admin_card
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.operation_policy import TargetFacts, decide_operation
@@ -336,6 +336,13 @@ class GitHubWaitingView(PanelViewBase):
                     )
                     url = None
                 else:
+                    await sync_connect_admin(
+                        session,
+                        tenant_id=tenant_id,
+                        platform="discord",
+                        platform_user_id=str(interaction.user.id),
+                        verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                    )
                     url = await connect_link(
                         session,
                         settings=self.runtime.settings,

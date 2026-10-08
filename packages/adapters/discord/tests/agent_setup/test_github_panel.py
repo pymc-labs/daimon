@@ -428,6 +428,7 @@ async def test_discord_agent_setup_shows_saved_key_refusal(
 ) -> None:
     message = "This agent uses a saved GitHub key. Ask your Daimon operator to switch it."
     monkeypatch.setattr(add_module, "is_guild_admin", lambda _interaction: True)
+    monkeypatch.setattr(add_module, "sync_connect_admin", AsyncMock())
     monkeypatch.setattr(add_module, "connect_link", AsyncMock(side_effect=ValueError(message)))
     agent = RosterAgent(name="helper", ma_agent_id="ag_helper", model_id="model", is_built_in=False)
     state = PanelState(
