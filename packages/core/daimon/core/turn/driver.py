@@ -69,6 +69,7 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.core.errors import TurnError
 from daimon.core.ma import replay_events, send_interrupt_and_wait, terminal_stop_reason
+from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.approvals import (
     build_confirmation_events,
     build_decision_events,
@@ -117,7 +118,10 @@ def _answers_in_turn(tool_confirmation: ToolConfirmation) -> bool:
 
 
 async def _decide_blocked(
-    tool_confirmation: AutoApprove | PolicyApproval, state: TurnState, fresh: list[str]
+    tool_confirmation: AutoApprove | PolicyApproval,
+    state: TurnState,
+    fresh: list[str],
+    answered: dict[str, ToolConfirmationResult],
 ) -> list[BetaManagedAgentsUserToolConfirmationEventParams]:
     """The `user.tool_confirmation` batch for `fresh` under an answering posture.
 
@@ -129,8 +133,30 @@ async def _decide_blocked(
             return build_confirmation_events(fresh)
         case PolicyApproval(decide=decide):
             calls = tool_calls_for(state, fresh)
-            results = await asyncio.gather(*(decide(call) for call in calls))
+
+            async def decide_one(call: ToolCall) -> ToolConfirmationResult:
+                result = await decide(call)
+                answered[call.tool_use_id] = result
+                return result
+
+            results = await asyncio.gather(*(decide_one(call) for call in calls))
             return build_decision_events(zip(fresh, results, strict=True))
+
+
+@dataclasses.dataclass(frozen=True)
+class _DecisionBatch:
+    events: list[BetaManagedAgentsUserToolConfirmationEventParams]
+    retire_unsent: tuple[Callable[[], Awaitable[None]], ...]
+
+
+async def _retire_unsent(
+    callbacks: Sequence[Callable[[], Awaitable[None]]], *, session_id: str
+) -> None:
+    """Make approved cards truthful when their allow never reached MA."""
+    results = await asyncio.gather(*(callback() for callback in callbacks), return_exceptions=True)
+    for error in results:
+        if isinstance(error, BaseException):
+            log.warning("turn.confirmation_retire_failed", session_id=session_id, error=str(error))
 
 
 #: Most time one cleanup step (joining a cancelled card hook, sending the
@@ -188,7 +214,7 @@ async def _decide_or_refuse_on_cancel(
     cancel: asyncio.Event,
     anthropic: AsyncAnthropic,
     session_id: str,
-) -> list[BetaManagedAgentsUserToolConfirmationEventParams]:
+) -> _DecisionBatch:
     """`_decide_blocked`, raced against the turn's cancel signal.
 
     The one place blocked calls are decided, for the live stream and the
@@ -205,19 +231,30 @@ async def _decide_or_refuse_on_cancel(
     (shielded, so the refusal lands even though this task is being torn down)
     before it propagates.
     """
+    answered: dict[str, ToolConfirmationResult] = {}
     decide_task = asyncio.create_task(
-        _decide_blocked(tool_confirmation, state, fresh), name="turn.decide_blocked"
+        _decide_blocked(tool_confirmation, state, fresh, answered), name="turn.decide_blocked"
     )
     cancel_task = asyncio.create_task(cancel.wait(), name="turn.decide_cancel_waiter")
     # Set once the wait ends on its own (a decision or the cancel event); if
     # the `finally` runs with it unset, this coroutine is being torn down from
     # outside (the turn ceiling, a caller) and the pending ids are refused.
     settled = False
+    ready = False
     try:
         await asyncio.wait({decide_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
         settled = True
         if decide_task.done() and not cancel.is_set():
-            return decide_task.result()
+            events = decide_task.result()
+            ready = True
+            return _DecisionBatch(
+                events,
+                tuple(
+                    result.retire_unsent
+                    for result in answered.values()
+                    if result.allow and result.retire_unsent is not None
+                ),
+            )
     finally:
         # Cleanup is bounded: a card hook retiring its card, or the deny
         # below, talks to a chat API or MA, and an outage there must not hold
@@ -227,6 +264,22 @@ async def _decide_or_refuse_on_cancel(
             if not task.done():
                 task.cancel()
             await _bounded(task, what="decide_task_join", session_id=session_id)
+        if not ready:
+            await _bounded(
+                asyncio.create_task(
+                    _retire_unsent(
+                        tuple(
+                            result.retire_unsent
+                            for result in answered.values()
+                            if result.allow and result.retire_unsent is not None
+                        ),
+                        session_id=session_id,
+                    ),
+                    name="turn.retire_unsent_confirmations",
+                ),
+                what="retire_unsent_confirmations",
+                session_id=session_id,
+            )
         if not settled:
             await _bounded(
                 asyncio.create_task(
@@ -255,6 +308,45 @@ async def _decide_or_refuse_on_cancel(
         session_id=session_id,
     )
     raise _InterruptInConsume()
+
+
+async def _send_decision_batch(
+    batch: _DecisionBatch,
+    *,
+    fresh: list[str],
+    cancel: asyncio.Event,
+    anthropic: AsyncAnthropic,
+    session_id: str,
+) -> None:
+    """Send decisions, retiring approved cards if no allow is sent."""
+    try:
+        if cancel.is_set():
+            raise _InterruptInConsume()
+        await anthropic.beta.sessions.events.send(session_id, events=batch.events)
+    except BaseException as err:
+        await _bounded(
+            asyncio.create_task(
+                _retire_unsent(batch.retire_unsent, session_id=session_id),
+                name="turn.retire_unsent_confirmations",
+            ),
+            what="retire_unsent_confirmations",
+            session_id=session_id,
+        )
+        if cancel.is_set() or isinstance(err, asyncio.CancelledError | _InterruptInConsume):
+            await _bounded(
+                asyncio.create_task(
+                    _refuse_blocked(
+                        anthropic,
+                        session_id,
+                        fresh,
+                        message="This turn ended before the call was approved; it did not run.",
+                    ),
+                    name="turn.refuse_blocked",
+                ),
+                what="unsent_refusal",
+                session_id=session_id,
+            )
+        raise
 
 
 # The SDK only wraps httpx failures raised while *opening* a request into
@@ -767,8 +859,12 @@ async def _pump(
                                     # confirm-reconnect-confirm spin. A later
                                     # duplicate has no fresh ids and enters
                                     # the bounded echo wait below.
-                                    await anthropic.beta.sessions.events.send(
-                                        session_id, events=decisions
+                                    await _send_decision_batch(
+                                        decisions,
+                                        fresh=fresh,
+                                        cancel=cancel,
+                                        anthropic=anthropic,
+                                        session_id=session_id,
                                     )
                                     log.info(
                                         "turn.tool_confirmation.sent",
@@ -1261,7 +1357,13 @@ async def _consume_with_reconnect(
                             # RUNNING session returns HTTP 200 and is
                             # silently ignored (measured 2026-08-26) -- never
                             # move this send to a running-session position.
-                            await anthropic.beta.sessions.events.send(session_id, events=decisions)
+                            await _send_decision_batch(
+                                decisions,
+                                fresh=fresh,
+                                cancel=cancel,
+                                anthropic=anthropic,
+                                session_id=session_id,
+                            )
                             log.info(
                                 "turn.tool_confirmation.sent",
                                 session_id=session_id,

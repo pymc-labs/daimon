@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.slack.tool_confirmation import SlackConfirmationCards
-from daimon.core.confirmation import ConfirmationPrompt, prompt_for_tool_call
+from daimon.core.confirmation import ApprovedConfirmation, ConfirmationPrompt, prompt_for_tool_call
 from daimon.core.posted_controls.confirmation import NOT_YOURS_MESSAGE
 from daimon.core.tool_safety import ToolCall
 from slack_sdk.web.async_client import AsyncWebClient
@@ -71,7 +71,8 @@ async def test_the_requesters_approve_answers_approved_and_edits_the_card() -> N
 
     await cards.handle_click(_click(approve_id, "U1"))
 
-    assert await asyncio.wait_for(waiting, timeout=1) == "approved"
+    result = await asyncio.wait_for(waiting, timeout=1)
+    assert isinstance(result, ApprovedConfirmation) and result.answer == "approved"
     update = client.chat_update.await_args.kwargs
     assert update["ts"] == "1700.1"
     assert update["text"].startswith("Approved")
@@ -131,6 +132,20 @@ async def test_tool_words_are_literal_in_card_fallback_and_private_details(
     waiting.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await waiting
+
+
+async def test_approved_card_can_retire_stopped_before_allow_is_sent() -> None:
+    cards = SlackConfirmationCards()
+    client = _client()
+    waiting, approve_id = await _post(cards, client)
+    await cards.handle_click(_click(approve_id, "U1"))
+
+    result = await asyncio.wait_for(waiting, timeout=1)
+    assert isinstance(result, ApprovedConfirmation)
+    await result.retire_unsent()
+
+    assert client.chat_update.await_count == 2
+    assert client.chat_update.await_args.kwargs["text"].startswith("Stopped")
 
 
 async def test_an_unanswered_card_expires_and_is_retired() -> None:
@@ -293,5 +308,5 @@ async def test_upload_card_has_color_and_private_details() -> None:
     assert client.chat_postEphemeral.await_args.kwargs["text"] == "\n".join(prompt.detail_lines)
     assert not waiting.done()
     await cards.handle_click(_click(actions["elements"][0]["action_id"], "U1"))
-    assert await waiting == "approved"
+    assert isinstance(await waiting, ApprovedConfirmation)
     assert client.chat_update.await_args.kwargs["attachments"][0]["color"] == "#57F287"

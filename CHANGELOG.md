@@ -140,6 +140,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Tool approval cards on Discord, Slack and Teams now name the action and consequence, show plain labelled inputs in Details, and collapse after a decision. Each blocked call gets its own card and confirmation event.
+- If a turn stops after an approval click but before its confirmation is sent, the answered card now shows Stopped.
 
 - `/billing` (`billing` on Teams) names its top spenders, never as `User 1234` and without pinging anyone. Discord fetches the member when the cache lacks them; Slack asks `users.info` and shows the name as plain text; Teams reads the rosters of the teams the bot is installed in. Someone who has left, or whose lookup is slow, shows the name daimon last saw for them: it now remembers the names Discord, Slack and Teams send with messages, clicks and lookups (`platform_user_names`, removed by a privacy deletion). Discord also asks for a departed person's account name. Someone never seen at all is a mention the Discord or Slack client names, or `Name unavailable` on Teams. Teams names channel budgets by channel name instead of the `19:…` id.
 - `/billing` drops its `·` separators: the admin subtitle is two lines, expiry dates read `$20.00 on Oct 12`, and top-up amounts show `about 100 turns` under the amount.

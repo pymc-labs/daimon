@@ -8,7 +8,7 @@ in-process, like the cancel registry: a restart ends the card and its turn toget
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC
 
 import structlog
@@ -21,6 +21,7 @@ from daimon.adapters.teams.card_actions import (
 from daimon.adapters.teams.identity import canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.core.confirmation import (
+    ApprovedConfirmation,
     ConfirmationAnswer,
     ConfirmationHook,
     ConfirmationPrompt,
@@ -135,6 +136,7 @@ class _PostedCard:
     conversation_id: str
     service_url: str | None
     message_id: str
+    answered_edit_done: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class TeamsConfirmationCards:
@@ -153,7 +155,8 @@ class TeamsConfirmationCards:
     ) -> ConfirmationHook:
         """A hook that posts each prompt's card into the turn's conversation."""
 
-        async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:
+            posted_cards: list[_PostedCard] = []
             if requester_display_name:
                 prompt = prompt.model_copy(
                     update={"requester_display_name": requester_display_name}
@@ -163,11 +166,22 @@ class TeamsConfirmationCards:
                 card = build_confirmation_card(prompt, state="pending", token=token)
                 message = MessageActivityInput().add_card(confirmation_adaptive_card(card, prompt))
                 sent = await self._sender.send(conversation_id, message, service_url=service_url)
-                return _PostedCard(prompt, conversation_id, service_url, sent.id)
+                posted = _PostedCard(prompt, conversation_id, service_url, sent.id)
+                posted_cards.append(posted)
+                return posted
 
-            return await self._controls.confirm(
+            result = await self._controls.confirm(
                 prompt, post=post, retire=self._edit, post_errors=TEAMS_SEND_ERRORS
             )
+            if result == "approved" and posted_cards:
+                answered_posted = posted_cards[0]
+
+                async def retire_unsent() -> None:
+                    await answered_posted.answered_edit_done.wait()
+                    await self._edit(answered_posted, "stopped")
+
+                return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
+            return result
 
         return _confirm
 
@@ -193,7 +207,9 @@ class TeamsConfirmationCards:
             posted.prompt, state=answer, answered_by_platform_user_id=clicker
         )
         name = activity.from_.name
-        return replace_card(confirmation_adaptive_card(card, posted.prompt, answered_by=name))
+        response = replace_card(confirmation_adaptive_card(card, posted.prompt, answered_by=name))
+        posted.answered_edit_done.set()
+        return response
 
     async def _edit(self, posted: _PostedCard, state: ConfirmationCardState) -> None:
         card = build_confirmation_card(posted.prompt, state=state)

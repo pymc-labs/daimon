@@ -15,7 +15,12 @@ from daimon.adapters.teams.tool_confirmation import (
     TeamsConfirmationCards,
     confirmation_adaptive_card,
 )
-from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt, prompt_for_tool_call
+from daimon.core.confirmation import (
+    ApprovedConfirmation,
+    ConfirmationAnswer,
+    ConfirmationPrompt,
+    prompt_for_tool_call,
+)
 from daimon.core.posted_controls.confirmation import (
     EXPIRED_MESSAGE,
     NO_LONGER_PENDING_MESSAGE,
@@ -116,7 +121,8 @@ async def test_only_the_requesters_click_answers_and_replaces_the_card(
 
     answered = await cards.on_action(_click(token, op, AAD_OBJECT_ID.upper()))
 
-    assert await asyncio.wait_for(waiting, timeout=1) == answer
+    result = await asyncio.wait_for(waiting, timeout=1)
+    assert (result.answer if isinstance(result, ApprovedConfirmation) else result) == answer
     assert isinstance(answered, AdaptiveCardActionCardResponse)
     body = answered.value.model_dump_json(by_alias=True)
     assert headline in body, "the card shows the answer"
@@ -137,6 +143,20 @@ async def test_an_unanswered_card_expires_and_is_retired() -> None:
     token = re.search(r'"token":"([^"]+)"', _json(sender, 0))
     assert token is not None
     assert cards._controls.missing_message(token.group(1)) == EXPIRED_MESSAGE
+
+
+async def test_approved_card_can_retire_stopped_before_allow_is_sent() -> None:
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    waiting, token = await _post(cards, sender)
+    await cards.on_action(_click(token, "approve", AAD_OBJECT_ID))
+
+    result = await asyncio.wait_for(waiting, timeout=1)
+    assert isinstance(result, ApprovedConfirmation)
+    await result.retire_unsent()
+
+    assert sender.activities[-1].id == "m-1"
+    assert "Stopped" in _json(sender, -1)
 
 
 async def test_a_cancelled_wait_retires_the_card_and_ignores_late_clicks() -> None:

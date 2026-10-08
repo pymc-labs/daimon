@@ -18,7 +18,12 @@ import secrets
 
 import structlog
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREEN, COLOR_GREYPLE
-from daimon.core.confirmation import ConfirmationAnswer, ConfirmationHook, ConfirmationPrompt
+from daimon.core.confirmation import (
+    ApprovedConfirmation,
+    ConfirmationAnswer,
+    ConfirmationHook,
+    ConfirmationPrompt,
+)
 from daimon.core.posted_controls.confirmation import (
     NOT_YOURS_MESSAGE,
     ConfirmationCard,
@@ -73,6 +78,7 @@ class _ConfirmationView(discord.ui.LayoutView):
         super().__init__(timeout=None)
         self._prompt = prompt
         self._answer = answer
+        self.answered_edit_done = asyncio.Event()
         container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
             accent_colour=discord.Colour(
                 COLOR_AMBER
@@ -139,10 +145,13 @@ class _ConfirmationView(discord.ui.LayoutView):
         answered = build_confirmation_card(
             self._prompt, state=answer, answered_by_platform_user_id=str(interaction.user.id)
         )
-        await interaction.response.edit_message(
-            view=_ConfirmationView(answered, self._prompt, answer=None),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        try:
+            await interaction.response.edit_message(
+                view=_ConfirmationView(answered, self._prompt, answer=None),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        finally:
+            self.answered_edit_done.set()
 
 
 def build_confirmation_view(
@@ -157,7 +166,7 @@ def build_confirmation_view(
 def discord_confirmation_hook(channel: discord.abc.Messageable) -> ConfirmationHook:
     """A hook that posts each prompt's card into `channel` (the turn's thread)."""
 
-    async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+    async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:
         loop = asyncio.get_running_loop()
         answer: asyncio.Future[ConfirmationAnswer] = loop.create_future()
         pending = build_confirmation_card(prompt, state="pending", token=secrets.token_urlsafe(12))
@@ -167,7 +176,15 @@ def discord_confirmation_hook(channel: discord.abc.Messageable) -> ConfirmationH
         async def retire(state: ConfirmationCardState) -> None:
             await _retire(message, prompt, state)
 
-        return await wait_local_confirmation(prompt, answer, stop=view.stop, retire=retire)
+        result = await wait_local_confirmation(prompt, answer, stop=view.stop, retire=retire)
+        if result == "approved":
+
+            async def retire_unsent() -> None:
+                await view.answered_edit_done.wait()
+                await retire("stopped")
+
+            return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
+        return result
 
     return _confirm
 

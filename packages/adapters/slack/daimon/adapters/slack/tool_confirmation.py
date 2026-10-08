@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import html
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import aiohttp
@@ -22,6 +22,7 @@ import structlog
 from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.confirmation import (
+    ApprovedConfirmation,
     ConfirmationAnswer,
     ConfirmationHook,
     ConfirmationPrompt,
@@ -75,6 +76,7 @@ class _PostedCard:
     client: AsyncWebClient
     channel: str
     ts: str
+    answered_edit_done: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class SlackConfirmationCards:
@@ -94,7 +96,9 @@ class SlackConfirmationCards:
     ) -> ConfirmationHook:
         """A hook that posts each prompt's card into `channel`/`thread_ts`."""
 
-        async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:
+            posted_cards: list[_PostedCard] = []
+
             async def post(token: str) -> _PostedCard:
                 card = build_confirmation_card(prompt, state="pending", token=token)
                 response = await post_as_agent(
@@ -110,14 +114,25 @@ class SlackConfirmationCards:
                 ts = str(response.get("ts") or "")  # pyright: ignore[reportUnknownMemberType]
                 if record_post is not None and ts:
                     await record_post(ts)
-                return _PostedCard(prompt=prompt, client=client, channel=channel, ts=ts)
+                posted = _PostedCard(prompt=prompt, client=client, channel=channel, ts=ts)
+                posted_cards.append(posted)
+                return posted
 
             async def retire(posted: _PostedCard, state: ConfirmationCardState) -> None:
                 await _edit(posted, state, answered_by=None)
 
-            return await self._controls.confirm(
+            result = await self._controls.confirm(
                 prompt, post=post, retire=retire, post_errors=(SlackApiError,)
             )
+            if result == "approved" and posted_cards:
+                answered_posted = posted_cards[0]
+
+                async def retire_unsent() -> None:
+                    await answered_posted.answered_edit_done.wait()
+                    await _edit(answered_posted, "stopped", answered_by=None)
+
+                return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
+            return result
 
         return _confirm
 
@@ -151,7 +166,10 @@ class SlackConfirmationCards:
                 refusal = refusal.format(requester=f"<@{posted.prompt.requester_platform_user_id}>")
             await _ephemeral(posted, clicker, refusal)
             return
-        await _edit(posted, answer, answered_by=clicker)
+        try:
+            await _edit(posted, answer, answered_by=clicker)
+        finally:
+            posted.answered_edit_done.set()
 
 
 async def _edit(

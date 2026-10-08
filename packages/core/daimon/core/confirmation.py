@@ -23,6 +23,7 @@ import asyncio
 import re
 import secrets
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final, Literal, cast
 
@@ -32,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 __all__ = [
     "CONFIRMATION_TIMEOUT",
     "ConfirmationAnswer",
+    "ApprovedConfirmation",
     "ConfirmationHook",
     "ConfirmationPrompt",
     "PendingConfirmations",
@@ -72,7 +74,17 @@ class ConfirmationPrompt(BaseModel):
         return self
 
 
-ConfirmationHook = Callable[[ConfirmationPrompt], Awaitable[ConfirmationAnswer]]
+@dataclass(frozen=True)
+class ApprovedConfirmation:
+    """An approved card that can be retired if its allow is never sent."""
+
+    answer: Literal["approved"]
+    retire_unsent: Callable[[], Awaitable[None]]
+
+
+ConfirmationHook = Callable[
+    [ConfirmationPrompt], Awaitable[ConfirmationAnswer | ApprovedConfirmation]
+]
 
 
 async def no_confirmation_surface(prompt: ConfirmationPrompt) -> ConfirmationAnswer:

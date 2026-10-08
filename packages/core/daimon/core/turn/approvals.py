@@ -27,6 +27,7 @@ import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsUserToolConfirmationEventParams
 from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event import StopReason
 from daimon.core.confirmation import (
+    ApprovedConfirmation,
     ConfirmationHook,
     no_confirmation_surface,
     prompt_for_tool_call,
@@ -246,15 +247,21 @@ def interactive_decider(
             call, requester_platform_user_id=requester_platform_user_id, now=now()
         )
         try:
-            answer = await confirm(prompt)
+            response = await confirm(prompt)
         except Exception as err:
             # Named boundary: the hook is adapter code talking to a chat API;
             # whatever it raises, the write must not run.
             log.warning("tool_safety.confirm_failed", tool=call.key, error=str(err))
-            answer = "denied"
+            response = "denied"
+        answer = response.answer if isinstance(response, ApprovedConfirmation) else response
         log.info("tool_safety.answered", tool=call.key, answer=answer)
         if answer == "approved":
-            return ToolConfirmationResult(allow=True)
+            return ToolConfirmationResult(
+                allow=True,
+                retire_unsent=response.retire_unsent
+                if isinstance(response, ApprovedConfirmation)
+                else None,
+            )
         return ToolConfirmationResult(allow=False, deny_message=_answer_message(call, answer))
 
     return _decide
