@@ -65,6 +65,8 @@ class _Fake:
         self.graph_status = 200
         self.graph_token_status = 200
         self.files = False
+        # A file posted from a library folder outside the channel's own (`Board`).
+        self.restricted = False
         self.site_status = 200
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -117,7 +119,8 @@ class _Fake:
                 }
                 older = {
                     **_message(_ROOT, "root"),
-                    "attachments": self._file("q3.xlsx"),
+                    "attachments": self._file("q3.xlsx")
+                    + (self._file("plan.docx", folder="Board") if self.restricted else []),
                     "replies": [
                         _message("1700000000002", "reply two", app=True),
                         _message("1700000000001", "reply one"),
@@ -132,10 +135,11 @@ class _Fake:
                 return httpx.Response(200, json={"value": []})
         return httpx.Response(404)
 
-    def _file(self, name: str) -> list[dict[str, str]]:
+    def _file(self, name: str, *, folder: str = "research") -> list[dict[str, str]]:
         if not self.files:
             return []
-        return [{"contentType": "reference", "name": name, "contentUrl": f"{_LIBRARY}/{name}"}]
+        url = f"{_LIBRARY}/{folder}/{name}"
+        return [{"contentType": "reference", "name": name, "contentUrl": url}]
 
     def _site(self, path: str) -> httpx.Response | None:
         """The channel's SharePoint site, readable only once granted (`site_status`)."""
@@ -147,10 +151,18 @@ class _Fake:
             return httpx.Response(200, json={"id": _SITE})
         if path == f"/v1.0/sites/{_SITE}/drives":
             return httpx.Response(200, json={"value": [{"id": "b!d", "webUrl": _LIBRARY}]})
+        # The channel's folder, found by name: `filesFolder` is refused under `Sites.Selected`.
+        if path in (f"/v1.0/sites/{_SITE}/drive/root:/research", "/v1.0/drives/b!d/items/f1"):
+            parent = {"driveId": "b!d", "path": "/drives/b!d/root:"}
+            return httpx.Response(
+                200, json={"id": "f1", "name": "research", "parentReference": parent}
+            )
         if path.startswith("/v1.0/drives/b!d/root:/"):
-            name = path.rsplit("/", 1)[1]
+            folder, name = path.removeprefix("/v1.0/drives/b!d/root:/").rsplit("/", 1)
             download = f"https://example.sharepoint.com/download/{name}?tempauth=t"
-            return httpx.Response(200, json={"id": name, "@microsoft.graph.downloadUrl": download})
+            parent = {"driveId": "b!d", "path": f"/drives/b!d/root:/{folder}"}
+            item = {"id": name, "parentReference": parent, "@microsoft.graph.downloadUrl": download}
+            return httpx.Response(200, json=item)
         return None
 
     def graph(self) -> list[httpx.Request]:
@@ -347,6 +359,28 @@ async def test_files_are_linked_only_where_the_channels_site_is_granted(
         assert all(f.url is None for f in files)
         sites = [r for r in fake.graph() if "/sites" in r.url.path]
         assert len(sites) == 2, "a refused site stops each read's lookups at the first"
+
+
+async def test_a_file_outside_the_channels_folder_is_named_but_not_linked(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The site grant ignores per-file permissions, so only the channel's own folder is linked."""
+    auth, fake = await _setup(db_session), _Fake()
+    fake.files = fake.restricted = True
+    read = await _teams_read_channel_impl(
+        _runtime(fake, sessionmaker),
+        auth,
+        channel_id=_CHANNEL,
+        limit=5,
+        cursor=None,
+        read_policy=OPEN_READ_POLICY,
+    )
+    links = {f.name: f.url for p in read.posts for f in p.files}
+    assert links == {
+        "q3.xlsx": "https://example.sharepoint.com/download/q3.xlsx?tempauth=t",
+        "plan.docx": None,
+        "notes.docx": "https://example.sharepoint.com/download/notes.docx?tempauth=t",
+    }, "a file from another folder on the site is listed by name only"
 
 
 async def test_no_link_for_a_sealed_thread_or_an_ungranted_private_channel(

@@ -24,7 +24,7 @@ class TeamsFileRow(BaseModel):
 
     name: str
     url: str | None = None
-    """A download link, only where the channel's SharePoint site is granted to daimon.
+    """A download link, only for a file in the channel's Files folder on a site granted to daimon.
     Anyone holding it can fetch the file for about an hour: fetch it, never post it."""
 
 

@@ -49,10 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Teams channel reads link files.** `read_channel`, `read_thread`,
   `get_message` and `search_messages` now return each file on a message with
   a download link where the channel's SharePoint site is granted, as Slack
-  reads do, so an agent can open a file it finds there. Elsewhere files are
-  still listed by name. Links last about an hour and only come with messages
-  the read already returns, so a sealed thread's files stay out. Each file is
-  now an object with `name` and `url` instead of a bare name.
+  reads do, so an agent can open a file it finds there. Only files in the
+  channel's own Files folder are linked: the site grant ignores SharePoint's
+  per-file permissions, so a file from another library or folder, and any
+  file elsewhere, is still listed by name. Links last about an hour and only
+  come with messages the read already returns, so a sealed thread's files
+  stay out. Each file is now an object with `name` and `url`, not a name.
 - **Teams files in private and shared channels, turned on by asking.** The
   Enable files sign-in now starts from a channel and grants daimon that
   channel's own SharePoint site: the team's for a standard channel, a site of

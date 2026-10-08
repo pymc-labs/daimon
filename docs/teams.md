@@ -341,9 +341,12 @@ registration:
   channel is read only from a turn inside it. Graph has no message search for
   an app, so `search_messages` scans recent posts, bounded, and says when it
   stopped short. A 1:1 chat cannot be read back. A message's files come with
-  a download link where the channel's site is granted (as for a turn's own
-  files), else by name. The link lasts about an hour and anyone holding it can
-  fetch the file, so only messages the read returns get one.
+  a download link where the channel's site is granted and the file is in the
+  channel's own Files folder, else by name: the site grant ignores
+  SharePoint's per-file permissions, so a file from a restricted library or
+  folder elsewhere on the site is never linked. The link lasts about an hour
+  and anyone holding it can fetch the file, so only messages the read returns
+  get one.
 - **Posting.** `send_message` and `create_thread` (up to 6,000 characters,
   only into a conversation the requester belongs to). Files ride along: in a
   channel whose site is granted they are saved to its Files tab and linked; in

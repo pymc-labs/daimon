@@ -7,9 +7,11 @@ standard channel, the team site's. A bot can put a file in a 1:1 chat only throu
 FileConsentCard: the person accepts and the adapter uploads the staged bytes
 to their OneDrive (`daimon.core.teams_file_offers`). A group chat takes neither.
 
-The read tools link a message's shared files the way the adapter does for a
-turn (`file_links`): Graph's download URL, only from the channel's own site and
-only where that site is granted. The URL is pre-authorised for about an hour,
+The read tools link a message's shared files (`file_links`): Graph's download
+URL, only where the channel's own site is granted and only for a file inside
+the channel's Files folder. The site grant reads past SharePoint's per-item
+permissions, so a file posted from a restricted library or folder elsewhere on
+the site is listed by name only. The URL is pre-authorised for about an hour,
 as a Slack read's proxy link lasts the turn grant, and only messages the read
 already returns get one, so it shows nothing the caller could not read.
 """
@@ -32,7 +34,7 @@ from daimon.adapters.mcp.tools.teams._directory import (
     split_thread,
 )
 from daimon.core.media.filenames import sanitize_title
-from daimon.core.stores.domain import FileUploadRow
+from daimon.core.stores.domain import FileUploadRow, TeamsChannelSiteRow
 from daimon.core.stores.teams_channel_sites import get_teams_channel_site
 from daimon.core.teams_file_offers import UploadOffer, consent_attachment
 from daimon.core.teams_graph import FILE_ATTACHMENT_TYPES, GraphMessage, GraphUnavailable
@@ -87,18 +89,10 @@ async def _save_in_channel(
     if stored is None and not ref.is_standard:
         # Its files live in a site of its own; the team site's same-named folder is not it.
         raise ToolError(f"{_NO_FILES}.")
-
-    async def channel_name() -> str:
-        return ref.channel_name
-
     sharepoint = SharePoint(graph_for(client), client.http)
     links: list[str] = []
     try:
-        folder: DriveFolder = (
-            await sharepoint.channel_folder(ref.group_id, ref.channel_id, channel_name=channel_name)
-            if stored is None
-            else DriveFolder(drive_id=stored.drive_id, item_id=stored.folder_id)
-        )
+        folder = await _channel_folder(sharepoint, ref, stored)
         for upload, data in staged:
             item = await sharepoint.upload(folder, upload.display_filename, data)
             links.append(
@@ -115,6 +109,19 @@ async def _save_in_channel(
             f"message failed ({type(err).__name__}); post it again without file_handles, "
             "with these links:\n" + "\n".join(links)
         ) from err
+
+
+async def _channel_folder(
+    sharepoint: SharePoint, ref: TeamsChannelRef, stored: TeamsChannelSiteRow | None
+) -> DriveFolder:
+    """The folder stored when files were turned on, else the channel's found by name."""
+    if stored is not None:
+        return DriveFolder(drive_id=stored.drive_id, item_id=stored.folder_id)
+
+    async def channel_name() -> str:
+        return ref.channel_name
+
+    return await sharepoint.channel_folder(ref.group_id, ref.channel_id, channel_name=channel_name)
 
 
 async def _offer(
@@ -161,11 +168,19 @@ async def file_links(
         # Its files live in a site of its own, not granted yet.
         return {}
     sharepoint = SharePoint(graph_for(client), client.http)
+    try:
+        folder = await _channel_folder(sharepoint, ref, stored)
+    except GraphUnavailable as err:
+        _log.info("teams.file_link.unresolved", status=err.status, reason=err.reason)
+        return {}
     links: dict[str, str] = {}
     for url in wanted:
         try:
             links[url] = await sharepoint.download_url(
-                url, group_id=ref.group_id, site_id=None if stored is None else stored.site_id
+                url,
+                group_id=ref.group_id,
+                site_id=None if stored is None else stored.site_id,
+                folder=folder,
             )
         except GraphUnavailable as err:
             _log.info("teams.file_link.unresolved", status=err.status, reason=err.reason)
