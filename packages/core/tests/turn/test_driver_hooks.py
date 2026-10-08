@@ -79,6 +79,34 @@ async def test_driver_calls_on_sse_event_for_each_upstream_event() -> None:
     )
 
 
+async def test_terminal_render_does_not_wait_for_stretched_periodic_interval() -> None:
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(make_agent_message(event_id="sevt_1", text="hello")),
+            YieldEvent(make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())),
+        ]
+    ]
+    lifecycle = RecordingLifecycle()
+
+    result = await asyncio.wait_for(
+        run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=lifecycle,
+            cancel=asyncio.Event(),
+            render_interval_s=lambda: 5.0,
+            now=_now,
+            billing=_EXEMPT,
+        ),
+        timeout=0.5,
+    )
+
+    assert result.content == [TextBlock(kind="text", text="hello")]
+    assert len(lifecycle.terminal_success) == 1
+
+
 async def test_driver_does_not_forward_redelivered_event_to_lifecycle() -> None:
     fa = FakeAnthropic()
     message = make_agent_message(event_id="sevt_1", text="hello")

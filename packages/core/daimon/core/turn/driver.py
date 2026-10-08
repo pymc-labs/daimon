@@ -91,6 +91,7 @@ from daimon.core.turn.posture import (
     ToolConfirmationResult,
 )
 from daimon.core.turn.reducers import apply
+from daimon.core.turn.render_interval import NORMAL_INTERVAL_S
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
@@ -491,7 +492,7 @@ async def run_turn(
     user_message: str,
     lifecycle: TurnLifecycle,
     cancel: asyncio.Event,
-    render_interval_s: float = 0.05,
+    render_interval_s: float | Callable[[], float] = 0.05,
     interrupt_timeout_s: float = 120.0,
     stream_read_timeout_s: float = 120.0,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -633,7 +634,7 @@ async def _pump(
     seed_state: TurnState,
     lifecycle: TurnLifecycle,
     cancel: asyncio.Event,
-    render_interval_s: float,
+    render_interval_s: float | Callable[[], float],
     interrupt_timeout_s: float,
     stream_read_timeout_s: float,
     now: Callable[[], datetime],
@@ -700,9 +701,18 @@ async def _pump(
         prev_cell[0] = state
 
     async def _render_loop() -> None:
+        loop = asyncio.get_running_loop()
+        last_check = loop.time()
         while True:
-            await asyncio.sleep(render_interval_s)
+            current = render_interval_s() if callable(render_interval_s) else render_interval_s
+            remaining = current - (loop.time() - last_check)
+            if remaining > 0:
+                # Recheck at the normal cadence so a stretch or restoration
+                # applies to an already sleeping render task.
+                await asyncio.sleep(min(remaining, NORMAL_INTERVAL_S))
+                continue
             await _render_once(state_cell[0])
+            last_check = loop.time()
 
     render_task = asyncio.create_task(_render_loop(), name="turn.render_loop")
 

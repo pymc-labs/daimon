@@ -199,3 +199,5 @@ discord_webhooks	Cadence	CadenceWebhookIPUnsafe	violates:NoGlobalBacklog	2	-	200
 discord_webhooks	Cadence	CadenceWebhookSkewUnsafe	violates:NoHookBacklog	2	-	five turns on one parent and one hook cannot send initial plus edit in one window
 discord_webhooks	Cadence	CadenceBotGlobalUnsafe	violates:NoGlobalBacklog	2	-	200 bot edits per window exceed bot-token global allowance of 100
 discord_webhooks	Cadence	CadenceSixtyFiveRoutes	clean	3	-	200 turns over 65 parents fit per-hook quota even if one hook per parent carries edits
+discord_webhooks	Cadence	CadenceWebhookStretched	clean	3	-	200 edits and 15 baseline initial or terminal requests per five-second window fit webhook IP global allowance
+discord_webhooks	Cadence	CadenceBotStretched	clean	3	-	200 edits and 15 baseline initial or terminal requests per five-second window fit bot-token global allowance

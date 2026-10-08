@@ -17,7 +17,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.config import BillingSettings, McpSettings, ThreadNamingSettings
+from daimon.core.config import (
+    BillingSettings,
+    McpSettings,
+    ThreadNamingSettings,
+    TurnRenderSettings,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -37,6 +42,7 @@ def _make_runtime(
 ) -> DiscordRuntime:
     settings = MagicMock()
     settings.agent_identity.enabled = True
+    settings.turn_render = TurnRenderSettings()
     settings.mcp = McpSettings()
     settings.defaults_root = MagicMock()
     discord_settings = MagicMock()
