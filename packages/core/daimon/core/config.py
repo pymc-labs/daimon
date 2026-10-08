@@ -417,9 +417,10 @@ class DiscordSettings(BaseModel):
         default=(),
         description=(
             "Discord user ids of automated QA bots allowed to start turns by "
-            "mention. Bot-authored mentions are rejected by default; these are "
-            "allow-listed so a harness can drive the mention path end-to-end "
-            "without a human. Several are supported because admin-gated tools "
+            "mention or reply to a recorded agent post. Bot-authored messages "
+            "are rejected by default; these are allow-listed so a harness can "
+            "drive addressed turns end-to-end without a human. Several are "
+            "supported because admin-gated tools "
             "need a caller holding Manage Server while the refusal paths need "
             "one without it. Leave empty outside test deployments -- an "
             "allow-listed bot spends real credit. As a tuple field this must "

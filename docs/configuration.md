@@ -407,13 +407,13 @@ Port for the Discord process's liveness endpoint. Must not collide with the mcp 
 
 `tuple[str, ...]` · optional · default unset
 
-Discord user ids of automated QA bots allowed to start turns by mention. Bot-authored
-mentions are rejected by default; these are allow-listed so a harness can drive the
-mention path end-to-end without a human. Several are supported because admin-gated tools
-need a caller holding Manage Server while the refusal paths need one without it. Leave
-empty outside test deployments -- an allow-listed bot spends real credit. As a tuple
-field this must be set as a JSON array, e.g. '["123","456"]'. daimon's own id is refused
-at the gate even if listed.
+Discord user ids of automated QA bots allowed to start turns by mention or reply to a
+recorded agent post. Bot-authored messages are rejected by default; these are allow-
+listed so a harness can drive addressed turns end-to-end without a human. Several are
+supported because admin-gated tools need a caller holding Manage Server while the
+refusal paths need one without it. Leave empty outside test deployments -- an allow-
+listed bot spends real credit. As a tuple field this must be set as a JSON array, e.g.
+'["123","456"]'. daimon's own id is refused at the gate even if listed.
 
 ### `DAIMON_DISCORD__BOT_DISPLAY_NAME`
 

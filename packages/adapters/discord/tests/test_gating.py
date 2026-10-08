@@ -49,6 +49,22 @@ def test_reply_to_recorded_agent_post_is_addressed() -> None:
     )
 
 
+def test_only_allow_listed_qa_bot_can_reply_to_recorded_post() -> None:
+    for author_id, expected in ((QA_BOT_ID, True), (OTHER_BOT_ID, False)):
+        assert (
+            should_process_message(
+                author_is_bot=True,
+                author_id=author_id,
+                bot_mentioned=False,
+                reply_to_recorded_post=True,
+                guild_id="g1",
+                self_user_id=DAIMON_ID,
+                qa_bot_user_ids=(QA_BOT_ID,),
+            )
+            is expected
+        )
+
+
 def test_own_webhook_post_is_rejected_even_if_it_mentions_bot() -> None:
     assert not should_process_message(
         author_is_bot=True,

@@ -38,13 +38,13 @@ def _is_allowed_bot_author(
     self_user_id: str | None,
     qa_bot_user_ids: Collection[str],
 ) -> bool:
-    """Whether a bot-authored mention may start a turn.
+    """Whether a bot-authored mention or reply may start a turn.
 
     Bots are rejected by default. A deployment may allow-list specific bots --
-    automated QA drivers -- so a harness can exercise the mention path
+    automated QA drivers -- so a harness can exercise addressed turns
     end-to-end without a human. Discord forbids bots from invoking application
-    commands or component interactions, so a mention is the only turn trigger
-    reachable by automation at all.
+    commands or component interactions, so mentions and replies are the turn
+    triggers reachable by automation.
 
     Several ids are allowed because the admin-gated tools need a caller who
     holds Manage Server and the refusal paths need one who does not; a single
@@ -73,8 +73,8 @@ def is_participation_candidate(
     Only human-authored, unmentioned messages inside a guild thread qualify,
     and only while the deployment does not say `disabled` -- the one mode no
     narrower scope can override, so it is decidable here, before any read.
-    Bots never qualify, allow-listed QA bots included: the mention path is
-    the only automation entry point.
+    Bots never qualify, allow-listed QA bots included: they can start only
+    addressed turns.
     """
     if deployment_mode is ParticipationMode.DISABLED or author_is_bot or bot_mentioned:
         return False
