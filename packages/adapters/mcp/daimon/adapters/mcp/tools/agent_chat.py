@@ -564,6 +564,7 @@ async def _start_turn_impl(
             session_factory=runtime.session_factory,
             fernet=runtime.fernet,
             app_session_unmapped=True,
+            requester_is_headless=auth.token_kind == "agent" or auth.platform_user_id is None,
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,

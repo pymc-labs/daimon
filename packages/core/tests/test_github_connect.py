@@ -44,28 +44,144 @@ from daimon.core.stores import (
     github_issued_tokens,
     github_links,
 )
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 def test_effective_access_properties() -> None:
     levels = ("none", "read", "write")
-    for baseline in levels:
-        for ceiling in levels:
-            for asker in levels:
-                if levels.index(baseline) > levels.index(ceiling) or ceiling == "none":
-                    continue
-                result = effective_access({1: baseline}, {1: ceiling}, {1: asker}).get(1, "none")
-                rank = levels.index(result)
-                assert rank >= levels.index(baseline)
-                assert rank <= levels.index(ceiling)
-                assert rank == max(
-                    levels.index(baseline), min(levels.index(ceiling), levels.index(asker))
+    for ceiling in ("read", "write"):
+        for asker in levels:
+            result = effective_access({1: ceiling}, {1: asker}).get(1, "none")
+            assert levels.index(result) == min(levels.index(ceiling), levels.index(asker))
+        assert effective_access({1: ceiling}, None) == {1: ceiling}
+    assert effective_access({1: "write"}, {}) == {}
+    assert effective_access({}, None) == {}
+
+
+async def test_human_without_link_or_repo_permission_gets_typed_reason(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id, account_id, agent_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with db_session_factory.begin() as session:
+        session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+        await session.flush()
+        session.add(Account(id=account_id, tenant_id=tenant_id, role="user"))
+        session.add(
+            TenantGitHubRepo(
+                tenant_id=tenant_id,
+                repo_id=101,
+                owner_id=1,
+                installation_id=77,
+                repo_full_name="example/repo",
+                max_access="read",
+                authorized_by_github_user_id=2,
+                status="active",
+                version=1,
+            )
+        )
+        await session.flush()
+        await github_app_installations.upsert_github_app(
+            session,
+            installation_id=77,
+            account_id=1,
+            account_login="example",
+            account_type="Organization",
+            repository_selection="selected",
+            suspended_at=None,
+        )
+        session.add(
+            AgentGitHubGrant(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=101,
+                baseline_access="read",
+                ceiling_access="read",
+                staged=False,
+                version=1,
+            )
+        )
+
+    config = GithubAppSettings(
+        app_id="123",
+        private_key=SecretStr("unused"),
+        client_id="client",
+        client_secret=SecretStr("secret"),
+    )
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(500))
+    ) as client:
+        missing = await github_app_session.prepare_app_access(
+            db_session_factory,
+            client,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=account_id,
+            is_external=False,
+            provisional_session_id="unlinked",
+            config=config,
+            fernet=fernet,
+            cache=PermissionCache(),
+        )
+        assert missing.tokens == () and missing.reason == "needs_link"
+        assert (
+            await github_app_session.effective_repo_state(
+                db_session_factory,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                account_id=account_id,
+                is_external=False,
+                config=config,
+                fernet=fernet,
+            )
+        ) == ((), {}, "needs_link")
+
+        async with db_session_factory.begin() as session:
+            session.add(
+                GitHubUserLink(
+                    github_user_id=501,
+                    login="person",
+                    encrypted_access_token=b"encrypted",
+                    access_expires_at=datetime.now(UTC) + timedelta(hours=1),
                 )
-    assert effective_access({}, {1: "write"}, {}) == {}
-    assert effective_access({1: "read"}, {}, {}) == {1: "read"}
-    with pytest.raises(ValueError, match="baseline exceeds ceiling"):
-        effective_access({1: "write"}, {1: "read"}, {1: "write"})
+            )
+            await session.flush()
+            session.add(
+                AccountGitHubLink(
+                    account_id=account_id,
+                    github_user_id=501,
+                    platform="discord",
+                    platform_user_id="person",
+                    verified_via="discord_oauth",
+                )
+            )
+        monkeypatch.setattr(github_app_session, "linked_permissions", AsyncMock(return_value={}))
+        denied = await github_app_session.prepare_app_access(
+            db_session_factory,
+            client,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=account_id,
+            is_external=False,
+            provisional_session_id="no-permission",
+            config=config,
+            fernet=fernet,
+            cache=PermissionCache(),
+        )
+        assert denied.tokens == () and denied.reason == "no_github_access"
+        assert (
+            await github_app_session.effective_repo_state(
+                db_session_factory,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                account_id=account_id,
+                is_external=False,
+                config=config,
+                fernet=fernet,
+            )
+        ) == ((), {}, "no_github_access")
 
 
 def test_permission_cache_evicts_least_recently_used() -> None:

@@ -79,7 +79,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
-from daimon.core.stores import github_access, github_app_installations
+from daimon.core.stores import github_access, github_app_installations, github_issued_tokens
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.scoped_config_write import set_fields
@@ -545,9 +545,16 @@ async def test_start_turn_mints_new_app_token_for_live_grant(
     )
     runtime.settings.github_app = app_settings
     runtime = replace(runtime, fernet=build_multifernet((Fernet.generate_key().decode(),)))
-    result = await _start_turn_impl(runtime, _auth(), "hi")
+    result = await _start_turn_impl(
+        runtime, replace(_auth(), token_kind="agent", platform_user_id="person"), "hi"
+    )
 
     assert result["handle"] == "ses_app_start"
+    async with db_session_factory() as session:
+        live = await github_issued_tokens.list_live_mcp_app_sessions(
+            session, now=dt.datetime.now(dt.UTC), session_id="ses_app_start"
+        )
+    assert len(live) == 1 and live[0].account_id is None
     assert minted == [
         {
             "repository_ids": [101],
@@ -2416,6 +2423,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "session_factory",
         "fernet",
         "app_session_unmapped",
+        "requester_is_headless",
         "github_fallback_pat",
         "github_app_id",
         "github_app_private_key",
