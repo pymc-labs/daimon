@@ -197,6 +197,16 @@ async def test_app_mode_grant_removal_allows_existing_working_repo(
             ma_secret_ref="old-binding",
         )
     )
+    db_session.add(AgentGithubBinding(agent_id=agent_id, principal_id=agent_id))
+    db_session.add(
+        AgentFile(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            key="GH_TOKEN",
+            content="saved",
+            encoding="plain",
+        )
+    )
     await db_session.flush()
     await remove_panel_grant(
         db_session,
@@ -216,6 +226,8 @@ async def test_app_mode_grant_removal_allows_existing_working_repo(
         db_session, tenant_id=tenant_id, agent_id=agent_id
     )
     assert [grant.repo_id for grant in grants] == [101]
+    assert await db_session.get(AgentGithubBinding, agent_id) is not None
+    assert await db_session.get(AgentFile, (tenant_id, agent_id, "GH_TOKEN")) is not None
 
 
 @pytest.mark.parametrize("saved_kind", ["pat", "env", "working", "skill", "channel_pin"])

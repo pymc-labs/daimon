@@ -328,16 +328,18 @@ async def activate_grants(
                 AgentGitHubGrantDraft.agent_id == agent_id,
             )
         )
-    overlay = await agent_github_binding.get_agent_github_binding(session, agent_id=agent_id)
-    removed_pat = overlay is not None
-    if overlay is not None:
-        await agent_github_binding.delete_for_agent(session, agent_id=agent_id)
-        if overlay.principal_id == agent_id:
-            await delete_credential_for_principal(session, principal_id=agent_id)
-    for key in ("GH_TOKEN", "GITHUB_TOKEN"):
-        await agent_files.delete_agent_file(
-            session, tenant_id=tenant_id, agent_id=agent_id, key=key
-        )
+    removed_pat = False
+    if panel.mode == "legacy":
+        overlay = await agent_github_binding.get_agent_github_binding(session, agent_id=agent_id)
+        removed_pat = overlay is not None
+        if overlay is not None:
+            await agent_github_binding.delete_for_agent(session, agent_id=agent_id)
+            if overlay.principal_id == agent_id:
+                await delete_credential_for_principal(session, principal_id=agent_id)
+        for key in ("GH_TOKEN", "GITHUB_TOKEN"):
+            await agent_files.delete_agent_file(
+                session, tenant_id=tenant_id, agent_id=agent_id, key=key
+            )
     if removed_pat:
         await mark_github_key_restart(session, tenant_id=tenant_id, agent_id=agent_id)
         await append_event(
