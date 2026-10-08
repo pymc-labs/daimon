@@ -1078,7 +1078,8 @@ class SupportSettings(BaseModel):
             '\N{THUMBS DOWN SIGN} "What went wrong?" form (the reasons, the text, the '
             "person, the agent and a link to the answer) to the channel Ask a human "
             "posts to: DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID for Slack, "
-            "DAIMON_SUPPORT__ESCALATION_CHANNEL_ID (a Discord channel) for Discord. "
+            "DAIMON_SUPPORT__ESCALATION_CHANNEL_ID for Discord (a Discord channel) and "
+            "Teams (a Teams or Discord channel). "
             "Missing/false (the default) keeps the form in the database only. The form "
             "tells the person their answers are shared when it is on. Spends no "
             "support credit. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a JSON object."
