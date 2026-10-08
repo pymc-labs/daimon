@@ -167,3 +167,56 @@ async def test_tool_refuses_home_boundary_and_missing_channel_access(
     ):
         await _where_am_i_impl(runtime, _auth(), "here", None)
     load.assert_not_awaited()
+
+
+async def test_teams_channel_turn_lists_its_channels_and_names_the_setter_from_storage() -> None:
+    caller = SimpleNamespace(inside_channel_id=None, home_place=lambda _id: None)
+    rows = [SimpleNamespace(id="19:ops@thread.tacv2"), SimpleNamespace(id="19:dev@thread.tacv2")]
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.here.load_caller_view", new=AsyncMock(return_value=caller)
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.here._teams_list_channels_impl",
+            new=AsyncMock(return_value=rows),
+        ),
+        patch("daimon.adapters.mcp.tools.here.load_here_card", new=AsyncMock()) as load,
+    ):
+        await _where_am_i_impl(
+            _runtime(),
+            _auth(platform="teams"),
+            "19:ops@thread.tacv2",
+            "19:ops@thread.tacv2;messageid=1",
+        )
+    kwargs = load.await_args.kwargs
+    assert kwargs["visible_channel_ids"] == {row.id for row in rows}, "the caller's channels"
+    assert kwargs["thread_id"] == "19:ops@thread.tacv2;messageid=1", "the post's thread"
+    assert kwargs["resolve_setter_display"] is None, "the card falls back to the stored name"
+
+
+@pytest.mark.parametrize(
+    "thread_id",
+    ["19:dev@thread.tacv2;messageid=1", "19:ops@thread.tacv2", "a:chat;setup=abc"],
+)
+async def test_teams_thread_must_name_the_requested_channel(thread_id: str) -> None:
+    with pytest.raises(ToolError, match="thread does not belong to this channel"):
+        await _require_thread_in_channel(
+            _runtime(), _auth(platform="teams"), "19:ops@thread.tacv2", thread_id
+        )
+
+
+async def test_a_teams_channel_the_caller_cannot_list_is_refused() -> None:
+    caller = SimpleNamespace(inside_channel_id=None, home_place=lambda _id: None)
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.here.load_caller_view", new=AsyncMock(return_value=caller)
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.here._teams_list_channels_impl",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch("daimon.adapters.mcp.tools.here.load_here_card", new=AsyncMock()) as load,
+        pytest.raises(ToolError, match="missing channel access"),
+    ):
+        await _where_am_i_impl(_runtime(), _auth(platform="teams"), "19:ops@thread.tacv2", None)
+    load.assert_not_awaited()
