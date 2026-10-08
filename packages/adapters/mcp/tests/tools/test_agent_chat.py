@@ -82,12 +82,13 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import github_access, github_app_installations
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_repo_binding import set_binding
+from daimon.core.stores.github_links import save_verified_link
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.tenant_balance import debit_amount
 from daimon.testing import ma_agent, ma_model_usage, ma_session
 from daimon.testing.asgi import call_mcp_tool, mcp_session
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma import (
     EMPTY_CLOUD_CONFIG,
     MARouter,
@@ -460,13 +461,16 @@ async def test_non_narrowed_token_still_gets_bm25_search_surface() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_start_turn_mints_new_app_token_for_live_grant(
+@pytest.mark.parametrize("linked", [False, True])
+async def test_start_turn_mints_baseline_app_token_with_or_without_personal_link(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    linked: bool,
 ) -> None:
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, id=_TENANT_ID, workspace_id="app-start-turn")
-        await make_account(session, tenant=tenant, id=_ACCOUNT_ID)
+        account = await make_account(session, tenant=tenant, id=_ACCOUNT_ID)
         await session.execute(
             text(
                 "INSERT INTO tenant_github_repos "
@@ -496,6 +500,23 @@ async def test_start_turn_mints_new_app_token_for_live_grant(
             granted_by_account_id=_ACCOUNT_ID,
         )
         await github_access.activate_agent(session, tenant_id=tenant.id, agent_id=_AGENT_UUID)
+        if linked:
+            await make_platform_principal(
+                session, platform="discord", external_id="person", tenant=tenant, account=account
+            )
+            await save_verified_link(
+                session,
+                intent_account_id=account.id,
+                platform="discord",
+                platform_user_id="person",
+                github_user_id=17,
+                login="linked-person",
+                access_token="test-access",
+                refresh_token="test-refresh",
+                expires_in=86400,
+                refresh_expires_in=172800,
+                fernet=fernet,
+            )
 
     minted: list[dict[str, Any]] = []
 
@@ -510,8 +531,17 @@ async def test_start_turn_mints_new_app_token_for_live_grant(
         async with httpx.AsyncClient(transport=httpx.MockTransport(github_handler)) as github:
             return await mint_app_access(args[0], github, **kwargs)
 
-    app_settings = GithubAppSettings(app_id="123", private_key=SecretStr("unused"))
+    app_settings = GithubAppSettings(
+        app_id="123",
+        private_key=SecretStr("unused"),
+        client_id="client",
+        client_secret=SecretStr("secret"),
+    )
     monkeypatch.setattr("daimon.core.github_app_session.build_app_jwt", lambda *_a, **_k: "app-jwt")
+    monkeypatch.setattr(
+        "daimon.core.github_app_session.linked_permissions",
+        AsyncMock(return_value={101: "read"}),
+    )
     monkeypatch.setattr("daimon.core.sessions.prepare_app_access", prepare_with_mock_github)
     monkeypatch.setattr(
         "daimon.core.sessions.create_session_vault", AsyncMock(return_value="vlt_start_turn")
@@ -544,7 +574,7 @@ async def test_start_turn_mints_new_app_token_for_live_grant(
         environment_name=_ENV_NAME,
     )
     runtime.settings.github_app = app_settings
-    runtime = replace(runtime, fernet=build_multifernet((Fernet.generate_key().decode(),)))
+    runtime = replace(runtime, fernet=fernet)
     result = await _start_turn_impl(runtime, _auth(), "hi")
 
     assert result["handle"] == "ses_app_start"

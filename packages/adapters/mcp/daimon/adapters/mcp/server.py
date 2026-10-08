@@ -37,6 +37,7 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
 )
 from daimon.adapters.mcp.middleware.session_header import StripSessionIdMiddleware
 from daimon.adapters.mcp.oauth_github import build_oauth_github_routes
+from daimon.adapters.mcp.oauth_github_personal import build_personal_link_routes
 from daimon.adapters.mcp.oauth_mcp import build_oauth_mcp_routes
 from daimon.adapters.mcp.oauth_slack import build_oauth_slack_routes
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -65,6 +66,7 @@ from daimon.adapters.mcp.tools.credential_requests import register_credential_re
 from daimon.adapters.mcp.tools.enable_files import register_enable_files_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.github_connect import register_github_connect_tools
+from daimon.adapters.mcp.tools.github_requests import register_github_request_tools
 from daimon.adapters.mcp.tools.here import register_here_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
@@ -412,6 +414,7 @@ def create_mcp_app(
     register_task_continuity_tools(mcp, runtime)  # hand off a task / start fresh
     register_github_app_tools(mcp, runtime)
     register_github_connect_tools(mcp, runtime)
+    register_github_request_tools(mcp, runtime)
     register_wizard_tools(mcp, runtime)
     skills.register_skill_tools(mcp, runtime)
     register_skill_upload_tools(mcp, runtime)
@@ -587,10 +590,31 @@ def create_mcp_app(
             sessionmaker=effective_sessionmaker,
             fernet=fernet,
         )
+        personal_start, personal_platform_callback, personal_github_callback = (
+            build_personal_link_routes(
+                settings=effective_settings,
+                sessionmaker=effective_sessionmaker,
+                fernet=fernet,
+                runtime=runtime,
+            )
+        )
+
+        async def combined_github_callback(request: Request) -> Response:
+            personal_response = await personal_github_callback(request)
+            return (
+                personal_response
+                if personal_response is not None
+                else await github_callback(request)
+            )
+
         app.add_route("/oauth/github/connect/{token}", github_connect, methods=["GET"])
-        app.add_route("/oauth/github/callback", github_callback, methods=["GET"])
+        app.add_route("/oauth/github/callback", combined_github_callback, methods=["GET"])
         app.add_route("/oauth/github/setup", github_setup, methods=["GET"])
         app.add_route("/oauth/github/confirm", github_confirm, methods=["GET", "POST"])
+        app.add_route(
+            "/oauth/github/link/platform-callback", personal_platform_callback, methods=["GET"]
+        )
+        app.add_route("/oauth/github/link/{token}", personal_start, methods=["GET"])
 
     mount_hub_apps(
         app,

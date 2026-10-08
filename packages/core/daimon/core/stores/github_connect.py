@@ -10,6 +10,7 @@ from typing import Any, Literal, cast
 
 from daimon.core._models import (
     Account,
+    AccountGitHubLink,
     AgentFile,
     AgentGitHubGrant,
     AgentRepoBinding,
@@ -134,7 +135,10 @@ class Invitation(BaseModel):
     agent_name: str | None
     operator_issued: bool
     activation_status: Literal["activated", "update_pending"] | None
+    preselected_repo_full_name: str | None
+    preselected_repo_full_names: list[str] | None
     connected_repo_count: int | None
+    encrypted_token: bytes | None
     expires_at: datetime
     used_at: datetime | None
 
@@ -145,6 +149,7 @@ class Flow(BaseModel):
     invitation_hash: str
     cookie_hash: str
     encrypted_verifier: bytes
+    encrypted_invitation_token: bytes | None
     encrypted_user_token: bytes | None
     github_user_id: int | None
     expires_at: datetime
@@ -156,6 +161,9 @@ async def mint_invitation(
     tenant_id: uuid.UUID,
     requester_account_id: uuid.UUID,
     requester_label: str | None = None,
+    workspace_label: str | None = None,
+    preselected_repo_full_name: str | None = None,
+    preselected_repo_full_names: list[str] | None = None,
     agent_id: uuid.UUID | None = None,
     agent_name: str | None = None,
     operator_issued: bool = False,
@@ -185,11 +193,14 @@ async def mint_invitation(
             token_hash=digest(token),
             tenant_id=tenant_id,
             requester_account_id=requester_account_id,
-            workspace_label=f"{tenant.platform} workspace {tenant.external_id}",
+            workspace_label=workspace_label
+            or ("this Discord server" if tenant.platform == "discord" else "this Slack workspace"),
             requester_label=requester_label or str(requester_account_id),
             agent_id=agent_id,
             agent_name=agent_name,
             operator_issued=operator_issued,
+            preselected_repo_full_name=preselected_repo_full_name,
+            preselected_repo_full_names=preselected_repo_full_names,
             expires_at=datetime.now(UTC) + timedelta(days=7),
         )
     )
@@ -535,6 +546,83 @@ async def get_invitation(session: AsyncSession, token_hash: str) -> Invitation |
     return Invitation.model_validate(row)
 
 
+async def invitation_status(
+    session: AsyncSession, token_hash: str
+) -> tuple[Literal["invalid", "used", "expired", "requester_left", "active"], Invitation | None]:
+    row = await session.get(GitHubConnectInvitation, token_hash)
+    if row is None:
+        return "invalid", None
+    invitation = Invitation.model_validate(row)
+    if row.used_at is not None:
+        return "used", invitation
+    if row.expires_at <= datetime.now(UTC):
+        return "expired", invitation
+    account = await session.get(Account, row.requester_account_id)
+    if (
+        account is None
+        or account.tenant_id != row.tenant_id
+        or account.role != "admin"
+        or account.is_external
+    ):
+        return "requester_left", invitation
+    return "active", invitation
+
+
+async def latest_pending_invitation(
+    session: AsyncSession, *, tenant_id: uuid.UUID, requester_account_id: uuid.UUID
+) -> Invitation | None:
+    row = await session.scalar(
+        select(GitHubConnectInvitation)
+        .where(
+            GitHubConnectInvitation.tenant_id == tenant_id,
+            GitHubConnectInvitation.requester_account_id == requester_account_id,
+            GitHubConnectInvitation.used_at.is_(None),
+            GitHubConnectInvitation.expires_at > datetime.now(UTC),
+            GitHubConnectInvitation.encrypted_token.is_not(None),
+        )
+        .order_by(GitHubConnectInvitation.expires_at.desc())
+        .limit(1)
+    )
+    return Invitation.model_validate(row) if row is not None else None
+
+
+async def set_invitation_encrypted_token(
+    session: AsyncSession, *, token: str, encrypted_token: bytes
+) -> None:
+    row = await session.get(GitHubConnectInvitation, digest(token))
+    if row is None:
+        raise ValueError("GitHub connection link was not found.")
+    row.encrypted_token = encrypted_token
+
+
+async def requester_linked_github_user_id(
+    session: AsyncSession, *, account_id: uuid.UUID
+) -> int | None:
+    return await session.scalar(
+        select(AccountGitHubLink.github_user_id).where(AccountGitHubLink.account_id == account_id)
+    )
+
+
+async def expire_pending_invitation(
+    session: AsyncSession, *, tenant_id: uuid.UUID, requester_account_id: uuid.UUID
+) -> None:
+    row = await session.scalar(
+        select(GitHubConnectInvitation)
+        .where(
+            GitHubConnectInvitation.tenant_id == tenant_id,
+            GitHubConnectInvitation.requester_account_id == requester_account_id,
+            GitHubConnectInvitation.used_at.is_(None),
+            GitHubConnectInvitation.expires_at > datetime.now(UTC),
+        )
+        .order_by(GitHubConnectInvitation.expires_at.desc())
+        .with_for_update()
+        .limit(1)
+    )
+    if row is not None:
+        row.expires_at = datetime.now(UTC)
+        await session.flush()
+
+
 async def successful_confirmation(
     session: AsyncSession, *, state: str, cookie: str = "", invitation_hash: str = ""
 ) -> Invitation | None:
@@ -561,6 +649,7 @@ async def create_flow(
     state: str,
     cookie: str,
     encrypted_verifier: bytes,
+    encrypted_invitation_token: bytes | None = None,
 ) -> None:
     await session.execute(
         delete(GitHubConnectFlow).where(GitHubConnectFlow.expires_at <= datetime.now(UTC))
@@ -571,6 +660,7 @@ async def create_flow(
             invitation_hash=invitation_hash,
             cookie_hash=digest(cookie),
             encrypted_verifier=encrypted_verifier,
+            encrypted_invitation_token=encrypted_invitation_token,
             expires_at=datetime.now(UTC) + timedelta(minutes=15),
         )
     )
@@ -679,7 +769,10 @@ async def confirm(
         update(GitHubConnectFlow)
         .where(GitHubConnectFlow.invitation_hash == flow.invitation_hash)
         .values(
-            encrypted_verifier=b"", encrypted_user_token=None, expires_at=now + timedelta(days=7)
+            encrypted_verifier=b"",
+            encrypted_invitation_token=None,
+            encrypted_user_token=None,
+            expires_at=now + timedelta(days=7),
         )
     )
     await session.flush()

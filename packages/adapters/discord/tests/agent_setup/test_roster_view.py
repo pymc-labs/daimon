@@ -399,7 +399,7 @@ def test_a_handoff_thread_says_so_without_inventing_a_setup_target() -> None:
     )
 
 
-def test_members_and_admins_get_identical_components() -> None:
+def test_only_admins_get_connect_github_on_shared_roster() -> None:
     answering = _agent("research-bot", tier="channel")
     agents = (answering, _agent("daimon", built_in=True), _agent("churn-explorer"))
 
@@ -414,9 +414,10 @@ def test_members_and_admins_get_identical_components() -> None:
         allowed_user_id=42,
     )
 
-    assert _structure(member) == _structure(admin), (
-        "role changes the voice of the routing sentence elsewhere, never this screen's components"
-    )
+    admin_components = _structure(admin)
+    assert ("Button", "🐙 GitHub", None) in admin_components
+    admin_components.remove(("Button", "🐙 GitHub", None))
+    assert _structure(member) == admin_components
 
 
 # ---------------------------------------------------------------------------

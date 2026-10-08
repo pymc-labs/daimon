@@ -13,6 +13,11 @@ from daimon.core._models import (
 )
 from daimon.core.stores.domain import GitHubInstallationReconciliationRow
 from daimon.core.stores.github_new_repo_notices import queue_new_repos
+from daimon.core.stores.github_removal_notices import (
+    cancel_unconfirmed_removal,
+    confirm_removal,
+    queue_removal,
+)
 from sqlalchemy import CursorResult, and_, case, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -79,6 +84,15 @@ async def enqueue(
     if deleted:
         # Lock the queue row before the cache row, matching finish()'s lock
         # order so a deletion cannot deadlock an in-flight snapshot write.
+        previous = await session.get(GitHubAppInstallation, installation_id)
+        if previous is not None:
+            await queue_removal(
+                session,
+                installation_id=installation_id,
+                account_login=previous.account_login,
+                now=now,
+                confirmed=False,
+            )
         await session.execute(
             delete(GitHubAppInstallation).where(
                 GitHubAppInstallation.installation_id == installation_id,
@@ -203,6 +217,16 @@ async def finish(
         return False
 
     if account_login is None:
+        previous = await session.get(GitHubAppInstallation, job.installation_id)
+        if previous is not None:
+            await queue_removal(
+                session,
+                installation_id=job.installation_id,
+                account_login=previous.account_login,
+                now=now,
+                confirmed=True,
+            )
+        await confirm_removal(session, installation_id=job.installation_id, now=now)
         await session.execute(
             delete(GitHubAppInstallation).where(
                 GitHubAppInstallation.installation_id == job.installation_id,
@@ -210,6 +234,7 @@ async def finish(
             )
         )
     else:
+        await cancel_unconfirmed_removal(session, installation_id=job.installation_id)
         if repos is None:
             raise ValueError("a live installation requires a complete repository snapshot")
         previous = await session.get(GitHubAppInstallation, job.installation_id)

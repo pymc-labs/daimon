@@ -41,7 +41,7 @@ features:
       description: See your agents, who answers where, and make changes
       should_escape: false
     - command: /github
-      description: Connect GitHub repos to an agent
+      description: Manage GitHub repos for agents
       should_escape: false
     - command: /routines
       description: Show scheduled routines for this workspace

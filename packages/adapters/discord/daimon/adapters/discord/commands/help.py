@@ -30,6 +30,7 @@ def _body(bot_display_name: str) -> str:
 **Agent management**
 -# /agent-setup — See your agents, who answers where, and make changes
 -# /github connect — Connect GitHub repos to an agent
+-# /github home — See connected repos and your GitHub link
 
 **Routines**
 -# /routines — Show scheduled routines for this guild

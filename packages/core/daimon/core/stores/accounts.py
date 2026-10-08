@@ -102,6 +102,18 @@ async def get_external(session: AsyncSession, account_id: uuid.UUID) -> bool:
     return stored is True
 
 
+async def has_external_accounts(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
+    """Whether a server contains any client accounts."""
+    return (
+        await session.scalar(
+            select(Account.id)
+            .where(Account.tenant_id == tenant_id, Account.is_external.is_(True))
+            .limit(1)
+        )
+        is not None
+    )
+
+
 async def set_external(session: AsyncSession, account_id: uuid.UUID, is_external: bool) -> None:
     """Record positive evidence that the account is from another organisation, or ours.
 

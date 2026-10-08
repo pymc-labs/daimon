@@ -20,7 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Agent identity can be disabled for selected Discord guilds or Slack workspaces
   while remaining enabled elsewhere in the deployment.
-- Agents can offer an admin a private GitHub connect link bound to the current agent; members can record a setup request. `/github connect` is available in Discord and Slack with a private button. Self-serve links activate only agents with no saved GitHub key, working repo or skill repo, and no channel pin. An operator can issue an agent-bound CLI link for a saved-key agent; it stages an update that requires **Update and restart chats**. New selections default to **Read and write**: push branches, open issues and pull requests. **Read only** reads code, issues and pull requests.
+- Discord and Slack GitHub setup panels now manage connected repos, agent grants,
+  personal links, waiting requests, and disconnects. The
+  server-rendered connection pages include a searchable picker, a persistent
+  Connect repos action, and pages for approval and recovery states.
+- Agents can offer an admin a private GitHub connect link bound to the current agent; members can record a setup request. `/github connect` is available in Discord and Slack with a private button. Self-serve links refuse legacy-mode agents with a saved GitHub key, working repo, skill repo, or channel pin. An operator can issue an agent-bound CLI link for a saved-key agent, then finish the staged update with `daimon github finish-update`. New selections default to **Read and write**: push branches, open issues and pull requests. **Read only** reads code, issues and pull requests.
 - With agent identity enabled, new default pictures use a tenant-assigned
   Daimon face built from the production mascot and canonical expressions.
   Layer IDs and draw weights live in a manifest; stored variants keep their
@@ -136,6 +140,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Repeated GitHub Connect repos submissions show the successful repo count.
+  The submit button disables while connecting, and new selections default to
+  read and write access.
 - **Sonnet 5.5 cache reads are billed at $0.10 per million tokens**, Anthropic's price since 2026-10-07. Daimon still charged the old $0.20, so the default model's cache reads cost tenants twice the list price in estimates and ledger debits.
 - Approving a tool call no longer fails the turn with "re-requested approval for tool call(s) already confirmed". The approved call now runs inside the turn, so a notebook or attachment publish is no longer refused after Approve.
 - Allow-listed Discord QA bots can start a turn by replying without a mention to a recorded agent post, as they already can by mentioning Daimon.

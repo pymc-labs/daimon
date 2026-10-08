@@ -46,6 +46,11 @@ PanelViewName = Literal[
     "creating",
     "add_skill",
     "avatar_upload",
+    "github_repos",
+    "github_home",
+    "github_add",
+    "github_manage",
+    "github_waiting",
 ]
 """Which of the panel's screens a view is showing."""
 
@@ -64,6 +69,11 @@ _PANEL_VIEW_NAMES: Final[frozenset[str]] = frozenset(
         "creating",
         "add_skill",
         "avatar_upload",
+        "github_repos",
+        "github_home",
+        "github_add",
+        "github_manage",
+        "github_waiting",
     }
 )
 _PANEL_EXPANSIONS: Final[tuple[PanelExpansion, ...]] = ("keys", "skills", "connections")
@@ -85,11 +95,27 @@ class PanelMetadata:
     team_id: str
     channel_id: str
     view: PanelViewName
+    channel_name: str | None = None
     page: int = 0
     agent_name: str | None = None
     root_view_id: str | None = None
     expanded: PanelExpansion | None = None
     skill_hash: str | None = None
+    repo_id: int | None = None
+    selected_repo_ids: tuple[int, ...] | None = None
+    github_ability: Literal["read", "write"] = "write"
+    github_step: Literal[
+        "pick",
+        "change",
+        "manage_change",
+        "manage_disconnect",
+        "manage_disconnect_all",
+        "personal_unlink",
+        "request_review",
+        "settings_ability",
+        "settings_remove",
+    ] = "pick"
+    github_settings: bool = False
     """On the Add skill form, the hash of the skill it last previewed."""
 
     def with_page(self, page: int) -> PanelMetadata:
@@ -120,6 +146,7 @@ class PanelMetadata:
             root_view_id=root_view_id,
             expanded=self.expanded if agent_name == self.agent_name else None,
             skill_hash=None,
+            repo_id=None,
         )
 
     def toggled(self, expansion: PanelExpansion) -> PanelMetadata:
@@ -139,12 +166,24 @@ def encode_panel_metadata(meta: PanelMetadata) -> str:
         payload["p"] = meta.page
     if meta.agent_name is not None:
         payload["a"] = meta.agent_name
+    if meta.channel_name is not None:
+        payload["n"] = meta.channel_name
     if meta.root_view_id is not None:
         payload["r"] = meta.root_view_id
     if meta.expanded is not None:
         payload["x"] = meta.expanded
     if meta.skill_hash is not None:
         payload["h"] = meta.skill_hash
+    if meta.repo_id is not None:
+        payload["g"] = meta.repo_id
+    if meta.selected_repo_ids is not None:
+        payload["s"] = list(meta.selected_repo_ids)
+    if meta.github_ability != "write":
+        payload["b"] = meta.github_ability
+    if meta.github_step != "pick":
+        payload["k"] = meta.github_step
+    if meta.github_settings:
+        payload["j"] = True
     encoded = json.dumps(payload, separators=(",", ":"))
     if len(encoded) > MAX_PRIVATE_METADATA_CHARS:
         raise ValueError(
@@ -182,8 +221,11 @@ def decode_panel_metadata(raw: str) -> PanelMetadata | None:
     if not isinstance(page, int) or isinstance(page, bool) or page < 0:
         return None
     agent_name = payload.get("a")
+    channel_name = payload.get("n")
     root_view_id = payload.get("r")
     if agent_name is not None and not isinstance(agent_name, str):
+        return None
+    if channel_name is not None and (not isinstance(channel_name, str) or len(channel_name) > 80):
         return None
     if root_view_id is not None and not isinstance(root_view_id, str):
         return None
@@ -200,15 +242,62 @@ def decode_panel_metadata(raw: str) -> PanelMetadata | None:
     skill_hash = payload.get("h")
     if skill_hash is not None and not isinstance(skill_hash, str):
         return None
+    repo_id = payload.get("g")
+    if repo_id is not None and (
+        not isinstance(repo_id, int) or isinstance(repo_id, bool) or repo_id < 1
+    ):
+        return None
+    selected_obj = payload.get("s")
+    selected: tuple[int, ...] | None = None
+    if selected_obj is not None:
+        if not isinstance(selected_obj, list):
+            return None
+        selected_raw = cast("list[object]", selected_obj)
+        if (
+            len(selected_raw) > 100
+            or any(
+                not isinstance(item, int) or isinstance(item, bool) or item < 1
+                for item in selected_raw
+            )
+            or len(selected_raw) != len(set(selected_raw))
+        ):
+            return None
+        selected = tuple(cast(int, item) for item in selected_raw)
+    ability = payload.get("b", "write")
+    step = payload.get("k", "pick")
+    github_settings = payload.get("j", False)
+    if (
+        ability not in ("read", "write")
+        or step
+        not in (
+            "pick",
+            "change",
+            "manage_change",
+            "manage_disconnect",
+            "manage_disconnect_all",
+            "personal_unlink",
+            "request_review",
+            "settings_ability",
+            "settings_remove",
+        )
+        or not isinstance(github_settings, bool)
+    ):
+        return None
     return PanelMetadata(
         team_id=team_id,
         channel_id=channel_id,
+        channel_name=channel_name,
         view=cast("PanelViewName", view),
         page=page,
         agent_name=agent_name,
         root_view_id=root_view_id,
         expanded=expanded,
         skill_hash=skill_hash,
+        repo_id=repo_id,
+        selected_repo_ids=selected,
+        github_ability=ability,
+        github_step=step,
+        github_settings=github_settings,
     )
 
 

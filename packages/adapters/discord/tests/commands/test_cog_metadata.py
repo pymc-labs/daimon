@@ -96,7 +96,7 @@ def test_here_cog_registers_guild_only_slash() -> None:
 
 
 def test_github_cog_registers_connect() -> None:
-    assert "connect" in _all_app_command_names(GitHubCog)
+    assert {"home", "connect"} <= _all_app_command_names(GitHubCog)
     assert GitHubCog.__cog_group_name__ == "github"
 
 

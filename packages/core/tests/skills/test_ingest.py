@@ -83,6 +83,17 @@ def test_md_upload_is_the_skill_md() -> None:
         (_zip({"ref.md": b"x"}), "s.zip", "No SKILL.md"),
         (_zip({"SKILL.md": _MD.encode(), "b/SKILL.md": _MD.encode()}), "s.zip", "one at a time"),
     ],
+    ids=[
+        "wrong-suffix",
+        "invalid-utf8",
+        "invalid-zip",
+        "symlink",
+        "parent-path",
+        "absolute-path",
+        "backslash-path",
+        "missing-skill",
+        "multiple-skills",
+    ],
 )
 def test_unsafe_or_unreadable_uploads_are_refused(data: bytes, filename: str, why: str) -> None:
     with pytest.raises(SkillIngestError, match=why):
