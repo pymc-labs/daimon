@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discord restart recovery does not replace an uneditable orphan card. Aged intents stop blocking channel tidy only after a definite recovery failure; a periodic pass revisits them. The bot deletes a known stale card only while it still carries that turn's pending button. Missing messages no longer count as failed deletes, while unknown webhooks do.
 - Discord keeps a pending turn-card intent when recovery cannot edit its webhook card or an unprompted turn cannot delete its card, instead of retiring an unresolved card.
 - Discord picture upload retry expires cleanly, and a completed upload still succeeds if its setup panel was dismissed.
+- The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
 - Agent identity can be disabled for selected Discord guilds or Slack workspaces
@@ -414,6 +415,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Building the image needs Docker 23 or later: the Dockerfile uses BuildKit instructions the legacy builder rejects.
 - Run migrations `0046_account_external` and `0047_turn_origin_external` before deploying. The new code leaves an empty member guest list out of the stored access policy, so older processes still read it; once one is listed, upgrade every process.
 - Isolated channels' agents no longer read other channels, nor sessions with no channel stamp: setups that relied on it stop working.
 - Teams guests in standard and private channels and 1:1 chats are no longer answered outside isolated channels unless listed with `daimon tenants access-policy --add-member-guest`, or unless `DAIMON_TEAMS__RESTRICT_GUESTS=false`.

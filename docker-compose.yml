@@ -50,7 +50,9 @@ services:
     volumes:
       - ./defaults:/app/defaults:ro
     entrypoint: ["sh", "-c"]
-    command: ["uv run alembic upgrade head && daimon defaults apply"]
+    # The venv is on PATH. `uv run` would try to write uv.lock into /app,
+    # which the non-root image user cannot.
+    command: ["alembic upgrade head && daimon defaults apply"]
     restart: "no"
 
   mcp:
