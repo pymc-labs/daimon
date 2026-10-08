@@ -77,6 +77,17 @@ CODE_BLOCK = {
     "required": ["type", "codeSnippet"],
     "additionalProperties": False,
 }
+# Teams' people picker, outside the Adaptive Cards 1.5 schema:
+# https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/people-picker
+DATA_QUERY = {
+    "type": "object",
+    "properties": {
+        "type": {"enum": ["Data.Query"]},
+        "dataset": {"enum": ["graph.microsoft.com/users"]},
+    },
+    "required": ["type", "dataset"],
+    "additionalProperties": False,
+}
 MAX_ACTIVITY_BYTES = 26_000  # a margin under Teams' 28 KB
 
 
@@ -303,6 +314,7 @@ class TeamsApiFake:
 def card_validator() -> Draft6Validator:
     schema = json.loads(CARD_SCHEMA.read_text())
     schema["definitions"]["ImplementationsOf.Element"]["anyOf"].append(CODE_BLOCK)
+    schema["definitions"]["Input.ChoiceSet"]["properties"]["choices.data"] = DATA_QUERY
     return Draft6Validator(schema)
 
 

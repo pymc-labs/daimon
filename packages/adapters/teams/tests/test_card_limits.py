@@ -16,7 +16,7 @@ from typing import Any, get_args
 import httpx
 import pytest
 from daimon.adapters.teams import card, memory, privacy_card, routines_card, setup_card
-from daimon.adapters.teams.billing_panel import checkout_card
+from daimon.adapters.teams.billing_panel import Lookup, checkout_card
 from daimon.adapters.teams.billing_panel import panel_card as billing_card
 from daimon.adapters.teams.credential_requests import credential_form, oauthdialog
 from daimon.adapters.teams.help import COMMAND_HELP, help_card
@@ -38,7 +38,7 @@ from daimon.core.answering_map import (
     SetupThreadRef,
     TenantAnswer,
 )
-from daimon.core.billing_panel import BillingPanelState, MemberRow
+from daimon.core.billing_panel import BillingPanelState, MemberRow, lookup_line
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.continuity.messages import ConfigurationChange
@@ -313,7 +313,8 @@ def _billing(*, is_admin: bool) -> AdaptiveCard:
             for index in range(10**3)
         ),
     )
-    return billing_card(state, since=NOW)
+    lookup = Lookup(name=EMOJI * 256, line=lookup_line(10.0**6, 10**6))
+    return billing_card(state, since=NOW, place="p" * 22, lookup=lookup)
 
 
 def _request(kind: str) -> CredentialRequestRow:

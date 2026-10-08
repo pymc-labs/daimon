@@ -8,7 +8,10 @@ channel budget, and gets "Add credit" (amount buttons; a click re-checks admin,
 creates a Stripe Checkout through the MCP server and replaces the card with an
 `Action.OpenUrl` to it) and "Redeem code" while a code is redeemable. "Expiry
 dates" opens a hidden section listing when each part of the timed credit
-expires.
+expires. An admin's "Look up a person" is Teams' people picker (an
+`Input.ChoiceSet` searching the organisation's directory, which submits the
+person's Entra object id); its click re-checks admin and redraws the card with
+that person's spend this month under the actions.
 
 The top spenders are named from the rosters of the teams the bot is installed
 in (`teams_installations`): Teams has no app-only way to name a person from
@@ -60,7 +63,7 @@ from daimon.adapters.teams.card_actions import (
     toast,
 )
 from daimon.adapters.teams.commands import CommandContext
-from daimon.adapters.teams.identity import DENIED
+from daimon.adapters.teams.identity import DENIED, canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.billing_panel import (
@@ -71,6 +74,7 @@ from daimon.core.billing_panel import (
     CHANNEL_BUDGETS_SHOWN,
     EXPIRY_DATES,
     EXPIRY_INTRO,
+    LOOK_UP,
     NOTHING_USED,
     REDEEM_CODE,
     TITLE,
@@ -89,12 +93,14 @@ from daimon.core.billing_panel import (
     estimate_turns,
     expiry_rows,
     load_billing_snapshot,
+    lookup_line,
     month_label,
     month_start,
     more_channel_budgets,
     more_spenders,
     spend_over_cap,
     spender_line,
+    stored_name_labels,
     timed_credit_note,
     turns_phrase,
 )
@@ -111,6 +117,10 @@ from daimon.core.promo_codes import describe_refusal
 from daimon.core.promo_credit import PromoRedeemed, PromoRedeemRefused, redeem_promo_code
 from daimon.core.stores.platform_names import get_channel_names
 from daimon.core.stores.teams_installations import list_teams_installations
+from daimon.core.stores.usage_events import (
+    cost_for_user_in_tenant_since,
+    turn_count_for_user_in_tenant_since,
+)
 from daimon.core.teams_bot_framework import SERVICE_URL
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext, App
@@ -119,11 +129,13 @@ from microsoft_teams.cards import (
     ActionSet,
     AdaptiveCard,
     CardElement,
+    ChoiceSetInput,
     Column,
     ColumnSet,
     Container,
     ExecuteAction,
     OpenUrlAction,
+    QueryData,
     ShowCardAction,
     TextBlock,
     TextInput,
@@ -140,6 +152,12 @@ NOT_CONFIGURED = (
     "Ask an operator about a manual credit top-up."
 )
 REDEEM_ADMIN_ONLY = "Only an admin can redeem a promo code."
+LOOKUP_ADMIN_ONLY = "Only an admin can look up a person's spend."
+PICK_A_PERSON = "Pick a person to look up."
+PERSON_INPUT = "person"
+# Teams' people picker: the choices come from the organisation's directory.
+# https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/people-picker
+PEOPLE_DATASET = "graph.microsoft.com/users"
 EXPIRY_ID = "billing-expiry"
 ENTER_CODE = "Enter a promo code."
 CODE_INPUT = "code"
@@ -344,6 +362,14 @@ def _topup(amount: int, state: BillingPanelState, place: str | None) -> Column:
     return Column(width="auto", items=[ActionSet(actions=[pay]), *_details(turns_phrase(turns))])
 
 
+@dataclasses.dataclass(frozen=True)
+class Lookup:
+    """A "Look up a person" pick: their name as card text and their spend line."""
+
+    name: str
+    line: str
+
+
 def _sub_card(*items: CardElement) -> AdaptiveCard:
     return AdaptiveCard(body=list(items))
 
@@ -360,6 +386,16 @@ def _actions(state: BillingPanelState, place: str | None) -> list[Action]:
             actions.append(ShowCardAction(title=REDEEM_CODE, card=_sub_card(code, redeem)))
     if state.timed_credit:
         actions.append(ToggleVisibilityAction(title=EXPIRY_DATES, target_elements=[EXPIRY_ID]))
+    if state.is_admin:
+        picker = ChoiceSetInput(
+            id=PERSON_INPUT,
+            label=LOOK_UP,
+            placeholder="Search for a person",
+            choices=[],
+            choices_data=QueryData(dataset=PEOPLE_DATASET),
+        )
+        look = ActionSet(actions=[button(VERB, "Look up", "lookup", place=place or "")])
+        actions.append(ShowCardAction(title=LOOK_UP, card=_sub_card(picker, look)))
     return actions
 
 
@@ -420,6 +456,7 @@ def _panel_body(
     now: datetime,
     channel_names: Mapping[str, str],
     place: str | None,
+    lookup: Lookup | None,
 ) -> list[CardElement]:
     subtext = (
         admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
@@ -444,6 +481,8 @@ def _panel_body(
         body.append(_titled(EXPIRY_INTRO, *_rows(*rows), element_id=EXPIRY_ID, hidden=True))
     if actions := _actions(state, place):
         body.append(ActionSet(actions=actions, separator=True, spacing="Large"))
+    if lookup is not None and state.is_admin:
+        body.append(_titled(lookup.name, *_rows(lookup.line)))
     return body
 
 
@@ -455,13 +494,16 @@ def panel_card(
     notice: str | None = None,
     channel_names: Mapping[str, str] | None = None,
     place: str | None = None,
+    lookup: Lookup | None = None,
 ) -> AdaptiveCard:
     """The member view, or for an admin the tenant view with its admin actions.
 
     ``channel_names`` names the channel budgets by id (`channel_labels`);
-    ``place`` is the token every button carries for the channel it was asked in.
+    ``place`` is the token every button carries for the channel it was asked in;
+    ``lookup`` is an admin's last "Look up a person" pick, shown under the actions.
     """
-    body = _panel_body(state, since, now or datetime.now(UTC), channel_names or {}, place)
+    now = now or datetime.now(UTC)
+    body = _panel_body(state, since, now, channel_names or {}, place, lookup)
     if notice is not None:
         body = [*text_lines(notice), *body]
     return AdaptiveCard(body=body, fallback_text=TITLE)
@@ -526,6 +568,7 @@ class BillingPanel:
         *,
         notice: str | None = None,
         place: str | None = None,
+        lookup: Lookup | None = None,
     ) -> AdaptiveCard:
         now = datetime.now(UTC)
         since = month_start(now)
@@ -553,7 +596,13 @@ class BillingPanel:
             self._channel_names(tenant_id, team_ids, budget_ids, stored_channels),
         )
         return panel_card(
-            state, since=since, now=now, notice=notice, channel_names=channel_names, place=place
+            state,
+            since=since,
+            now=now,
+            notice=notice,
+            channel_names=channel_names,
+            place=place,
+            lookup=lookup,
         )
 
     async def _named(
@@ -604,6 +653,8 @@ class BillingPanel:
         if data.get("op") == "redeem":
             code = str(cast(object, data.get(CODE_INPUT)) or "")
             return await self._redeem(actor, code, place)
+        if data.get("op") == "lookup":
+            return await self._lookup(actor, cast(object, data.get(PERSON_INPUT)), place)
         if data.get("op") != "topup":
             card = await self._panel(actor.tenant_id, actor.user_id, actor.is_admin, place=place)
             return replace_card(card)
@@ -625,6 +676,47 @@ class BillingPanel:
             capture_exception_with_scope(exc)
             return replace_card(text_card("💸 Billing", NOT_CONFIGURED, back=_back(place)))
         return replace_card(checkout_card(url, amount, place))
+
+    async def _lookup(
+        self, actor: Actor, picked: object, place: str | None
+    ) -> AdaptiveCardInvokeResponse:
+        """One person's spend this month for a live admin, under the redrawn panel.
+
+        Per-person spend is what a member's snapshot withholds, so admin is
+        re-checked before any usage read.
+        """
+        if not actor.is_admin:
+            return toast(LOOKUP_ADMIN_ONLY)
+        user_id = canonical_uuid(picked)
+        if user_id is None:
+            return toast(PICK_A_PERSON)
+        since = month_start(datetime.now(UTC))
+        tenant_id = actor.tenant_id
+        async with self._runtime.sessionmaker() as session:
+            spend = await cost_for_user_in_tenant_since(
+                session, tenant_id=tenant_id, platform_user_id=user_id, since=since
+            )
+            turns = await turn_count_for_user_in_tenant_since(
+                session, tenant_id=tenant_id, platform_user_id=user_id, since=since
+            )
+            stored = await stored_name_labels(
+                session, tenant_id=tenant_id, platform="teams", user_ids=[user_id]
+            )
+            teams = await list_teams_installations(session, tenant_id=tenant_id)
+        labels, found = await roster_names(
+            self._roster_name or _no_roster,
+            team_ids=[team.team_id for team in teams] if self._roster_name is not None else [],
+            user_ids=[user_id],
+            stored=stored,
+        )
+        if found:
+            remember_user_names(
+                self._runtime.sessionmaker, tenant_id=tenant_id, platform="teams", names=found
+            )
+        name = plain_name(labels.get(user_id) or "") or NAME_UNAVAILABLE
+        lookup = Lookup(name=name, line=lookup_line(spend, turns))
+        card = await self._panel(tenant_id, actor.user_id, True, place=place, lookup=lookup)
+        return replace_card(card)
 
     async def _redeem(
         self, actor: Actor, code: str, place: str | None

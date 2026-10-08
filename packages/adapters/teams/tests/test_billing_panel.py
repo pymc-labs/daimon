@@ -21,7 +21,9 @@ import pytest
 from daimon.adapters.teams.billing_panel import (
     ADMIN_ONLY,
     ENTER_CODE,
+    LOOKUP_ADMIN_ONLY,
     NOT_CONFIGURED,
+    PICK_A_PERSON,
     REDEEM_ADMIN_ONLY,
     UNKNOWN_AMOUNT,
     channel_labels,
@@ -363,6 +365,41 @@ async def test_billing_typed_in_a_channel_shows_its_budget_on_every_click_of_its
     assert '"This channel"' not in in_chat, "typed in the chat, there is no channel"
 
 
+async def test_an_admin_looks_up_a_person_with_the_people_picker(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    picked, idle = str(uuid.UUID(int=7)), str(uuid.UUID(int=8))
+    async with db_session_factory.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None
+        await record_teams_installation(
+            session, tenant_id=tenant_id, team_id=TEAM_A, group_id="g", name="A"
+        )
+        await make_usage_event(session, tenant=tenant, platform_user_id=picked, input_tokens=9000)
+    teams_api_fake.names[picked] = "Maya *Chen*"
+    teams_api_fake.absent.add(idle)
+
+    async with _running(db_session_factory, teams_api_fake) as service:
+        admin = await _command(service, teams_api_fake, AAD_OBJECT_ID)
+        found = json.dumps(await post_activity(service, _click("lookup", person=picked.upper())))
+        nobody = json.dumps(await post_activity(service, _click("lookup", person=idle)))
+        member = await post_activity(
+            service, _click("lookup", user=OTHER_AAD_OBJECT_ID, person=picked)
+        )
+        empty = await post_activity(service, _click("lookup"))
+        member_card = await _command(service, teams_api_fake, OTHER_AAD_OBJECT_ID)
+
+    assert '"dataset": "graph.microsoft.com/users"' in admin, "the picker searches the directory"
+    assert "Maya \\\\*Chen\\\\*" in found and "this month" in found, "their name and spend"
+    assert "Name unavailable" in nobody and "Nothing used this month" in nobody, (
+        "someone never named to us, who used nothing"
+    )
+    assert member["value"] == LOOKUP_ADMIN_ONLY, "a forwarded admin card reads nothing for a member"
+    assert empty["value"] == PICK_A_PERSON, "a click without a pick asks for one"
+    assert "Look up a person" not in member_card, "a member is not offered the picker"
+
+
 async def test_a_message_remembers_its_senders_name(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -535,8 +572,8 @@ def test_the_admin_card_is_sections_set_apart_with_the_total_biggest() -> None:
         "$20.00 on {{DATE(2026-01-20T00:00:00Z, SHORT)}}",
     ], "soonest first, hidden until Expiry dates is pressed"
     titles = [action["title"] for action in actions["actions"]]
-    assert titles == ["Add credit", "Expiry dates"]
-    add, toggle = actions["actions"]
+    assert titles == ["Add credit", "Expiry dates", "Look up a person"]
+    add, toggle, _ = actions["actions"]
     assert add["type"] == "Action.ShowCard"
     amounts = add["card"]["body"][0]
     assert amounts["type"] == "ColumnSet" and len(amounts["columns"]) == 4
@@ -557,7 +594,7 @@ def test_redeem_code_is_offered_only_while_a_code_is_redeemable() -> None:
             "actions"
         ]
     ]
-    assert titles == ["Add credit", "Redeem code"]
+    assert titles == ["Add credit", "Redeem code", "Look up a person"]
 
 
 def test_the_member_card_shows_own_use_and_asks_an_admin_for_credit() -> None:
