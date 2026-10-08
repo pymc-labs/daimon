@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **👎 feedback can go to the support channel, per tenant.** With
+  `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` on for a tenant (off by default), each
+  submitted "What went wrong?" form on Slack, and each 👎 text on Discord, is
+  also posted once to the channel Ask a human uses, with the person, the agent,
+  the reasons, the text and a link to the answer. The form tells the person
+  it is shared.
 - **Teams files in private and shared channels, turned on by asking.** The
   Enable files sign-in now starts from a channel and grants daimon that
   channel's own SharePoint site: the team's for a standard channel, a site of

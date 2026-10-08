@@ -998,6 +998,18 @@ How many human-support requests each user gets within a tenant. A COUNT of inter
 NOT the USD in DAIMON_BILLING__SIGNUP_CREDIT — the two are deliberately separate
 ledgers. 0 disables escalation.
 
+### `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT`
+
+`dict[UUID, bool]` · optional · default `{}`
+
+Per-tenant switch, keyed by tenant UUID: true also posts every submitted 👎 "What went
+wrong?" form (the reasons, the text, the person, the agent and a link to the answer) to
+the channel Ask a human posts to: DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID for Slack,
+DAIMON_SUPPORT__ESCALATION_CHANNEL_ID (a Discord channel) for Discord. Missing/false
+(the default) keeps the form in the database only. The form tells the person their
+answers are shared when it is on. Spends no support credit. Configure
+DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a JSON object.
+
 ## Thread Naming
 
 Read from `daimon.core.config.ThreadNamingSettings`. Prefix `DAIMON_THREAD_NAMING__`.

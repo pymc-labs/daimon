@@ -84,6 +84,46 @@ _OUT_OF_CREDITS = OUT_OF_CREDITS
 _RECORDED_UNDELIVERED = RECORDED_UNDELIVERED
 
 
+async def post_to_support_channel(
+    bot: commands.Bot,
+    *,
+    channel_id: str,
+    body: str,
+    allowed_mentions: discord.AllowedMentions | None = None,
+) -> bool:
+    """Post ``body`` into the support channel. True if it landed.
+
+    Shared by Ask a human and the routed 👎 form (`feedback_modal`). Resolves
+    through the cache first and falls back to one fetch, because the
+    escalation channel lives in the operators' own guild and may not be in a
+    freshly-started bot's cache. Returns False on anything that means the
+    message did not arrive -- a channel that cannot be resolved, one the bot
+    cannot post in, or an id that is not a channel it can message.
+    """
+    try:
+        channel = bot.get_channel(int(channel_id))
+        if channel is None:
+            channel = await bot.fetch_channel(int(channel_id))
+        if not isinstance(channel, discord.abc.Messageable):
+            _log.warning("support.channel_not_messageable", channel_id=channel_id)
+            return False
+        if allowed_mentions is None:
+            await channel.send(body)
+        else:
+            await channel.send(body, allowed_mentions=allowed_mentions)
+        return True
+    except (discord.HTTPException, ValueError) as exc:
+        # A misconfigured id, a channel the bot was removed from, or lost
+        # send permission. All operator-side, none of them the requester's
+        # problem -- and none of them may lose the row.
+        _log.warning(
+            "support.channel_undeliverable",
+            channel_id=channel_id,
+            err_type=type(exc).__name__,
+        )
+        return False
+
+
 class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
     """Free-text form; writing it is what spends the credit.
 
@@ -265,37 +305,14 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
         guild_id: str,
         channel_id: str,
     ) -> bool:
-        """Post the request into the escalation channel. True if it landed.
-
-        Resolves through the cache first and falls back to one fetch, because
-        the escalation channel lives in the operators' own guild and may not be
-        in a freshly-started bot's cache. Returns False on anything that means
-        the message did not arrive -- a channel that cannot be resolved, one
-        the bot cannot post in, or an id that is not a channel it can message
-        -- so the caller leaves `delivered_at` NULL and tells the requester the
-        honest thing.
-        """
-        body = self._body(interaction, note)
-        bot = cast(commands.Bot, interaction.client)
-        try:
-            channel = bot.get_channel(int(channel_id))
-            if channel is None:
-                channel = await bot.fetch_channel(int(channel_id))
-            if not isinstance(channel, discord.abc.Messageable):
-                _log.warning("support.channel_not_messageable", channel_id=channel_id)
-                return False
-            await channel.send(body)
-            return True
-        except (discord.HTTPException, ValueError) as exc:
-            # A misconfigured id, a channel the bot was removed from, or lost
-            # send permission. All operator-side, none of them the requester's
-            # problem -- and none of them may lose the row.
-            _log.warning(
-                "support.channel_undeliverable",
-                channel_id=channel_id,
-                err_type=type(exc).__name__,
-            )
-            return False
+        """Post the request into the escalation channel. True if it landed; on
+        False the caller leaves `delivered_at` NULL and tells the requester the
+        honest thing."""
+        return await post_to_support_channel(
+            cast(commands.Bot, interaction.client),
+            channel_id=channel_id,
+            body=self._body(interaction, note),
+        )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         """Adapter boundary: discord.py routes on_submit failures here, not to a dispatcher."""
