@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from daimon.core._models import AgentAvatar, Tenant
-from daimon.core.agent_faces import FaceCombo, choose, decode_combo, encode_combo, render
+from daimon.core.agent_faces import CLASSIC, FaceCombo, choose, decode_combo, encode_combo, render
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -91,7 +91,7 @@ async def _choose_face(
             AgentAvatar.face_combo.is_not(None),
         )
     )
-    existing = [decode_combo(raw) for raw in rows if raw is not None]
+    existing = [CLASSIC, *(decode_combo(raw) for raw in rows if raw is not None)]
     return await asyncio.to_thread(choose, normalize_agent_name(agent_name), existing)
 
 

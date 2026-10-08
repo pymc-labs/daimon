@@ -1,13 +1,15 @@
 """Deterministic mascot faces for tenant-scoped agent avatars.
 
-The base derives from the production mascot. Eye and mouth layers derive from
-canonical expression sprites, flattened and traced per ink at 1024 pixels.
+The base and laugh mouth derive from the production mascot. Closed eye arcs
+derive from a canonical expression sprite; plain eyes and restrained smiles use
+the same ink colours.
 Headwear and shades are the approved prototype layers. Assets are bundled with
 this MIT-licensed package; no source art or network access is needed at runtime.
 """
 
 from __future__ import annotations
 
+import colorsys
 import hashlib
 import io
 import json
@@ -60,27 +62,46 @@ _PALETTE = (
     "#B6D7A8",
     "#F9CB9C",
     "#8E7CC3",
+    "#D38982",
+    "#D39782",
+    "#D3A482",
+    "#D3B282",
+    "#D3BF82",
+    "#D3CD82",
+    "#CDD382",
+    "#BFD382",
+    "#B2D382",
+    "#A4D382",
+    "#97D382",
+    "#89D382",
+    "#82D389",
+    "#82D397",
+    "#82D3A4",
+    "#82D3B2",
+    "#82D3BF",
+    "#82D3CD",
+    "#82CDD3",
+    "#82BFD3",
+    "#82B2D3",
+    "#82A4D3",
+    "#8297D3",
+    "#8289D3",
+    "#8982D3",
+    "#9782D3",
+    "#A482D3",
+    "#B282D3",
+    "#BF82D3",
+    "#CD82D3",
+    "#D382CD",
+    "#D382BF",
+    "#D382B2",
+    "#D382A4",
+    "#D38297",
+    "#D38289",
 )
-_EXPRESSIONS = (
-    "angry",
-    "excited",
-    "happy",
-    "sad",
-    "sleepy",
-    "thinking",
-    "wink",
-    "pointing",
-    "waving",
-    "typing",
-    "shrug",
-    "turn-front",
-)
-_CANON_EYES = ("happy", "excited", "wink", "angry", "sleepy", "thinking", "sad")
-_CANON_MOUTHS = ("laugh", "happy", "excited", "angry", "sleepy", "thinking", "sad")
-_NOVEL_EYES = tuple(name for name in _EXPRESSIONS if name not in _CANON_EYES)
-_NOVEL_MOUTHS = tuple(name for name in _EXPRESSIONS if name not in _CANON_MOUTHS)
-_VALID_MOUTHS = (*_EXPRESSIONS, "laugh")
-_BROWS = ("default", "raised", "angry", "worried", "flat")
+_EXPRESSIONS = ("arc", "plain")
+_VALID_MOUTHS = ("laugh", "smile", "soft-open")
+_BROWS = ("default", "raised")
 _HATS: tuple[tuple[str | None, str | None], ...] = (
     (None, None),
     ("hardhat", None),
@@ -97,23 +118,29 @@ _HATS: tuple[tuple[str | None, str | None], ...] = (
 )
 _HAT_WIDTH = {"hardhat": 0.58, "gradcap": 0.70, "beanie": 0.58, "cap": 0.60}
 _MOUTH_WIDTH = {
-    "angry": 0.26,
-    "excited": 0.42,
-    "happy": 0.33,
     "laugh": 0.40,
-    "sad": 0.26,
-    "sleepy": 0.42,
-    "thinking": 0.27,
-    "wink": 0.34,
-    "pointing": 0.35,
-    "waving": 0.27,
-    "typing": 0.32,
-    "shrug": 0.32,
-    "turn-front": 0.32,
+    "smile": 0.31,
+    "soft-open": 0.26,
 }
-CLASSIC: FaceCombo = (0, "happy", "laugh", 0, False, "default")
+CLASSIC: FaceCombo = (0, "arc", "laugh", 0, False, "default")
 HAT_SHARE = 0.20
 SHADES_SHARE = 0.10
+
+
+def _colour_weight(value: str) -> int:
+    rgb = tuple(int(value[index : index + 2], 16) / 255 for index in (1, 3, 5))
+    hue, _, saturation = colorsys.rgb_to_hls(*rgb)
+    if 0.11 <= hue < 0.32 and saturation >= 0.35:
+        return 1  # bright yellow and lime are available but uncommon
+    if 0.32 <= hue <= 0.85:
+        return 4  # green, teal, blue and lavender carry the palette
+    return 2
+
+
+_COLOUR_WEIGHTS = tuple(_colour_weight(value) for value in _PALETTE)
+_COLOUR_SLOTS = tuple(index for index, weight in enumerate(_COLOUR_WEIGHTS) for _ in range(weight))
+_COLOUR_TARGETS = {1: 0.05, 2: 0.25, 4: 0.70}
+_MOUTH_TARGETS = {"laugh": 0.60, "smile": 0.30, "soft-open": 0.10}
 
 
 def encode_combo(combo: FaceCombo) -> str:
@@ -147,6 +174,13 @@ def decode_combo(raw: str) -> FaceCombo:
 
 def _rgb(value: str) -> np.ndarray:
     return np.array([int(value[i : i + 2], 16) for i in (1, 3, 5)], dtype=np.float32)
+
+
+_PALETTE_RGB = np.stack([_rgb(value) for value in _PALETTE])
+_COLOUR_HUES = np.array([colorsys.rgb_to_hls(*(_rgb(value) / 255))[0] * 360 for value in _PALETTE])
+_RAW_HUE_SEPARATION = np.abs(_COLOUR_HUES[:, None] - _COLOUR_HUES[None, :])
+_HUE_SEPARATION = np.minimum(_RAW_HUE_SEPARATION, 360 - _RAW_HUE_SEPARATION)
+_RGB_SEPARATION = np.linalg.norm(_PALETTE_RGB[:, None, :] - _PALETTE_RGB[None, :, :], axis=2)
 
 
 @lru_cache(maxsize=2)
@@ -248,7 +282,7 @@ def render_image(combo: FaceCombo, size: int = 512) -> Image.Image:
     mouth_height = part.height * mouth_width / part.width
     place(f"mouth-{mouth}", width=mouth_width, cy=0.40 + mouth_height / 2)
     if not shades:
-        place(f"eyes-{eyes}", width=0.66 if eyes == "happy" else 0.6072, cy=0.345)
+        place(f"eyes-{eyes}", width=0.47 if eyes == "plain" else 0.6072, cy=0.345)
     else:
         place("eyewear-shades", width=0.64, cy=0.345)
     hat_name, hat_colour = _HATS[hat]
@@ -285,8 +319,8 @@ def thumbnail(combo: FaceCombo) -> np.ndarray:
     return (picture * circle).reshape(-1)
 
 
-def candidates(agent_key: str, count: int = 32) -> list[FaceCombo]:
-    """Stable draws favour canonical faces; props and novelty stay uncommon."""
+def candidates(agent_key: str, count: int = 48) -> list[FaceCombo]:
+    """Stable draws favour the classic face and use restrained canonical variants."""
     result: list[FaceCombo] = []
     attempt = 0
     while len(result) < count:
@@ -294,26 +328,16 @@ def candidates(agent_key: str, count: int = 32) -> list[FaceCombo]:
         attempt += 1
         hat = 0 if digest[4] / 256 >= HAT_SHARE else 1 + digest[5] % (len(_HATS) - 1)
         shades = digest[6] / 256 < SHADES_SHARE
-        expression_roll = digest[7]
-        if expression_roll < 64:
-            eyes, mouth = "happy", "laugh"
-        elif expression_roll < 176:
-            expression = _CANON_EYES[digest[1] % len(_CANON_EYES)]
-            eyes = expression
-            mouth = "happy" if expression == "wink" else expression
-        elif expression_roll < 253:
-            eyes = _CANON_EYES[digest[1] % len(_CANON_EYES)]
-            mouth = _CANON_MOUTHS[digest[2] % len(_CANON_MOUTHS)]
-        else:
-            eyes = _NOVEL_EYES[digest[1] % len(_NOVEL_EYES)]
-            mouth = _NOVEL_MOUTHS[digest[2] % len(_NOVEL_MOUTHS)]
+        eyes = "arc" if digest[7] < 192 else "plain"
+        mouth = "laugh" if digest[8] < 154 else "smile" if digest[8] < 231 else "soft-open"
+        brows = "raised" if mouth != "laugh" and digest[3] < 64 else "default"
         combo: FaceCombo = (
-            digest[0] % len(_PALETTE),
+            _COLOUR_SLOTS[int.from_bytes(digest[:2]) % len(_COLOUR_SLOTS)],
             eyes,
             mouth,
             hat,
             shades,
-            _BROWS[digest[3] % len(_BROWS)],
+            brows,
         )
         if combo != CLASSIC and combo not in result:
             result.append(combo)
@@ -321,19 +345,28 @@ def candidates(agent_key: str, count: int = 32) -> list[FaceCombo]:
 
 
 def choose(
-    agent_key: str, existing: list[FaceCombo], *, count: int = 32, min_plain: float = 5.0
+    agent_key: str, existing: list[FaceCombo], *, count: int | None = None, min_plain: float = 4.0
 ) -> FaceCombo:
     """Balance colours first, then prefer distinct plain canonical faces."""
     used = set(existing)
-    options = [combo for combo in candidates(agent_key, count) if combo not in used]
+    candidate_count = count if count is not None else (96 if len(existing) < 24 else 48)
+    options = [combo for combo in candidates(agent_key, candidate_count) if combo not in used]
     if not options:
         raise ValueError("no unused face candidates")
     plain = [combo for combo in options if combo[3] == 0 and not combo[4]]
     colour_uses = Counter(combo[0] for combo in existing)
     if not existing:
-        return min(plain or options, key=lambda combo: (not _is_classic(combo), combo[0]))
+        return min(
+            plain or options,
+            key=lambda combo: (-_COLOUR_WEIGHTS[combo[0]], not _is_classic(combo), combo[0]),
+        )
     previous = np.stack([thumbnail(combo) for combo in existing])
-    prefer_classic = hashlib.sha256(f"{agent_key}|classic".encode()).digest()[0] < 128
+    previous_colours = [combo[0] for combo in existing]
+    category_uses = Counter(_COLOUR_WEIGHTS[colour] for colour in previous_colours)
+    eye_uses = Counter(combo[1] for combo in existing)
+    mouth_uses = Counter(combo[2] for combo in existing)
+    hue_spread = _HUE_SEPARATION[:, previous_colours].min(axis=1)
+    rgb_spread = _RGB_SEPARATION[:, previous_colours].min(axis=1)
     distances: dict[FaceCombo, float] = {}
 
     def distance(combo: FaceCombo) -> float:
@@ -342,12 +375,32 @@ def choose(
         return distances[combo]
 
     def pick(pool: list[FaceCombo]) -> FaceCombo:
+        def eye_error(combo: FaceCombo) -> float:
+            return abs(eye_uses["arc"] + (combo[1] == "arc") - (len(existing) + 1) * 0.75)
+
+        def mouth_error(combo: FaceCombo) -> float:
+            return sum(
+                abs(mouth_uses[mouth] + (combo[2] == mouth) - (len(existing) + 1) * target)
+                for mouth, target in _MOUTH_TARGETS.items()
+            )
+
+        def category_error(combo: FaceCombo) -> float:
+            category = _COLOUR_WEIGHTS[combo[0]]
+            return sum(
+                abs(category_uses[weight] + (weight == category) - (len(existing) + 1) * target)
+                for weight, target in _COLOUR_TARGETS.items()
+            )
+
         return min(
             pool,
             key=lambda combo: (
-                colour_uses[combo[0]],
-                prefer_classic and not _is_classic(combo),
-                combo[1] in _NOVEL_EYES or combo[2] in _NOVEL_MOUTHS,
+                -hue_spread[combo[0]],
+                eye_error(combo),
+                mouth_error(combo),
+                category_error(combo),
+                -rgb_spread[combo[0]],
+                colour_uses[combo[0]] * (4 // _COLOUR_WEIGHTS[combo[0]]),
+                not _is_classic(combo),
                 -distance(combo),
             ),
         )
@@ -360,12 +413,14 @@ def choose(
 
 
 def _is_classic(combo: FaceCombo) -> bool:
-    return combo[1:3] == ("happy", "laugh") and combo[3] == 0 and not combo[4]
+    return combo[1:3] == ("arc", "laugh") and combo[3] == 0 and not combo[4]
 
 
 def assign(agent_keys: list[str]) -> dict[str, FaceCombo]:
-    """Assign agents in creation order; previously chosen faces never move."""
+    """Assign in creation order while reserving the built-in face's colour."""
     assigned: dict[str, FaceCombo] = {}
+    existing = [CLASSIC]
     for key in agent_keys:
-        assigned[key] = choose(key, list(assigned.values()))
+        assigned[key] = choose(key, existing)
+        existing.append(assigned[key])
     return assigned

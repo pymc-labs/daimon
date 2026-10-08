@@ -23,25 +23,25 @@ from daimon.core.agent_faces import (
 from daimon.core.stores.agent_avatars import get_or_create_avatar, replace_avatar, reset_avatar
 from daimon.testing.factories import make_tenant
 from PIL import Image, ImageDraw
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 def test_render_is_stable_and_round_trips_its_combination() -> None:
-    combo: FaceCombo = (12, "wink", "sad", 3, False, "raised")
+    combo: FaceCombo = (12, "arc", "smile", 3, False, "raised")
     png = render(combo, 512)
     assert png == render(combo, 512)
     assert decode_combo(encode_combo(combo)) == combo
     assert Image.open(BytesIO(png)).size == (512, 512)
     assert Image.open(BytesIO(render(CLASSIC, 128))).size == (128, 128)
     with pytest.raises(ValueError, match="invalid face"):
-        decode_combo('[0,"happy","happy",0,false,"not-a-brow"]')
+        decode_combo('[0,"arc","smile",0,false,"not-a-brow"]')
 
 
 def test_props_reach_inside_the_circular_header_crop() -> None:
-    plain = (0, "happy", "happy", 0, False, "default")
-    hat = (0, "happy", "happy", 1, False, "default")
-    headset = (0, "happy", "happy", 11, False, "default")
-    shades = (0, "happy", "happy", 0, True, "default")
+    plain = (0, "arc", "smile", 0, False, "default")
+    hat = (0, "arc", "smile", 1, False, "default")
+    headset = (0, "arc", "smile", 11, False, "default")
+    shades = (0, "arc", "smile", 0, True, "default")
     mask = Image.new("L", (36, 36), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, 35, 35), fill=255)
     inside = np.asarray(mask) > 0
@@ -51,16 +51,34 @@ def test_props_reach_inside_the_circular_header_crop() -> None:
         assert float(delta[inside].mean()) > 2, "the prop must be visible inside a circular header"
 
 
-def test_assignment_prefers_underused_colour_before_expression_distance(
+def test_assignment_prefers_hue_separation_before_expression_distance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    previous: FaceCombo = (0, "happy", "laugh", 0, False, "default")
-    same_colour: FaceCombo = (0, "angry", "angry", 0, False, "default")
-    fresh_colour: FaceCombo = (1, "happy", "laugh", 0, False, "default")
+    previous: FaceCombo = (0, "arc", "laugh", 0, False, "default")
+    same_colour: FaceCombo = (0, "plain", "smile", 0, False, "raised")
+    fresh_colour: FaceCombo = (1, "arc", "laugh", 0, False, "default")
     pictures = {previous: 0, same_colour: 20, fresh_colour: 6}
     monkeypatch.setattr(agent_faces, "candidates", lambda _key, _count: [same_colour, fresh_colour])
     monkeypatch.setattr(agent_faces, "thumbnail", lambda combo: np.array([pictures[combo]]))
     assert choose("analyst", [previous], count=2) == fresh_colour
+
+
+def test_thread_palette_spreads_hues_around_the_builtin_face() -> None:
+    names = [
+        "analyst",
+        "research",
+        "ops",
+        "finance-bot",
+        "support",
+        "data-eng",
+        "qa-sec-b-76b4ca",
+        "sales-copilot",
+    ]
+    faces = assign(names)
+    colours = [CLASSIC[0], *(combo[0] for combo in faces.values())]
+    separation = agent_faces._HUE_SEPARATION[np.ix_(colours, colours)].copy()
+    np.fill_diagonal(separation, np.inf)
+    assert float(separation.min()) >= 20
 
 
 def test_five_hundred_faces_are_distinct_at_twenty_pixels() -> None:
@@ -77,16 +95,31 @@ def test_five_hundred_faces_are_distinct_at_twenty_pixels() -> None:
     eyes = Counter(combo[1] for combo in faces.values())
     mouths = Counter(combo[2] for combo in faces.values())
     classic = sum(
-        combo[1:3] == ("happy", "laugh") and combo[3] == 0 and not combo[4]
+        combo[1:3] == ("arc", "laugh") and combo[3] == 0 and not combo[4]
         for combo in faces.values()
     )
-    assert 75 <= hats <= 150, "headwear should remain a minority of assigned faces"
-    assert 25 <= shades <= 75, "shades should remain a minority of assigned faces"
-    assert len(colours) == 36
-    assert max(colours.values()) - min(colours.values()) <= 3
+    assert 200 <= hats <= 325, "props provide distinction in a dense tenant"
+    assert 75 <= shades <= 150
+    assert len(colours) == 72
+    assert min(colours.values()) >= 1
+    assert max(colours.values()) <= 12
+    assignment_by_weight = Counter(
+        {
+            weight: sum(
+                count
+                for index, count in colours.items()
+                if agent_faces._COLOUR_WEIGHTS[index] == weight
+            )
+            for weight in (1, 2, 4)
+        }
+    )
+    assert assignment_by_weight[4] > assignment_by_weight[2] > assignment_by_weight[1]
+    assert assignment_by_weight[1] < 75, "yellow and lime should stay uncommon"
     assert classic >= 20, "the production face should be a common draw"
-    assert sum(eyes[name] for name in ("pointing", "waving", "typing", "shrug", "turn-front")) < 50
-    assert mouths["wink"] < 30, "the tongue-out expression should be uncommon"
+    assert set(eyes) == {"arc", "plain"}
+    assert set(mouths) == {"laugh", "smile", "soft-open"}
+    assert 370 <= eyes["arc"] <= 380
+    assert 290 <= mouths["laugh"] <= 310
 
 
 @pytest.mark.asyncio
@@ -133,13 +166,15 @@ async def test_face_switch_off_keeps_initials_and_creates_no_face_combination(
 
 @pytest.mark.asyncio
 async def test_concurrent_first_uses_assign_distinct_tenant_faces(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_engine: AsyncEngine,
+    db_clean: None,
 ) -> None:
-    async with db_session_factory.begin() as session:
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with session_factory.begin() as session:
         tenant = await make_tenant(session)
 
     async def create(name: str) -> FaceCombo | None:
-        async with db_session_factory.begin() as session:
+        async with session_factory.begin() as session:
             row = await get_or_create_avatar(
                 session, tenant_id=tenant.id, agent_name=name, face_enabled=True
             )
