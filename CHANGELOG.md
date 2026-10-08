@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also posted once to the channel Ask a human uses, with the person, the agent,
   the reasons, the text and a link to the answer. The form tells the person
   it is shared.
+- **Teams feedback catches up with Slack.** 👎 on a Teams answer now opens a
+  "What went wrong?" form with the same reasons and optional text, and 👍 is
+  acknowledged. Only people who could start a turn at the answer can vote.
+  `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` now covers Teams: a submitted form is
+  posted once to the support channel, spending no credit. With support set
+  up, answers carry an Ask a human button that opens the support form for
+  that answer. Turns that only ran tools get both on their finished card;
+  cancelled turns get neither.
 - **Teams files in private and shared channels, turned on by asking.** The
   Enable files sign-in now starts from a channel and grants daimon that
   channel's own SharePoint site: the team's for a standard channel, a site of

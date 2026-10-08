@@ -56,12 +56,24 @@ is supported; government and China clouds use other Bot Framework hosts.
 
 A turn shows one status card, edited in place, with a Cancel button only the
 author can use. The answer replaces the card, split across messages when long,
-with Teams' thumbs up/down feedback on the last one. Messages sent while a turn
+with feedback controls on the last one (below). Messages sent while a turn
 runs are queued and run as one follow-up per author. Work an agent hands off
 (`hand_off_task`) runs right after the turn that queued it; if admission
 refuses that work, it is dropped without a notice, as on Slack. Retried
 deliveries are deduplicated in memory only, so a retry that lands after a
 restart runs again.
+
+### Feedback and Ask a human
+
+The last part of an answer carries Teams' thumbs up/down. 👍 records the vote;
+👎 opens a "What went wrong?" form with optional reasons and text, at least one
+required. When support is set up the answer also has an Ask a human button
+that opens the `support` form for it, spending a credit, and the post links
+to the answer. A turn that only ran tools gets both on its finished card; a
+cancelled turn gets neither. Only people who could start a turn at that
+answer can vote or ask. With `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` on, each
+submitted 👎 form is posted once to the support channel without spending a
+credit, and the form says it is shared. Feedback text is never logged.
 
 ### People from another organisation
 
