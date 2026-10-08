@@ -100,3 +100,51 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
 
     reply = client.chat_postMessage.await_args.kwargs["text"]
     assert reply.startswith("This channel has used its spending budget."), reply
+
+
+async def test_excluded_workspace_dm_skips_agent_identity_lookup(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="slack")
+        account = await make_account(session, tenant=tenant)
+        await make_dm_conversation(
+            session,
+            tenant=tenant,
+            account_id=account.id,
+            route_key=f"{_TEAM}:D2",
+            external_user_id="U1",
+            workspace_id=_TEAM,
+            source_channel_id=_CHANNEL,
+        )
+    client = MagicMock()
+    client.chat_postMessage = AsyncMock()
+    monkeypatch.setattr(dm_module, "resolve_web_client", AsyncMock(return_value=client))
+    monkeypatch.setattr(dm_module, "_live_role", AsyncMock(return_value=Role.USER))
+    find_agent = AsyncMock()
+    monkeypatch.setattr(dm_module, "find_agent_by_daimon_tag", find_agent)
+
+    async def reply(*_args: Any, **kwargs: Any) -> str:
+        await kwargs["on_agent"]("analyst")
+        return "done"
+
+    monkeypatch.setattr(dm_module, "reply_to_dm", reply)
+    runtime = MagicMock()
+    runtime.sessionmaker = db_session_factory
+    runtime.settings.agent_identity.enabled = True
+    runtime.settings.agent_identity.excluded_slack_team_ids = [_TEAM]
+    await dm_module.handle_direct_message(
+        runtime,
+        {
+            "type": "message",
+            "channel_type": "im",
+            "channel": "D2",
+            "user": "U1",
+            "ts": "1.1",
+            "text": "hi",
+        },
+        team_id=_TEAM,
+    )
+    find_agent.assert_not_awaited()
+    kwargs = client.chat_postMessage.await_args.kwargs
+    assert "username" not in kwargs and "icon_url" not in kwargs

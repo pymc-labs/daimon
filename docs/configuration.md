@@ -372,16 +372,16 @@ DAIMON_AGENT_IDENTITY__ENABLED=true after platform setup is ready.
 `list[str]` · optional · default unset
 
 Discord guild IDs where agent identity stays off when enabled globally. Set
-DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS to a JSON array of IDs. Default: no
-guilds excluded.
+DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS to a JSON array of IDs. Default: []
+(no guilds excluded).
 
 ### `DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS`
 
 `list[str]` · optional · default unset
 
 Slack workspace team IDs where agent identity stays off when enabled globally. Set
-DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS to a JSON array of IDs. Default: no
-workspaces excluded.
+DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS to a JSON array of IDs. Default: [] (no
+workspaces excluded).
 
 ## Discord
 
@@ -430,9 +430,9 @@ notice; continuation wakes keep their existing admission path.
 `int` · optional · default `86400`
 
 Minimum age in seconds before Discord can retire a card after definite recovery failure
-or repeated failed recovery passes. Must exceed the turn ceiling. Recovery runs at
-startup and periodically, and deletes a known pending card when the bot has Manage
-Messages permission.
+or repeated failed recovery passes. Must be at least the turn ceiling plus 15 minutes.
+Recovery runs at startup and periodically, and deletes a known pending card when the bot
+has Manage Messages permission.
 
 ### `DAIMON_DISCORD__TURN_CARD_UNRECOVERABLE_AFTER_ATTEMPTS`
 

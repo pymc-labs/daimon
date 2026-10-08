@@ -458,6 +458,43 @@ async def test_deleted_webhook_edit_records_replacement(
     assert new_post is not None and new_post.agent_id == auth.chat_agent_id
 
 
+async def test_excluded_guild_send_and_replacement_use_plain_bot(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: _FakeDiscord,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.mcp.tools.discord import _post_transport
+
+    world = await _world(committing_sessionmaker)
+    world.runtime.settings.agent_identity.excluded_discord_guild_ids = [_GUILD]
+    auth, origin = await world.turn()
+    old_id = await _post(world, auth)
+    assert fake.messages[old_id]["content"] == "first draft"
+    assert not fake.did("POST", f"/channels/{_CHANNEL}/webhooks")
+
+    fake.messages[old_id]["webhook_id"] = "900"
+    fake.messages[old_id]["application_id"] = _BOT
+    fake.messages[old_id]["author"] = _user("900", bot=True)
+    hook = MagicMock(spec=discord.Webhook)
+    hook.id = 900
+    hook.edit_message = AsyncMock(
+        side_effect=discord.NotFound(
+            MagicMock(status=404), {"code": 10015, "message": "Unknown Webhook"}
+        )
+    )
+    monkeypatch.setattr(_post_transport, "own_webhook", AsyncMock(side_effect=[hook, None]))
+    result = await _edit_message_impl(
+        world.runtime,
+        auth,
+        channel_id=_CHANNEL,
+        message_id=old_id,
+        content="updated",
+        origin_context_id=origin,
+    )
+    assert fake.messages[result.message_id]["content"] == "updated"
+    assert not fake.did("POST", f"/channels/{_CHANNEL}/webhooks")
+
+
 # ---------------------------------------------------------------------------
 # Own messages
 # ---------------------------------------------------------------------------

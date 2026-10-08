@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from aioresponses import CallbackResult
+from daimon.adapters.slack import app as slack_app
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
@@ -288,6 +289,7 @@ async def _run_continuation_and_capture_controls(
     reason: ContinuationReason,
     admin_status: bool | None = False,
     prior_role: Role | None = None,
+    excluded_identity: bool = False,
 ) -> str:
     """Run one continuation turn and return the `user_message` it ran with.
 
@@ -311,6 +313,10 @@ async def _run_continuation_and_capture_controls(
     await db_session.commit()
 
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
+    app.runtime.settings.agent_identity.enabled = True
+    app.runtime.settings.agent_identity.excluded_slack_team_ids = (
+        ["T_CONT_ENTRY"] if excluded_identity else []
+    )
     row = _make_continuation_row(
         tenant_id=tenant.id, account_id=requester.account_id, reason=reason
     )
@@ -327,6 +333,10 @@ async def _run_continuation_and_capture_controls(
         ) as resolve_env,
         patch("daimon.adapters.slack.app.bind_session", new_callable=AsyncMock) as bind,
         patch("daimon.adapters.slack.app.run_prepared_turn", new_callable=AsyncMock) as run_turn,
+        patch(
+            "daimon.adapters.slack.app.resolve_agent_identity",
+            wraps=slack_app.resolve_agent_identity,
+        ) as resolve_identity,
     ):
         resolve_agent.return_value = _AGENT_ID
         resolve_env.return_value = _ENV_ID
@@ -347,10 +357,27 @@ async def _run_continuation_and_capture_controls(
             team_id="T_CONT_ENTRY",
         )
 
+    assert resolve_identity.await_args.kwargs["enabled"] == (not excluded_identity)
+
     assert run_turn.await_args is not None, "the follow-up turn should have run"
     user_message = run_turn.await_args.kwargs["user_message"]
     assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
     return user_message
+
+
+async def test_excluded_workspace_continuation_disables_identity(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    await _run_continuation_and_capture_controls(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_ENTRY_EXCLUDED",
+        reason="task_handoff",
+        excluded_identity=True,
+    )
 
 
 @pytest.mark.parametrize("reason", ["task_handoff", "private_input_applied"])

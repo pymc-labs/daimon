@@ -475,6 +475,13 @@ async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
     async def _assert_marked_before_run(*args: Any, **kwargs: Any) -> Any:
         async with db_session_factory() as session:
             active = await list_orphaned_turns(session, platform="discord")
+            intent_id = await session.scalar(
+                sql_text(
+                    "SELECT id FROM turn_card_intents WHERE thread_id = :thread_id AND status = 'posted'"
+                ),
+                {"thread_id": str(channel.id)},
+            )
+        assert intent_id in bot._live_turn_card_intent_ids  # pyright: ignore[reportPrivateUsage]
         assert any(
             marker.thread_id == str(channel.id) and marker.active_turn_message_id == "42"
             for marker in active

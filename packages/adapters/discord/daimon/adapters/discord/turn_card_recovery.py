@@ -148,6 +148,7 @@ async def expire_unrecoverable_turn_card(
     max_age_s: int,
     reason: str,
     candidate_message_ids: set[int] | None = None,
+    allow_missing_member: bool = False,
     now: datetime | None = None,
 ) -> bool:
     """Close an aged intent after a definite failure; delete only its pending cards."""
@@ -156,7 +157,11 @@ async def expire_unrecoverable_turn_card(
     current_time = now or datetime.now(UTC)
     if (current_time - intent.created_at).total_seconds() < max_age_s:
         return False
-    if thread is not None and thread.guild.me is None:  # pyright: ignore[reportUnnecessaryComparison]
+    if (
+        thread is not None
+        and thread.guild.me is None  # pyright: ignore[reportUnnecessaryComparison]
+        and not allow_missing_member
+    ):
         log.warning("turn.card_intent_unrecoverable_deferred", intent_id=str(intent.id))
         return False
     try:
@@ -180,7 +185,7 @@ async def expire_unrecoverable_turn_card(
     deleted = 0
     if thread is not None:
         member = thread.guild.me
-        if thread.permissions_for(member).manage_messages:
+        if member is not None and thread.permissions_for(member).manage_messages:  # pyright: ignore[reportUnnecessaryComparison]
             ids = set(candidate_message_ids or ())
             if intent.message_id is not None:
                 try:
@@ -348,6 +353,7 @@ async def reconcile_turn_card_intent(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     monotonic: Callable[[], float] = time.monotonic,
+    candidate_message_ids: set[int] | None = None,
 ) -> None:
     """Reconcile one snapshotted intent without delaying admission."""
     complete_miss_at: float | None = None
@@ -361,6 +367,8 @@ async def reconcile_turn_card_intent(
             created_after=intent.created_at,
             before=search_before,
         )
+        if candidate_message_ids is not None:
+            candidate_message_ids.update(result.message_ids)
         if result.state in (TurnCardSearchState.FOUND, TurnCardSearchState.MULTIPLE):
             message_ids = set(result.message_ids)
 

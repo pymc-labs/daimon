@@ -410,8 +410,9 @@ class DiscordSettings(BaseModel):
         ge=1,
         description=(
             "Minimum age in seconds before Discord can retire a card after definite "
-            "recovery failure or repeated failed recovery passes. Must exceed the turn "
-            "ceiling. Recovery runs at startup and periodically, and deletes a known "
+            "recovery failure or repeated failed recovery passes. Must be at least the turn "
+            "ceiling plus 15 minutes. Recovery runs at startup and periodically, "
+            "and deletes a known "
             "pending card when the bot has Manage Messages permission."
         ),
     )
@@ -431,8 +432,10 @@ class DiscordSettings(BaseModel):
         # which imports config, so a module-level import would form a cycle.
         from daimon.core.turn.ceiling import TURN_CEILING_S
 
-        if age_s <= TURN_CEILING_S:
-            raise ValueError("turn card unrecoverable age must exceed the turn ceiling")
+        if age_s < TURN_CEILING_S + 15 * 60:
+            raise ValueError(
+                "turn card unrecoverable age must be at least turn ceiling plus 15 minutes"
+            )
         return age_s
 
     health_port: int = Field(
@@ -1221,7 +1224,7 @@ class AgentIdentitySettings(BaseModel):
         description=(
             "Discord guild IDs where agent identity stays off when enabled globally. "
             "Set DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS to a JSON array of IDs. "
-            "Default: no guilds excluded."
+            "Default: [] (no guilds excluded)."
         ),
     )
     excluded_slack_team_ids: list[str] = Field(
@@ -1229,7 +1232,7 @@ class AgentIdentitySettings(BaseModel):
         description=(
             "Slack workspace team IDs where agent identity stays off when enabled globally. "
             "Set DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS to a JSON array of IDs. "
-            "Default: no workspaces excluded."
+            "Default: [] (no workspaces excluded)."
         ),
     )
 
@@ -1241,7 +1244,7 @@ class AgentIdentitySettings(BaseModel):
             if all(isinstance(item, (str, int)) and not isinstance(item, bool) for item in entries):
                 normalized: list[str] = []
                 for item in entries:
-                    normalized.append(str(item))
+                    normalized.append(str(item).strip())
                 return normalized
             return entries
         return value

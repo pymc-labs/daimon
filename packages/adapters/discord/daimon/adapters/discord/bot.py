@@ -103,6 +103,7 @@ from daimon.core.stores.thread_sessions import (
     update_watermark,
 )
 from daimon.core.stores.turn_card_intents import (
+    get_turn_card_intent,
     list_recoverable_turn_card_intents,
     record_turn_card_recovery_failure,
 )
@@ -1202,6 +1203,7 @@ class DaimonBot(commands.Bot):
         """Recover one intent independently so a delayed search cannot block others."""
         await self.wait_until_ready()
         thread: discord.Thread | None = None
+        candidate_message_ids: set[int] = set()
         for attempt in range(3):
             try:
                 channel = self.get_channel(int(intent.thread_id)) or await self.fetch_channel(
@@ -1214,7 +1216,9 @@ class DaimonBot(commands.Bot):
                         thread_id=intent.thread_id,
                         channel_type=type(channel).__name__,
                     )
-                    await self._record_failed_card_recovery(intent, thread=None)
+                    await self._record_failed_card_recovery(
+                        intent, thread=None, candidate_message_ids=candidate_message_ids
+                    )
                     return
                 thread = channel
                 await reconcile_turn_card_intent(
@@ -1223,8 +1227,11 @@ class DaimonBot(commands.Bot):
                     thread=channel,
                     client=self,
                     restarted=restarted,
+                    candidate_message_ids=candidate_message_ids,
                 )
-                await self._record_failed_card_recovery(intent, thread=thread)
+                await self._record_failed_card_recovery(
+                    intent, thread=thread, candidate_message_ids=candidate_message_ids
+                )
                 return
             except UnrecoverableTurnCardError as err:
                 discord_settings = self.runtime.settings.discord
@@ -1235,10 +1242,16 @@ class DaimonBot(commands.Bot):
                     thread=thread,
                     max_age_s=discord_settings.turn_card_unrecoverable_after_s,
                     reason=str(err),
-                    candidate_message_ids=err.message_ids,
+                    candidate_message_ids=candidate_message_ids | err.message_ids,
                 )
                 return
-            except (discord.HTTPException, discord.ClientException, ValueError) as err:
+            except (
+                discord.HTTPException,
+                discord.ClientException,
+                SQLAlchemyError,
+                TimeoutError,
+                ValueError,
+            ) as err:
                 if is_definite_recovery_failure(err):
                     discord_settings = self.runtime.settings.discord
                     assert discord_settings is not None
@@ -1248,6 +1261,7 @@ class DaimonBot(commands.Bot):
                         thread=thread,
                         max_age_s=discord_settings.turn_card_unrecoverable_after_s,
                         reason=str(err),
+                        candidate_message_ids=candidate_message_ids,
                     )
                     return
                 if attempt < 2:
@@ -1259,25 +1273,40 @@ class DaimonBot(commands.Bot):
                     thread_id=intent.thread_id,
                     error=str(err),
                 )
-                await self._record_failed_card_recovery(intent, thread=thread)
+                await self._record_failed_card_recovery(
+                    intent, thread=thread, candidate_message_ids=candidate_message_ids
+                )
 
     async def _record_failed_card_recovery(
-        self, intent: TurnCardIntentRow, *, thread: discord.Thread | None
+        self,
+        intent: TurnCardIntentRow,
+        *,
+        thread: discord.Thread | None,
+        candidate_message_ids: set[int] | None = None,
     ) -> None:
         """Count unresolved passes, then retire an aged intent at the configured limit."""
         async with self.runtime.sessionmaker() as session:
             failures = await record_turn_card_recovery_failure(session, id=intent.id)
+            refreshed = (
+                await get_turn_card_intent(session, id=intent.id) if failures is not None else None
+            )
             await session.commit()
         discord_settings = self.runtime.settings.discord
         assert discord_settings is not None
-        if failures is None or failures < discord_settings.turn_card_unrecoverable_after_attempts:
+        if (
+            failures is None
+            or refreshed is None
+            or failures < discord_settings.turn_card_unrecoverable_after_attempts
+        ):
             return
         await expire_unrecoverable_turn_card(
             self.runtime.sessionmaker,
-            intent=intent,
+            intent=refreshed,
             thread=thread,
             max_age_s=discord_settings.turn_card_unrecoverable_after_s,
             reason="recovery attempts exhausted",
+            candidate_message_ids=candidate_message_ids,
+            allow_missing_member=True,
         )
 
     async def on_ready(self) -> None:
