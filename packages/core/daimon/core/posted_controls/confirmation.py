@@ -50,7 +50,6 @@ class ConfirmationCard(BaseModel):
     detail_lines: tuple[str, ...] = ()
     consequence: str | None = None
     body: str | None = None
-    items: tuple[str, ...] = ()
     footer: str | None
     token: str | None = None
 
@@ -107,7 +106,6 @@ def build_confirmation_card(
         body=body,
         consequence=prompt.consequence if state == "pending" else None,
         detail_lines=prompt.detail_lines if state == "pending" else (),
-        items=prompt.items if state == "pending" else (),
         footer=footer,
         token=token,
     )
@@ -132,35 +130,21 @@ def build_confirmation_blocks(
     ]
     if card.body:
         blocks.append({"type": "section", "text": {"type": "plain_text", "text": card.body}})
-    if card.items:
-        blocks.append(
-            {
-                "type": "section",
-                "text": {
-                    "type": "plain_text",
-                    "text": "\n".join(f"• {item}" for item in card.items),
-                },
-            }
-        )
     if card.consequence:
         blocks.append({"type": "section", "text": {"type": "plain_text", "text": card.consequence}})
     if card.token is not None:
         blocks.append({"type": "divider"})
-        count = len(card.items)
         buttons = [
             {
                 "type": "button",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"Approve all {count}" if count else "Approve",
-                },
+                "text": {"type": "plain_text", "text": "Approve"},
                 "style": "primary",
                 "action_id": confirmation_custom_id(card.token, "approve"),
                 "value": card.token,
             },
             {
                 "type": "button",
-                "text": {"type": "plain_text", "text": f"Deny all {count}" if count else "Deny"},
+                "text": {"type": "plain_text", "text": "Deny"},
                 "style": "danger",
                 "action_id": confirmation_custom_id(card.token, "deny"),
                 "value": card.token,
@@ -184,6 +168,4 @@ def build_confirmation_blocks(
 
 def confirmation_card_text(card: ConfirmationCard) -> str:
     """Plain-text fallback with one card fact per line and no private details."""
-    return "\n".join(
-        part for part in (card.headline, card.body, *card.items, card.consequence) if part
-    )
+    return "\n".join(part for part in (card.headline, card.body, card.consequence) if part)

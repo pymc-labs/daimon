@@ -249,19 +249,18 @@ async def test_a_stalled_discord_retire_cannot_hold_the_turn_past_its_budget(
     assert not [t for t in asyncio.all_tasks() if t.get_name() == "turn.decide_blocked"]
 
 
-async def test_grouped_card_and_details_are_scannable() -> None:
+async def test_upload_card_and_details_are_scannable() -> None:
     prompt = _prompt().model_copy(
         update={
-            "title": 'Upload 3 files to notebook "memecoin-scan"?',
-            "items": ("cg_meme.csv", "launch_features.csv", "launch_curves.csv"),
+            "title": 'Upload "cg_meme.csv" to notebook "memecoin-scan"?',
             "consequence": "Anyone with the notebook's link can open these files.",
         }
     )
     view = build_confirmation_view(
         build_confirmation_card(prompt, state="pending", token="tok_abcdefgh"), prompt
     )
-    assert _texts(view)[1] == "• cg\\_meme.csv\n• launch\\_features.csv\n• launch\\_curves.csv"
-    assert [button.label for button in _buttons(view)] == ["Approve all 3", "Deny all 3", "Details"]
+    assert _texts(view)[0] == '**Upload "cg\\_meme.csv" to notebook "memecoin-scan"?**'
+    assert [button.label for button in _buttons(view)] == ["Approve", "Deny", "Details"]
     click = _interaction(999)
     await _buttons(view)[2].callback(click)
     click.response.send_message.assert_awaited_once()

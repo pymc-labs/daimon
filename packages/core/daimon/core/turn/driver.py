@@ -121,19 +121,15 @@ async def _decide_blocked(
 ) -> list[BetaManagedAgentsUserToolConfirmationEventParams]:
     """The `user.tool_confirmation` batch for `fresh` under an answering posture.
 
-    `PolicyApproval` awaits its group decider when present. One answer may
-    cover several calls, but the returned batch still has one event per id.
+    `PolicyApproval` decides each blocked call independently, then returns
+    one event per id.
     """
     match tool_confirmation:
         case AutoApprove():
             return build_confirmation_events(fresh)
-        case PolicyApproval(decide=decide, decide_group=decide_group):
+        case PolicyApproval(decide=decide):
             calls = tool_calls_for(state, fresh)
-            results = (
-                await decide_group(calls)
-                if decide_group is not None
-                else await asyncio.gather(*(decide(call) for call in calls))
-            )
+            results = await asyncio.gather(*(decide(call) for call in calls))
             return build_decision_events(zip(fresh, results, strict=True))
 
 

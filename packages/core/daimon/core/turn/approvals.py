@@ -16,14 +16,10 @@ The decider builders are the policy shells over
 `daimon.core.tool_safety.decide_tool_call`. `unattended_decider` never waits
 on anyone; `interactive_decider` hands `ask` verdicts to the adapter's
 `ConfirmationHook`. Neither does I/O of its own — the hook is the only thing
-that talks to a platform, and a hook that raises counts as a refusal. The
-interactive group decider puts up to five same-target calls on one card.
-"""
+that talks to a platform, and a hook that raises counts as a refusal."""
 
 from __future__ import annotations
 
-import asyncio
-import json
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 
@@ -47,7 +43,6 @@ from daimon.core.turn.posture import (
     PolicyApproval,
     RequireApproval,
     ToolCallDecider,
-    ToolCallGroupDecider,
     ToolConfirmation,
     ToolConfirmationResult,
 )
@@ -265,123 +260,6 @@ def interactive_decider(
     return _decide
 
 
-def interactive_group_decider(
-    policy: ToolSafetyPolicy,
-    *,
-    requester_platform_user_id: str,
-    confirm: ConfirmationHook,
-    fallback: ToolCallDecider | None = None,
-    trusted_servers: frozenset[str] = frozenset(),
-    now: Callable[[], datetime] = lambda: datetime.now(UTC),
-) -> ToolCallGroupDecider:
-    """Ask once for up to five same-tool, same-target calls in one pause.
-
-    Calls that cannot share a card use `fallback`, preserving wrappers such as
-    publish-only refusal when tool safety is disabled.
-    """
-    individual = fallback or interactive_decider(
-        policy,
-        requester_platform_user_id=requester_platform_user_id,
-        confirm=confirm,
-        trusted_servers=trusted_servers,
-        now=now,
-    )
-
-    async def decide_group(calls: Sequence[ToolCall]) -> list[ToolConfirmationResult]:
-        groups: dict[tuple[str, str, str], list[int]] = {}
-        for index, call in enumerate(calls):
-            if call.tool_name in {"create_notebook_upload_url", "create_attachment_upload_url"}:
-                target = str(call.input.get("slug") or "")
-            elif call.tool_name == "add_skill":
-                target = str(call.input.get("agent_name") or call.input.get("agent") or "")
-            else:
-                target = json.dumps(
-                    {key: value for key, value in call.input.items() if key != "origin_context_id"},
-                    sort_keys=True,
-                    default=str,
-                )
-            key = (call.server_name or "", call.tool_name, target)
-            groups.setdefault(key, []).append(index)
-        chunks = [
-            indices[offset : offset + 5]
-            for indices in groups.values()
-            for offset in range(0, len(indices), 5)
-        ]
-
-        async def decide_chunk(indices: list[int]) -> list[tuple[int, ToolConfirmationResult]]:
-            if len(indices) == 1:
-                index = indices[0]
-                return [(index, await individual(calls[index]))]
-            selected = [calls[index] for index in indices]
-            verdicts = [
-                decide_tool_call(policy, call, attended=True, trusted_servers=trusted_servers)
-                for call in selected
-            ]
-            if any(
-                _is_unseen(call) or verdict.outcome != "ask"
-                for call, verdict in zip(selected, verdicts, strict=True)
-            ):
-                decisions = await asyncio.gather(*(individual(call) for call in selected))
-                return list(zip(indices, decisions, strict=True))
-            prompt = prompt_for_tool_call(
-                selected[0], requester_platform_user_id=requester_platform_user_id, now=now()
-            )
-            count = len(selected)
-            if selected[0].tool_name == "create_attachment_upload_url":
-                slug = str(selected[0].input.get("slug") or "")
-                prompt = prompt.model_copy(
-                    update={
-                        "title": f'Upload {count} files to notebook "{slug}"?',
-                        "action": f'Upload {count} files to notebook "{slug}"',
-                        "denied_action": f"{count} files not uploaded",
-                        "consequence": "Anyone with the notebook's link can open these files.",
-                        "items": tuple(str(call.input.get("name") or "file") for call in selected),
-                        "detail_lines": (
-                            *(
-                                f"File: {str(call.input.get('name') or 'file')[:80]}"
-                                for call in selected
-                            ),
-                            f"Notebook: {slug[:80]}",
-                        ),
-                    }
-                )
-            else:
-                prompt = prompt.model_copy(
-                    update={
-                        "items": tuple(
-                            str(call.input.get("name") or call.input.get("title") or call.tool_name)
-                            for call in selected
-                        ),
-                    }
-                )
-            try:
-                answer = await confirm(prompt)
-            except Exception as err:
-                log.warning("tool_safety.confirm_failed", tool=selected[0].key, error=str(err))
-                answer = "denied"
-            return [
-                (
-                    index,
-                    ToolConfirmationResult(
-                        allow=answer == "approved",
-                        deny_message=None
-                        if answer == "approved"
-                        else _answer_message(call, answer),
-                    ),
-                )
-                for index, call in zip(indices, selected, strict=True)
-            ]
-
-        batches = await asyncio.gather(*(decide_chunk(indices) for indices in chunks))
-        ordered: list[ToolConfirmationResult | None] = [None] * len(calls)
-        for batch in batches:
-            for index, result in batch:
-                ordered[index] = result
-        return [result for result in ordered if result is not None]
-
-    return decide_group
-
-
 def headless_tool_confirmation(
     policy: ToolSafetyPolicy, *, trusted_servers: frozenset[str] = frozenset()
 ) -> ToolConfirmation:
@@ -424,18 +302,7 @@ def chat_tool_confirmation(
     )
     if not policy.enabled:
         decide = _publish_only(decide, trusted_servers=trusted_servers)
-    group = (
-        interactive_group_decider(
-            policy,
-            requester_platform_user_id=requester_platform_user_id,
-            confirm=confirm,
-            fallback=decide,
-            trusted_servers=trusted_servers,
-        )
-        if attended and confirm is not None
-        else None
-    )
-    return PolicyApproval(decide=decide, decide_group=group)
+    return PolicyApproval(decide=decide)
 
 
 def _publish_only(decide: ToolCallDecider, *, trusted_servers: frozenset[str]) -> ToolCallDecider:

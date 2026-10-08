@@ -813,10 +813,9 @@ hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
 (`packages/core/daimon/core/confirmation.py`), Discord, Slack and Teams each draw the
 shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
 with action-specific copy and a Details control with plain labelled inputs.
-A pause groups up to five
-same-tool, same-server, same-target writes on one card; the driver still
-sends one `user.tool_confirmation` event per call after the answer,
-and an adapter that passes no hook gets `no_confirmation_surface`, which
+A pause shows one card per blocked call, and the driver sends one
+`user.tool_confirmation` event per call after its answer. An adapter that
+passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call
 the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep
 their `operation_policy` checks), except `add_skill`: its confirming call, the

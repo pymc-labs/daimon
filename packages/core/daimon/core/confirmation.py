@@ -60,7 +60,6 @@ class ConfirmationPrompt(BaseModel):
     consequence: str | None = None
     action: str | None = None
     denied_action: str | None = None
-    items: tuple[str, ...] = ()
     detail_lines: tuple[str, ...] = ()
     requester_platform_user_id: str
     requester_display_name: str | None = None

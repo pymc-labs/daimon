@@ -80,23 +80,20 @@ def confirmation_adaptive_card(
     body: list[CardElement] = [heading(card.headline)]
     if card.body:
         body.append(TextBlock(text=card.body, wrap=True))
-    if card.items:
-        body.append(TextBlock(text="\n".join(f"• {item}" for item in card.items), wrap=True))
     if card.consequence:
         body.append(TextBlock(text=card.consequence, wrap=True))
     if card.token is not None:
         body.append(Container(items=[], separator=True))
-        count = len(card.items)
         approve = button(
             VERB,
-            f"Approve all {count}" if count else "Approve",
+            "Approve",
             "approve",
             style="positive",
             token=card.token,
         )
         deny = button(
             VERB,
-            f"Deny all {count}" if count else "Deny",
+            "Deny",
             "deny",
             style="destructive",
             token=card.token,

@@ -30,10 +30,6 @@ class _ConfirmationView(discord.ui.LayoutView):
             deny: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 style=discord.ButtonStyle.danger, label="Deny"
             )
-            count = len(card.items)
-            if count:
-                approve.label = f"Approve all {count}"
-                deny.label = f"Deny all {count}"
             details: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 style=discord.ButtonStyle.secondary, label="Details"
             )

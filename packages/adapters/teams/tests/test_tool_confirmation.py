@@ -118,14 +118,13 @@ async def test_a_cancelled_wait_retires_the_card_and_ignores_late_clicks() -> No
     assert len(sender.sent) == 2, "a late click changes nothing"
 
 
-def test_grouped_card_has_expander_and_state_color() -> None:
+def test_upload_card_has_expander_and_state_color() -> None:
     from daimon.adapters.teams.tool_confirmation import confirmation_adaptive_card
     from daimon.core.posted_controls.confirmation import build_confirmation_card
 
     prompt = _prompt().model_copy(
         update={
-            "title": 'Upload 3 files to notebook "memecoin-scan"?',
-            "items": ("cg_meme.csv", "launch_features.csv", "launch_curves.csv"),
+            "title": 'Upload "cg_meme.csv" to notebook "memecoin-scan"?',
             "consequence": "Anyone with the notebook's link can open these files.",
             "requester_display_name": "Ada Lovelace",
         }
@@ -135,7 +134,7 @@ def test_grouped_card_has_expander_and_state_color() -> None:
     ).model_dump_json(by_alias=True)
     assert "Action.ToggleVisibility" in pending
     assert "CodeBlock" not in pending and "Tool:" not in pending
-    assert "Approve all 3" in pending and "Deny all 3" in pending
+    assert '"title":"Approve"' in pending and '"title":"Deny"' in pending
     assert "Ada Lovelace" in pending and "warning" in pending
     assert "Only Ada Lovelace can approve or deny" in pending
     assert '"text":"Expires {{TIME(' in pending

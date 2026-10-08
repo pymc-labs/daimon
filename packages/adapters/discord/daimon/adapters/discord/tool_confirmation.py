@@ -43,8 +43,6 @@ def _body(card: ConfirmationCard) -> list[str]:
     lines = [f"**{safe(card.headline)}**"]
     if card.body:
         lines.append(safe(card.body))
-    if card.items:
-        lines.append("\n".join(f"• {safe(item)}" for item in card.items))
     if card.consequence:
         lines.append(safe(card.consequence))
     return lines
@@ -91,10 +89,6 @@ class _ConfirmationView(discord.ui.LayoutView):
             deny: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 style=discord.ButtonStyle.danger, label="Deny"
             )
-            count = len(card.items)
-            if count:
-                approve.label = f"Approve all {count}"
-                deny.label = f"Deny all {count}"
             details: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 style=discord.ButtonStyle.secondary, label="Details"
             )

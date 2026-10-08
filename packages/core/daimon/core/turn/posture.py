@@ -46,7 +46,7 @@ the operator's `ToolSafetyPolicy` by `daimon.core.turn.approvals`.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -97,7 +97,6 @@ class ToolConfirmationResult:
 
 
 ToolCallDecider = Callable[[ToolCall], Awaitable[ToolConfirmationResult]]
-ToolCallGroupDecider = Callable[[Sequence[ToolCall]], Awaitable[list[ToolConfirmationResult]]]
 
 
 @dataclass(frozen=True)
@@ -108,7 +107,6 @@ class PolicyApproval:
     as a person needs to press a button; the session sits idle meanwhile."""
 
     decide: ToolCallDecider
-    decide_group: ToolCallGroupDecider | None = None
 
 
 ToolConfirmation = RequireApproval | AutoApprove | PolicyApproval

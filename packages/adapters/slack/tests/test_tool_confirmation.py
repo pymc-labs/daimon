@@ -214,13 +214,12 @@ async def test_a_stalled_slack_retire_cannot_hold_the_turn_past_its_budget(
     assert not [t for t in asyncio.all_tasks() if t.get_name() == "turn.decide_blocked"]
 
 
-async def test_grouped_card_has_color_and_private_details() -> None:
+async def test_upload_card_has_color_and_private_details() -> None:
     cards = SlackConfirmationCards()
     client = _client()
     prompt = _prompt().model_copy(
         update={
-            "title": 'Upload 3 files to notebook "memecoin-scan"?',
-            "items": ("cg_meme.csv", "launch_features.csv", "launch_curves.csv"),
+            "title": 'Upload "cg_meme.csv" to notebook "memecoin-scan"?',
             "consequence": "Anyone with the notebook's link can open these files.",
         }
     )
@@ -233,8 +232,8 @@ async def test_grouped_card_has_color_and_private_details() -> None:
     assert attachment["color"] == "#FEE75C"
     actions = next(block for block in attachment["blocks"] if block["type"] == "actions")
     assert [button["text"]["text"] for button in actions["elements"]] == [
-        "Approve all 3",
-        "Deny all 3",
+        "Approve",
+        "Deny",
         "Details",
     ]
     await cards.handle_click(_click(actions["elements"][2]["action_id"], "U2"))

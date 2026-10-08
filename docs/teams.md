@@ -248,8 +248,8 @@ confirmation card.
 Tool approvals appear as Adaptive Cards in the conversation. The card shows
 the action, consequence and requester's display name, with **Approve**,
 **Deny** and a **Details** expander for plain labelled inputs. Only the requester can
-approve or deny. Same-target calls in one pause share a card, up to five
-calls per card. Answered, expired and stopped cards lose their buttons.
+approve or deny. Each call gets its own card. Answered, expired and stopped
+cards lose their buttons.
 
 Grant the app `Sites.Selected`, which reaches only the sites granted to it,
 then grant each channel's site. The manifest does not change and no restart is
