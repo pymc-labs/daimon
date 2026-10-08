@@ -465,8 +465,10 @@ class DetailsView(PanelViewBase):
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
         agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=self.agent.ma_agent_id)
         async with self.runtime.sessionmaker() as session:
-            panel = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
-        if not any(repo.live_ceiling is not None for repo in panel.repos) and not panel.has_pat:
+            panel = await load_grants_panel(
+                session, tenant_id=tenant_id, agent_id=agent_id, agent_name=self.agent.name
+            )
+        if not any(repo.live_ceiling is not None for repo in panel.repos) and not panel.saved_state:
             from daimon.adapters.discord.agent_setup.github_add_repos import GitHubAddReposView
 
             await self.swap_to(

@@ -182,6 +182,7 @@ def _panel() -> GrantsPanel:
         mode="legacy",
         working_repo="example/work",
         has_pat=True,
+        saved_state=True,
         repos=(
             RepoChoice(
                 repo_id=1,

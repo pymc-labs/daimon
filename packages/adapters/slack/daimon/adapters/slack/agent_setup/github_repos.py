@@ -85,7 +85,7 @@ def build_view(meta: PanelMetadata, panel: GrantsPanel) -> dict[str, Any]:
     metadata = dataclasses.replace(
         meta, view="github_repos", repo_id=selected.repo_id if selected else None, page=page
     )
-    if panel.mode == "legacy" and panel.has_pat:
+    if panel.saved_state:
         return finish_modal(
             title="GitHub repos",
             blocks=[

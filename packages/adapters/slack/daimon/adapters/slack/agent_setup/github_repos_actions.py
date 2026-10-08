@@ -172,7 +172,7 @@ async def _handle_add(
                 text="Select at least one repo.",
             )
             return True
-        if panel.mode == "legacy" and panel.has_pat:
+        if panel.saved_state:
             await post_ephemeral(
                 client, channel_id=channel_id, user_id=user_id, text=CLIENT_AGENT_MESSAGE
             )
@@ -231,7 +231,9 @@ async def _commit_add(
             account = await get_account(session, principal.account_id)
             if account is None or account.is_external:
                 raise ValueError("You cannot change this agent's GitHub repos.")
-            fresh = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
+            fresh = await load_grants_panel(
+                session, tenant_id=tenant_id, agent_id=agent_id, agent_name=meta.agent_name or ""
+            )
             chosen = [repo for repo in fresh.repos if repo.repo_id in selected]
             if len(chosen) != len(selected):
                 raise ValueError("A repo is no longer connected here. Review your choices.")
@@ -262,7 +264,9 @@ async def _commit_add(
                 account_id=account.id,
                 agent_name=meta.agent_name or "",
             )
-            fresh = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
+            fresh = await load_grants_panel(
+                session, tenant_id=tenant_id, agent_id=agent_id, agent_name=meta.agent_name or ""
+            )
     except ValueError as error:
         await post_ephemeral(
             client,
@@ -342,13 +346,15 @@ async def handle(
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.ma_agent_id)
     if action_id in github_add_repos.ACTIONS or action_id in (github_repos.ACTION_OPEN,):
         async with runtime.sessionmaker() as session:
-            add_panel = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
+            add_panel = await load_grants_panel(
+                session, tenant_id=tenant_id, agent_id=agent_id, agent_name=name
+            )
         initial = action_id in (
             github_add_repos.ACTION_OPEN,
             github_repos.ACTION_OPEN,
         )
         if action_id != github_repos.ACTION_OPEN or (
-            not add_panel.has_pat
+            not add_panel.saved_state
             and not any(repo.live_ceiling is not None for repo in add_panel.repos)
         ):
             add_meta = (
@@ -381,7 +387,9 @@ async def handle(
     selected_repo_id = meta.repo_id
     if action_id == github_repos.ACTION_BACK and meta.github_settings:
         async with runtime.sessionmaker() as session:
-            panel = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
+            panel = await load_grants_panel(
+                session, tenant_id=tenant_id, agent_id=agent_id, agent_name=name
+            )
         view_info = cast("dict[str, Any]", payload.get("view") or {})
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=str(view_info.get("id") or ""),
@@ -409,7 +417,9 @@ async def handle(
         return True
     if action_id == github_repos.ACTION_SETTINGS:
         async with runtime.sessionmaker() as session:
-            panel = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
+            panel = await load_grants_panel(
+                session, tenant_id=tenant_id, agent_id=agent_id, agent_name=name
+            )
         view_info = cast("dict[str, Any]", payload.get("view") or {})
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=str(view_info.get("id") or ""),
@@ -423,7 +433,9 @@ async def handle(
         if choice not in ("ability", "remove"):
             return True
         async with runtime.sessionmaker() as session:
-            panel = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
+            panel = await load_grants_panel(
+                session, tenant_id=tenant_id, agent_id=agent_id, agent_name=name
+            )
         view_info = cast("dict[str, Any]", payload.get("view") or {})
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=str(view_info.get("id") or ""),
@@ -456,7 +468,9 @@ async def handle(
                 if account is None or account.is_external:
                     raise ValueError("External participants cannot change GitHub repos.")
                 actor = account.id
-                panel = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
+                panel = await load_grants_panel(
+                    session, tenant_id=tenant_id, agent_id=agent_id, agent_name=name
+                )
                 repo = next((r for r in panel.repos if r.repo_id == selected_repo_id), None)
                 if action_id == github_repos.ACTION_STAGE:
                     if repo is None:
@@ -509,7 +523,7 @@ async def handle(
                             agent_name=name,
                         )
                 elif action_id == github_repos.ACTION_ACTIVATE:
-                    if panel.mode == "legacy" and panel.has_pat:
+                    if panel.saved_state:
                         raise ValueError(CLIENT_AGENT_MESSAGE)
                     removed_pat = await activate_grants(
                         session,
@@ -543,7 +557,9 @@ async def handle(
                 text=f"Updated {name}. Open chats restart on the next turn.",
             )
     async with runtime.sessionmaker() as session:
-        panel = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
+        panel = await load_grants_panel(
+            session, tenant_id=tenant_id, agent_id=agent_id, agent_name=name
+        )
     next_page = meta.page
     if action_id == github_repos.ACTION_PREVIOUS:
         next_page = max(0, next_page - 1)

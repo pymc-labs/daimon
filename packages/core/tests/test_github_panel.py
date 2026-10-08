@@ -27,6 +27,7 @@ from daimon.core.github_new_repo_delivery import poll_new_repo_notices_once
 from daimon.core.github_panel import (
     activate_grants,
     connect_link,
+    load_grants_panel,
     pending_connect_link,
     remove_panel_grant,
     stage_panel_grant,
@@ -278,6 +279,10 @@ async def test_panel_activation_refuses_each_saved_state(
             )
         )
     await db_session.flush()
+    panel = await load_grants_panel(
+        db_session, tenant_id=tenant_id, agent_id=agent_id, agent_name="Helper"
+    )
+    assert panel.saved_state
     await stage_panel_grant(
         db_session,
         tenant_id=tenant_id,

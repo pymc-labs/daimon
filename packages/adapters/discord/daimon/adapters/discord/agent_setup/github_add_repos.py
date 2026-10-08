@@ -60,7 +60,7 @@ class GitHubAddReposView(PanelViewBase):
             selected_ids = frozenset()
         self.selected_ids = selected_ids
         container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
-        if panel.mode == "legacy" and panel.has_pat:
+        if panel.saved_state:
             container.add_item(discord.ui.TextDisplay(CLIENT_AGENT_MESSAGE))
             actions: EmbedActionRow = EmbedActionRow()
             self._add_back(actions)
@@ -323,7 +323,7 @@ class GitHubAddReposView(PanelViewBase):
         if not self.selected_ids:
             await interaction.followup.send("Select at least one repo.", ephemeral=True)
             return
-        if self.panel.mode == "legacy" and self.panel.has_pat:
+        if self.panel.saved_state:
             await interaction.followup.send(CLIENT_AGENT_MESSAGE, ephemeral=True)
             return
         await self._commit(interaction)
@@ -333,7 +333,9 @@ class GitHubAddReposView(PanelViewBase):
         agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=self.agent.ma_agent_id)
         try:
             async with self.runtime.sessionmaker.begin() as session:
-                current = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
+                current = await load_grants_panel(
+                    session, tenant_id=tenant_id, agent_id=agent_id, agent_name=self.agent.name
+                )
                 chosen = [repo for repo in current.repos if repo.repo_id in self.selected_ids]
                 if len(chosen) != len(self.selected_ids):
                     raise ValueError("A repo is no longer connected here. Review your choices.")
@@ -362,7 +364,9 @@ class GitHubAddReposView(PanelViewBase):
                     account_id=self.state.account_id,
                     agent_name=self.agent.name,
                 )
-                current = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
+                current = await load_grants_panel(
+                    session, tenant_id=tenant_id, agent_id=agent_id, agent_name=self.agent.name
+                )
         except ValueError as error:
             await interaction.followup.send(safe_github_error(error), ephemeral=True)
             return

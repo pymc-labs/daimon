@@ -61,7 +61,7 @@ class GitHubReposView(PanelViewBase):
         start = (page // 20) * 20
         self.repo_id = panel.repos[page].repo_id if page < len(panel.repos) else None
         container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
-        if panel.mode == "legacy" and panel.has_pat:
+        if panel.saved_state:
             container.add_item(discord.ui.TextDisplay(CLIENT_AGENT_MESSAGE))
             back: discord.ui.Button[GitHubReposView] = discord.ui.Button(
                 label="◀ Back", style=discord.ButtonStyle.secondary
@@ -247,7 +247,9 @@ class GitHubReposView(PanelViewBase):
     async def _refresh_panel(self, interaction: discord.Interaction) -> None:
         tenant_id, agent_id = self._ids()
         async with self.runtime.sessionmaker() as session:
-            panel = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
+            panel = await load_grants_panel(
+                session, tenant_id=tenant_id, agent_id=agent_id, agent_name=self.agent.name
+            )
         await self.swap_to(
             interaction,
             GitHubReposView(

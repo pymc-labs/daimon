@@ -41,7 +41,9 @@ async def approve_connected_request(
     requester = await session.get(Account, request.requester_account_id)
     if requester is None or requester.is_external or requester.tenant_id != tenant_id:
         return False
-    panel = await load_grants_panel(session, tenant_id=tenant_id, agent_id=request.agent_id)
+    panel = await load_grants_panel(
+        session, tenant_id=tenant_id, agent_id=request.agent_id, agent_name=request.agent_name
+    )
     selected = [
         next(
             (repo for repo in panel.repos if repo.full_name.casefold() == name.casefold()),

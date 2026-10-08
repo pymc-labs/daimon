@@ -234,7 +234,7 @@ def test_slack_github_home_and_confirmations() -> None:
     assert "Choose agent" not in pending_text
     no_admin = build_github_home_view(meta, connected_count=0, is_admin=False)
     assert "Workspace admins connect repos here" in str(no_admin["blocks"])
-    panel = GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=True)
+    panel = GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=True, saved_state=True)
     refused = build_view(meta, panel)
     assert "This agent uses a saved GitHub key" in str(refused["blocks"])
 
@@ -372,7 +372,7 @@ def test_slack_add_repos_keeps_selection_on_one_screen() -> None:
     assert "Add repos" not in empty_actions
     saved_key = build_add_view(
         PanelMetadata(team_id="T", channel_id="C", view="github_add", agent_name="helper"),
-        GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=True),
+        GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=True, saved_state=True),
     )
     assert "This agent uses a saved GitHub key" in str(saved_key["blocks"])
 

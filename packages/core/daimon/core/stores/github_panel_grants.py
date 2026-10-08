@@ -13,7 +13,8 @@ from daimon.core._models import (
     TenantGitHubRepo,
 )
 from daimon.core.stores import agent_files, agent_github_binding, agent_repo_binding, github_access
-from daimon.core.stores.github_connect import require_app_eligible_agent
+from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.github_connect import has_saved_github_state, require_app_eligible_agent
 from daimon.core.stores.github_credentials import delete_credential_for_principal
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.thread_sessions import mark_github_key_restart
@@ -42,6 +43,7 @@ class GrantsPanel:
     repos: tuple[RepoChoice, ...]
     working_repo: str | None
     has_pat: bool
+    saved_state: bool = False
     has_pending: bool = False
 
     def text(self, agent_name: str, *, page: int = 0, page_size: int = 20) -> str:
@@ -60,7 +62,11 @@ class GrantsPanel:
 
 
 async def load_grants_panel(
-    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    agent_name: str | None = None,
 ) -> GrantsPanel:
     authorized = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
     grants = {
@@ -79,6 +85,15 @@ async def load_grants_panel(
         )
     }
     mode = await github_access.get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_id)
+    policy = (
+        await load_access_policy(session, tenant_id=tenant_id) if agent_name is not None else None
+    )
+    rule = policy.agent_rules.get(agent_name) if policy is not None and agent_name else None
+    pinned = rule is not None and rule.runs_in is not None
+    saved_state = pinned or (
+        mode == "legacy"
+        and await has_saved_github_state(session, tenant_id=tenant_id, agent_id=agent_id)
+    )
     binding = await agent_repo_binding.get_binding(session, tenant_id=tenant_id, agent_id=agent_id)
     overlay = await agent_github_binding.get_agent_github_binding(session, agent_id=agent_id)
     repos = tuple(
@@ -134,6 +149,7 @@ async def load_grants_panel(
         repos=repos,
         working_repo=binding.repo_url if binding else None,
         has_pat=overlay is not None,
+        saved_state=saved_state,
         has_pending=bool(drafts) or any(row.staged for row in grants.values()),
     )
 
@@ -255,7 +271,9 @@ async def activate_grants(
     await require_app_eligible_agent(
         session, tenant_id=tenant_id, agent_id=agent_id, agent_name=agent_name
     )
-    panel = await load_grants_panel(session, tenant_id=tenant_id, agent_id=agent_id)
+    panel = await load_grants_panel(
+        session, tenant_id=tenant_id, agent_id=agent_id, agent_name=agent_name
+    )
     if panel.working_repo is not None:
         working = next(
             (r for r in panel.repos if r.full_name.casefold() == panel.working_repo.casefold()),

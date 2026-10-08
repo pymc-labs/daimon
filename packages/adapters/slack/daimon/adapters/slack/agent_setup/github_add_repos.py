@@ -74,7 +74,7 @@ def build_view(
         selected_repo_ids=selected,
     )
     blocks: list[dict[str, Any]] = []
-    if panel.mode == "legacy" and panel.has_pat:
+    if panel.saved_state:
         blocks.append(_section(CLIENT_AGENT_MESSAGE))
         blocks.append({"type": "actions", "elements": [_button(ACTION_BACK, "◀ Back")]})
     elif meta.github_step == "pick":
