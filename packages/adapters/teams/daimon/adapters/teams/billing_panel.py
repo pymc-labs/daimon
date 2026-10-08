@@ -1,10 +1,14 @@
-"""The `billing` command and its card actions: this month's usage, the balance and top-ups.
+"""The `billing` command and its card actions: this month's usage, the credit and top-ups.
 
-Mirrors Slack's `/billing`. A member sees their own spend and the balance; an
-admin also sees tenant totals, the top spenders and top-up buttons. A top-up
-click re-checks admin, creates a Stripe Checkout through the MCP server and
-replaces the card with an `Action.OpenUrl` to it. While a promo code is
-redeemable, the admin view has a code box whose Redeem button submits it.
+Mirrors Slack's `/billing`, in the same words. The card is a stack of
+containers set apart by separators: the month, a member's own use, the credit
+left, the channel's budget, then the actions. A member sees their own use and
+the credit; an admin also sees the month's spend, the top spenders and every
+channel budget, and gets "Add credit" (amount buttons; a click re-checks admin,
+creates a Stripe Checkout through the MCP server and replaces the card with an
+`Action.OpenUrl` to it) and "Redeem code" while a code is redeemable. "Expiry
+dates" opens a hidden section listing when each part of the timed credit
+expires.
 
 The top spenders are named from the rosters of the teams the bot is installed
 in (`teams_installations`): Teams has no app-only way to name a person from
@@ -44,11 +48,20 @@ from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.billing_panel import (
+    ADD_CREDIT,
     ASK_ADMIN,
+    CHANNEL_BUDGET,
+    CHANNEL_BUDGETS,
     CHANNEL_BUDGETS_SHOWN,
+    EXPIRY_DATES,
+    EXPIRY_INTRO,
     NOTHING_USED,
+    REDEEM_CODE,
+    TITLE,
+    TOP_SPENDERS,
     TOP_SPENDERS_SHOWN,
     TOPUP_AMOUNTS,
+    YOU,
     BillingPanelState,
     MemberRow,
     admin_summary,
@@ -56,8 +69,9 @@ from daimon.core.billing_panel import (
     channel_budget_line,
     channel_budget_phrase,
     create_checkout,
-    credit_total,
+    credit_headline,
     estimate_turns,
+    expiry_rows,
     load_billing_snapshot,
     month_label,
     month_start,
@@ -81,10 +95,13 @@ from microsoft_teams.cards import (
     ActionSet,
     AdaptiveCard,
     CardElement,
+    Container,
     ExecuteAction,
     OpenUrlAction,
+    ShowCardAction,
     TextBlock,
     TextInput,
+    ToggleVisibilityAction,
 )
 
 log = structlog.get_logger()
@@ -97,6 +114,7 @@ NOT_CONFIGURED = (
     "Ask an operator about a manual credit top-up."
 )
 REDEEM_ADMIN_ONLY = "Only an admin can redeem a promo code."
+EXPIRY_ID = "billing-expiry"
 ENTER_CODE = "Enter a promo code."
 CODE_INPUT = "code"
 # The panel waits at most this long for roster lookups, all together.
@@ -115,32 +133,44 @@ def card_time(moment: datetime) -> str:
     return f"{{{{DATE({iso}, SHORT)}}}} {{{{TIME({iso})}}}}"
 
 
+def card_date(moment: datetime) -> str:
+    """A date Teams shows in each reader's own timezone."""
+    return f"{{{{DATE({moment.astimezone(UTC):%Y-%m-%dT%H:%M:%SZ}, SHORT)}}}}"
+
+
 def _details(*lines: str) -> list[CardElement]:
-    """Small grey lines under a group."""
+    """Small grey lines."""
     return [
         TextBlock(text=line, is_subtle=True, size="Small", spacing="None", wrap=True)
         for line in lines
     ]
 
 
-def _bold(text: str) -> str:
-    return f"**{text}**"
+def _block(*items: CardElement, element_id: str | None = None, hidden: bool = False) -> Container:
+    """One section of the card, set apart from the one above."""
+    return Container(
+        items=list(items),
+        separator=True,
+        spacing="Large",
+        id=element_id,
+        is_visible=False if hidden else None,
+    )
+
+
+def _header(title: str, subtext: str) -> Container:
+    return Container(items=[heading(title), *_details(subtext)])
 
 
 def _credit(state: BillingPanelState) -> list[CardElement]:
-    """The total credit left, then one grey line on the timed credit it includes, if any."""
-    details = [note] if (note := timed_credit_note(state.timed_credit, when=card_time)) else []
+    """The total as the biggest text on the card, the words under it, and the timed credit."""
+    figure, words = credit_headline(state.guild_balance_usd)
+    items: list[CardElement] = [TextBlock(text=figure, size="ExtraLarge", weight="Bolder")]
+    if words is not None:
+        items.append(TextBlock(text=words, spacing="None", wrap=True))
+    details = [note] if (note := timed_credit_note(state.timed_credit)) else []
     if not state.is_admin:
         details.append(ASK_ADMIN)
-    total = credit_total(state.guild_balance_usd, bold=_bold)
-    return [*text_lines("🏦 **Organisation credit**", total), *_details(*details)]
-
-
-def _channel_budget(state: BillingPanelState, now: datetime) -> list[CardElement]:
-    if state.channel_budget is None:
-        return []
-    phrase = channel_budget_phrase(state.channel_budget, now=now)
-    return [*text_lines("📊 **Channel budget**"), *_details(phrase)]
+    return items + _details(*details)
 
 
 def plain_name(name: str) -> str:
@@ -212,58 +242,91 @@ def redeemed_text(result: PromoRedeemed) -> str:
     )
 
 
-def _member_body(state: BillingPanelState, since: datetime, now: datetime) -> list[CardElement]:
-    used = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
-    over = " ⚠️ over cap" if spend_over_cap(state.caller_spend, state.caller_cap) else ""
-    return [
-        heading("💸 Billing"),
-        *_details(month_label(since)),
-        *text_lines(f"**You**{over}: {used}"),
-        *_credit(state),
-        *_channel_budget(state, now),
-    ]
-
-
-def _channel_budgets(state: BillingPanelState) -> list[str]:
-    """The admin view's channel budgets, most used first; nothing when there are none."""
-    if not state.channel_budgets:
-        return []
-    lines = ["📊 **Channel budgets**"] + [
-        channel_budget_line(status, label=f"Channel `{status.budget.channel_id}`")
-        for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
-    ]
-    if more := more_channel_budgets(state):
-        lines.append(f"{more} more channel budgets")
-    return lines
-
-
 def _topup(amount: int, state: BillingPanelState) -> Action:
     turns = estimate_turns(amount, guild_spend=state.guild_spend, guild_turns=state.guild_turns)
-    return button(VERB, f"${amount} · ≈{turns:,} turns", "topup", amount=str(amount))
+    return button(VERB, f"${amount} (≈ {turns:,} turns)", "topup", amount=str(amount))
 
 
-def _admin_body(state: BillingPanelState, since: datetime, now: datetime) -> list[CardElement]:
-    totals = admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
-    top = [
+def _sub_card(*items: CardElement) -> AdaptiveCard:
+    return AdaptiveCard(body=list(items))
+
+
+def _actions(state: BillingPanelState) -> list[Action]:
+    """`Add credit` and `Redeem code` for an admin; `Expiry dates` with timed credit."""
+    actions: list[Action] = []
+    if state.is_admin:
+        amounts = ActionSet(actions=[_topup(amount, state) for amount in TOPUP_AMOUNTS])
+        actions.append(ShowCardAction(title=ADD_CREDIT, card=_sub_card(amounts)))
+        if state.has_redeemable_promo_code:
+            code = TextInput(id=CODE_INPUT, placeholder="XXXXX-XXXXX-XXXXX-XXXXX", max_length=100)
+            redeem = ActionSet(actions=[button(VERB, "Redeem", "redeem")])
+            actions.append(ShowCardAction(title=REDEEM_CODE, card=_sub_card(code, redeem)))
+    if state.timed_credit:
+        actions.append(ToggleVisibilityAction(title=EXPIRY_DATES, target_elements=[EXPIRY_ID]))
+    return actions
+
+
+def _titled(
+    title: str, *items: CardElement, element_id: str | None = None, hidden: bool = False
+) -> Container:
+    """A section with a bold title, set apart from the one above."""
+    label = TextBlock(text=title, weight="Bolder", wrap=True)
+    return _block(label, *items, element_id=element_id, hidden=hidden)
+
+
+def _spenders(state: BillingPanelState) -> Container:
+    """`Top spenders` by roster name, then a grey `+ N more`."""
+    rows = [
         spender_line(rank, plain_name(row.display_name), cost=row.cost_usd, is_caller=row.is_caller)
         for rank, row in enumerate(state.member_rows[:TOP_SPENDERS_SHOWN], start=1)
-    ]
+    ] or [NOTHING_USED]
+    items: list[CardElement] = _rows(*rows)
     if overflow := more_spenders(len(state.member_rows), state.over_cap_count):
-        top.append(f"+ {overflow} more")
-    body: list[CardElement] = [
-        heading("💸 Billing · admin view"),
-        *_details(totals),
-        *_credit(state),
-        *_channel_budget(state, now),
-        *text_lines("🏆 **Top spenders**", *(top or [NOTHING_USED])),
-        *text_lines(*_channel_budgets(state)),
-        *text_lines("💳 **Top up credit**"),
-        ActionSet(actions=[_topup(amount, state) for amount in TOPUP_AMOUNTS]),
+        items += _details(f"+ {overflow} more")
+    return _titled(TOP_SPENDERS, *items)
+
+
+def _channel_budgets(state: BillingPanelState, now: datetime) -> Container:
+    """`Channel budgets`, most used first, five then a grey `+ N more`."""
+    lines = [
+        channel_budget_line(status, label=f"Channel `{status.budget.channel_id}`", now=now)
+        for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
     ]
-    if state.has_redeemable_promo_code:
-        code = TextInput(id=CODE_INPUT, placeholder="XXXXX-XXXXX-XXXXX-XXXXX", max_length=100)
-        redeem = button(VERB, "🎟️ Redeem code", "redeem")
-        body += [*text_lines("🎟️ **Promo code**"), code, ActionSet(actions=[redeem])]
+    items: list[CardElement] = _rows(*lines)
+    if more := more_channel_budgets(state):
+        items += _details(f"+ {more} more")
+    return _titled(CHANNEL_BUDGETS, *items)
+
+
+def _rows(*lines: str) -> list[CardElement]:
+    """List rows, close together."""
+    return [TextBlock(text=line, spacing="Small", wrap=True) for line in lines]
+
+
+def _panel_body(state: BillingPanelState, since: datetime, now: datetime) -> list[CardElement]:
+    subtext = (
+        admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
+        if state.is_admin
+        else month_label(since)
+    )
+    body: list[CardElement] = [_header(TITLE, subtext)]
+    if not state.is_admin:
+        own = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
+        over = "  ⚠️ Over your cap" if spend_over_cap(state.caller_spend, state.caller_cap) else ""
+        body.append(_titled(f"{YOU}{over}", *_rows(own)))
+    body.append(_block(*_credit(state)))
+    if state.channel_budget is not None:
+        phrase = channel_budget_phrase(state.channel_budget, now=now)
+        body.append(_titled(CHANNEL_BUDGET, *_rows(phrase)))
+    if state.is_admin:
+        body.append(_spenders(state))
+        if state.channel_budgets:
+            body.append(_channel_budgets(state, now))
+    if state.timed_credit:
+        rows = expiry_rows(state.timed_credit, when=card_date)
+        body.append(_titled(EXPIRY_INTRO, *_rows(*rows), element_id=EXPIRY_ID, hidden=True))
+    if actions := _actions(state):
+        body.append(ActionSet(actions=actions, separator=True, spacing="Large"))
     return body
 
 
@@ -274,12 +337,11 @@ def panel_card(
     now: datetime | None = None,
     notice: str | None = None,
 ) -> AdaptiveCard:
-    """The member view, or for an admin the tenant view with top-up buttons."""
-    now = now or datetime.now(UTC)
-    body = _admin_body(state, since, now) if state.is_admin else _member_body(state, since, now)
+    """The member view, or for an admin the tenant view with its admin actions."""
+    body = _panel_body(state, since, now or datetime.now(UTC))
     if notice is not None:
         body = [*text_lines(notice), *body]
-    return AdaptiveCard(body=body, fallback_text="Billing")
+    return AdaptiveCard(body=body, fallback_text=TITLE)
 
 
 def _back() -> ExecuteAction:

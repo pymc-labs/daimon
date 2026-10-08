@@ -104,3 +104,25 @@ async def test_redeem_button_is_routed() -> None:
 
     assert client.call_log[0] == "ack", "the button press should be acked first"
     assert calls == ["billing_redeem_open"], "the button should open the redeem form"
+
+
+async def test_the_panels_own_actions_are_routed() -> None:
+    """The "Expiry dates" button and the "Look up a person" picker go to the panel handler."""
+    client, app, calls = _FakeSocketClient(), _app(), list[str]()
+
+    async def _fake_action(runtime: Any, payload: dict[str, Any]) -> None:
+        calls.append(payload["actions"][0]["action_id"])
+
+    action_ids = ["billing_expiry_open", "billing_lookup"]
+    with patch("daimon.adapters.slack.app.handle_panel_action", new=_fake_action):
+        for n, action_id in enumerate(action_ids):
+            payload = {
+                "type": "block_actions",
+                "team": {"id": "T"},
+                "user": {"id": "U"},
+                "actions": [{"action_id": action_id, "type": "button"}],
+            }
+            await app.on_request(client, SocketModeRequest("interactive", f"env-p{n}", payload))  # type: ignore[arg-type]
+        await _drain(app)
+
+    assert calls == action_ids

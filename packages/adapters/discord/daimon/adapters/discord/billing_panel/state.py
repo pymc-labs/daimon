@@ -13,7 +13,8 @@ from daimon.adapters.discord import theme
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.promo_credit import ActiveTimedCredit
 
-COLOR_OVER_CAP = theme.COLOR_RED  # caller is over their effective cap
+COLOR_OVER_CAP = theme.COLOR_RED  # no credit left, or the caller is over their cap
+COLOR_WARNING = theme.COLOR_AMBER  # timed credit expires within a week
 
 
 @dataclasses.dataclass(frozen=True)

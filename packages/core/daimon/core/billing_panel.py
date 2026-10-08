@@ -10,15 +10,15 @@ from __future__ import annotations
 import dataclasses
 import uuid
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Literal
 
 import httpx
 import structlog
 from daimon.core.billing import month_start as month_start
 from daimon.core.channel_budget import (
     ChannelBudgetStatus,
-    describe_budget,
     get_channel_budget_status,
     list_channel_budget_statuses,
     window_label,
@@ -50,10 +50,26 @@ MEMBER_CAP = 25
 CHANNEL_BUDGETS_SHOWN = 5
 # Per-turn cost assumed while a tenant has no usage history yet.
 _FALLBACK_TURN_COST_USD = 0.10
-# Rows the admin view names under Top spenders; the rest are counted.
+# Rows the admin panel names under Top spenders; the rest are counted.
 TOP_SPENDERS_SHOWN = 5
+# Timed credits "Expiry dates" lists, soonest first; the rest are counted.
+EXPIRY_SHOWN = 5
+# Timed credit ending within this long turns the panel's accent amber.
+EXPIRY_WARNING = timedelta(days=7)
+
+# The words every platform's panel uses, so they read the same everywhere.
+TITLE = "Billing"
+YOU = "You"
 ASK_ADMIN = "Ask an admin to add credit."
 NOTHING_USED = "Nothing used this month"
+ADD_CREDIT = "Add credit"
+REDEEM_CODE = "Redeem code"
+EXPIRY_DATES = "Expiry dates"
+EXPIRY_INTRO = "Unused credit expires:"
+LOOK_UP = "Look up a person"
+CHANNEL_BUDGET = "Channel budget"
+TOP_SPENDERS = "Top spenders"
+CHANNEL_BUDGETS = "Channel budgets"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -201,41 +217,74 @@ def fmt_usd(value: float | Decimal) -> str:
     return f"${value:,.2f}"
 
 
-def credit_total(balance: Decimal, *, bold: Callable[[str], str]) -> str:
-    """`**$62.40** total credit left`, or below zero `**No credit left** · $3.10 spent beyond it`.
+def credit_headline(balance: Decimal) -> tuple[str, str | None]:
+    """The big figure and the words under it: `$62.40`, `total credit left`.
 
-    ``bold`` wraps text in the platform's bold syntax.
+    At or below zero the figure is `No credit left`, with `$3.10 spent beyond it`
+    under it when the balance is negative (an operator-funded tenant).
     """
-    if balance < 0:
-        return f"{bold('No credit left')} · {fmt_usd(-balance)} spent beyond it"
-    return f"{bold(fmt_usd(balance))} total credit left"
+    if balance > 0:
+        return fmt_usd(balance), "total credit left"
+    return "No credit left", (f"{fmt_usd(-balance)} spent beyond it" if balance < 0 else None)
 
 
-def timed_credit_note(
-    credits: Sequence[ActiveTimedCredit], *, when: Callable[[datetime], str]
-) -> str | None:
-    """The one line under the total about the timed credit it includes; None without any.
+def timed_credit_note(credits: Sequence[ActiveTimedCredit]) -> str | None:
+    """`Includes $25.00 that expires. It's used first.`; None without timed credit.
 
-    `Includes $25.00 that expires, first on <date>. It's used first.`, naming
-    the soonest end; with a single credit, `Includes $20.00 that expires <date>.`
-    ``when`` renders a date in the platform's own syntax.
+    The amount is everything left in live timed credit; when each part expires
+    is behind the panel's "Expiry dates" action.
     """
     if not credits:
         return None
     amount = fmt_usd(sum((credit.remaining_usd for credit in credits), Decimal("0")))
-    soonest = when(min(credit.ends_at for credit in credits))
-    expires = f"expires {soonest}" if len(credits) == 1 else f"expires, first on {soonest}"
-    return f"Includes {amount} that {expires}. It's used first."
+    return f"Includes {amount} that expires. It's used first."
+
+
+def expiry_rows(
+    credits: Sequence[ActiveTimedCredit], *, when: Callable[[datetime], str]
+) -> list[str]:
+    """`$20.00 · Oct 12` per timed credit, soonest first, at most ``EXPIRY_SHOWN``, then `+ N more`.
+
+    ``when`` renders a date in the platform's own syntax.
+    """
+    ordered = sorted(credits, key=lambda credit: credit.ends_at)
+    rows = [
+        f"{fmt_usd(credit.remaining_usd)} · {when(credit.ends_at)}"
+        for credit in ordered[:EXPIRY_SHOWN]
+    ]
+    if (more := len(ordered) - EXPIRY_SHOWN) > 0:
+        rows.append(f"+ {more} more")
+    return rows
+
+
+Tone = Literal["alert", "warning"]
+
+
+def panel_tone(
+    *,
+    balance: Decimal,
+    caller_spend: float,
+    caller_cap: Decimal | None,
+    credits: Sequence[ActiveTimedCredit],
+    now: datetime,
+) -> Tone | None:
+    """The panel's state for an accent: `alert` with no credit left or the caller over
+    their cap, `warning` when timed credit expires within ``EXPIRY_WARNING``, else None."""
+    if balance <= 0 or spend_over_cap(caller_spend, caller_cap):
+        return "alert"
+    if any(credit.ends_at - now <= EXPIRY_WARNING for credit in credits):
+        return "warning"
+    return None
 
 
 def channel_budget_phrase(status: ChannelBudgetStatus, *, now: datetime) -> str:
-    """The invoking channel's budget in words, e.g. `$1.20 of $5.00 spent this month`.
+    """The invoking channel's budget in words, e.g. `$1.20 of $5.00 used this month`.
 
     A budget that has not started shows its limit and when it starts; a fixed
     one that has ended says so.
     """
     budget = status.budget
-    spent = f"{fmt_usd(status.spent_usd)} of {fmt_usd(budget.limit_usd)} spent"
+    spent = f"{fmt_usd(status.spent_usd)} of {fmt_usd(budget.limit_usd)} used"
     if budget.window == "monthly":
         return f"{spent} this month"
     if budget.starts_at is None:
@@ -250,9 +299,9 @@ def channel_budget_phrase(status: ChannelBudgetStatus, *, now: datetime) -> str:
     return f"{spent} from {window_label(budget)}{ended}"
 
 
-def channel_budget_line(status: ChannelBudgetStatus, *, label: str) -> str:
-    """`#team-a: $4.00 of $5.00 (monthly) · 80% used`, with the platform's channel ``label``."""
-    return f"{label}: {describe_budget(status)} · {status.percent_used}% used"
+def channel_budget_line(status: ChannelBudgetStatus, *, label: str, now: datetime) -> str:
+    """`#team-a  $4.00 of $5.00 used this month`, with the platform's channel ``label``."""
+    return f"{label}  {channel_budget_phrase(status, now=now)}"
 
 
 def more_channel_budgets(state: BillingPanelState) -> int:

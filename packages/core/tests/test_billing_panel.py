@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock
 
@@ -17,12 +18,14 @@ from daimon.core.billing_panel import (
     caller_line,
     channel_budget_phrase,
     create_checkout,
-    credit_total,
+    credit_headline,
     estimate_turns,
+    expiry_rows,
     fmt_usd,
     load_billing_snapshot,
     lookup_line,
     member_label,
+    panel_tone,
     spender_line,
     timed_credit_note,
 )
@@ -80,29 +83,42 @@ def _ends(day: int) -> datetime:
     return datetime(2025, 1, day, tzinfo=UTC)
 
 
-def test_credit_total_reads_as_a_total_or_as_none_left() -> None:
-    bold = "**{}**".format
-    assert credit_total(Decimal("62.4"), bold=bold) == "**$62.40** total credit left"
-    assert credit_total(Decimal("0"), bold=bold) == "**$0.00** total credit left"
-    assert credit_total(Decimal("-3.1"), bold=bold) == "**No credit left** · $3.10 spent beyond it"
+def test_credit_headline_is_the_figure_and_the_words_under_it() -> None:
+    assert credit_headline(Decimal("62.4")) == ("$62.40", "total credit left")
+    assert credit_headline(Decimal("0")) == ("No credit left", None)
+    assert credit_headline(Decimal("-3.1")) == ("No credit left", "$3.10 spent beyond it")
 
 
-def test_timed_credit_note_is_none_without_timed_credit() -> None:
-    assert timed_credit_note((), when=str) is None
-
-
-def test_timed_credit_note_names_one_credits_end() -> None:
-    credit = [ActiveTimedCredit(Decimal("20"), _ends(20))]
-    assert timed_credit_note(credit, when=lambda moment: f"{moment:%b %d}") == (
-        "Includes $20.00 that expires Jan 20. It's used first."
-    )
-
-
-def test_timed_credit_note_sums_several_and_names_the_soonest_end() -> None:
+def test_timed_credit_note_sums_what_expires_without_dates() -> None:
+    assert timed_credit_note(()) is None
     credits = [ActiveTimedCredit(Decimal(n), _ends(20 + n)) for n in (4, 1, 2, 3)]
-    assert timed_credit_note(credits, when=lambda moment: f"{moment:%b %d}") == (
-        "Includes $10.00 that expires, first on Jan 21. It's used first."
+    assert timed_credit_note(credits) == "Includes $10.00 that expires. It's used first."
+
+
+def test_expiry_rows_list_five_soonest_first_and_count_the_rest() -> None:
+    credits = [ActiveTimedCredit(Decimal(n), _ends(10 + n)) for n in (7, 1, 2, 3, 4, 5, 6)]
+    rows = expiry_rows(credits, when=lambda moment: f"{moment:%b} {moment.day}")
+    assert rows == [
+        "$1.00 · Jan 11",
+        "$2.00 · Jan 12",
+        "$3.00 · Jan 13",
+        "$4.00 · Jan 14",
+        "$5.00 · Jan 15",
+        "+ 2 more",
+    ]
+
+
+def test_panel_tone_flags_no_credit_over_cap_and_soon_expiring_credit() -> None:
+    soon = [ActiveTimedCredit(Decimal("5"), _NOW + timedelta(days=3))]
+    later = [ActiveTimedCredit(Decimal("5"), _NOW + timedelta(days=30))]
+    tone = functools.partial(panel_tone, caller_spend=1.0, caller_cap=None, now=_NOW)
+    assert tone(balance=Decimal("0"), credits=()) == "alert", "no credit left"
+    assert tone(balance=Decimal("9"), credits=soon) == "warning", "expires within a week"
+    assert tone(balance=Decimal("9"), credits=later) is None
+    over = panel_tone(
+        balance=Decimal("9"), caller_spend=6.0, caller_cap=Decimal("5"), credits=(), now=_NOW
     )
+    assert over == "alert", "the caller is over their cap"
 
 
 def test_the_month_summary_and_own_use_lines() -> None:
@@ -145,16 +161,16 @@ def _budget(
 @pytest.mark.parametrize(
     ("status", "phrase"),
     [
-        (_budget("monthly"), "$1.20 of $5.00 spent this month"),
-        (_budget("total"), "$1.20 of $5.00 spent in total"),
-        (_budget("total", starts_at=_ends(2)), "$1.20 of $5.00 spent since 2025-01-02"),
+        (_budget("monthly"), "$1.20 of $5.00 used this month"),
+        (_budget("total"), "$1.20 of $5.00 used in total"),
+        (_budget("total", starts_at=_ends(2)), "$1.20 of $5.00 used since 2025-01-02"),
         (
             _budget("total", starts_at=_ends(20), spent="0", is_active=False),
             "$5.00 budget from 2025-01-20",
         ),
         (
             _budget("fixed", starts_at=_ends(2), ends_at=_ends(20)),
-            "$1.20 of $5.00 spent from 2025-01-02 until 2025-01-20",
+            "$1.20 of $5.00 used from 2025-01-02 until 2025-01-20",
         ),
         (
             _budget("fixed", starts_at=_ends(20), ends_at=_ends(25), spent="0", is_active=False),
@@ -162,7 +178,7 @@ def _budget(
         ),
         (
             _budget("fixed", starts_at=_ends(2), ends_at=_ends(10), is_active=False),
-            "$1.20 of $5.00 spent from 2025-01-02 until 2025-01-10 (ended)",
+            "$1.20 of $5.00 used from 2025-01-02 until 2025-01-10 (ended)",
         ),
     ],
 )

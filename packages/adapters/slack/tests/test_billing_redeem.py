@@ -55,7 +55,7 @@ def _state(**overrides: Any) -> BillingPanelState:
 
 
 def _action_ids(blocks: list[dict[str, Any]]) -> list[str]:
-    return [e.get("action_id", "") for b in blocks for e in b.get("elements", [])]
+    return [e["action_id"] for b in blocks if b["type"] == "actions" for e in b["elements"]]
 
 
 def _texts(blocks: list[dict[str, Any]]) -> str:
@@ -100,19 +100,21 @@ def test_only_admins_get_the_redeem_button_while_a_code_is_redeemable() -> None:
         _state(is_admin=False, has_redeemable_promo_code=True), now=_NOW, since=_SINCE
     )
     assert "billing_redeem_open" in _action_ids(admin), "admins should get the redeem button"
-    assert _action_ids(no_code) == ["billing_topup"], "no redeemable code should hide the button"
+    assert _action_ids(no_code) == ["billing_topup", "billing_lookup"], (
+        "no redeemable code should hide the button"
+    )
     assert "billing_redeem_open" not in _action_ids(member), "members should not get it"
 
 
-def test_timed_credit_lines_in_both_views() -> None:
+def test_timed_credit_shows_under_the_total_in_both_views() -> None:
     """Live timed credit shows in both views and is absent without any."""
     credit = (ActiveTimedCredit(remaining_usd=Decimal("7.5"), ends_at=_END),)
     for is_admin in (True, False):
         blocks = build_billing_container(
             _state(is_admin=is_admin, timed_credit=credit), now=_NOW, since=_SINCE
         )
-        assert f"Includes $7.50 that expires <!date^{int(_END.timestamp())}^" in _texts(blocks), (
-            "each view should show the timed credit and its end"
+        assert "Includes $7.50 that expires. It's used first." in _texts(blocks), (
+            "each view should say how much of the credit expires"
         )
     assert "Includes" not in _texts(build_billing_container(_state(), now=_NOW, since=_SINCE)), (
         "no timed credit should mean no line"
@@ -212,7 +214,7 @@ async def test_submission_redeems_and_refreshes_the_panel(
     assert root["view_id"] == "V_ROOT" and "*$10.00* total credit left" in _texts(
         root["view"]["blocks"]
     ), "the panel should show the new balance"
-    assert "$0.00 of $5.00 spent this month" in _texts(root["view"]["blocks"]), (
+    assert "*Channel budget*\n$0.00 of $5.00 used this month" in _texts(root["view"]["blocks"]), (
         "the refreshed panel should keep the channel's budget line"
     )
     assert json.loads(root["view"]["private_metadata"]) == {"channel_id": "C1"}, (

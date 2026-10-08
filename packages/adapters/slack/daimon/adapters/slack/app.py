@@ -72,7 +72,11 @@ from daimon.adapters.slack.attachments import (
     build_image_url_prefix,
     build_skipped_image_prefix,
 )
-from daimon.adapters.slack.billing_panel.actions import handle_billing_command, handle_topup_select
+from daimon.adapters.slack.billing_panel.actions import (
+    handle_billing_command,
+    handle_panel_action,
+    handle_topup_select,
+)
 from daimon.adapters.slack.billing_panel.redeem import (
     REDEEM_CALLBACK_ID,
     RedeemDecision,
@@ -80,7 +84,7 @@ from daimon.adapters.slack.billing_panel.redeem import (
     handle_redeem_open,
     run_redeem_submission,
 )
-from daimon.adapters.slack.billing_panel.views import REDEEM_OPEN_ACTION_ID
+from daimon.adapters.slack.billing_panel.views import PANEL_ACTION_IDS, REDEEM_OPEN_ACTION_ID
 from daimon.adapters.slack.boot_sweep import (
     recover_slack_card_intents,
     retire_orphaned_turns,
@@ -1100,6 +1104,8 @@ class SlackApp:
                     self._spawn(handle_topup_select(self.runtime, payload))
                 elif action_id == REDEEM_OPEN_ACTION_ID:
                     self._spawn(handle_redeem_open(self.runtime, payload))
+                elif action_id in PANEL_ACTION_IDS:
+                    self._spawn(handle_panel_action(self.runtime, payload))
                 elif action_id in (
                     "privacy_delete_open",
                     "privacy_export",

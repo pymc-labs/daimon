@@ -1,25 +1,34 @@
-"""BillingPanelView + build_billing_container + buttons for /billing.
+"""BillingPanelView, its container and the panels behind its buttons, for /billing.
+
+The panel is one Components V2 container: the month, the credit left, the
+channel's budget, for an admin the top spenders and channel budgets, and the
+actions, each section set apart by a separator. Its
+accent shows state: red with no credit left or the caller over their cap,
+amber while timed credit expires within a week.
 
 The Discord-native admin check (manage_guild | administrator | owner) is
-re-derived from the live interaction on every render AND on every admin-select
+re-derived from the live interaction on every render AND on every admin
 click — it is never trusted from the rendered view. `is_admin` on the view is a
-render hint that decides whether the two admin selects appear at all; the
-boundary is the click-time admin gate from `checks.py`, called as the first act
-of each of those callbacks before any HTTP call or usage read. Every
-interaction rebuilds the view with a fresh timeout, so a member who was an admin
-when the panel opened may not be one when they click.
+render hint that decides whether the admin actions appear at all; the boundary
+is the click-time admin gate from `checks.py`, called as the first act of each
+admin callback before any HTTP call or usage read. Every interaction rebuilds
+the view with a fresh timeout, so a member who was an admin when the panel
+opened may not be one when they click.
 
-Admin view shows a top-up string select ($10/$25/$50/$100) and a UserSelect
-member-spend lookup that POST to the MCP /billing/checkout route via an
-authenticated internal token. Discord never imports stripe.
+Admins get "Add credit" (amounts that POST to the MCP /billing/checkout route
+via an authenticated account token; Discord never imports stripe), "Redeem
+code" while a code is redeemable, and "Look up a person" for one member's
+spend. Everyone gets "Expiry dates", a private reply, while the credit
+includes timed credit.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
-from decimal import Decimal
+from typing import Any
 
 import httpx
 from daimon.adapters.discord import layout
@@ -31,24 +40,38 @@ from daimon.adapters.discord.billing_panel.read import (
 from daimon.adapters.discord.billing_panel.redeem import RedeemCodeModal
 from daimon.adapters.discord.billing_panel.state import (
     COLOR_OVER_CAP,
+    COLOR_WARNING,
     BillingPanelState,
 )
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.billing_panel import (
+    ADD_CREDIT,
     ASK_ADMIN,
+    CHANNEL_BUDGET,
+    CHANNEL_BUDGETS,
     CHANNEL_BUDGETS_SHOWN,
+    EXPIRY_DATES,
+    EXPIRY_INTRO,
+    LOOK_UP,
     NOTHING_USED,
+    REDEEM_CODE,
+    TITLE,
+    TOP_SPENDERS,
     TOP_SPENDERS_SHOWN,
+    TOPUP_AMOUNTS,
+    YOU,
     admin_summary,
     caller_line,
     channel_budget_line,
     channel_budget_phrase,
-    credit_total,
+    credit_headline,
+    expiry_rows,
     lookup_line,
     month_label,
     more_spenders,
+    panel_tone,
     spender_line,
     timed_credit_note,
 )
@@ -65,18 +88,16 @@ from discord import Interaction
 from discord.ext import commands
 
 BotInteraction = Interaction[commands.Bot]
+Container = discord.ui.Container[discord.ui.LayoutView]
+Text = discord.ui.TextDisplay[discord.ui.LayoutView]
 
 # Fallback cost per turn used when guild has no usage history yet.
 _FALLBACK_TURN_COST_USD = 0.10
 
 
 # ---------------------------------------------------------------------------
-# Pure formatters (unchanged from embed era)
+# Pure formatters
 # ---------------------------------------------------------------------------
-
-
-def _is_over_cap(spend: float, cap: Decimal | None) -> bool:
-    return cap is not None and spend > float(cap)
 
 
 def plain_name(name: str) -> str:
@@ -91,40 +112,33 @@ def _discord_date(moment: datetime) -> str:
     return f"<t:{epoch}:D> (<t:{epoch}:R>)"
 
 
-def _bold(text: str) -> str:
-    return f"**{text}**"
+def _gap() -> discord.ui.Separator[discord.ui.LayoutView]:
+    """The line and space between two blocks of a panel."""
+    return discord.ui.Separator(spacing=discord.SeparatorSpacing.large)
 
 
-def _server_credit_lines(state: BillingPanelState) -> list[str]:
-    """The total credit left, then one dim line on the timed credit it includes, if any."""
-    lines = ["🏦 **Server credit**", credit_total(state.guild_balance_usd, bold=_bold)]
-    if (note := timed_credit_note(state.timed_credit, when=_discord_date)) is not None:
+def _accent(state: BillingPanelState, now: datetime) -> int | None:
+    tone = panel_tone(
+        balance=state.guild_balance_usd,
+        caller_spend=state.caller_spend,
+        caller_cap=state.caller_cap,
+        credits=state.timed_credit,
+        now=now,
+    )
+    return {"alert": COLOR_OVER_CAP, "warning": COLOR_WARNING, None: None}[tone]
+
+
+def _credit_text(state: BillingPanelState) -> str:
+    """The total as a heading, the words under it, and the timed credit it includes."""
+    figure, words = credit_headline(state.guild_balance_usd)
+    lines = [f"### {figure}"]
+    if words is not None:
+        lines.append(words)
+    if (note := timed_credit_note(state.timed_credit)) is not None:
         lines.append(f"-# {note}")
     if not state.is_admin:
         lines.append(f"-# {ASK_ADMIN}")
-    return lines
-
-
-def _channel_budget_lines(state: BillingPanelState, *, now: datetime) -> list[str]:
-    """The invoking channel's budget as its own group; nothing when it has none."""
-    if state.channel_budget is None:
-        return []
-    phrase = channel_budget_phrase(state.channel_budget, now=now)
-    return ["", "📊 **Channel budget**", f"-# {phrase}"]
-
-
-def _channel_budgets_lines(state: BillingPanelState) -> list[str]:
-    """The admin view's channel budgets, most used first; nothing when there are none."""
-    if not state.channel_budgets:
-        return []
-    lines = ["", "📊 **Channel budgets**"] + [
-        f"-# {channel_budget_line(status, label=f'<#{status.budget.channel_id}>')}"
-        for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
-    ]
-    more = len(state.channel_budgets) - CHANNEL_BUDGETS_SHOWN
-    if more > 0:
-        lines.append(f"-# {more} more channel budgets")
-    return lines
+    return "\n".join(lines)
 
 
 def estimate_turns(
@@ -148,8 +162,30 @@ def estimate_turns(
 
 
 # ---------------------------------------------------------------------------
-# V2 pure container builders (B8 design)
+# Pure container builders
 # ---------------------------------------------------------------------------
+
+
+def _spenders_text(state: BillingPanelState) -> str:
+    """`**Top spenders**`, the top five by name, then `+ N more — look one up below`."""
+    rows = [
+        spender_line(rank, plain_name(row.display_name), cost=row.cost_usd, is_caller=row.is_caller)
+        for rank, row in enumerate(state.member_rows[:TOP_SPENDERS_SHOWN], start=1)
+    ] or [NOTHING_USED]
+    if overflow := more_spenders(len(state.member_rows), state.over_cap_count):
+        rows.append(f"-# + {overflow} more — look one up below")
+    return "\n".join([f"**{TOP_SPENDERS}**", *rows])
+
+
+def _channel_budgets_text(state: BillingPanelState, now: datetime) -> str:
+    """`**Channel budgets**`: every channel budget, most used first, five then a count."""
+    lines = [f"**{CHANNEL_BUDGETS}**"] + [
+        channel_budget_line(status, label=f"<#{status.budget.channel_id}>", now=now)
+        for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
+    ]
+    if (more := len(state.channel_budgets) - CHANNEL_BUDGETS_SHOWN) > 0:
+        lines.append(f"-# + {more} more")
+    return "\n".join(lines)
 
 
 def build_billing_container(
@@ -157,70 +193,55 @@ def build_billing_container(
     *,
     now: datetime,
     since: datetime,
-) -> discord.ui.Container[discord.ui.LayoutView]:
-    """Build the B8 billing Container (text-only, no ActionRows).
+    controls: Sequence[discord.ui.ActionRow[Any]] = (),
+) -> Container:
+    """The /billing panel: one container, its sections set apart by separators.
 
-    Admin branch:
-      - header: '💸 Billing · admin view' + subtext 'October 2026 · $48.17 spent by 9 people'
-      - hairline
-      - one TextDisplay: 🏦 Server credit (total, then the timed credit it
-        includes), 📊 Channel budget for the invoking channel, 🏆 Top spenders
-        (top 5, names escaped) with a dim '+ N more' line when N > 0,
-        then 📊 Channel budgets for every channel
+      - header: `## Billing` + `-# October 2026 · $48.17 spent by 9 people`
+        (a member's subtext is the month alone)
+      - a member's own use: `**You**` + `$11.50 of your $25.00 this month`
+      - credit: `### $62.40` + `total credit left` + the timed credit it includes
+        (and for a member `-# Ask an admin to add credit.`)
+      - `**Channel budget**` + `$1.20 of $5.00 used this month`, when the
+        invoking channel has one
+      - admin only: `**Top spenders**` by name, then `**Channel budgets**` when
+        any exist
+      - ``controls``, the action rows, last; the Done render passes none
 
-    Member branch:
-      - header: '💸 Billing' + subtext with the month
-      - hairline
-      - one TextDisplay: **You** group + 🏦 Server credit + 📊 Channel budget
-
-    Accent: COLOR_OVER_CAP only when caller is over their cap; no accent otherwise
-    (COLOR_NOMINAL is retired — B8 decision).
+    The accent is red with no credit left or the caller over their cap, amber
+    while timed credit expires within a week, and absent otherwise.
     """
-    accent = COLOR_OVER_CAP if _is_over_cap(state.caller_spend, state.caller_cap) else None
-
-    if state.is_admin:
-        subtext = admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
-        hdr = layout.header("💸 Billing · admin view", subtext=subtext)
-
-        body_lines: list[str] = [
-            *_server_credit_lines(state),
-            *_channel_budget_lines(state, now=now),
-            "",
-            "🏆 **Top spenders**",
-        ]
-        top5 = state.member_rows[:TOP_SPENDERS_SHOWN]
-        body_lines += [
-            "-# "
-            + spender_line(
-                rank, plain_name(row.display_name), cost=row.cost_usd, is_caller=row.is_caller
-            )
-            for rank, row in enumerate(top5, start=1)
-        ] or [f"-# {NOTHING_USED}"]
-        overflow = more_spenders(len(state.member_rows), state.over_cap_count)
-        if overflow > 0:
-            body_lines.append(f"-# + {overflow} more — look one up below")
-        body_lines += _channel_budgets_lines(state)
-
-        body: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
-            "\n".join(body_lines)
-        )
-        return discord.ui.Container(hdr, layout.hairline(), body, accent_colour=accent)
-
-    # Member (non-admin) branch
-    hdr = layout.header("💸 Billing", subtext=month_label(since))
-    caller_body = f"-# {caller_line(state.caller_spend, state.caller_cap, state.caller_turns)}"
-
-    body_lines_member: list[str] = [
-        "**You**",
-        caller_body,
-        "",
-        *_server_credit_lines(state),
-        *_channel_budget_lines(state, now=now),
-    ]
-    body_member: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
-        "\n".join(body_lines_member)
+    subtext = (
+        admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
+        if state.is_admin
+        else month_label(since)
     )
-    return discord.ui.Container(hdr, layout.hairline(), body_member, accent_colour=accent)
+    sections: list[str] = []
+    if not state.is_admin:
+        own = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
+        sections.append(f"**{YOU}**\n{own}")
+    sections.append(_credit_text(state))
+    if state.channel_budget is not None:
+        phrase = channel_budget_phrase(state.channel_budget, now=now)
+        sections.append(f"**{CHANNEL_BUDGET}**\n{phrase}")
+    if state.is_admin:
+        sections.append(_spenders_text(state))
+        if state.channel_budgets:
+            sections.append(_channel_budgets_text(state, now))
+    children: list[discord.ui.Item[discord.ui.LayoutView]] = [layout.header(TITLE, subtext=subtext)]
+    for section in sections:
+        children += [_gap(), Text(section)]
+    if controls:
+        children += [_gap(), *controls]
+    return discord.ui.Container(*children, accent_colour=_accent(state, now))
+
+
+def build_expiry_container(state: BillingPanelState) -> Container:
+    """`## Expiry dates`, then `Unused credit expires:` and one row per timed credit."""
+    rows = expiry_rows(state.timed_credit, when=_discord_date)
+    return discord.ui.Container(
+        layout.header(EXPIRY_DATES), _gap(), Text("\n".join([EXPIRY_INTRO, *rows]))
+    )
 
 
 def build_member_lookup_container(
@@ -230,26 +251,23 @@ def build_member_lookup_container(
     turns: int,
     since: datetime,
     now: datetime,
-) -> discord.ui.Container[discord.ui.LayoutView]:
-    """Pure builder for the member-spend lookup ephemeral reply.
+) -> Container:
+    """The member lookup's private reply: `## Maya Chen` + `$14.02 this month`.
 
-    When spend == 0.0 and turns == 0 the body is 'Nothing used this month' —
-    covers the zero-daimon-account case invisibly.
+    With no spend and no turns the body is `Nothing used this month`, which
+    also covers someone who has no daimon account.
     """
-    hdr = layout.header(f"🔍 {plain_name(display_name)}", subtext=month_label(since))
-    body_text = lookup_line(spend_usd, turns)
-
-    body: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(body_text)
-    return discord.ui.Container(hdr, layout.hairline(), body)
+    hdr = layout.header(plain_name(display_name))
+    return discord.ui.Container(hdr, Text(lookup_line(spend_usd, turns)))
 
 
 # ---------------------------------------------------------------------------
-# Interactive selects
+# Interactive selects and buttons
 # ---------------------------------------------------------------------------
 
 
 class _TopUpSelect(discord.ui.Select["BillingPanelView"]):
-    """Full-width string select for top-up amounts. Admin card only."""
+    """The "Add credit" select: a full-width list of top-up amounts. Admin panel only."""
 
     def __init__(self, state: BillingPanelState) -> None:
         options = [
@@ -260,10 +278,10 @@ class _TopUpSelect(discord.ui.Select["BillingPanelView"]):
                     :100
                 ],
             )
-            for amount in (10, 25, 50, 100)
+            for amount in TOPUP_AMOUNTS
         ]
         super().__init__(
-            placeholder="💳 Top up server credit…",
+            placeholder=ADD_CREDIT,
             min_values=1,
             max_values=1,
             options=options,
@@ -295,11 +313,11 @@ class _TopUpSelect(discord.ui.Select["BillingPanelView"]):
 
 
 class _MemberLookupSelect(discord.ui.UserSelect["BillingPanelView"]):
-    """Native UserSelect for per-member spend lookup. Admin card only."""
+    """The "Look up a person" picker: one member's spend this month. Admin panel only."""
 
     def __init__(self) -> None:
         super().__init__(
-            placeholder="🔍 Look up a member's spend…",
+            placeholder=LOOK_UP,
             min_values=1,
             max_values=1,
         )
@@ -350,11 +368,24 @@ class _MemberLookupSelect(discord.ui.UserSelect["BillingPanelView"]):
 
 
 # ---------------------------------------------------------------------------
-# View shell (LayoutView)
+# Views
 # ---------------------------------------------------------------------------
 
 
-class BillingPanelView(discord.ui.LayoutView):
+class _InvokerOnly(discord.ui.LayoutView):
+    allowed_user_id: int
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
+        if interaction.user.id != self.allowed_user_id:
+            await interaction.response.send_message(
+                "Only the command invoker can use these buttons.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+
+class BillingPanelView(_InvokerOnly):
     def __init__(
         self,
         state: BillingPanelState,
@@ -375,37 +406,25 @@ class BillingPanelView(discord.ui.LayoutView):
         self.panel_now = now
         self.panel_since = since
 
-        container = build_billing_container(state, now=now, since=since)
-        self.add_item(container)
-        self.add_item(layout.hairline())
-
+        rows: list[discord.ui.ActionRow[Any]] = []
         if is_admin:
-            top_up_row = discord.ui.ActionRow(_TopUpSelect(state))
-            self.add_item(top_up_row)
-            lookup_row = discord.ui.ActionRow(_MemberLookupSelect())
-            self.add_item(lookup_row)
-
-        buttons: list[discord.ui.Button[BillingPanelView]] = [_RefreshButton(), _DoneButton()]
+            rows.append(discord.ui.ActionRow(_TopUpSelect(state)))
+        actions: list[discord.ui.Button[BillingPanelView]] = []
         if is_admin and state.has_redeemable_promo_code:
-            buttons.insert(0, _RedeemButton())
-        self.add_item(discord.ui.ActionRow(*buttons))
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
-        if interaction.user.id != self.allowed_user_id:
-            await interaction.response.send_message(
-                "Only the command invoker can use these buttons.",
-                ephemeral=True,
-            )
-            return False
-        return True
+            actions.append(_RedeemButton())
+        if state.timed_credit:
+            actions.append(_ExpiryButton())
+        if actions:
+            rows.append(discord.ui.ActionRow(*actions))
+        if is_admin:
+            rows.append(discord.ui.ActionRow(_MemberLookupSelect()))
+        rows.append(discord.ui.ActionRow(_RefreshButton(), _DoneButton()))
+        self.add_item(build_billing_container(state, now=now, since=since, controls=rows))
 
 
 class _RefreshButton(discord.ui.Button["BillingPanelView"]):
     def __init__(self) -> None:
-        super().__init__(
-            label="🔄 Refresh",
-            style=discord.ButtonStyle.secondary,
-        )
+        super().__init__(label="Refresh", style=discord.ButtonStyle.secondary)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         if self.view is None:
@@ -413,14 +432,30 @@ class _RefreshButton(discord.ui.Button["BillingPanelView"]):
         await _rerender(interaction, self.view)
 
 
+class _ExpiryButton(discord.ui.Button["BillingPanelView"]):
+    """The "Expiry dates" button: when each part of the timed credit expires, privately."""
+
+    def __init__(self) -> None:
+        super().__init__(label=EXPIRY_DATES, style=discord.ButtonStyle.secondary)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if self.view is None:
+            return
+        await interaction.response.send_message(
+            view=layout.static_view(build_expiry_container(self.view.state)),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
 class _RedeemButton(discord.ui.Button["BillingPanelView"]):
-    """Opens the redeem-code modal. Admin card only, while a code is redeemable.
+    """Opens the redeem-code modal. Admin panel only, while a code is redeemable.
 
     Re-gated on click and on submit.
     """
 
     def __init__(self) -> None:
-        super().__init__(label="🎟️ Redeem code", style=discord.ButtonStyle.secondary)
+        super().__init__(label=REDEEM_CODE, style=discord.ButtonStyle.secondary)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.view
@@ -439,10 +474,7 @@ class _RedeemButton(discord.ui.Button["BillingPanelView"]):
 
 class _DoneButton(discord.ui.Button["BillingPanelView"]):
     def __init__(self) -> None:
-        super().__init__(
-            label="Done",
-            style=discord.ButtonStyle.secondary,
-        )
+        super().__init__(label="Done", style=discord.ButtonStyle.secondary)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         if self.view is None:
