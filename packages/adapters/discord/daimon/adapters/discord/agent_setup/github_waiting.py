@@ -84,6 +84,7 @@ class GitHubWaitingView(PanelViewBase):
         repos: tuple[AuthorizedRepo, ...],
         selected_id: uuid.UUID | None = None,
         page: int = 0,
+        own_page: int = 0,
         requester_labels: dict[str, str] | None = None,
         thread_labels: dict[str, str] | None = None,
     ) -> None:
@@ -92,6 +93,7 @@ class GitHubWaitingView(PanelViewBase):
         self.own_requests = own_requests
         self.selected_id = selected_id
         self.page = min(max(page, 0), max(0, (len(requests) - 1) // 20))
+        self.own_page = min(max(own_page, 0), max(0, (len(own_requests) - 1) // 20))
         self._repos = repos
         self.requester_labels = requester_labels or {}
         self.thread_labels = thread_labels or {}
@@ -155,11 +157,25 @@ class GitHubWaitingView(PanelViewBase):
                             description=self.thread_labels.get(row.thread_id, "This thread")[:100],
                             value=str(row.id),
                         )
-                        for row in own_requests[:20]
+                        for row in own_requests[self.own_page * 20 : (self.own_page + 1) * 20]
                     ],
                 )
                 select_own.callback = self._on_cancel_select  # type: ignore[method-assign]
                 container.add_item(EmbedActionRow(select_own))
+                if len(own_requests) > 20:
+                    own_paging: EmbedActionRow = EmbedActionRow()
+                    own_previous: discord.ui.Button[GitHubWaitingView] = discord.ui.Button(
+                        label="Previous your requests", disabled=self.own_page == 0
+                    )
+                    own_previous.callback = self._on_own_previous  # type: ignore[method-assign]
+                    own_next: discord.ui.Button[GitHubWaitingView] = discord.ui.Button(
+                        label="Next your requests",
+                        disabled=(self.own_page + 1) * 20 >= len(own_requests),
+                    )
+                    own_next.callback = self._on_own_next  # type: ignore[method-assign]
+                    own_paging.add_item(own_previous)
+                    own_paging.add_item(own_next)
+                    container.add_item(own_paging)
         else:
             connected = {
                 repo.repo_full_name.casefold(): repo
@@ -219,6 +235,7 @@ class GitHubWaitingView(PanelViewBase):
             interaction=interaction,
             selected_id=selected_id,
             page=self.page,
+            own_page=self.own_page,
         )
         await self.swap_to(interaction, view)
 
@@ -239,6 +256,28 @@ class GitHubWaitingView(PanelViewBase):
                 user_id=self.allowed_user_id,
                 interaction=interaction,
                 page=page,
+                own_page=self.own_page,
+            ),
+        )
+
+    async def _on_own_previous(self, interaction: discord.Interaction) -> None:
+        await self._change_own_page(interaction, self.own_page - 1)
+
+    async def _on_own_next(self, interaction: discord.Interaction) -> None:
+        await self._change_own_page(interaction, self.own_page + 1)
+
+    async def _change_own_page(self, interaction: discord.Interaction, own_page: int) -> None:
+        if not await self._allowed(interaction):
+            return
+        await self.swap_to(
+            interaction,
+            await load_waiting_view(
+                self.state,
+                runtime=self.runtime,
+                user_id=self.allowed_user_id,
+                interaction=interaction,
+                page=self.page,
+                own_page=own_page,
             ),
         )
 
@@ -259,7 +298,12 @@ class GitHubWaitingView(PanelViewBase):
                 account_id=self.state.account_id,
             )
         view = await load_waiting_view(
-            self.state, runtime=self.runtime, user_id=self.allowed_user_id, interaction=interaction
+            self.state,
+            runtime=self.runtime,
+            user_id=self.allowed_user_id,
+            interaction=interaction,
+            page=self.page,
+            own_page=self.own_page,
         )
         await self.swap_to(interaction, view)
 
@@ -480,6 +524,7 @@ async def load_waiting_view(
     interaction: discord.Interaction | None = None,
     selected_id: uuid.UUID | None = None,
     page: int = 0,
+    own_page: int = 0,
 ) -> GitHubWaitingView:
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id))
     visible_agents = (
@@ -543,6 +588,7 @@ async def load_waiting_view(
         repos=repos,
         selected_id=selected_id,
         page=page,
+        own_page=own_page,
         requester_labels=requester_labels,
         thread_labels=(
             {

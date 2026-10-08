@@ -176,6 +176,26 @@ def test_discord_waiting_list_pages_after_twenty_requests() -> None:
     assert labels["Previous requests"] is False
     assert labels["Next requests"] is True
 
+    own = GitHubWaitingView(
+        state,
+        runtime=MagicMock(),
+        allowed_user_id=7,
+        requests=(),
+        own_requests=requests,
+        repos=(),
+        own_page=1,
+    )
+    own_select = next(item for item in own.walk_children() if isinstance(item, discord.ui.Select))
+    assert len(own_select.options) == 1
+    assert own_select.options[0].value == str(requests[20].id)
+    own_labels = {
+        item.label: item.disabled
+        for item in own.walk_children()
+        if isinstance(item, discord.ui.Button)
+    }
+    assert own_labels["Previous your requests"] is False
+    assert own_labels["Next your requests"] is True
+
 
 def _panel() -> GrantsPanel:
     return GrantsPanel(
