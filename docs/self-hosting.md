@@ -191,17 +191,12 @@ The confirmation page has **Select all repos you administer** for bulk selection
 each selected repository still requires a fresh GitHub admin check at confirmation.
 
 Agents remain in legacy GitHub mode until a server admin stages grants with
-`daimon github grants stage --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id> --ceiling read`
+`daimon github grants stage --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id> --baseline read --ceiling read`
 and runs `daimon github grants activate --tenant <workspace-uuid> --agent <agent-uuid>`.
 Use `grants list`, `remove`, and `deactivate` with the same tenant and agent options.
 While app mode is active, `grants stage` updates access immediately. Existing
 sessions rotate tokens in place when the repository set is unchanged; a changed
 repository set closes the sessions so the next turn mounts the new checkouts.
-For a human turn, GitHub access is the lesser of the grant ceiling and that
-person's GitHub permission. A person without a GitHub link or permission gets
-no repository token. Routines, schedules, and agent-key turns have no human
-asker and receive each live grant at its ceiling. The stored baseline column
-is retained for compatibility but does not affect access.
 
 ## Microsoft Teams (optional)
 

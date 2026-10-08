@@ -702,7 +702,7 @@ async def _refresh_github_app_sessions(
         if not due_for_expiry and not due_for_access:
             continue
         try:
-            desired_urls, desired_permissions, _ = await effective_repo_state(
+            desired_urls, desired_permissions = await effective_repo_state(
                 sm,
                 tenant_id=item.mapping.tenant_id,
                 agent_id=item.agent_id,
@@ -786,7 +786,7 @@ async def _refresh_github_app_sessions(
                 due_for_access = last_check is None or last_check <= now - timedelta(minutes=5)
                 if not due_for_expiry and not due_for_access:
                     continue
-                desired_urls, desired_permissions, _ = await effective_repo_state(
+                desired_urls, desired_permissions = await effective_repo_state(
                     sm,
                     tenant_id=current.tenant_id,
                     agent_id=current.agent_id,

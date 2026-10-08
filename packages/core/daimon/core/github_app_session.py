@@ -7,7 +7,6 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal
 
 import httpx
 from anthropic import APIStatusError, AsyncAnthropic
@@ -61,8 +60,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = logging.getLogger(__name__)
 
-type AccessReason = Literal["needs_link", "no_github_access"]
-
 
 @dataclass(frozen=True)
 class AppToken:
@@ -79,7 +76,6 @@ class AppSessionAccess:
     resources: tuple[Resource, ...]
     tokens: tuple[AppToken, ...]
     working_token: str | None
-    reason: AccessReason | None = None
 
 
 REQUESTER_CACHE = PermissionCache()
@@ -95,7 +91,7 @@ async def effective_repo_urls(
     config: GithubAppSettings,
     fernet: MultiFernet | None,
 ) -> tuple[str, ...]:
-    urls, _, _ = await effective_repo_state(
+    urls, _ = await effective_repo_state(
         sessionmaker,
         tenant_id=tenant_id,
         agent_id=agent_id,
@@ -116,16 +112,16 @@ async def effective_repo_state(
     is_external: bool,
     config: GithubAppSettings,
     fernet: MultiFernet | None,
-) -> tuple[tuple[str, ...], dict[int, dict[str, str]], AccessReason | None]:
+) -> tuple[tuple[str, ...], dict[int, dict[str, str]]]:
     if is_external:
-        return (), {}, None
+        return (), {}
     async with sessionmaker() as session:
         if not await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id):
-            return (), {}, None
+            return (), {}
     if fernet is None:
         raise ValueError("GitHub App mode requires encryption")
     async with httpx.AsyncClient() as client:
-        rows, _, _, reason = await _effective_rows(
+        rows, _, _ = await _effective_rows(
             sessionmaker,
             client,
             tenant_id=tenant_id,
@@ -138,7 +134,6 @@ async def effective_repo_state(
     return (
         tuple(sorted(f"https://github.com/{repo.repo_full_name}" for _, repo, _ in rows)),
         {repo.repo_id: dict(PERMISSION_PROFILES[profile]) for _, repo, profile in rows},
-        reason,
     )
 
 
@@ -183,12 +178,7 @@ async def _effective_rows(
     config: GithubAppSettings,
     fernet: MultiFernet,
     cache: PermissionCache,
-) -> tuple[
-    list[tuple[AgentGrant, AuthorizedRepo, PermissionProfile]],
-    int | None,
-    int | None,
-    AccessReason | None,
-]:
+) -> tuple[list[tuple[AgentGrant, AuthorizedRepo, PermissionProfile]], int | None, int | None]:
     async with sessionmaker() as session:
         live = await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id)
         grants = [grant for grant, _ in live]
@@ -197,8 +187,6 @@ async def _effective_rows(
         user = await get_user(session, github_user_id=link.github_user_id) if link else None
     if user is None or user.status != "active":
         user = None
-    if account_id is not None and user is None:
-        return [], None, None, "needs_link"
     asker: dict[int, Access] = {}
     if user is not None:
         if config.client_id is None or config.client_secret is None:
@@ -220,10 +208,13 @@ async def _effective_rows(
             user = await get_user(session, github_user_id=user.github_user_id)
         if user is None or user.status != "active":
             raise ValueError("GitHub requester link changed during access check")
+    baseline: dict[int, Access] = {
+        grant.repo_id: grant.baseline_access for grant in grants if grant.repo_id in repos
+    }
     ceiling: dict[int, Access] = {
         grant.repo_id: grant.ceiling_access for grant in grants if grant.repo_id in repos
     }
-    access = effective_access(ceiling, asker if account_id is not None else None)
+    access = effective_access(baseline, ceiling, asker)
     return (
         [
             (grant, repos[grant.repo_id], access[grant.repo_id])
@@ -232,7 +223,6 @@ async def _effective_rows(
         ],
         user.github_user_id if user is not None else None,
         user.link_generation if user is not None else None,
-        "no_github_access" if account_id is not None and not access else None,
     )
 
 
@@ -266,7 +256,7 @@ async def prepare_app_access(
             return AppSessionAccess((), (), None)
     if fernet is None or config.app_id is None or config.private_key is None:
         raise ValueError("GitHub App mode requires App credentials and encryption")
-    rows, user_id, link_generation, reason = await _effective_rows(
+    rows, user_id, link_generation = await _effective_rows(
         sessionmaker,
         client,
         tenant_id=tenant_id,
@@ -277,7 +267,7 @@ async def prepare_app_access(
         cache=cache,
     )
     if not rows:
-        return AppSessionAccess((), (), None, reason)
+        return AppSessionAccess((), (), None)
     groups = group_repository_access(
         [(repo.installation_id, repo.repo_id, access) for _, repo, access in rows]
     )

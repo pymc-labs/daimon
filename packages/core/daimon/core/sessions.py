@@ -642,11 +642,7 @@ async def create_session(
                         is_unmapped=requester_is_headless or app_session_unmapped,
                         is_mcp=app_session_unmapped,
                         agent_id=agent_uuid if app_session_unmapped else None,
-                        account_id=(
-                            account_id
-                            if app_session_unmapped and not requester_is_headless
-                            else None
-                        ),
+                        account_id=account_id if app_session_unmapped else None,
                         repo_urls=snapshot.repo_urls if snapshot is not None else (),
                         repo_resource_ids=(
                             snapshot.repo_resource_ids if snapshot is not None else None

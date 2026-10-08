@@ -4,8 +4,8 @@ A routine is a recurring headless turn: a cron expression, a timezone, an
 agent and one prompt. The scheduler fires it, the agent runs with no human in
 the thread, and the tail of its final message is written back onto the
 routine row.
-For an agent in GitHub App mode, a routine has no human asker and receives each
-live repository grant at its configured ceiling.
+For an agent in GitHub App mode, a routine has no human asker and receives only
+the agent's baseline repository grants.
 
 A routine may name a **destination**: a channel or a thread. With one, the run
 is told where its result goes, and if the agent does not post there itself,

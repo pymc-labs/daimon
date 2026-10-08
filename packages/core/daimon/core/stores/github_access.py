@@ -108,9 +108,9 @@ async def stage_grant(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     repo_id: int,
+    baseline_access: Literal["none", "read", "write"],
     ceiling_access: Literal["read", "write"],
     granted_by_account_id: uuid.UUID | None,
-    baseline_access: Literal["none", "read", "write"] = "none",
     mount_path: str | None = None,
     is_working_repo: bool = False,
 ) -> AgentGrant:

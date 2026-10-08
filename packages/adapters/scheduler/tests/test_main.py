@@ -164,7 +164,7 @@ async def test_mcp_app_session_refreshes_before_token_expiry(
     )
     await db_session.commit()
     desired = unittest.mock.AsyncMock(
-        return_value=(("https://github.com/acme/repo",), {11: {"contents": "read"}}, None)
+        return_value=(("https://github.com/acme/repo",), {11: {"contents": "read"}})
     )
     rotate = unittest.mock.AsyncMock()
     monkeypatch.setattr("daimon.adapters.scheduler.main.effective_repo_state", desired)

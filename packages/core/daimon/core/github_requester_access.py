@@ -41,14 +41,20 @@ _LEVELS: tuple[Access, ...] = ("none", "read", "write")
 
 
 def effective_access(
+    baseline_rows: Mapping[int, Access],
     ceiling_rows: Mapping[int, Access],
-    asker_permissions: Mapping[int, Access] | None,
+    asker_permissions: Mapping[int, Access],
 ) -> dict[int, Literal["read", "write"]]:
-    """Mirror a human's GitHub permission, or use the ceiling without a human."""
+    """Compute max(baseline, min(ceiling, asker)) for each granted repository."""
     result: dict[int, Literal["read", "write"]] = {}
-    for repo_id, ceiling in ceiling_rows.items():
-        asker = ceiling if asker_permissions is None else asker_permissions.get(repo_id, "none")
-        level = _LEVELS[min(_RANK[ceiling], _RANK[asker])]
+    for repo_id in baseline_rows.keys() | ceiling_rows.keys():
+        baseline = baseline_rows.get(repo_id, "none")
+        ceiling = ceiling_rows.get(repo_id, baseline)
+        if _RANK[baseline] > _RANK[ceiling]:
+            raise ValueError("baseline exceeds ceiling")
+        level = _LEVELS[
+            max(_RANK[baseline], min(_RANK[ceiling], _RANK[asker_permissions.get(repo_id, "none")]))
+        ]
         if level != "none":
             result[repo_id] = level
     return result
