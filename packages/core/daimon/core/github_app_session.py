@@ -704,8 +704,8 @@ async def rotate_live_app_tokens(
                 fernet=fernet,
             )
         except (ValueError, InvalidToken):
-            # No rollback snapshot: refresh anyway; a failure after a swap then
-            # archives the session as it would outside a turn.
+            # No rollback snapshot: refresh anyway. A failure still leaves the
+            # running turn alone; the next turn boundary replaces the session.
             _log.warning("No App rollback snapshot for active session %s", session_id)
     async with httpx.AsyncClient() as client:
         access = await prepare_app_access(
@@ -800,8 +800,15 @@ async def rotate_live_app_tokens(
                                     resource_id,
                                     session_id,
                                 )
-                elif swapped:
+                elif swapped and not active_turn:
+                    # Only an idle session is archived; a running turn is never
+                    # interrupted, and the next turn boundary replaces it.
                     await anthropic.beta.sessions.archive(session_id)
+                elif swapped:
+                    _log.warning(
+                        "App refresh failed mid-swap during active turn %s; left running",
+                        session_id,
+                    )
             finally:
                 await revoke_app_access(sessionmaker, client, access)
             raise

@@ -1523,6 +1523,61 @@ async def test_app_rotation_keeps_old_session_when_first_resource_update_fails(
 
 
 @pytest.mark.asyncio
+async def test_active_turn_failure_after_swap_without_snapshot_is_not_archived(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://github.com/owner/repo"
+    new = AppSessionAccess(
+        resources=(
+            {
+                "type": "github_repository",
+                "url": url,
+                "authorization_token": "new-token",
+                "mount_path": "/workspace/owner/repo",
+            },
+        ),
+        tokens=(AppToken(uuid.uuid4(), "new-token", 1, (11,), "read", "GH_TOKEN_OWNER_READ"),),
+        working_token="new-token",
+    )
+    monkeypatch.setattr(
+        github_app_session,
+        "_current_app_access",
+        AsyncMock(side_effect=ValueError("current App token cannot be restored")),
+    )
+    monkeypatch.setattr(github_app_session, "prepare_app_access", AsyncMock(return_value=new))
+    monkeypatch.setattr(
+        github_app_session,
+        "add_app_credentials",
+        AsyncMock(side_effect=RuntimeError("vault update failed")),
+    )
+    monkeypatch.setattr(github_app_session, "revoke_app_access", AsyncMock())
+    update = AsyncMock()
+    archive = AsyncMock()
+    anthropic = SimpleNamespace(
+        beta=SimpleNamespace(
+            sessions=SimpleNamespace(resources=SimpleNamespace(update=update), archive=archive)
+        )
+    )
+    with pytest.raises(RuntimeError, match="vault update failed"):
+        await github_app_session.rotate_live_app_tokens(
+            anthropic,
+            db_session_factory,
+            session_id="running-session",
+            tenant_id=uuid.uuid4(),
+            agent_id=uuid.uuid4(),
+            account_id=None,
+            is_external=True,
+            vault_id="running-vault",
+            resource_ids={url: "resource-1"},
+            config=GithubAppSettings(),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            active_turn=True,
+        )
+    update.assert_awaited_once()
+    archive.assert_not_awaited()
+
+
 async def test_active_turn_rotation_failure_restores_old_credentials_without_archiving(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
