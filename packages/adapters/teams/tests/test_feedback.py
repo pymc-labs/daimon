@@ -11,7 +11,7 @@ import pytest
 import structlog
 from daimon.adapters.teams import feedback, support
 from daimon.adapters.teams.answer_access import IN_DIRECT_CHAT, NOT_ALLOWED, AnswerPlace
-from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, feedback_text, form_details
+from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, feedback_text, form_details, sent_form
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import SupportSettings
@@ -72,6 +72,15 @@ async def _send(
     return await post_activity(service, make_invoke("task/submit", {"data": data}, user=user))
 
 
+async def _send_as_action(
+    service: TeamsHttpService, *, reasons: str = "", note: str = "", **marker: str
+) -> Any:
+    """The form's Send as Teams' custom loop may deliver it: `message/submitAction`."""
+    typed = json.dumps({"reasons": reasons, "text": note} | marker)
+    value = {"actionName": "feedback", "actionValue": {"reaction": "dislike", "feedback": typed}}
+    return await post_activity(service, make_invoke("message/submitAction", value))
+
+
 def _message(response: Any) -> str:
     assert response["task"]["type"] == "message", response
     return response["task"]["value"]
@@ -117,6 +126,15 @@ def test_a_form_keeps_only_known_reasons_in_vocabulary_order() -> None:
     form = form_details({"message": "m-1", "reasons": "too_slow,bogus, inaccurate", "text": " "})
     assert form.reasons == ("inaccurate", "too_slow"), "unknown codes dropped, order fixed"
     assert form.text == "", "whitespace is no text"
+
+
+def test_a_sent_form_is_told_apart_from_the_built_in_one() -> None:
+    marked = sent_form(json.dumps({"action": FEEDBACK_DIALOG, "message": "forged"}), "m-1")
+    assert marked is not None and marked.message_id == "m-1", "the invoke's answer, not the form's"
+    inputs = sent_form(json.dumps({"reasons": "other", "text": " x "}), "m-1")
+    assert inputs is not None and (inputs.reasons, inputs.text) == (("other",), "x")
+    assert sent_form(json.dumps({"feedbackText": "x"}), "m-1") is None, "the built-in form"
+    assert sent_form("plain", "m-1") is None, "not JSON, not the form"
 
 
 def test_a_channel_answer_links_to_its_thread_and_a_chat_answer_names_the_chat() -> None:
@@ -292,3 +310,43 @@ async def test_a_routed_form_from_a_sealed_channel_is_marked(
 
     [posted] = _posts_to_ops(teams_api_fake)
     assert support.SEALED_LINE in posted, "whoever reads it knows to answer in the channel"
+
+
+async def test_the_form_sent_as_a_submit_action_is_recorded_and_routed(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with _running(db_session_factory, teams_api_fake, routed=True) as service:
+        await _click(service, "dislike")
+        reply = await _send_as_action(service, reasons="inaccurate", note=CRITICISM)
+
+    assert reply is None, "a message/submitAction is answered with an empty body"
+    [row] = await _rows(db_session_factory)
+    assert (row["vote"], row["feedback_text"]) == ("down", CRITICISM), "the text is kept"
+    assert row["feedback_reasons"] == ["inaccurate"], "and the reasons"
+    [posted] = _posts_to_ops(teams_api_fake)
+    assert "**Reasons:** Wrong or inaccurate" in posted and posted.endswith(CRITICISM)
+
+
+async def test_an_empty_form_sent_as_a_submit_action_keeps_only_the_vote(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with _running(db_session_factory, teams_api_fake, routed=True) as service:
+        await _click(service, "dislike")
+        await _send_as_action(service, note="  ", action=FEEDBACK_DIALOG, message=ANSWER)
+
+    [row] = await _rows(db_session_factory)
+    assert (row["vote"], row["feedback_text"], row["feedback_reasons"]) == ("down", None, None)
+    assert _posts_to_ops(teams_api_fake) == [], "nothing to route from an empty form"
+
+
+async def test_a_form_sent_as_a_submit_action_is_refused_like_the_dialog(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    policy = TenantAccessPolicy(invoker_user_ids=(OTHER_AAD_OBJECT_ID,))
+    async with db_session_factory.begin() as session:
+        await set_access_policy(session, tenant_id=TENANT, policy=policy)
+    async with _running(db_session_factory, teams_api_fake, routed=True) as service:
+        await _send_as_action(service, reasons="other", note=CRITICISM)
+
+    assert await _rows(db_session_factory) == [], "the same voter rule on either route"
+    assert _posts_to_ops(teams_api_fake) == []

@@ -134,6 +134,13 @@ SOURCES: dict[str, tuple[str, ...]] = {
         "https://github.com/microsoft/teams.py/blob/main/packages/api/src/microsoft_teams/api/"
         "activities/invoke/message/fetch_task.py",
     ),
+    # The custom loop's form sent: Teams delivers it as `message/submitAction`, the dialog's
+    # inputs JSON-encoded in `feedback`, which Microsoft's sample decodes; here daimon's inputs.
+    "feedback_form_submit": (
+        _CAPTURE,
+        "https://github.com/OfficeDev/Microsoft-Teams-Samples/blob/c845867cf0/samples/TeamsSDK/"
+        "bot-ai-messages/python/bot-ai-messages/main.py",
+    ),
     "installation_add": (f"{_EVENTS}#install-update-event",),
     # No published `remove` payload: a captured personal `upgrade`, with the documented action.
     "installation_remove": (f"{_TEAMS_NET}/ActivitiesTests.cs", f"{_EVENTS}#install-update-event"),
@@ -453,6 +460,19 @@ async def test_a_custom_feedback_click_records_the_vote_and_answers_with_the_for
     async with db_session_factory() as session:
         [row] = (await session.execute(select(MessageFeedback))).scalars().all()
     assert (row.vote, row.message_id) == ("down", CARD_MESSAGE_ID), "the 👎 is recorded at once"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_the_custom_form_sent_as_submit_action_stores_its_reasons_and_text(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    response, _ = await _run(db_session_factory, teams_api_fake, "feedback_form_submit")
+    assert response is None, "acknowledged with an empty body, as every message/submitAction"
+    async with db_session_factory() as session:
+        [row] = (await session.execute(select(MessageFeedback))).scalars().all()
+    assert (row.vote, row.message_id) == ("down", CARD_MESSAGE_ID), "on the answer replied to"
+    assert row.feedback_text == "The totals are off.", "the form's text, not dropped"
+    assert row.feedback_reasons == ["inaccurate", "too_slow"], "the form's reasons, as codes"
 
 
 @pytest.mark.usefixtures("provisioned_tenant")

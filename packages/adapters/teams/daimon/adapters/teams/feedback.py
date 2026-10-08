@@ -8,9 +8,13 @@ form: optional reasons (`FEEDBACK_REASONS`) and optional text, at least one.
 Its submit (`task/submit`) records the down-vote and the form on the
 submitter's own row; the form carries the answer's id, never a row id, so a
 forged one only points the submitter's own feedback at another message in
-the same conversation, under the same access check. Answers posted before
-the custom mode still open Teams' built-in form, which arrives as
-`message/submitAction` with text only (`on_builtin`).
+the same conversation, under the same access check. Teams may instead
+deliver the form's Send as `message/submitAction`, its inputs JSON-encoded in
+`actionValue.feedback`, as Microsoft's samples for the custom mode handle it;
+`on_builtin` recognises the form there and takes the same submit path,
+except that this invoke is answered with an empty body, so no thanks is
+shown. Answers posted before the custom mode still open Teams' built-in form,
+which arrives the same way with text only.
 
 Who may vote: the people who could have asked the agent there
 (`answer_access`), decided under the policy lock in the transaction that
@@ -32,7 +36,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, cast
 
 import structlog
@@ -175,6 +179,23 @@ def form_details(data: object) -> FormDetails:
     )
 
 
+def sent_form(raw: str, message_id: str) -> FormDetails | None:
+    """Daimon's form when Teams delivered its Send as `message/submitAction`.
+
+    None for anything else, such as the built-in form's `{"feedbackText": ...}`.
+    The answer is the invoke's own `replyToId`, never a field in the payload.
+    """
+    try:
+        parsed: object = json.loads(raw)
+    except ValueError:
+        return None
+    fields = submitted_fields(parsed)
+    marked = fields.get("action") == FEEDBACK_DIALOG
+    if not marked and REASONS_INPUT not in fields and TEXT_INPUT not in fields:
+        return None
+    return replace(form_details(fields), message_id=message_id)
+
+
 _Outcome = Literal["recorded", "refused", "unreadable"]
 
 
@@ -236,7 +257,7 @@ class TeamsFeedback:
         )
 
     async def on_builtin(self, ctx: ActivityContext[MessageSubmitActionInvokeActivity]) -> None:
-        """An answer posted with Teams' built-in form: the vote and any text."""
+        """Daimon's form sent this way, or an older answer's built-in form: vote and text."""
         await guarded(self._builtin(ctx.activity), None, "teams.feedback.failed")
 
     def _shared(self, tenant_id: uuid.UUID) -> bool:
@@ -262,25 +283,55 @@ class TeamsFeedback:
         form = form_details(activity.value.data)
         if actor is None or not form.message_id:
             return dialog_message(DENIED)
-        shared = self._shared(actor.tenant_id)
         if not form.text and not form.reasons:
+            shared = self._shared(actor.tenant_id)
             return dialog(TITLE, feedback_form(form.message_id, shared=shared, error=NEEDS_ONE))
-        place = AnswerPlace.of(activity, form.message_id)
+        recorded = await self._take_form(
+            actor, AnswerPlace.of(activity, form.message_id), form, activity.from_.name
+        )
+        if recorded.outcome != "recorded":
+            return dialog_message(refusal_text(recorded.outcome))
+        return dialog_message(THANKS_TEXT)
+
+    async def _builtin(self, activity: MessageSubmitActionInvokeActivity) -> None:
+        actor = await card_actor(self._runtime, activity)
+        message_id = activity.reply_to_id
+        if actor is None or not message_id:
+            log.info("teams.feedback.dropped")
+            return
+        place = AnswerPlace.of(activity, message_id)
+        action_value = activity.value.action_value
+        form = sent_form(action_value.feedback, message_id)
+        if form is not None:
+            # Daimon's form, delivered this way: the same submit path, minus the
+            # re-shown form, which an empty-bodied answer cannot carry. An empty
+            # one keeps the vote its click already recorded.
+            if form.text or form.reasons:
+                await self._take_form(actor, place, form, activity.from_.name)
+            return
+        vote: Vote = "up" if action_value.reaction == "like" else "down"
+        await self._record(actor, place, vote, text=feedback_text(action_value.feedback))
+
+    async def _take_form(
+        self, actor: Actor, place: AnswerPlace, form: FormDetails, user_name: str | None
+    ) -> _Recorded:
+        """Record a sent form as a down-vote with its details, and route it if the
+        tenant shares forms with support."""
         recorded = await self._record(
             actor, place, "down", details=(form.text or None, form.reasons)
         )
         if recorded.outcome != "recorded" or recorded.row_id is None:
-            return dialog_message(refusal_text(recorded.outcome))
+            return recorded
         log.info(
             "feedback.submission_recorded",
             feedback_id=str(recorded.row_id),
             reasons=list(form.reasons),
         )
-        if shared and recorded.details_changed:
+        if self._shared(actor.tenant_id) and recorded.details_changed:
             teams = self._runtime.settings.teams
             post = feedback_post(
                 user_id=actor.user_id,
-                user_name=activity.from_.name,
+                user_name=user_name,
                 link=place.link(teams.tenant_id) if teams is not None else place.message_id,
                 form=form,
                 recorded=recorded,
@@ -290,17 +341,7 @@ class TeamsFeedback:
             log.info(
                 "feedback.routed_to_support", feedback_id=str(recorded.row_id), delivered=delivered
             )
-        return dialog_message(THANKS_TEXT)
-
-    async def _builtin(self, activity: MessageSubmitActionInvokeActivity) -> None:
-        actor = await card_actor(self._runtime, activity)
-        message_id = activity.reply_to_id
-        if actor is None or not message_id:
-            log.info("teams.feedback.dropped")
-            return
-        vote: Vote = "up" if activity.value.action_value.reaction == "like" else "down"
-        text = feedback_text(activity.value.action_value.feedback)
-        await self._record(actor, AnswerPlace.of(activity, message_id), vote, text=text)
+        return recorded
 
     async def _record(
         self,
