@@ -31,7 +31,11 @@ typed in as one the caller can see: naming their other channels would take
 Graph lookups per team, so an agent rule's other channels stay unnamed. Slack
 answers `memory` privately inside the channel; Teams answers in the 1:1 chat,
 so for a channel whose readers are limited it says why instead, as `/dm`
-refuses to carry such a channel's work out.
+refuses to carry such a channel's work out. Teams bot commands are typed
+words (the manifest's command list only fills them in), so a message that is
+exactly a command word runs it: a reply of just `here` gets the card, where
+Slack and Discord take `here` as a slash command no reply can trip. The word
+stays `here` to match them.
 
 No platform parametrization, no database -- this is a scope check.
 """
@@ -55,8 +59,9 @@ from daimon.adapters.teams.attachments import (
     SharedFile,
     prepare_attachments,
 )
-from daimon.adapters.teams.commands import CommandContext
+from daimon.adapters.teams.commands import CommandContext, parse_command
 from daimon.adapters.teams.credential_requests import credential_form
+from daimon.adapters.teams.help import COMMAND_HELP
 from daimon.adapters.teams.identity import (
     GROUP_CHAT_UNSUPPORTED,
     Refusal,
@@ -115,6 +120,15 @@ def test_teams_commands_are_offered_only_in_the_one_to_one_chat() -> None:
     assert all(cl["scopes"] == ["personal"] for cl in manifest["bots"][0]["commandLists"]), (
         "command replies can carry account details; one typed in a channel is answered in the 1:1"
     )
+
+
+def test_teams_commands_are_bare_words_and_here_is_one() -> None:
+    names = {name: AsyncMock() for name in COMMAND_HELP}
+    assert parse_command("here", names) == ("here", ""), (
+        "a message that is exactly `here` runs the command, named as Slack's and Discord's are; "
+        "they are slash commands, so no reply there trips one"
+    )
+    assert parse_command("here is the file", names) is None, "anything longer is a turn"
 
 
 async def test_the_teams_here_card_sees_only_the_place_it_was_typed_in() -> None:
