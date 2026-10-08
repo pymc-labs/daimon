@@ -20,6 +20,7 @@ from daimon.core.github_app_session import (
     rotate_live_app_tokens,
 )
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
@@ -37,6 +38,7 @@ from daimon.core.stores.github_connect import (
     mint_invitation,
 )
 from daimon.core.stores.thread_sessions import (
+    get_thread_session_by_id,
     list_live_sessions_for_agent,
     mark_dead,
     record_app_token_refresh,
@@ -190,25 +192,37 @@ def _run_grant_command(
                                     fernet=fernet,
                                 )
                                 if _grant_session_action(action, snapshot, urls) == "rotate":
-                                    await rotate_live_app_tokens(
-                                        anthropic,
-                                        sessionmaker,
-                                        session_id=mapped.ma_session_id,
-                                        tenant_id=tenant,
-                                        agent_id=agent,
-                                        account_id=mapped.account_id,
-                                        is_external=False,
-                                        vault_id=snapshot.vault_id,
-                                        resource_ids=snapshot.repo_resource_ids,
-                                        config=settings.github_app,
-                                        fernet=fernet,
-                                    )
-                                    async with sessionmaker.begin() as session:
-                                        await record_app_token_refresh(
-                                            session,
-                                            ma_session_id=mapped.ma_session_id,
-                                            issued_at=int(datetime.now(UTC).timestamp()),
-                                        )
+                                    # The scheduler refresh and turn start/finish take the
+                                    # same fence; read the turn state only once inside it.
+                                    async with session_mutation_fence(
+                                        sessionmaker, mapped.ma_session_id, check=False
+                                    ):
+                                        async with sessionmaker() as session:
+                                            current = await get_thread_session_by_id(
+                                                session, id=mapped.id
+                                            )
+                                        if current is not None and current.status == "live":
+                                            await rotate_live_app_tokens(
+                                                anthropic,
+                                                sessionmaker,
+                                                session_id=mapped.ma_session_id,
+                                                tenant_id=tenant,
+                                                agent_id=agent,
+                                                account_id=mapped.account_id,
+                                                is_external=False,
+                                                vault_id=snapshot.vault_id,
+                                                resource_ids=snapshot.repo_resource_ids,
+                                                config=settings.github_app,
+                                                fernet=fernet,
+                                                active_turn=current.active_turn_message_id
+                                                is not None,
+                                            )
+                                            async with sessionmaker.begin() as session:
+                                                await record_app_token_refresh(
+                                                    session,
+                                                    ma_session_id=mapped.ma_session_id,
+                                                    issued_at=int(datetime.now(UTC).timestamp()),
+                                                )
                                     rotated_ids.add(mapped.ma_session_id)
                                     continue
                             if mapped.ma_session_id not in archived_ids:

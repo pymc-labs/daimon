@@ -301,6 +301,7 @@ async def add_github_copilot_credential(
     *,
     vault_id: str,
     token: str,
+    in_place: bool = False,
 ) -> None:
     """Create or replace the GitHub Copilot MCP `static_bearer` credential.
 
@@ -315,11 +316,14 @@ async def add_github_copilot_credential(
     session create writes it again.
 
     Idempotent on retry: list existing credentials, delete any static one
-    pointed at the GitHub Copilot URL, then create the new one. A person's own
-    `mcp_oauth` grant at that URL is left in place and nothing is created:
-    their sign-in outranks the agent's PAT, and the slot is taken anyway.
+    pointed at the GitHub Copilot URL, then create the new one. With
+    ``in_place`` (GitHub App rotation during a running turn) the first static
+    credential is updated instead, so the slot is never empty, and any
+    duplicates are deleted. A person's own `mcp_oauth` grant at that URL is
+    left in place and nothing is created: their sign-in outranks the agent's
+    PAT, and the slot is taken anyway.
     """
-    stale: list[str] = []
+    existing: list[str] = []
     async for cred in client.beta.vaults.credentials.list(vault_id=vault_id):
         if isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse):
             continue
@@ -327,19 +331,29 @@ async def add_github_copilot_credential(
             continue
         if cred.auth.type == "mcp_oauth":
             return
-        stale.append(cred.id)
-    # Collect first: deleting while the list paginates can skip an entry.
-    for credential_id in stale:
-        await client.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
-
-    await client.beta.vaults.credentials.create(
-        vault_id=vault_id,
-        auth={
-            "type": "static_bearer",
-            "mcp_server_url": GITHUB_COPILOT_MCP_URL,
-            "token": token,
-        },
-    )
+        existing.append(cred.id)
+    if not in_place:
+        # Collect first: deleting while the list paginates can skip an entry.
+        for credential_id in existing:
+            await client.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
+        existing = []
+    if existing:
+        await client.beta.vaults.credentials.update(
+            existing[0],
+            vault_id=vault_id,
+            auth={"type": "static_bearer", "token": token},
+        )
+        for duplicate_id in existing[1:]:
+            await client.beta.vaults.credentials.delete(duplicate_id, vault_id=vault_id)
+    else:
+        await client.beta.vaults.credentials.create(
+            vault_id=vault_id,
+            auth={
+                "type": "static_bearer",
+                "mcp_server_url": GITHUB_COPILOT_MCP_URL,
+                "token": token,
+            },
+        )
 
 
 async def add_external_mcp_credential(
