@@ -14,6 +14,7 @@ from daimon.adapters.cli.errors import run_cli
 from daimon.core.config import load_settings
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.github_app_session import (
+    archive_app_vault,
     effective_repo_urls,
     revoke_session_tokens,
     rotate_live_app_tokens,
@@ -226,7 +227,7 @@ def _run_grant_command(
                                             fernet=fernet,
                                         )
                                         if vault_id is not None:
-                                            await anthropic.beta.vaults.archive(vault_id)
+                                            await archive_app_vault(anthropic, vault_id=vault_id)
                                 archived_ids.add(mapped.ma_session_id)
                             async with sessionmaker.begin() as session:
                                 await mark_dead(session, id=mapped.id)

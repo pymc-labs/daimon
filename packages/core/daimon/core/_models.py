@@ -1384,10 +1384,14 @@ class GitHubAppInstallation(Base):
     """
 
     __tablename__ = "github_app_installations"
+    __table_args__ = (
+        CheckConstraint("app IN ('legacy', 'github_app')", name="ck_github_app_installations_app"),
+    )
 
     installation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     account_login: Mapped[str] = mapped_column(Text, nullable=False)
     repo_full_names: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    app: Mapped[str] = mapped_column(Text, nullable=False, server_default="legacy")
     account_id: Mapped[int | None] = mapped_column(BigInteger)
     account_type: Mapped[str | None] = mapped_column(Text)
     repository_selection: Mapped[str | None] = mapped_column(Text)
@@ -2635,6 +2639,7 @@ class GitHubIssuedToken(Base):
 
 class GitHubAppSessionVault(Base):
     __tablename__ = "github_app_session_vaults"
+    __table_args__ = (Index("ix_github_app_session_vaults_mcp_open", "is_mcp", "closed_at"),)
 
     session_id: Mapped[str] = mapped_column(Text, primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -2642,6 +2647,13 @@ class GitHubAppSessionVault(Base):
     )
     vault_id: Mapped[str] = mapped_column(Text)
     is_unmapped: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    is_mcp: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+    repo_urls: Mapped[list[str] | None] = mapped_column(JSONB)
+    repo_resource_ids: Mapped[dict[str, str] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

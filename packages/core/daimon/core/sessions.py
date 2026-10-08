@@ -52,6 +52,7 @@ from daimon.core.github_app_session import (
     REQUESTER_CACHE,
     AppSessionAccess,
     add_app_credentials,
+    archive_app_vault,
     create_session_vault,
     finish_app_delivery,
     prepare_app_access,
@@ -69,7 +70,12 @@ from daimon.core.mcp_vault import (
 from daimon.core.memory_resource import ensure_memory_store_and_mount
 from daimon.core.repo_resource import build_repo_resource
 from daimon.core.session_seal import origin_stamp
-from daimon.core.session_snapshot import session_mcp_servers, session_skills, session_tools
+from daimon.core.session_snapshot import (
+    session_mcp_servers,
+    session_skills,
+    session_tools,
+    snapshot_from_created_session,
+)
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.github_access import get_agent_mode
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
@@ -615,6 +621,18 @@ async def create_session(
                 assert (
                     session_factory is not None and tenant_id is not None and vault_id is not None
                 )
+                snapshot = (
+                    snapshot_from_created_session(
+                        created,
+                        env_sha256=None,
+                        env_file_id=None,
+                        repo_token_issued_at=None,
+                        vault_id=vault_id,
+                        github_mode="app",
+                    )
+                    if app_session_unmapped
+                    else None
+                )
                 async with session_factory.begin() as session:
                     await register_app_session_vault(
                         session,
@@ -622,6 +640,13 @@ async def create_session(
                         tenant_id=tenant_id,
                         vault_id=vault_id,
                         is_unmapped=requester_is_headless or app_session_unmapped,
+                        is_mcp=app_session_unmapped,
+                        agent_id=agent_uuid if app_session_unmapped else None,
+                        account_id=account_id if app_session_unmapped else None,
+                        repo_urls=snapshot.repo_urls if snapshot is not None else (),
+                        repo_resource_ids=(
+                            snapshot.repo_resource_ids if snapshot is not None else None
+                        ),
                     )
                 async with httpx.AsyncClient() as app_client:
                     await finish_app_delivery(
@@ -642,7 +667,7 @@ async def create_session(
             raise
     except BaseException:
         if app_mode and vault_id is not None:
-            await anthropic.beta.vaults.archive(vault_id)
+            await archive_app_vault(anthropic, vault_id=vault_id)
         raise
 
 

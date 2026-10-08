@@ -95,6 +95,7 @@ from daimon.core.rule_views import (
 from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
@@ -103,9 +104,13 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.github_connect import delete_expired_flows
 from daimon.core.stores.github_issued_tokens import (
+    LiveMcpAppSession,
+    closed_app_session_for_id,
     decrypt_issued_token,
+    finish_headless_app_session,
     list_closed_app_sessions,
     list_live_app_sessions,
+    list_live_mcp_app_sessions,
     list_session_tokens,
     mark_headless_app_session_closed,
     mark_revoked,
@@ -656,6 +661,23 @@ async def _sweep_github_app_tokens(
 _last_app_access_checks: dict[str, datetime] = {}
 
 
+async def _retire_mcp_app_session(
+    anthropic_client: AsyncAnthropic,
+    sm: async_sessionmaker[AsyncSession],
+    item: LiveMcpAppSession,
+    *,
+    fernet: MultiFernet,
+) -> None:
+    await anthropic_client.beta.sessions.archive(item.session_id)
+    async with sm.begin() as session:
+        await finish_headless_app_session(session, session_id=item.session_id)
+    async with httpx.AsyncClient() as github:
+        await revoke_session_tokens(sm, github, session_id=item.session_id, fernet=fernet)
+    await archive_app_vault(anthropic_client, vault_id=item.vault_id)
+    async with sm.begin() as session:
+        await mark_headless_app_session_closed(session, session_id=item.session_id)
+
+
 async def _refresh_github_app_sessions(
     anthropic_client: AsyncAnthropic,
     sm: async_sessionmaker[AsyncSession],
@@ -734,6 +756,78 @@ async def _refresh_github_app_sessions(
                 "scheduler.github_app_session_refresh.failed",
                 session_id=item.mapping.ma_session_id,
             )
+    async with sm() as session:
+        mcp_live = await list_live_mcp_app_sessions(session, now=now)
+    for candidate in mcp_live:
+        try:
+            async with session_mutation_fence(sm, candidate.session_id, check=False):
+                # Continue and close use this fence too. Re-read after acquiring it.
+                async with sm() as session:
+                    current = next(
+                        iter(
+                            await list_live_mcp_app_sessions(
+                                session, now=datetime.now(UTC), session_id=candidate.session_id
+                            )
+                        ),
+                        None,
+                    )
+                if current is None:
+                    continue
+                observed = await anthropic_client.beta.sessions.retrieve(current.session_id)
+                if observed.status != "idle":
+                    continue
+                if current.account_id is None:
+                    await _retire_mcp_app_session(anthropic_client, sm, current, fernet=fernet)
+                    continue
+                due_for_expiry = (
+                    current.expires_at is None or current.expires_at <= now + timedelta(minutes=15)
+                )
+                last_check = _last_app_access_checks.get(current.session_id)
+                due_for_access = last_check is None or last_check <= now - timedelta(minutes=5)
+                if not due_for_expiry and not due_for_access:
+                    continue
+                desired_urls, desired_permissions = await effective_repo_state(
+                    sm,
+                    tenant_id=current.tenant_id,
+                    agent_id=current.agent_id,
+                    account_id=current.account_id,
+                    is_external=False,
+                    config=settings.github_app,
+                    fernet=fernet,
+                )
+                if desired_urls != current.repo_urls:
+                    await _retire_mcp_app_session(anthropic_client, sm, current, fernet=fernet)
+                    continue
+                level = {"none": 0, "read": 1, "write": 2}
+                narrowed = any(
+                    level.get(desired_permissions.get(repo_id, {}).get(key, "none"), 0)
+                    < level.get(value, 0)
+                    for repo_id, permissions in current.permissions_by_repo.items()
+                    for key, value in permissions.items()
+                )
+                if not due_for_expiry and not narrowed:
+                    _last_app_access_checks[current.session_id] = now
+                    continue
+                if current.expires_at is not None or current.repo_urls:
+                    await rotate_live_app_tokens(
+                        anthropic_client,
+                        sm,
+                        session_id=current.session_id,
+                        tenant_id=current.tenant_id,
+                        agent_id=current.agent_id,
+                        account_id=current.account_id,
+                        is_external=False,
+                        vault_id=current.vault_id,
+                        resource_ids=current.repo_resource_ids,
+                        config=settings.github_app,
+                        fernet=fernet,
+                    )
+                _last_app_access_checks[current.session_id] = now
+        except Exception:
+            log.exception(
+                "scheduler.github_mcp_app_session_refresh.failed",
+                session_id=candidate.session_id,
+            )
 
 
 async def _close_github_app_sessions(
@@ -747,18 +841,25 @@ async def _close_github_app_sessions(
     async with httpx.AsyncClient() as github:
         for item in closed:
             try:
-                if fernet is None:
+                async with session_mutation_fence(sm, item.session_id, check=False):
                     async with sm() as session:
-                        if await list_session_tokens(session, session_id=item.session_id):
-                            continue
-                else:
-                    await revoke_session_tokens(
-                        sm, github, session_id=item.session_id, fernet=fernet
-                    )
-                if item.vault_id is not None:
-                    await archive_app_vault(anthropic_client, vault_id=item.vault_id)
-                async with sm.begin() as session:
-                    await mark_headless_app_session_closed(session, session_id=item.session_id)
+                        current = await closed_app_session_for_id(
+                            session, session_id=item.session_id, now=datetime.now(UTC)
+                        )
+                    if current is None:
+                        continue
+                    if fernet is None:
+                        async with sm() as session:
+                            if await list_session_tokens(session, session_id=item.session_id):
+                                continue
+                    else:
+                        await revoke_session_tokens(
+                            sm, github, session_id=item.session_id, fernet=fernet
+                        )
+                    if current.vault_id is not None:
+                        await archive_app_vault(anthropic_client, vault_id=current.vault_id)
+                    async with sm.begin() as session:
+                        await mark_headless_app_session_closed(session, session_id=item.session_id)
             except Exception:
                 log.exception(
                     "scheduler.github_app_session_close.failed",

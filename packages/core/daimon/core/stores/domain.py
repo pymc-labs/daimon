@@ -747,6 +747,7 @@ class GitHubAppInstallationRow(BaseModel):
     installation_id: int
     account_login: str
     repo_full_names: tuple[str, ...]
+    app: Literal["legacy", "github_app"] = "legacy"
     account_id: int | None = None
     account_type: str | None = None
     repository_selection: str | None = None

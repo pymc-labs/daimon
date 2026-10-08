@@ -18,7 +18,7 @@ from anthropic.types.beta import (
 from cryptography.fernet import Fernet, MultiFernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from daimon.core._models import AgentGitHubMode
+from daimon.core._models import AgentGitHubMode, GitHubAppSessionVault
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_requests import mint_request_token
@@ -37,7 +37,7 @@ from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import RepoAccessProof
 from daimon.core.turn.posture import ExemptReason
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
     FakeMemoryStoreState,
     NotHandled,
@@ -1387,12 +1387,15 @@ async def test_create_session_skips_copilot_when_no_pat(
     assert len(session_bodies) == 1
 
 
+@pytest.mark.parametrize("app_session_unmapped", [False, True])
 async def test_create_session_app_mode_with_zero_grants_has_no_github_access(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    app_session_unmapped: bool,
 ) -> None:
     tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant) if app_session_unmapped else None
     agent_uuid = uuid.uuid4()
     db_session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_uuid, mode="app"))
     await db_session.commit()
@@ -1420,9 +1423,17 @@ async def test_create_session_app_mode_with_zero_grants_has_no_github_access(
         agent=_make_agent(anthropic_id="ag_zero_grants"),
         environment=_make_env(anthropic_id="env_zero_grants"),
         tenant_id=tenant.id,
+        account_id=account.id if account is not None else None,
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
+        app_session_unmapped=app_session_unmapped,
     )
+    async with db_session_factory() as session:
+        registered = await session.get(GitHubAppSessionVault, "sess_zero_grants")
+    assert registered is not None
+    assert registered.is_unmapped is app_session_unmapped
+    assert registered.is_mcp is app_session_unmapped
+    assert registered.agent_id == (agent_uuid if app_session_unmapped else None)
     assert bodies[0]["vault_ids"] == ["vlt_session"]
     assert not any(r["type"] == "github_repository" for r in bodies[0].get("resources", []))
     assert credentials.await_args.kwargs["access"].tokens == ()

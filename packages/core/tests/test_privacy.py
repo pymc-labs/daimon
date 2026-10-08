@@ -924,6 +924,10 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # generation then fails the inventory sweeper's link check.
             "account_github_links",
             "github_issued_tokens",
+            # The vault belongs to a tenant session. Erasure clears its requester
+            # FK; the scheduler then retires the orphaned session and vault
+            # instead of renewing its tokens as a headless requester.
+            "github_app_session_vaults",
         }
     )
 
