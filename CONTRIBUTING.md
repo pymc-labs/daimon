@@ -18,7 +18,8 @@ look for in a pull request.
 - `apps/report-host/` — standalone report host service.
 - `plugin/` — Claude Code plugin (commands and skills).
 - `defaults/` — YAML sources for seeded agents, environments, and skills.
-- `docs/` — operator documentation.
+- `docs/` — operator documentation, published as the docs site. Shipped
+  behaviour only; plans and designs go in issues.
 
 Dependency rule (enforced by `import-linter` in CI):
 

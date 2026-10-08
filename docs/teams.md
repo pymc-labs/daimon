@@ -1,6 +1,6 @@
 # Teams adapter
 
-daimon on Microsoft Teams answers in 1:1 chats and in channel threads where
+Daimon on Microsoft Teams answers in 1:1 chats and in channel threads where
 it is @mentioned. It reads the thread it is asked about, works with files,
 runs routines, and has the same agents, memory and billing as on Discord and
 Slack. This page covers how it behaves and where it differs. To set it up
@@ -15,7 +15,7 @@ the built-in one start with its bold name on the first message chunk.
 Discord (gateway) and Slack (Socket Mode) dial out; Teams does not. The
 adapter runs a FastAPI listener on `DAIMON_TEAMS__PORT` (default `3978`). The
 Microsoft SDK owns `POST /api/messages` and validates the Bot Framework JWT
-before daimon code runs; tokens from any other issuer (such as Entra ID) are
+before Daimon code runs; tokens from any other issuer (such as Entra ID) are
 refused with 401 first. The same listener serves `/healthz` and `/readyz`,
 and, with `DAIMON_TEAMS__PUBLIC_URL` set, `GET /oauth/teams/files/callback`
 (below); a reverse proxy in front must pass that path too.
@@ -91,7 +91,7 @@ form say so, so whoever picks it up answers in the channel.
 Two kinds of people count as from another organisation: a shared channel's
 external participants, who join through B2B direct connect and stay in their
 home tenant, and guests (Entra B2B guest accounts in ours), who can be in
-standard and private channels and 1:1 chats. daimon answers them only inside
+standard and private channels and 1:1 chats. Daimon answers them only inside
 a channel kept to its own agents (`readers: own`) and its threads. Anywhere else an addressed message gets
 one line saying so and runs no turn, and their unmentioned replies are never
 judged for a followed thread. Their turns run as a member (never an admin or
@@ -148,7 +148,7 @@ the agent. None of them runs an agent turn.
 | `here` | The status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. Typed in a channel whose readers are limited, it says so instead, since the answer would leave the channel. |
-| `privacy` | See, export or delete what daimon stores about you. |
+| `privacy` | See, export or delete what Daimon stores about you. |
 | `billing` | Your usage this month and the credit left, with when timed credit expires, and, typed in a channel with a budget, that budget; admins also see the month's spend, the top spenders and channel budgets, add credit, redeem promo codes and look up one person's spend with the people picker. |
 | `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked; one from a channel with channel admins goes to them first (above). |
 
@@ -259,7 +259,7 @@ consent above) a followed thread stays mention-only.
   Where they are unavailable, `files_hint` tells the agent, asked for a file or
   to turn files on, to call `enable_channel_files` first rather than offer an
   artifact, report or notebook; the bot posts the Enable files card (below)
-  after that answer, for a daimon admin who asked.
+  after that answer, for a Daimon admin who asked.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and
@@ -290,7 +290,7 @@ needed.
    (the messaging endpoint without `/api/messages`). Same app →
    Authentication → Add a platform → Web → redirect URI
    `<DAIMON_TEAMS__PUBLIC_URL>/oauth/teams/files/callback`.
-3. When a daimon admin asks daimon to turn files on in a channel (or for a
+3. When a Daimon admin asks Daimon to turn files on in a channel (or for a
    file there), or shares a file it cannot open, the bot posts an **Enable
    files** card (unasked, at most every 15 minutes per channel). A SharePoint
    or global admin who is a member of the channel clicks it and signs in once,
@@ -359,7 +359,7 @@ registration:
   delete what it posted (`edit_message`, `delete_message`); closing a thread
   (`delete_thread`, `archive_thread`) is not on Teams.
 - **`send_direct_message`** opens a 1:1 chat with someone who shares a team
-  with the caller and daimon, named by Entra object ID.
+  with the caller and Daimon, named by Entra object ID.
 - **`post_wizard`** posts its form as an Adaptive Card that only the asker can
   fill in (no step images); Submit starts their turn.
 - Task handoff and fresh starts, timers (`create_timer`, `list_timers`,

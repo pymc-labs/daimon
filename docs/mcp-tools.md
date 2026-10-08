@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 117 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 117 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -154,7 +154,7 @@ Shared channel MCP tools with per-platform dispatch.
 | `search_messages` | Discord callers, Slack callers, Teams callers | Search messages with server-side filters. |
 | `send_direct_message` | Discord callers, Slack callers, Teams callers | Privately message one human member of the current server/workspace. |
 | `send_message` | Discord callers, Slack callers, Teams callers | Post a message to a channel. |
-| `set_display_identity` | Discord callers | Change how daimon appears in this Discord server: its display name, its avatar, or both. |
+| `set_display_identity` | Discord callers | Change how Daimon appears in this Discord server: its display name, its avatar, or both. |
 
 ## `cli_token`
 
@@ -423,7 +423,7 @@ post_wizard: the agent-facing tool that posts a multi-step form.
 
 ## Hub login mounts: `hub`
 
-Tool surface for the hub mounts: every daimon a logged-in person can reach.
+Tool surface for the hub mounts: every Daimon a logged-in person can reach.
 
 A second surface, separate from the tools above: one app per platform, mounted at
 `/discord/mcp` and `/slack/mcp` behind that platform's OAuth login, and present only
@@ -433,11 +433,11 @@ visibility tags, so a logged-in caller sees all of them; each takes a `daimon_id
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `ask` | all callers | Ask a daimon one question and wait up to about two minutes for its answer. |
+| `ask` | all callers | Ask a Daimon one question and wait up to about two minutes for its answer. |
 | `continue_turn` | all callers | Send a follow-up on an existing session without waiting. |
-| `describe_daimon` | all callers | Describe one daimon: role, skills, repo, environment, platform and workspace. |
+| `describe_daimon` | all callers | Describe one Daimon: role, skills, repo, environment, platform and workspace. |
 | `get_session` | all callers | Status of one session. |
-| `list_daimons` | all callers | List every daimon you can reach on this platform, across all your workspaces. |
+| `list_daimons` | all callers | List every Daimon you can reach on this platform, across all your workspaces. |
 | `list_events` | all callers | A session's transcript. |
-| `list_my_sessions` | all callers | Sessions you started with this daimon, for resuming with ``handle``. |
+| `list_my_sessions` | all callers | Sessions you started with this Daimon, for resuming with ``handle``. |
 | `start_turn` | all callers | Start a turn without waiting. |

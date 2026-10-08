@@ -402,7 +402,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         avatar_url: str | None = None,
         origin_context_id: str | None = None,
     ) -> DisplayIdentityRow:
-        """Change how daimon appears in this Discord server: its display name,
+        """Change how Daimon appears in this Discord server: its display name,
         its avatar, or both.
 
         Use when the user asks you to rename yourself or change your profile

@@ -1,9 +1,9 @@
 # Architecture
 
-daimon is built on
+Daimon is built on
 [Anthropic Managed Agents](https://platform.claude.com/docs/en/managed-agents/quickstart).
 Managed Agents (MA) owns the agent, its sandbox, its skills and the session
-that runs a turn. daimon owns everything around that: the chat surfaces, the
+that runs a turn. Daimon owns everything around that: the chat surfaces, the
 tenancy model, the config cascade, credentials, the credit ledger, and the
 pipeline that turns a chat message into a session and streams the result back
 into a thread.
@@ -63,8 +63,8 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
 | `daimon.testing` | `packages/testing/` | Shared fixtures. |
-| `mux` | `packages/mux/` | A separate namespace, not part of `daimon`. See [mux.md](mux.md). |
-| `notebook_host`, `report_host` | `apps/*/src/` | Standalone services that talk to daimon over HTTP only. |
+| `mux` | `packages/mux/` | A separate namespace, not part of `daimon`. See [its README](https://github.com/pymc-labs/daimon/blob/main/packages/mux/README.md). |
+| `notebook_host`, `report_host` | `apps/*/src/` | Standalone services that talk to Daimon over HTTP only. |
 
 None of that is convention. Eight `import-linter` contracts in the root
 `pyproject.toml` are the authority, run as `uv run lint-imports` in pre-commit
@@ -877,7 +877,7 @@ the tenant and limit type.
 
 ### Outside text is data
 
-Anything daimon quotes into a turn from someone other than the person asking
+Anything Daimon quotes into a turn from someone other than the person asking
 goes through one envelope, `packages/core/daimon/core/untrusted.py`: an
 element marked `trust="untrusted"`, opened by a fixed line saying the content
 is data, not instructions, with every value escaped so the content cannot
@@ -891,7 +891,7 @@ block (`packages/core/daimon/core/agent_guidance.py`) tells every agent what
 the marker means. Only the `<user_query>` is the request.
 
 Third-party MCP tool results travel from Managed Agents straight to the model
-without passing through daimon, so they carry no marker; the guidance
+without passing through Daimon, so they carry no marker; the guidance
 paragraph covers them by name ("whatever a tool returns").
 
 ## Trust model
@@ -959,7 +959,7 @@ On every turn, wherever an agent with a rule runs (including an exempt admin
 turn and a member's turn inside its channel), its sends (messages, replies,
 threads and posts, files and cards on Discord, Slack and Teams) reach only:
 its rule's channels and threads under them; the requester's own 1:1 DM with
-daimon (a Slack IM whose user is the requester, or a Teams personal chat the
+Daimon (a Slack IM whose user is the requester, or a Teams personal chat the
 requester is in); and direct messages to the requester. Its context never
 lands in another channel or another person's DM. A channel's own agent is
 stricter: it posts only into its channel and the threads under it, never the
@@ -1241,7 +1241,7 @@ host admits uploads only from the tenants the operator lists in
 signed upload token.
 `apps/report-host/` serves one published PDF report with a chat sidebar.
 Both are FastAPI processes that hold no Anthropic key and no database
-credential; they reach daimon over HTTP with capability tokens, and the
+credential; they reach Daimon over HTTP with capability tokens, and the
 `must not import daimon` contracts keep it that way.
 
 ## Where to look next
@@ -1367,7 +1367,7 @@ by the routine MCP tools. See [routines.md](routines.md) for catch-up and shutdo
 The shared channel tool `send_direct_message(recipient_id, content)` dispatches
 to Discord, Slack or Teams under the authenticated tenant. Both sender and recipient
 are checked for current platform membership before a DM is opened (on Teams,
-a team daimon is in that both belong to). Discord bot recipients, Slack
+a team Daimon is in that both belong to). Discord bot recipients, Slack
 inactive, external, or bot users and Teams anonymous members are rejected. Other
 platforms return unsupported. Channel tools continue to reject DM channel IDs.
 

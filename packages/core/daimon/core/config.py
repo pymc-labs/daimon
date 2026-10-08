@@ -424,7 +424,7 @@ class DiscordSettings(BaseModel):
             "need a caller holding Manage Server while the refusal paths need "
             "one without it. Leave empty outside test deployments -- an "
             "allow-listed bot spends real credit. As a tuple field this must "
-            'be set as a JSON array, e.g. \'["123","456"]\'. daimon\'s own id '
+            'be set as a JSON array, e.g. \'["123","456"]\'. Daimon\'s own id '
             "is refused at the gate even if listed."
         ),
     )
@@ -580,7 +580,7 @@ class TeamsSettings(BaseModel):
         description=(
             "Externally reachable base URL of the Teams service (the Bot "
             "Framework messaging endpoint without /api/messages). Enables the "
-            "admin sign-in that grants daimon a team's SharePoint site; its "
+            "admin sign-in that grants Daimon a team's SharePoint site; its "
             "callback is <public_url>/oauth/teams/files/callback, which must be "
             "a Web redirect URI on the app registration."
         ),
@@ -1060,7 +1060,7 @@ class SupportSettings(BaseModel):
             "for a deployment installed in several workspaces: every workspace's "
             "requests are posted with that workspace's bot token. Unset posts with "
             "the requesting workspace's own token, which suits a single-workspace "
-            "install. daimon must be installed in the named workspace."
+            "install. Daimon must be installed in the named workspace."
         ),
     )
     credits_per_user: int = Field(
@@ -1194,7 +1194,7 @@ class Settings(BaseSettings):
         ge=0,
         description=(
             "Security audit retention age in days, default 90. Operators must schedule "
-            "daimon audit prune TENANT_UUID for each tenant (for example daily). "
+            "`daimon audit prune TENANT_UUID` for each tenant (for example daily). "
             "The command deletes older events. Set 0 to explicitly retain events forever; "
             "privacy erasure and tenant deletion still apply."
         ),

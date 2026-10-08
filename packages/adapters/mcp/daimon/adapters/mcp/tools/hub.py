@@ -1,4 +1,4 @@
-"""Tool surface for the hub mounts: every daimon a logged-in person can reach.
+"""Tool surface for the hub mounts: every Daimon a logged-in person can reach.
 
 A hub caller is one platform user across several tenants, so no tool here
 takes a bare agent name: names are unique only within a tenant and two guilds
@@ -7,14 +7,14 @@ UUID as ``id`` and every other tool takes it back as ``daimon_id``. Resolution
 walks only the caller's own tenants, so an id from anywhere else is
 indistinguishable from a nonexistent one.
 
-Once a daimon is resolved the tool builds an ordinary ``AuthIdentity`` for the
+Once a Daimon is resolved the tool builds an ordinary ``AuthIdentity`` for the
 caller's account in that tenant and hands off to the agent-chat implementation
 functions. That is what makes a hub turn run with the person's channel
 visibility and bill the right tenant, exactly as a per-agent token does.
 
 Session handles are scoped one step tighter than on the per-agent surface.
 There, the token *is* the agent, so "the agent's sessions" and "the caller's
-sessions" coincide. Here every member of a workspace shares one daimon, so a
+sessions" coincide. Here every member of a workspace shares one Daimon, so a
 handle is only usable by the account that created the session: the
 ``daimon_account`` metadata ``create_session`` stamps on every session is
 compared to the caller's account before any read or continuation, and
@@ -22,7 +22,7 @@ compared to the caller's account before any read or continuation, and
 adapters carry the thread starter's account, so they are invisible to
 everyone else through the hub -- except to a workspace admin (stored role,
 refreshed by their next platform turn), who may list and read every channel
-conversation of the daimon, sealed ones included, but continue none that is
+conversation of the Daimon, sealed ones included, but continue none that is
 sealed, and to a channel admin (stored grants), who may do the same for the
 channels they administer (docs/architecture.md, "Trust model").
 """
@@ -311,11 +311,11 @@ def register_hub_tools(
     async def list_daimons(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
     ) -> list[DaimonSummary]:
-        """List every daimon you can reach on this platform, across all your workspaces.
+        """List every Daimon you can reach on this platform, across all your workspaces.
 
         Call this first. ``id`` is what every other tool takes as ``daimon_id``;
-        ``workspace`` tells you which Slack workspace or Discord server the daimon
-        lives in. Two daimons may share a ``name`` in different workspaces.
+        ``workspace`` tells you which Slack workspace or Discord server the Daimon
+        lives in. Two Daimons may share a ``name`` in different workspaces.
         """
         return await _list_daimons_impl(runtime, await _hub_auth(ctx))
 
@@ -323,7 +323,7 @@ def register_hub_tools(
     async def describe_daimon(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, daimon_id: str
     ) -> AgentDescription:
-        """Describe one daimon: role, skills, repo, environment, platform and workspace."""
+        """Describe one Daimon: role, skills, repo, environment, platform and workspace."""
         tenant, _, auth = await _identity(runtime, ctx, daimon_id)
         base = await _describe_agent_impl(runtime, auth)
         return base.model_copy(update={"workspace": tenant.workspace_name})
@@ -332,9 +332,9 @@ def register_hub_tools(
     async def ask(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, daimon_id: str, message: str, handle: str | None = None
     ) -> ToolResult:
-        """Ask a daimon one question and wait up to about two minutes for its answer.
+        """Ask a Daimon one question and wait up to about two minutes for its answer.
 
-        Runs as you, in that daimon's workspace: it reads only what you can see
+        Runs as you, in that Daimon's workspace: it reads only what you can see
         and spends that workspace's credit. Pass ``handle`` from a previous
         result to continue the same conversation. On timeout the error carries
         the handle; resume with it rather than asking again.
@@ -387,7 +387,7 @@ def register_hub_tools(
         limit: int | None = None,
         order: Literal["asc", "desc"] | None = None,
     ) -> Page[SessionEventOut]:
-        """A session's transcript. The daimon's reply is in ``agent.message`` events."""
+        """A session's transcript. The Daimon's reply is in ``agent.message`` events."""
         _, _, auth = await _identity(runtime, ctx, daimon_id)
         with hub_session_access(await load_hub_subject(runtime, auth), "read"):
             await _verify_account_owns_session(runtime, auth, handle)
@@ -397,12 +397,12 @@ def register_hub_tools(
     async def list_my_sessions(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, daimon_id: str
     ) -> list[SessionInfo]:
-        """Sessions you started with this daimon, for resuming with ``handle``.
+        """Sessions you started with this Daimon, for resuming with ``handle``.
 
-        Other people's conversations with the same daimon are not listed and
+        Other people's conversations with the same Daimon are not listed and
         their handles are not accepted; nor are conversations from a sealed
         channel, which can only be read from inside it. A workspace admin also
-        sees everyone's channel conversations with this daimon, sealed ones
+        sees everyone's channel conversations with this Daimon, sealed ones
         included, and can read them with ``get_session``/``list_events``, but
         can't continue a sealed one from here. A channel admin sees the same
         for the channels they administer.

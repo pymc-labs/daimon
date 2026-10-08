@@ -22,7 +22,7 @@ rules on two channels, a thread, a category and two agents with rules.
 | | `own` | only the channel's own agents, inside it |
 | `writers` | `any` | any agent answers and posts |
 | | `own` | only the channel's own agents answer and post |
-| | `none` | no turn starts and nothing posts, admins and daimon's notices included |
+| | `none` | no turn starts and nothing posts, admins and Daimon's notices included |
 
 A channel's **own agents** are those whose agent rule names it alone, while
 its readers are `own`: that channel is their **home**. `own` goes on both
@@ -64,7 +64,7 @@ configure its own agent.
 whoever holds it opens. From a channel whose content is kept inside, or by an
 agent with a rule, it waits for the requester to press Approve on a card.
 Agent keys and runs nobody watches can't publish there, and nobody changes
-daimon's server-wide name or avatar there. See [publishing](#publishing).
+Daimon's server-wide name or avatar there. See [publishing](#publishing).
 
 **Listed** covers agents, their skills, environments, routines, timers and
 defaults. From outside, a channel's own agents are hidden everywhere.

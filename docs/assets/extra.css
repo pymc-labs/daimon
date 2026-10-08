@@ -41,10 +41,10 @@
   background-color: rgba(255, 255, 255, 0.4);
 }
 
-/* Material renders the logo at 1.2rem; the sticker needs a little more to
-   be recognisable. */
-.md-header__button.md-logo img {
-  height: 1.6rem;
+/* The sidebar shows the sticker on desktop, and narrower screens get the
+   menu button there instead, so the header never needs the logo. */
+.md-header__button.md-logo {
+  display: none;
 }
 
 /* The readme's sticker at the top of the navigation. Desktop only: below

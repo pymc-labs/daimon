@@ -1,4 +1,4 @@
-# Self-hosting daimon
+# Self-hosting Daimon
 
 This guide expands the README quickstart. It covers the full Docker Compose
 setup, running the processes by hand, Slack, Microsoft Teams, the Claude Code
@@ -8,7 +8,7 @@ login mounts, chart storage and connecting MCP servers.
 
 - [Docker](https://docs.docker.com/get-docker/) with Compose.
 - An Anthropic API key **in a workspace dedicated to this deployment**.
-  daimon manages the workspace's Managed Agents resources as its own, so
+  Daimon manages the workspace's Managed Agents resources as its own, so
   sharing the workspace with anything else causes collisions.
 
 ## 1. Configure the environment
@@ -264,7 +264,7 @@ You need:
 
 ### 1. Register the app in Entra
 
-This registration is the identity daimon signs in as.
+This registration is the identity Daimon signs in as.
 
 1. Go to [entra.microsoft.com](https://entra.microsoft.com) → **App
    registrations** → **New registration**.
@@ -314,7 +314,7 @@ az bot msteams create -g <resource-group> -n <bot-name>
 ### 3. Run the Teams service
 
 **Find your admins.** Teams doesn't tell bots who its admins are, so you list
-daimon's admins yourself, by their Entra object ID: Entra → **Users** → pick
+Daimon's admins yourself, by their Entra object ID: Entra → **Users** → pick
 the person → copy **Object ID**. Admins can create routines, mint
 coding-tool tokens, replace shared keys, top up and see everyone's usage.
 Anyone can create an agent. You can change the list later.
@@ -331,7 +331,7 @@ DAIMON_TEAMS__ADMIN_USER_IDS=["<object ID>","<another object ID>"]
 A few things to know:
 
 - **Set the three credentials together.** Once any `DAIMON_TEAMS__` value is
-  set, every daimon process expects the full set. A half-filled block stops
+  set, every Daimon process expects the full set. A half-filled block stops
   them all from starting, not just Teams.
 - **The admin list is a JSON array**, not a comma-separated list.
 - **`DAIMON_CRYPTO__KEYS` must be set** (see step 1 of this guide).
@@ -369,7 +369,7 @@ Only those four paths need to be public. The last one is used only by the
 optional channel files. Check it from outside your network:
 `curl https://teams.example.com/healthz` should return `{"status":"live"}`.
 
-### 4. Point the bot at daimon
+### 4. Point the bot at Daimon
 
 Back in the Azure Bot → **Settings** → **Configuration**, set the
 **Messaging endpoint** to your hostname **with `/api/messages` on the end**:
@@ -411,7 +411,7 @@ EOF
 
 Before you zip it, check these fields in `manifest.json`:
 
-- `termsOfUseUrl` should point at your own terms page, since daimon serves
+- `termsOfUseUrl` should point at your own terms page, since Daimon serves
   none.
 - `websiteUrl` and `privacyUrl` should point at pages you serve. The Teams
   host itself answers 404 outside the four bot paths.
@@ -486,7 +486,7 @@ Teams](https://learn.microsoft.com/en-us/microsoftteams/shared-channels)):
    participants don't use guest accounts, but guest access must be enabled
    to invite them. The SharePoint and Microsoft 365 Groups guest settings
    must stay on too (the default).
-4. Create the shared channel, set its readers and writers to `own` in daimon
+4. Create the shared channel, set its readers and writers to `own` in Daimon
    (the setup panel's Channel settings, `set_channel_rule` or
    `daimon channels rule set`),
    then add the other organisation's people as channel members. Guests,
@@ -495,7 +495,7 @@ Teams](https://learn.microsoft.com/en-us/microsoftteams/shared-channels)):
    added as an external participant (in the admin center, search
    `ext:user@domain.com`).
 
-daimon answers them only there, as a member who can't change its setup.
+Daimon answers them only there, as a member who can't change its setup.
 Guests in standard and private channels and 1:1 chats get the same rules;
 list the ones who are colleagues with `daimon tenants access-policy
 --add-member-guest <object id>`. `DAIMON_TEAMS__RESTRICT_GUESTS=false` treats
@@ -522,12 +522,12 @@ those files and save its own outputs to the channel's Files tab:
 3. Set `DAIMON_TEAMS__PUBLIC_URL=https://teams.example.com` in `.env` (your
    hostname, without `/api/messages`) and run
    `docker compose --profile teams up -d` so the service picks it up.
-4. In the channel, a daimon admin asks the bot to turn files on ("enable
+4. In the channel, a Daimon admin asks the bot to turn files on ("enable
    files in this channel"), or shares a file it can't open, and the bot posts
    an **Enable files** card. Click it and sign in as a SharePoint or global
    admin who is a member of that channel. The first sign-in in your
    organisation must be a global admin, who approves this for everyone.
-   daimon then grants itself access to that channel's site, and the next
+   Daimon then grants itself access to that channel's site, and the next
    message can read the file.
 
 One sign-in covers a team's standard channels, which share its site; each
@@ -542,7 +542,7 @@ also shows how to grant a team's site by hand.
   the Teams channel is enabled:** the Azure Bot's Teams channel isn't on (step 2), or the
   manifest's `id` and `botId` don't match the client ID.
 - **No answer anywhere, and nothing in `docker compose logs teams`:** the
-  messages aren't reaching daimon. Check the messaging endpoint (step 4),
+  messages aren't reaching Daimon. Check the messaging endpoint (step 4),
   including the `/api/messages` suffix, and that `/healthz` answers from
   outside your network.
 - **1:1 chats work but channel @mentions don't:** if the app was added to the
@@ -551,10 +551,10 @@ also shows how to grant a team's site by hand.
   add it again. Check, too, that the mention was picked from autocomplete.
 - **A Reply on a bot message gets no answer in a private channel:** Teams
   sends the bot only the private channel posts that @mention it. Mention it.
-- **Every daimon process fails at startup after adding Teams:** a
+- **Every Daimon process fails at startup after adding Teams:** a
   `DAIMON_TEAMS__` value is missing, or `DAIMON_TEAMS__ADMIN_USER_IDS` isn't
   a JSON array of object IDs.
-- **`teams.tenant_reconcile_failed` in the logs:** daimon couldn't finish
+- **`teams.tenant_reconcile_failed` in the logs:** Daimon couldn't finish
   setting up your organisation, and it refuses turns until it does. The log
   line says why.
 - **It stopped answering after months of working:** the client secret has
@@ -573,7 +573,7 @@ permissions.
 
 Coding-agent clients such as Claude Code connect through the plugin in
 [`plugin/`](https://github.com/pymc-labs/daimon/blob/main/plugin/README.md) instead of a per-agent token. It logs in via
-Slack or Discord OAuth and reaches every daimon install the logged-in person
+Slack or Discord OAuth and reaches every Daimon install the logged-in person
 belongs to. There is no Teams login yet.
 
 Each platform's mount needs its own OAuth app, plus `DAIMON_HUB__*`,
@@ -588,10 +588,10 @@ Register these redirect URIs on the OAuth apps, where `{origin}` is
 The Discord app requests the `identify` and `guilds` scopes. The Slack app
 requests user scopes (`users:read`, `channels:history`, `groups:history`,
 `channels:read`, `groups:read`, `im:history`, `mpim:history`, `im:read`,
-`mpim:read`, `search:read`) so a daimon reads Slack as the person asking and
+`mpim:read`, `search:read`) so a Daimon reads Slack as the person asking and
 never sees a channel they cannot.
 
-A login reaches only workspaces where daimon is installed and ready, checked
+A login reaches only workspaces where Daimon is installed and ready, checked
 on every call. Membership is re-read when the login token is issued or
 refreshed: a Slack token stops working the moment its user leaves the
 workspace, while someone removed from a Discord server keeps that server's
@@ -619,7 +619,7 @@ the private artifact store.
   virtual-hosted-style addressing. Confirm that contract with your provider.
   Path-style-only endpoints, including default MinIO setups, are not
   supported.
-- Objects remain private. daimon never applies a public-read ACL.
+- Objects remain private. Daimon never applies a public-read ACL.
 - Presigned URL expiry does not delete stored objects. Configure a bucket
   lifecycle rule for the retention period your deployment requires.
 
@@ -634,7 +634,7 @@ Ask the agent to connect a server and it posts a card only you can open.
   form. The token is checked against the server before it is stored and is
   shared by everyone who talks to that agent.
 - A server that signs people in through a browser (Notion, Slack, Atlassian)
-  gets a sign-in link. daimon registers itself as an OAuth client, you
+  gets a sign-in link. Daimon registers itself as an OAuth client, you
   approve in the browser, and the grant lands in your own vault, refreshed
   by Anthropic. Each person connects their own account.
 

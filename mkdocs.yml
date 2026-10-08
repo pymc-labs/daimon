@@ -1,4 +1,4 @@
-site_name: daimon
+site_name: Daimon
 site_description: The open source data science agent for Discord and Slack
 site_url: https://pymc-labs.github.io/daimon/
 repo_url: https://github.com/pymc-labs/daimon
@@ -21,13 +21,17 @@ nav:
   - Routines: routines.md
   - Billing: billing.md
   - Defaults: defaults.md
+  - GitHub push resync: github-push-resync.md
   - Slack: slack.md
   - Agent identity: agent-identity.md
   - Teams: teams.md
   - Claude Code plugin: plugin.md
-  - mux: mux.md
-  - Managed Agents adoption plan: managed-agents-adoption.md
-  - Dreams design: dreams-design.md
+
+# Every page in docs/ is published, listed or not, so a page left out of the
+# nav fails the strict build instead of shipping unreachable.
+validation:
+  nav:
+    omitted_files: warn
 
 theme:
   name: material

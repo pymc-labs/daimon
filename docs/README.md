@@ -1,6 +1,6 @@
 # Documentation
 
-daimon is an open source data science agent that joins a team's Discord,
+Daimon is an open source data science agent that joins a team's Discord,
 Slack or Microsoft Teams, runs the analysis in the thread, and posts back
 charts, models and a reproducible notebook. Start with
 [self-hosting.md](self-hosting.md) to get a
@@ -24,6 +24,8 @@ pieces fit together.
   and cap gates, the signup credit, top-ups and the ledger tables.
 - [defaults.md](defaults.md) — authoring `defaults/`: agents, environments and
   skills, `daimon defaults apply` and `verify`, the seeded-skill fingerprint.
+- [github-push-resync.md](github-push-resync.md) — how a GitHub push resyncs
+  bound skills: the queue, retries, rate limits and delivery guarantees.
 - [slack.md](slack.md) — the Slack adapter's trust model: file delivery and
   per-user access.
 - [agent-identity.md](agent-identity.md) — per-message agent names, avatars,
@@ -32,12 +34,6 @@ pieces fit together.
   channel history and files, agent tools, restarts and current limits.
 - [plugin.md](plugin.md) — the Claude Code plugin: what the hub login mounts
   are and what has to be configured before installing it.
-- [mux.md](mux.md) — what `packages/mux` is for, and that it is a scaffold
-  nothing imports yet.
-- [managed-agents-adoption.md](managed-agents-adoption.md) — which recent
-  Claude Managed Agents features to adopt, what each touches, and go or no-go.
-- [dreams-design.md](dreams-design.md) — design for tidying agent memory with
-  Managed Agents dreams; not built.
 - [slack-app-manifest.yaml](slack-app-manifest.yaml) — paste-in manifest for
   creating the Slack app.
 - [teams-app-manifest.yaml](teams-app-manifest.yaml) — the Teams app manifest
