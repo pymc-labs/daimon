@@ -843,7 +843,7 @@ async def test_reconfirmation_respects_inactive_repo_choice(
 
 
 @pytest.mark.asyncio
-async def test_shared_installation_can_connect_repos_in_two_workspaces(
+async def test_workspace_a_can_connect_org_repo_after_workspace_b(
     db_session: AsyncSession,
 ) -> None:
     await github_app_installations.upsert(
@@ -852,9 +852,10 @@ async def test_shared_installation_can_connect_repos_in_two_workspaces(
         account_login="org-x",
         repo_full_names=["org-x/one", "org-x/two"],
     )
-    for index, repo_name in enumerate(("org-x/one", "org-x/two"), start=1):
+    connected: list[tuple[uuid.UUID, int]] = []
+    for workspace, index, repo_name in (("B", 2, "org-x/two"), ("A", 1, "org-x/one")):
         tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
-        db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+        db_session.add(Tenant(id=tenant_id, platform="discord", external_id=workspace))
         await db_session.flush()
         db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
         await db_session.flush()
@@ -884,6 +885,8 @@ async def test_shared_installation_can_connect_repos_in_two_workspaces(
             ],
         )
         assert await db_session.get(TenantGitHubRepo, (tenant_id, index)) is not None
+        connected.append((tenant_id, index))
+    assert all([await db_session.get(TenantGitHubRepo, key) is not None for key in connected])
 
 
 @pytest.mark.asyncio
