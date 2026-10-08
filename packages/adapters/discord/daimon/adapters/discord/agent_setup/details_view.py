@@ -475,11 +475,16 @@ class DetailsView(PanelViewBase):
             details=self.details,
             agent=self.agent,
         )
-        with contextlib.suppress(discord.NotFound):
+        try:
             await panel_interaction.edit_original_response(
                 view=refreshed.bind_render_interaction(panel_interaction, panel=self.state),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+        except discord.NotFound:
+            return
+        except discord.HTTPException as exc:
+            if exc.status != 401 or exc.code != 50027:
+                raise
 
     async def _on_avatar_details(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(

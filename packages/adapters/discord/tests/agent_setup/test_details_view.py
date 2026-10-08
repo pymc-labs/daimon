@@ -290,16 +290,24 @@ async def test_picture_upload_refreshes_live_panel_without_expiring_it(
     assert panel_interaction.edit_original_response.await_count == 1
 
 
+@pytest.mark.parametrize(
+    "panel_error",
+    [
+        discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Webhook"),
+        discord.HTTPException(
+            MagicMock(status=401, reason="Unauthorized"),
+            {"code": 50027, "message": "Invalid Webhook Token"},
+        ),
+    ],
+)
 async def test_picture_upload_ignores_missing_live_panel(
-    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch, panel_error: discord.HTTPException
 ) -> None:
     details = _details()
     state = _state(details, account_id=account_id)
     view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
     panel_interaction = _admin_interaction()
-    panel_interaction.edit_original_response.side_effect = discord.NotFound(
-        MagicMock(status=404, reason="Not Found"), "Unknown Webhook"
-    )
+    panel_interaction.edit_original_response.side_effect = panel_error
     view.bind_render_interaction(panel_interaction, panel=state)
     modal = PictureUploadModal(view)
     modal.file_input._values = [MagicMock(spec=discord.Attachment)]
