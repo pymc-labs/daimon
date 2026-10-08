@@ -34,8 +34,8 @@ covers every turn on the session: a billed caller continuing an exempt session
 is absorbed too, and an exempt caller acting on a billed session is debited.
 
 Per `guideline:architecture` Error Propagation: this does not swallow
-exceptions — the scheduler tick is the boundary that decides a sweep failure
-must not kill the loop.
+exceptions — the scheduler's sweep loop is the boundary that decides a sweep
+failure must not kill the process.
 """
 
 from __future__ import annotations

@@ -136,7 +136,7 @@ Each tick, 30 seconds apart by default:
    unclaimed work remains in PostgreSQL when the bounded batch is full.
 
 The [usage sweep](billing.md#the-tables) runs on its own loop with the same
-pause between passes, so a long pass never delays a claim. Shutdown cancels a
+pause between passes, so a long pass no longer blocks claims. Shutdown cancels a
 pass in flight; the next process starts a full pass.
 
 The per-routine catch-up policy controls downtime recovery:

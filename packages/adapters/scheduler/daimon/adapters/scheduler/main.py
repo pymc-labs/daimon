@@ -552,15 +552,15 @@ async def _sweep_headless_usage(
     watermark: UsageSweepWatermark,
 ) -> None:
     """Backfill usage for headless MCP turns once. Boundary catch: a sweep
-    failure must not kill the scheduler loop — idempotent recording means the
-    next tick re-reads and records anything missed.
+    failure must not kill the scheduler — idempotent recording means the next
+    pass re-reads and records anything missed.
     """
     try:
         await sweep_headless_usage(client, sm, markup=markup, watermark=watermark)
     except (anthropic.APIError, SQLAlchemyError):
         # Named boundary: a sweep failure (upstream MA error OR a DB write that
         # trips a constraint, e.g. a stray foreign-tenant session) must not kill
-        # the tick loop. Idempotent recording means the next tick retries.
+        # the sweep loop. Idempotent recording means the next pass retries.
         log.exception("scheduler.usage_sweep.failed")
 
 
@@ -982,9 +982,10 @@ async def _close_github_app_sessions(
 async def _settle_promo_credit(sm: async_sessionmaker[AsyncSession]) -> None:
     """Grant opened timed promo windows, expire closed ones, credit back late spend.
 
-    The usage sweep runs on its own loop; ``LATE_SPEND_GRACE`` gives its late
-    debits time to land before the reconcile pass. Idempotent; boundary catch
-    so a DB failure retries on the next tick.
+    The usage sweep runs on its own loop, so a session's spend can land up to
+    two passes plus one tick interval late. ``LATE_SPEND_GRACE`` assumes that
+    is well under its 15 minutes; a debit landing later counts as ordinary
+    spend. Idempotent; boundary catch so a DB failure retries on the next tick.
     """
     try:
         await settle_promo_credit(sm, now=datetime.now(UTC))
