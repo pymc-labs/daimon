@@ -42,7 +42,7 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.feedback_button import FeedbackButton
 from daimon.adapters.discord.feedback_modal import support_channel_for
 from daimon.adapters.discord.post_transport import DiscordPostTransport, known_webhook_ids
-from daimon.adapters.discord.support_escalation import SupportEscalateButton
+from daimon.adapters.discord.support_escalation import SupportEscalateButton, discord_channel
 from daimon.core.agent_post_identity import is_our_discord_webhook
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.message_feedback import (
@@ -368,7 +368,7 @@ class FeedbackReactionCog(commands.Cog):
         """
         settings = self._bot.runtime.settings
         allowance = settings.support.credits_per_user
-        if not is_enabled(channel_id=settings.support.escalation_channel_id, allowance=allowance):
+        if not is_enabled(channel_id=discord_channel(settings.support), allowance=allowance):
             log.info("support.disabled", message_id=str(payload.message_id))
             return
 
