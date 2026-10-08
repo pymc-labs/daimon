@@ -109,6 +109,7 @@ from microsoft_teams.cards import (
     TextBlock,
     TextInput,
 )
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
@@ -449,13 +450,34 @@ class SupportCommand:
     async def _deliver(
         self, tenant_id: uuid.UUID, asked: _Asked, body: str, escalation_id: uuid.UUID
     ) -> None:
-        """Best effort: the row is committed, and stays undelivered unless a post lands."""
-        delivered = await self._chat_admins(tenant_id, asked, body) or (
-            await post_to_support_channel(self._runtime, self._direct, body)
-        )
+        """Best effort: the row is committed, and stays undelivered unless a post lands.
+
+        A database or Graph failure while picking admins still leaves the
+        escalation channel to try, as on Slack.
+        """
+        delivered = False
+        try:
+            delivered = await self._chat_admins(tenant_id, asked, body)
+        except (SQLAlchemyError, *TEAMS_SEND_ERRORS) as exc:
+            # OSError (in TEAMS_SEND_ERRORS): asyncpg raises a refused connection raw.
+            log.warning(
+                "support.admin_routing_failed",
+                escalation_id=str(escalation_id),
+                err_type=type(exc).__name__,
+            )
+        if not delivered:
+            delivered = await post_to_support_channel(self._runtime, self._direct, body)
         if delivered:
-            async with self._runtime.sessionmaker.begin() as session:
-                await mark_delivered(session, escalation_id=escalation_id)
+            try:
+                async with self._runtime.sessionmaker.begin() as session:
+                    await mark_delivered(session, escalation_id=escalation_id)
+            except (SQLAlchemyError, OSError) as exc:
+                # It landed; an unstamped row is never re-posted, so only log it.
+                log.warning(
+                    "support.delivery_unstamped",
+                    escalation_id=str(escalation_id),
+                    err_type=type(exc).__name__,
+                )
         log.info(
             "support.escalation_delivered", escalation_id=str(escalation_id), delivered=delivered
         )

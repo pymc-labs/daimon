@@ -27,6 +27,7 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_platform_principal
 from pydantic import SecretStr
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -383,6 +384,27 @@ async def test_a_channel_with_its_own_admins_sends_the_request_to_them_first(
         assert ops == [], "the escalation channel only when no admin got it"
     else:
         assert chats == [] and len(ops) == 1, "no admin reachable: the escalation channel"
+
+
+async def test_a_database_error_picking_admins_still_reaches_the_support_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def unreachable(*args: object, **kwargs: object) -> list[frozenset[str]]:
+        raise OperationalError("SELECT", {}, OSError("connection refused"))
+
+    await _grant_lead(db_session_factory)
+    monkeypatch.setattr(support, "support_recipient_tiers", unreachable)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        card = await _form(service, teams_api_fake, make_channel_activity(text="support"))
+        reply = await _send(service, _token(card), "the routine broke")
+
+    assert support.RECEIVED.format(remaining=2) in reply, "the spent credit is not a failure"
+    [posted] = _posts_to(teams_api_fake, OPS)
+    assert "the routine broke" in posted, "the escalation channel is still tried"
+    [row] = await _rows(db_session_factory)
+    assert row.delivered_at is not None, "and stamped once it lands"
 
 
 async def test_a_sealed_channel_warns_in_the_form_and_marks_the_post(
