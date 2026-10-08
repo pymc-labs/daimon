@@ -96,6 +96,9 @@ def test_slack_blocks_carry_buttons_only_while_pending() -> None:
     ]
     assert "<@U1>" in pending[-1]["elements"][0]["text"]
     assert pending[-1]["elements"][0]["text"].startswith("Only <@U1> can approve or deny\nExpires ")
+    assert "Expires at <!date^" in pending[-1]["elements"][0]["text"]
+    assert "^{time}|" in pending[-1]["elements"][0]["text"]
+    assert "|12:10 UTC>" in pending[-1]["elements"][0]["text"]
     assert " · " not in str(pending)
     assert "linear" not in str(pending)
     assert "create_issue" not in str(pending)

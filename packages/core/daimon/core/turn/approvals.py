@@ -270,11 +270,16 @@ def interactive_group_decider(
     *,
     requester_platform_user_id: str,
     confirm: ConfirmationHook,
+    fallback: ToolCallDecider | None = None,
     trusted_servers: frozenset[str] = frozenset(),
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> ToolCallGroupDecider:
-    """Ask once for up to five same-tool, same-target calls in one pause."""
-    individual = interactive_decider(
+    """Ask once for up to five same-tool, same-target calls in one pause.
+
+    Calls that cannot share a card use `fallback`, preserving wrappers such as
+    publish-only refusal when tool safety is disabled.
+    """
+    individual = fallback or interactive_decider(
         policy,
         requester_platform_user_id=requester_platform_user_id,
         confirm=confirm,
@@ -343,7 +348,6 @@ def interactive_group_decider(
             else:
                 prompt = prompt.model_copy(
                     update={
-                        "title": f"{count} × {prompt.title}",
                         "items": tuple(
                             str(call.input.get("name") or call.input.get("title") or call.tool_name)
                             for call in selected
@@ -424,10 +428,11 @@ def chat_tool_confirmation(
         interactive_group_decider(
             policy,
             requester_platform_user_id=requester_platform_user_id,
-            confirm=confirm if confirm is not None else no_confirmation_surface,
+            confirm=confirm,
+            fallback=decide,
             trusted_servers=trusted_servers,
         )
-        if attended and policy.enabled
+        if attended and confirm is not None
         else None
     )
     return PolicyApproval(decide=decide, decide_group=group)

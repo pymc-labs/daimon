@@ -1,4 +1,12 @@
-"""Shared approval card words, states and Slack Block Kit rendering."""
+"""Platform-neutral approval card words, states and Slack Block Kit rendering.
+
+The card is posted pending and edited in place when answered, expired or
+stopped. Discord, Slack and Teams draw the same ``ConfirmationCard`` so the
+action and consequence stay consistent. Button tokens only route clicks to
+the waiting turn; they are never shown as card copy.
+
+Pure module: no I/O or clock reads.
+"""
 
 from __future__ import annotations
 
@@ -52,6 +60,10 @@ def confirmation_custom_id(token: str, choice: ConfirmationChoice) -> str:
 
 
 def parse_confirmation_custom_id(custom_id: str) -> tuple[str, ConfirmationAnswer] | None:
+    """Return ``(token, answer)`` for an approval button, else ``None``.
+
+    Details has its own handler and is never interpreted as an answer.
+    """
     match = CONFIRMATION_ACTION_PATTERN.match(custom_id)
     if match is None or match["choice"] == "details":
         return None
@@ -70,6 +82,11 @@ def build_confirmation_card(
     token: str | None = None,
     answered_by_platform_user_id: str | None = None,
 ) -> ConfirmationCard:
+    """Build the card for ``prompt`` in ``state``.
+
+    ``token`` is required only while pending, when its buttons can be used.
+    Answered and retired cards cannot carry live buttons.
+    """
     if (token is not None) != (state == "pending"):
         raise ValueError("token belongs to state='pending' only")
     if state == "pending":
@@ -99,12 +116,17 @@ def build_confirmation_card(
 def _slack_expires(expires_at: datetime) -> str:
     unix = int(expires_at.timestamp())
     fallback = datetime.fromtimestamp(unix, UTC).strftime("%H:%M")
-    return f"<!date^{unix}^{{ago}}|{fallback} UTC>"
+    return f"at <!date^{unix}^{{time}}|{fallback} UTC>"
 
 
 def build_confirmation_blocks(
     card: ConfirmationCard, *, prompt: ConfirmationPrompt
 ) -> list[dict[str, Any]]:
+    """Render the shared card as Slack Block Kit, with buttons only while pending.
+
+    The two pending footer facts occupy separate lines in one context element.
+    Details are sent privately by the Slack adapter when clicked.
+    """
     blocks: list[dict[str, Any]] = [
         {"type": "header", "text": {"type": "plain_text", "text": card.headline[:150]}},
     ]
@@ -161,6 +183,7 @@ def build_confirmation_blocks(
 
 
 def confirmation_card_text(card: ConfirmationCard) -> str:
+    """Plain-text fallback with one card fact per line and no private details."""
     return "\n".join(
         part for part in (card.headline, card.body, *card.items, card.consequence) if part
     )

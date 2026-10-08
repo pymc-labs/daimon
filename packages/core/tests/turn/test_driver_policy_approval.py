@@ -662,7 +662,14 @@ async def test_ma_repeating_the_pause_while_the_card_is_up_does_not_end_the_turn
     ]
 
 
-async def test_same_target_uploads_share_one_card_but_send_one_confirmation_per_call() -> None:
+@pytest.mark.parametrize(
+    ("policy", "asks_before_publishing"),
+    [(_ON, False), (OPEN_TOOL_SAFETY, True)],
+    ids=["tool-safety-on", "publish-only"],
+)
+async def test_same_target_uploads_share_one_card_but_send_one_confirmation_per_call(
+    policy: ToolSafetyPolicy, asks_before_publishing: bool
+) -> None:
     fa = FakeAnthropic()
     names = ["cg_meme.csv", "launch_features.csv", "launch_curves.csv"]
     events = [
@@ -707,10 +714,11 @@ async def test_same_target_uploads_share_one_card_but_send_one_confirmation_per_
         render_interval_s=0.001,
         billing=_EXEMPT,
         tool_confirmation=chat_tool_confirmation(
-            _ON,
+            policy,
             requester_platform_user_id="U1",
             confirm=card,
             trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            asks_before_publishing=asks_before_publishing,
         ),
     )
     assert final.error is None
@@ -719,6 +727,61 @@ async def test_same_target_uploads_share_one_card_but_send_one_confirmation_per_
     assert prompts[0].items == tuple(names)
     assert [event["tool_use_id"] for event in _confirmations(fa)] == ["tu_0", "tu_1", "tu_2"]
     assert all(event["result"] == "allow" for event in _confirmations(fa))
+
+
+async def test_publish_only_group_fallback_refuses_other_held_calls() -> None:
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    posture = chat_tool_confirmation(
+        OPEN_TOOL_SAFETY,
+        requester_platform_user_id="U1",
+        confirm=card,
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        asks_before_publishing=True,
+    )
+    assert isinstance(posture, PolicyApproval) and posture.decide_group is not None
+    calls = [
+        ToolCall(
+            tool_use_id=f"tu_{index}",
+            server_name="linear",
+            tool_name="create_issue",
+            input={"title": "Bug"},
+        )
+        for index in range(2)
+    ]
+    decisions = await posture.decide_group(calls)
+    assert not any(decision.allow for decision in decisions)
+    assert prompts == [], "non-publish held calls cannot gain a card through grouping"
+
+
+async def test_generic_group_keeps_the_single_call_title() -> None:
+    from daimon.core.turn.approvals import interactive_group_decider
+
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    decide = interactive_group_decider(_ON, requester_platform_user_id="U1", confirm=card)
+    calls = [
+        ToolCall(
+            tool_use_id=f"tu_{index}",
+            server_name="linear",
+            tool_name="create_issue",
+            input={"title": "Bug"},
+        )
+        for index in range(2)
+    ]
+    decisions = await decide(calls)
+    assert all(decision.allow for decision in decisions)
+    assert len(prompts) == 1
+    assert prompts[0].title == 'Create issue "Bug"?'
+    assert prompts[0].items == ("Bug", "Bug")
 
 
 async def test_upload_group_splits_after_five_and_keeps_other_tools_separate() -> None:
