@@ -35,6 +35,7 @@ from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.externals import ExternalParticipants, MemberFacts
 from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, TeamsFeedback
 from daimon.adapters.teams.help import send_help
+from daimon.adapters.teams.here import show_here
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TimedSender
 from daimon.adapters.teams.memory import show_memory
@@ -344,6 +345,7 @@ def create_teams_http_service(
     commands: dict[str, CommandHandler] = {
         "new": new_command,
         "setup": setup.command,
+        "here": show_here,
         "routines": routines.command,
         "memory": show_memory,
         "privacy": privacy.command,

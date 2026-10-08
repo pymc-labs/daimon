@@ -26,13 +26,16 @@ Thread participation shares Discord's gates
 (`test_thread_participation_platforms.py`) but needs Graph, so without the
 consent a followed thread stays mention-only; and where Discord's unprompted
 card appears once there is output, Teams posts only the answer, so there is no
-running card or Cancel button.
+running card or Cancel button. The `here` card counts only the place it was
+typed in as one the caller can see: naming their other channels would take
+Graph lookups per team, so an agent rule's other channels stay unnamed.
 
 No platform parametrization, no database -- this is a scope check.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,18 +45,26 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import yaml
-from daimon.adapters.teams import installations
+from daimon.adapters.teams import here, installations
 from daimon.adapters.teams.attachments import (
     ChannelMedia,
     InboundFile,
     SharedFile,
     prepare_attachments,
 )
+from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.credential_requests import credential_form
-from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, Refusal, parse_inbound
+from daimon.adapters.teams.identity import (
+    GROUP_CHAT_UNSUPPORTED,
+    Refusal,
+    TeamsInbound,
+    parse_inbound,
+)
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.credential_requests import ENV_FILE_TARGET
+from daimon.core.here_card import assemble_here_card
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.teams_threads import conversation_of, new_setup_thread_id
 from daimon.core.turn.state import TextBlock, TurnState
@@ -100,6 +111,51 @@ def test_teams_commands_are_offered_only_in_the_one_to_one_chat() -> None:
     manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
     assert all(cl["scopes"] == ["personal"] for cl in manifest["bots"][0]["commandLists"]), (
         "command replies can carry account details; one typed in a channel is answered in the 1:1"
+    )
+
+
+async def test_the_teams_here_card_sees_only_the_place_it_was_typed_in() -> None:
+    channel = "19:ops@thread.tacv2"
+    asked = TeamsInbound(
+        kind="channel",
+        entra_tenant_id=TENANT,
+        user_id=str(uuid.UUID(int=2)),
+        conversation_id=f"{channel};messageid=1",
+        channel_id=channel,
+        activity_id="1",
+        text="here",
+        service_url=None,
+    )
+    card = assemble_here_card(
+        channel_id=channel,
+        agent_name=None,
+        tier=None,
+        channel=None,
+        tenant=None,
+        configuration_target_name=None,
+        policy=TenantAccessPolicy(),
+        details=None,
+    )
+    runtime = MagicMock()
+    runtime.settings.mcp.public_url = None
+    context = CommandContext(
+        inbound=dataclasses.replace(
+            asked, kind="dm", conversation_id="a:chat", channel_id="a:chat"
+        ),
+        tenant_id=uuid.uuid4(),
+        args="",
+        is_admin=False,
+        runtime=runtime,
+        send=AsyncMock(),
+        asked_in=asked,
+    )
+    with (
+        patch.object(here, "find_platform_principal", AsyncMock(return_value=None)),
+        patch.object(here, "load_here_card", AsyncMock(return_value=card)) as load,
+    ):
+        await here.show_here(context)
+    assert load.await_args.kwargs["visible_channel_ids"] == {channel}, (
+        "Teams names no other channel the caller may see; if it learned to, replace this record"
     )
 
 
