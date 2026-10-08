@@ -212,13 +212,11 @@ async def _effective_rows(
             user = await get_user(session, github_user_id=user.github_user_id)
         if user is None or user.status != "active":
             raise ValueError("GitHub requester link changed during access check")
-    baseline: dict[int, Access] = {
-        grant.repo_id: grant.baseline_access for grant in grants if grant.repo_id in repos
-    }
-    ceiling: dict[int, Access] = {
+    abilities: dict[int, PermissionProfile] = {
         grant.repo_id: grant.ceiling_access for grant in grants if grant.repo_id in repos
     }
-    access = effective_access(baseline, ceiling, asker)
+    baselines: dict[int, Access] = {grant.repo_id: grant.baseline_access for grant in grants}
+    access = effective_access(abilities, asker if account_id is not None else {}, baselines)
     return (
         [
             (grant, repos[grant.repo_id], access[grant.repo_id])

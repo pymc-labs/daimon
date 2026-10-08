@@ -6,7 +6,7 @@
       'ask': dict({
         'description': '''
           Ask a Daimon one question and wait up to about two minutes for its answer.
-          
+          <blank line>
           Runs as you, in that Daimon's workspace: it reads only what you can see
           and spends that workspace's credit. Pass ``handle`` from a previous
           result to continue the same conversation. On timeout the error carries
@@ -100,7 +100,7 @@
       'list_daimons': dict({
         'description': '''
           List every Daimon you can reach on this platform, across all your workspaces.
-          
+          <blank line>
           Call this first. ``id`` is what every other tool takes as ``daimon_id``;
           ``workspace`` tells you which Slack workspace or Discord server the Daimon
           lives in. Two Daimons may share a ``name`` in different workspaces.
@@ -171,7 +171,7 @@
       'list_my_sessions': dict({
         'description': '''
           Sessions you started with this Daimon, for resuming with ``handle``.
-          
+          <blank line>
           Other people's conversations with the same Daimon are not listed and
           their handles are not accepted; nor are conversations from a sealed
           channel, which can only be read from inside it. A workspace admin also
@@ -196,7 +196,7 @@
       'start_turn': dict({
         'description': '''
           Start a turn without waiting.
-          
+          <blank line>
           Returns ``{"handle": ...}`` for polling with ``get_session``.
         ''',
         'parameters': dict({
@@ -224,7 +224,7 @@
     'add_channel_skill': dict({
       'description': '''
         Add a skill to whatever agent answers in one channel, there only. Admin-only.
-        
+        <blank line>
         ``skill`` is a skill id, a workspace library skill's name, or
         ``agent/name`` for one uploaded to the agent that answers in this
         channel; another agent's upload is refused. The latest version is
@@ -252,7 +252,7 @@
       'description': '''
         Add a skill to one agent from a pasted SKILL.md, a .md or .zip attached in
         this chat, or one folder of a GitHub repository. Pass exactly one source.
-        
+        <blank line>
         The first call only previews: name, description, files and the files the
         agent could run. Show that to the person; only when they confirm, call again
         with the same arguments plus the preview's ``content_hash``, and the person
@@ -361,7 +361,7 @@
     'archive_agent': dict({
       'description': '''
         Delete an agent, for example churn-explorer, by archiving it. Admin-only.
-        
+        <blank line>
         This removes the agent from the tenant pool and clears its channel/workspace
         defaults so those channels fall back to the next routing tier.
       ''',
@@ -394,7 +394,7 @@
         Archive the agent copied as a channel's own, when that channel closes. For
         example, retire #client-acme's agent once the engagement ends. Requires a server
         or workspace admin.
-        
+        <blank line>
         Only an agent ``set_channel_rule`` copied for a channel can be archived here,
         never a built-in agent or a default. Pass ``channel_id``, the channel it was made
         for, to drop its rule and default there with it; while its rule or a default
@@ -440,7 +440,7 @@
     'archive_environment': dict({
       'description': '''
         Archive the MA environment and delete from the tenant pool.
-        
+        <blank line>
         Channels and the workspace default that picked it are cleared, so they
         fall through to the next tier; read ``note`` back to the user. When that
         leaves a sealed channel on an environment with unrestricted networking,
@@ -466,7 +466,7 @@
     'archive_my_session': dict({
       'description': '''
         Archive a session when its conversation is finished.
-        
+        <blank line>
         An archived session is no longer live and stops being re-read by
         usage collection. This is NOT a cancel — to stop a running turn, use
         the cancel tool instead. Returns ``{"handle": "<session_id>",
@@ -488,7 +488,7 @@
     'archive_thread': dict({
       'description': '''
         Archive a Discord thread you opened, with create_thread or from a mention.
-        
+        <blank line>
         Its messages stay readable and a new post reopens it. Use it for a
         finished or abandoned thread of yours that others wrote in. A thread
         opened from someone's mention can be archived only when that person
@@ -557,12 +557,12 @@
     'attach_mcp_server': dict({
       'description': '''
         Add an MCP server that needs no token, such as Context7, to an agent.
-        
+        <blank line>
         For Linear or other bearer-authenticated endpoints, use
         ``request_mcp_token`` instead;
         ``detach_mcp_server`` disconnects it. Fork Daimon with ``fork_agent`` before
         directly changing its setup. Channel or workspace defaults need admin.
-        
+        <blank line>
         Connects the server; its tools are available from the agent's next message,
         not the one running now. Reusing a server name replaces the URL; the same
         name and URL is a no-op. Other connections are preserved.
@@ -615,11 +615,11 @@
       'description': '''
         Have an agent work in a public GitHub repo: "work in
         github.com/owner/project", "point it at our open-source repository".
-        
+        <blank line>
         Only for a repository that needs no token to clone; this checks, and
         refuses otherwise. When a token is needed, use ``request_repo_binding``,
         which collects one privately.
-        
+        <blank line>
         The agent checks it out and works in it from your next message here, and
         anyone who talks to it works in it too. Files already open in this
         conversation are carried across or left behind according to the answer
@@ -691,7 +691,7 @@
     'cancel_turn': dict({
       'description': '''
         Stop a running turn immediately.
-        
+        <blank line>
         Sends an interrupt regardless of the session's current status —
         sending one to an already-idle session is harmless. Returns
         ``{"handle": "<session_id>", "status": "<observed_status>"}``
@@ -719,12 +719,12 @@
         Stop an agent answering in a channel by clearing its default routing.
         For example, stop churn-explorer answering in #growth. Use
         ``set_agent_default`` to choose a replacement instead.
-        
+        <blank line>
         When ``channel_id`` is provided only that channel's default is cleared;
         omit it to clear the workspace-wide default.  If the scope had no
         default the call is a no-op (idempotent).  Requires Manage Server (admin);
         an admin of the channel may clear that channel's default.
-        
+        <blank line>
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
         never the current thread's id. Slack: use the id from
@@ -772,7 +772,7 @@
     'clear_channel_budget': dict({
       'description': '''
         Remove a channel's spending budget, so only the balance and caps apply. Admin-only.
-        
+        <blank line>
         A thread id clears its parent channel's budget.
       ''',
       'parameters': dict({
@@ -793,7 +793,7 @@
         Stop a channel picking its own environment, so it uses the workspace default.
         For example, put #growth back on the default environment. A no-op when the
         channel has none of its own.
-        
+        <blank line>
         Omit ``channel_id`` to clear the workspace default, leaving the deployment
         default. The workspace default requires Manage Server (admin); an admin of the
         channel may clear that channel's environment, unless it is sealed and the
@@ -827,7 +827,7 @@
     'clear_repo_binding': dict({
       'description': '''
         Remove the repo binding for your agent.
-        
+        <blank line>
         Idempotent — succeeds whether or not a binding existed.
       ''',
       'parameters': dict({
@@ -840,7 +840,7 @@
     'continue_turn': dict({
       'description': '''
         Send a follow-up message on an existing session.
-        
+        <blank line>
         Use this to continue a multi-turn conversation. Returns
         ``{"handle": "<session_id>", "turn_event_id": "<event_id>",
         "turn_started_at": "<iso8601>"}`` — the same three-key shape as
@@ -869,7 +869,7 @@
     'convert': dict({
       'description': '''
         Convert an ISO-8601 ``time`` from ``from_tz`` to ``to_tz``.
-        
+        <blank line>
         Naive input is interpreted as ``from_tz``; aware input must agree
         with ``from_tz`` at that wall time.
       ''',
@@ -898,7 +898,7 @@
       'description': '''
         Create an agent called, for example, churn-explorer. Pass fields directly —
         there is NO ``spec`` wrapper.
-        
+        <blank line>
         Required: ``name`` and ``model``. Use ``"claude-sonnet-5-5"`` when the user
         asks for Sonnet and ``"claude-opus-5-5"`` when they ask for Opus — always
         the current generation. Only pass an older id (``claude-sonnet-5``,
@@ -906,10 +906,10 @@
         Optional: ``description``, ``system`` (the system prompt), ``tools``,
         ``mcp_servers``, and ``skill_repos`` — GitHub repos to sync skills from,
         e.g. ``[{"url": "https://github.com/owner/repo", "branch": "main"}]``.
-        
+        <blank line>
         Do not pass a ``skills`` field here. To add skills, either sync a repo via
         ``skill_repos`` or use ``sync_skills`` after the agent is created.
-        
+        <blank line>
         A returned ``answering`` field says the new agent is routed nowhere yet:
         post it verbatim. Always pass this turn's ``origin_context_id``: a chat turn
         without it is refused while a channel in the workspace is confidential, and with
@@ -965,7 +965,7 @@
           'BetaManagedAgentsAgentToolset20260401Params': dict({
             'description': '''
               Configuration for built-in agent tools.
-              
+              <blank line>
               Use this to enable or disable groups of tools available to the agent.
             ''',
             'properties': dict({
@@ -1091,7 +1091,7 @@
           'BetaManagedAgentsCustomToolParams': dict({
             'description': '''
               A custom tool that is executed by the API client rather than the agent.
-              
+              <blank line>
               When the agent calls this tool, an `agent.custom_tool_use` event is emitted and the session goes idle, waiting for the client to provide the result via a `user.custom_tool_result` event.
             ''',
             'properties': dict({
@@ -1239,7 +1239,7 @@
             'additionalProperties': False,
             'description': '''
               Authoring-time reference to a GitHub skill repository.
-              
+              <blank line>
               Used by the `sync_agent_skills` orchestrator. Excluded from
               `AgentSpec.model_dump()` because skill_repos do not serialize to MA —
               the sync pipeline turns them into uploaded `BetaManagedAgentsSkillParams`.
@@ -1392,12 +1392,12 @@
     'create_attachment_upload_url': dict({
       'description': '''
         Mint a one-time upload URL for a raw data file in a notebook/blog workspace.
-        
+        <blank line>
         Produce the bytes in your sandbox (e.g. idata.to_netcdf("posterior.nc")) then
         PUT the file to upload_url with curl -sS -X PUT --data-binary @posterior.nc
         "<upload_url>". This is the ONLY way to attach large data — base64 through a
         tool argument cannot carry ~1 MB.
-        
+        <blank line>
         name is the agent-visible filename (charset [A-Za-z0-9_][A-Za-z0-9_.-]{0,63},
         no slash); it becomes data/<name> inside the notebook. slug must match the slug
         you publish the notebook/blog under. Returns {upload_url, slug, upload_expires_at}.
@@ -1434,18 +1434,18 @@
     'create_environment': dict({
       'description': '''
         Create a sandbox environment a channel or the workspace can later run in.
-        
+        <blank line>
         Packages are declared under ``spec.config.packages``, one list per
         ecosystem: ``apt``, ``cargo``, ``gem``, ``go``, ``npm``, ``pip``. For
         example, an environment with numpy, pandas, and pymc sets
         ``config.packages.pip = ["numpy", "pandas", "pymc"]``. Pin a version
         with the ecosystem's own syntax — for ``pip``, ``package==1.0.0``.
-        
+        <blank line>
         The package lists you send are the environment's complete package
         set, not a delta: a later change to these packages replaces rather
         than merges, so omitting a previously-installed package removes it.
         Always send the full intended list for every ecosystem you care about.
-        
+        <blank line>
         The new environment is inert until an admin picks it for a channel or
         the workspace, or a channel's admin picks it for their channel, with
         ``set_channel_environment``; creating one here changes nothing yet.
@@ -1456,7 +1456,7 @@
             'additionalProperties': False,
             'description': '''
               Request params for `cloud` environment configuration.
-              
+              <blank line>
               Fields default to null; on update, omitted fields preserve the
               existing value.
             ''',
@@ -1498,7 +1498,7 @@
             'additionalProperties': False,
             'description': '''
               Limited network request params.
-              
+              <blank line>
               Fields default to null; on update, omitted fields preserve the
               existing value.
             ''',
@@ -1550,7 +1550,7 @@
             'additionalProperties': False,
             'description': '''
               Specify packages (and optionally their versions) available in this environment.
-              
+              <blank line>
               When versioning, use the version semantics relevant for the package manager, e.g. for `pip` use `package==1.0.0`. You are responsible for validating the package and version exist. Unversioned installs the latest.
             ''',
             'properties': dict({
@@ -1657,7 +1657,7 @@
             'additionalProperties': False,
             'description': '''
               Authoring shape for an environment YAML file.
-              
+              <blank line>
               Mirrors `anthropic.types.beta.environment_create_params.EnvironmentCreateParams`
               with `extra="forbid"` so authoring typos fail before any MA write. The SDK's
               `BetaCloudConfigParams` TypedDict is the nested type for `config` — no
@@ -1727,27 +1727,27 @@
     'create_file_upload_url': dict({
       'description': '''
         Attach, post, send, or share a file in Discord — step 1 of 2.
-        
+        <blank line>
         This is the ONLY way to put a file you produced (a chart, a table, an
         image, a data file) into Discord as an attachment. Your reply text
         delivers itself; a file never does. Reading a file, or copying it to
         /mnt/session/outputs/, does not send it anywhere.
-        
+        <blank line>
         The intent words are in this first line on purpose: an agent looking
         for "attach an image" or "post a file" has to find this tool by
         search, and the name alone does not carry any of them.
-        
+        <blank line>
         Call this FIRST, then send the bytes from your sandbox with curl:
-        
+        <blank line>
             curl -sS -X PUT --data-binary @chart.png "<upload_url>"
-        
+        <blank line>
         Do NOT base64 the file into a tool argument. The bytes go straight from
         your sandbox over HTTP; they never pass through your context, so a large
         file costs you nothing and cannot be truncated in transit.
-        
+        <blank line>
         ``mime_type`` is required (e.g. "image/png", "text/csv") — it is not
         guessed, since a wrong one produces a wrong file extension.
-        
+        <blank line>
         Returns an ``upload_url`` and a ``handle_id``. After the PUT succeeds,
         pass the handle id to ``send_message``'s ``file_handles`` argument to
         post it, in the same channel/thread where the user asked — do not post
@@ -1774,12 +1774,12 @@
     'create_notebook_upload_url': dict({
       'description': '''
         Mint a one-time upload URL for a marimo notebook.
-        
+        <blank line>
         Get your notebook's .py into a sandbox file (author it incrementally with
         write/edit + read-back, or curl it from an origin), then PUT the file to the
         returned upload_url — the source never goes through a tool argument (which
         truncates large notebooks).
-        
+        <blank line>
         permanent=False (default) publishes a scratch notebook that the host deletes
         after ttl_days: 1 by default, up to 365. Pick a longer ttl_days when the
         person needs the link for longer, such as a client review or a report that
@@ -1787,28 +1787,28 @@
         Prefer the default; re-upload the same slug with permanent=True once the
         notebook is worth keeping. Re-uploading a scratch notebook restarts its
         ttl_days from now; re-uploading a blog keeps it a blog.
-        
+        <blank line>
         Either survives host restarts. The host stops a notebook nobody has opened
         for a couple of hours, so opening a quiet link can take a few seconds while
         it starts again.
-        
+        <blank line>
         Both are read-only apps by default: code hidden, interactive widgets live.
         editable=True (scratch only, and only where the operator has turned it on)
         serves the marimo code editor instead. Anyone holding that link can run
         arbitrary code on the notebook host, so pass it only when the person you
         are sharing with asked to edit the notebook.
-        
+        <blank line>
         Returns {upload_url, slug, upload_expires_at}. upload_expires_at is when the
         upload URL stops working (~5 min), not the notebook; use it promptly. Pass
         slug to reuse a stable URL across iterations, or omit it for a fresh random
         one.
-        
+        <blank line>
         Then upload with: curl -sS -X PUT --data-binary @<file> "<upload_url>". The
         curl response JSON carries the live url and expires_at (null for a blog);
         share that whole url and say when it expires. Its access_token is the
         notebook's only key, so share it only where the notebook belongs. Never
         paste large file contents into a tool argument.
-        
+        <blank line>
         Pass this turn's origin_context_id. An agent with a rule (where it runs)
         publishes only once the requester approves the call on a card.
       ''',
@@ -1863,7 +1863,7 @@
     'create_promo_code': dict({
       'description': '''
         Create a promo code any server or workspace can redeem for credit. Operator-only.
-        
+        <blank line>
         ``amount_usd`` is the credit per redemption as a decimal string.
         ``credit`` codes stay until spent; ``timed`` codes need
         ``credit_starts_at`` and ``credit_ends_at`` and expire unspent credit
@@ -1962,9 +1962,9 @@
     'create_routine': dict({
       'description': '''
         Create a routine in the caller's tenant partition.
-        
+        <blank line>
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
-        
+        <blank line>
         ``destination_kind`` (``channel`` or ``thread``) and ``destination_id``
         optionally name where each run's result goes. The run is told where,
         and if the agent does not post there itself, daimon posts the end of
@@ -1975,26 +1975,26 @@
         spend counts toward the destination channel's budget, or without a
         destination the budget of the channel named by ``origin_context_id``
         (this turn's), and a run is skipped while that budget is used up.
-        
+        <blank line>
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
         ``"research-bot"``). It is NOT:
-        
+        <blank line>
         - a free-text description of the routine
         - a mention, tag fragment, or user handle
         - a routine label or trigger phrase
         - the name of a tool, MCP, or skill
-        
+        <blank line>
         The tool resolves ``agent_name`` to a live MA agent id at the call
         boundary; an unknown name raises ``ToolError`` and the
         routine is not created. A non-admin may only name the agent they are
         talking to, or the agent the destination channel answers with.
-        
+        <blank line>
         If you are the calling agent and do not know which agent to bind the
         routine to, DEFAULT to your own name (the one you were addressed as
         in this conversation). Do NOT guess from context — if ambiguous, ask
         the user which agent should own the routine.
-        
+        <blank line>
         Example: a user says "daimon, create a routine that pings me every
         5 minutes with the message 'ping'". The correct call is
         ``create_routine(agent_name="daimon", cron_expr="*/5 * * * *",
@@ -2077,28 +2077,28 @@
     'create_thread': dict({
       'description': '''
         Create a new thread and post content as its first message.
-        
+        <blank line>
         ``content`` is required on every platform and becomes the thread's
         first message — Slack cannot open a thread without a root message,
         and a Discord forum post is rejected by the API without a starter
         message.
-        
+        <blank line>
         Discord: ``name`` is the thread's title (1-100 characters). On a text
         channel this creates a PUBLIC thread; on a forum channel it creates a
         post. ``name`` is ignored on Slack and Teams.
-        
+        <blank line>
         Slack: posts ``content`` as a channel-root message and returns its
         ``ts``. Combine that ``ts`` with ``channel_id`` to address the new
         thread afterward: ``send_message`` and ``read_thread`` both take the
         composite ``channel_id:ts`` form (e.g. if this call returns
         ``ts="1717171717.123456"`` for channel ``C0123456789``, reply with
         ``send_message(channel_id="C0123456789:1717171717.123456", ...)``).
-        
+        <blank line>
         Teams: ``channel_id`` is the channel (``parent_channel_id`` in
         turn_controls, no ``;messageid=``); this starts a new post and returns
         its ``conversation_id``, which ``send_message`` takes to reply in it.
         Text only, and you must be a member of the channel.
-        
+        <blank line>
         Only create a thread when the user asked for one. Refused in channels
         the workspace marked protected.
       ''',
@@ -2126,11 +2126,11 @@
     'create_timer': dict({
       'description': '''
         Come back to this conversation once, later: "remind me in two hours", "check back tomorrow at 9".
-        
+        <blank line>
         At `fire_at` you get one new turn in this same thread, with its context
         and your `note` as the message, as the person who asked. It fires once;
         for anything that repeats ("every Monday"), use `create_routine`.
-        
+        <blank line>
         `fire_at` needs an explicit offset; use the time tools to work it out
         from the person's timezone. One minute to 90 days ahead. `note` is all
         you get besides the thread, so name what to check and what to report.
@@ -2162,7 +2162,7 @@
     'delete_message': dict({
       'description': '''
         Delete one message you posted, or on Discord one of your replies or status cards.
-        
+        <blank line>
         Use it for your own stale, empty or failed posts, one message per
         call. The same rules as edit_message: only your own posts and
         replies, pass origin_context_id, the same limits and the same refused
@@ -2199,10 +2199,10 @@
     'delete_notebook': dict({
       'description': '''
         Un-publish a notebook or blog you published (deletes it from the host).
-        
+        <blank line>
         slug is the bare name — the same one you passed to
         create_notebook_upload_url, and the same one list_notebooks reports.
-        
+        <blank line>
         Returns {slug, deleted}. deleted=false means nothing by that name existed:
         check list_notebooks for the right slug rather than retrying.
       ''',
@@ -2222,7 +2222,7 @@
     'delete_report': dict({
       'description': '''
         Un-publish a report you published.
-        
+        <blank line>
         Revokes the report's credential and removes it from the host —
         every link you handed out stops working. This cannot be undone;
         re-publishing the same slug mints a new credential and new links,
@@ -2260,7 +2260,7 @@
     'delete_skill': dict({
       'description': '''
         Delete a skill such as eda from the workspace, destroying all versions for every agent.
-        
+        <blank line>
         For detaching one agent's reference, use ``remove_skill`` instead.
         Deleting the shared skill resource is admin-only.
       ''',
@@ -2280,7 +2280,7 @@
     'delete_thread': dict({
       'description': '''
         Remove your own messages from a thread you opened.
-        
+        <blank line>
         Discord: a thread from create_thread or from a mention (the latter
         only when the person who mentioned you or a server admin asks); your
         posts, replies and status cards go, except the running turn's and
@@ -2341,7 +2341,7 @@
     'describe_agent': dict({
       'description': '''
         Describe the agent associated with this MCP token.
-        
+        <blank line>
         Returns the agent's name, system-prompt summary, skill identifiers,
         and configured environment. No parameters — agent identity is read
         from the token claim (confused-deputy mitigation).
@@ -2359,7 +2359,7 @@
         the named connection and its tools while preserving other servers and
         skills, and forget the shared token stored for it; the change reaches the
         agent on its next message, not the one running now.
-        
+        <blank line>
         ``attach_mcp_server`` adds public endpoints; ``request_mcp_token`` and
         ``request_mcp_oauth`` enroll authenticated connections. The built-in
         daimon server cannot be removed. Use this when a connection keeps
@@ -2411,7 +2411,7 @@
     'edit_message': dict({
       'description': '''
         Replace the text of a message you posted.
-        
+        <blank line>
         Use it to correct or update your own post instead of posting again.
         Your own posts are those you sent with send_message or create_thread
         and, on Discord, your chat replies and status cards (a status card's
@@ -2462,7 +2462,7 @@
     'enable_channel_files': dict({
       'description': '''
         Post the Enable files card in this Teams channel, right after your reply.
-        
+        <blank line>
         Call it only in a Teams channel whose ``<channel>`` element has a
         ``files_hint`` naming this tool, when an admin asks for a file there or
         to turn files on, before offering anything else (an artifact, report
@@ -2482,20 +2482,20 @@
       'description': '''
         Who answers in this channel, for example #growth? Report who answers, the
         environment it runs in, and which routing tier decided each.
-        
+        <blank line>
         Supply thread_id to include its setup binding. Thread responder wins, else
         the channel's own default, else the workspace default, else the deployment
         default. This reports the winner
         AND every tier's setting, so "why that agent" is answerable without
         starting a turn and reading its footer.
-        
+        <blank line>
         Use it when someone asks which agent is configured here, when an agent
         answers that seems wrong for the channel, or before changing a default —
         the tier that currently wins is the tier worth changing.
-        
+        <blank line>
         Not admin-gated: this is a read of routing any member can already infer
         from a reply's footer.
-        
+        <blank line>
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
         never the current thread's id. Slack: use the id from
@@ -2533,17 +2533,17 @@
     'fetch_youtube_transcript': dict({
       'description': '''
         Fetch the transcript of a public YouTube video for summarization or Q&A.
-        
+        <blank line>
         Use this when the user shares a YouTube URL and asks about the video's
         content — summaries, key points, quotes, "what did they say at X". Do
         NOT use it for unrelated chat about a video the user mentions without
         asking for content help.
-        
+        <blank line>
         The returned transcript includes [HH:MM:SS] timestamps every ~30
         seconds and bracketed visual notes (e.g. "[shows chart]") for moments
         not captured by audio. Use timestamps when you cite specific moments
         in your reply ("around 12:30 they discuss...").
-        
+        <blank line>
         Limitations:
         - Public videos only. Private and unlisted URLs will error out — tell
           the user the video must be public.
@@ -2592,9 +2592,9 @@
         GitHub access, no API/service keys and no connector tokens; attach its own
         with ``request_agent_key`` and the repo tools. An agent an operator pinned
         to channels can't be copied.
-        
+        <blank line>
         Use ``update_agent`` to edit the copy. Daimon cannot be edited directly.
-        
+        <blank line>
         Continue configuring it through Daimon with the copy named as the setup
         target. A returned ``answering`` field says the copy is routed nowhere yet:
         post it verbatim.
@@ -2630,7 +2630,7 @@
     'get_agent': dict({
       'description': '''
         Show what an agent can access: attached MCP servers and skills.
-        
+        <blank line>
         Use ``list_agent_keys`` for stored key names. Configuration does not prove
         the answering session's access. Returns server names/URLs and skills; custom
         skills have a display name (null if deleted), Anthropic skills have a readable id.
@@ -2676,7 +2676,7 @@
     'get_channel_budget': dict({
       'description': '''
         Show a channel's spending budget: its limit, window and what it has spent.
-        
+        <blank line>
         For the channel this turn is in (in a DM, the channel it was moved
         from), omit ``channel_id`` and pass this turn's
         ``origin_context_id``. For another channel, pass its id; a
@@ -2716,7 +2716,7 @@
     'get_cli_token': dict({
       'description': '''
         Mint a short-lived CLI access token for the named service.
-        
+        <blank line>
         Fails with a ``ToolError`` when the calling agent has no credential
         bound for that service — see the ``cli-auth`` skill for the
         per-agent binding flow. On success, returns the token as plaintext
@@ -2757,7 +2757,7 @@
     'get_message': dict({
       'description': '''
         Fetch a single message by channel and message id (Slack: the message ts).
-        
+        <blank line>
         Teams: a reply is addressed under its thread, channel_id
         <channel>;messageid=<root>; a post by its channel. Sealed channels
         need origin_context_id, as read_channel does.
@@ -2793,7 +2793,7 @@
     'get_my_session': dict({
       'description': '''
         Get one session's status and metadata (no reply text, read-only).
-        
+        <blank line>
         Use this to check whether a turn has finished (``status`` becomes
         ``idle``/``terminated``) before reading the transcript with
         ``list_events``.
@@ -2842,7 +2842,7 @@
     'get_session': dict({
       'description': '''
         Look up one of your sessions by id (tenant-scoped).
-        
+        <blank line>
         A conversation from a sealed channel is refused unless
         ``origin_context_id`` is this turn's origin inside that channel.
       ''',
@@ -2888,7 +2888,7 @@
     'get_tenant_summary': dict({
       'description': '''
         Summarize this server or workspace: balance, funding mode and each channel. Admin-only.
-        
+        <blank line>
         Lists every channel with its own agent or environment setting, a
         spending budget, channel admins or confidential status, with the agent and environment that
         apply there, the roles and members administering it, and the budget's
@@ -2907,13 +2907,13 @@
     'get_thread_participation': dict({
       'description': '''
         Report whether you follow a thread or channel, and which tier decided it.
-        
+        <blank line>
         Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
         thread (its parent is looked up, so ``channel_id`` is optional);
         ``channel_id`` from ``<channel role="parent_channel">`` alone for a
         channel; neither for the workspace. Reading needs no admin; changing
         channel or workspace scope does.
-        
+        <blank line>
         Reports every tier (deployment, workspace, channel, thread) plus the
         winner. Read the returned ``explanation`` back to the user.
       ''',
@@ -2949,7 +2949,7 @@
     'get_turn_cost': dict({
       'description': '''
         Return one finished turn's raw provider cost, before markup.
-        
+        <blank line>
         Pass the ``turn_started_at``/``turn_event_id`` returned by
         ``start_turn`` or ``continue_turn``. Call this once per terminal —
         the host polls status every two seconds and should read cost once,
@@ -2984,7 +2984,7 @@
     'github_connect': dict({
       'description': '''
         Connect this agent to GitHub when someone asks to set up GitHub.
-        
+        <blank line>
         Send the admin a private, single-use link bound to the selected agent.
         Members get Ask an admin and a recorded request. Never repeat a private
         link in a shared reply. For a setup target, pass its current name and
@@ -3028,18 +3028,18 @@
     'hand_off_task': dict({
       'description': '''
         Hand this task over to another agent in the same conversation: "have that one take over", "let churn-explorer finish this".
-        
+        <blank line>
         `set_setup_target` changes your configuration target; `set_agent_default`
         changes who answers a channel; neither does this. The destination must
         already answer in this workspace. A member may hand only to an agent of
         this channel (the one it answers with, or one pinned to it); any other
         needs a server admin or a channel admin of this channel.
-        
+        <blank line>
         From the next message here, that agent answers, with its own keys,
         connections and memory; conversation, decisions and files move with the
         requester. Posted files stay posted. No extra billed turn unless
         `continuation` is set.
-        
+        <blank line>
         `agent_id`: the destination's current id from `list_agents`; a recreated
         namesake is refused. `continuation` is null unless the person asked the
         destination to continue or finish NAMED work ("let it finish the chart").
@@ -3096,7 +3096,7 @@
     'list_agent_keys': dict({
       'description': '''
         What keys does an agent have? List its stored API key names, never values.
-        
+        <blank line>
         Use ``get_agent`` for skills and MCP access, ``request_agent_key`` to add
         keys or ``remove_agent_key`` to remove them. Stored names on this target
         are not proof that the answering agent can use those keys.
@@ -3212,7 +3212,7 @@
     'list_channels': dict({
       'description': '''
         List channels in this server/workspace that you can view.
-        
+        <blank line>
         From inside a confidential channel (its own agent, or origin_context_id
         placing this turn there) only that channel is listed. Teams: the
         channels of every team daimon is in that you belong to, with each
@@ -3249,7 +3249,7 @@
     'list_environments': dict({
       'description': '''
         List environments in the tenant pool. ``page`` is reserved for future pagination.
-        
+        <blank line>
         Operator tokens need the ``tenant:read`` scope.
       ''',
       'parameters': dict({
@@ -3273,10 +3273,10 @@
     'list_events': dict({
       'description': '''
         List a session's events — the transcript.
-        
+        <blank line>
         The agent's reply is in the ``agent.message`` events. Call this once
         ``get_session`` reports the session is idle to read what the agent said.
-        
+        <blank line>
         A poller reading one turn should pass
         ``types=["agent.message", "session.status_idle"]``,
         ``created_at_gte=<the turn_started_at from start_turn/continue_turn>``,
@@ -3365,7 +3365,7 @@
     'list_my_sessions': dict({
       'description': '''
         List the sessions you started with this agent (id, status, title, timestamps).
-        
+        <blank line>
         ``id`` is the handle you pass to ``get_session``, ``list_events``,
         ``deliver_turn_charts``, and ``continue_turn``. Scoped to this agent
         and to the account the token was minted for. No parameters — identity
@@ -3381,7 +3381,7 @@
     'list_notebooks': dict({
       'description': '''
         List what you've published — scratch notebooks and permanent blogs alike.
-        
+        <blank line>
         Each entry carries slug, url, alive, permanent (true = a blog, kept until
         deleted) and, for a scratch notebook, expires_at. url is null while a
         notebook is stopped; its published link still works. The slug
@@ -3416,7 +3416,7 @@
     'list_session_events': dict({
       'description': '''
         List events for one of your sessions (SDK pass-through, single page).
-        
+        <blank line>
         A conversation from a sealed channel is refused unless
         ``origin_context_id`` is this turn's origin inside that channel.
       ''',
@@ -3484,7 +3484,7 @@
     'list_sessions': dict({
       'description': '''
         List your sessions in the tenant pool. ``agent_name`` narrows to one agent.
-        
+        <blank line>
         Conversations from a sealed channel are listed only when
         ``origin_context_id`` is this turn's origin inside that channel.
       ''',
@@ -3540,7 +3540,7 @@
     'list_threads': dict({
       'description': '''
         List active and archived public threads for a channel.
-        
+        <blank line>
         Archived private threads are not listed. Teams: every post is a
         thread; lists the 50 most recently active with their reply counts.
         Sealed channels need origin_context_id, as read_channel does.
@@ -3594,19 +3594,19 @@
     'parse_link': dict({
       'description': '''
         Extract IDs from a channel or message link.
-        
+        <blank line>
         Discord: supports discord.com, ptb.discord.com, and
         canary.discord.com URLs.
         - If link_type is "channel": use read_channel(channel_id)
         - If link_type is "message_or_thread": try read_thread(thread_id) first;
           if read_thread fails, it is a message: use get_message(channel_id, message_id)
-        
+        <blank line>
         Slack: supports a workspace permalink
         (.../archives/<channel>/p<digits>). Returns channel_id, the dotted
         message ts, and thread_ts when the link is a reply. Try
         read_thread(thread_id=f"{channel_id}:{thread_ts or message_ts}")
         first; if that fails, use get_message(channel_id, message_ts).
-        
+        <blank line>
         Teams: supports teams.microsoft.com/l/channel/... and /l/message/...
         links (teams.cloud.microsoft too). A message link returns its
         thread_id for read_thread and get_message.
@@ -3627,12 +3627,12 @@
     'post_github_app_install_link': dict({
       'description': '''
         Install the GitHub App: post a link inviting the user to grant repository access.
-        
+        <blank line>
         For requests to set up or hook up GitHub for an agent, use
         ``github_connect`` instead.
         For a private repo with a working token, use ``request_repo_binding`` instead.
         A token remains the fallback and existing bound tokens keep being used.
-        
+        <blank line>
         Posts a link button in this channel opening GitHub's install page. It cannot
         tell whether installation happened. Installing alone neither verifies this
         tenant's access nor binds a working repo; use ``request_repo_binding`` and
@@ -3658,7 +3658,7 @@
     'post_wizard': dict({
       'description': '''
         Post a multi-step form in the channel instead of asking in prose.
-        
+        <blank line>
         Each entry in ``steps`` carries ``question`` (the text shown to the
         user), ``kind`` (``choice``, ``multi`` or ``text``), and ``options``
         for the two choice kinds. A step may carry one finished image by
@@ -3669,7 +3669,7 @@
         ceiling (too many steps, too many options, too long a question)
         raises an error naming the offending step — split the form into a
         shorter follow-up and retry.
-        
+        <blank line>
         AFTER CALLING THIS TOOL YOU MUST END YOUR TURN IMMEDIATELY. Do not
         narrate the form, do not continue the conversation, and do not call
         another tool. The user's answers arrive later as a brand-new message.
@@ -3709,7 +3709,7 @@
           'Step': dict({
             'description': '''
               One screen of the wizard: a question plus how it is answered.
-              
+              <blank line>
               Accepts the shape a model actually writes as well as the canonical one.
               Authored by an LLM at a tool boundary, and the canonical field names lose
               every coin-flip against the prior set by other form APIs: `type` for
@@ -3838,24 +3838,24 @@
       'description': '''
         Publish a report: a page where the named people can read it and
         ask it questions.
-        
+        <blank line>
         Pass a short slug (goes in the URL), a title, one entry per
         recipient (``name`` and ``label`` — a short identifier for their
         link, e.g. an email or handle), a dollar cap on how much reader Q&A
         may spend against your tenant's balance, and optionally which agent
         should answer questions (defaults to this tenant's configured
         agent).
-        
+        <blank line>
         Pass this turn's ``origin_context_id``. An agent with a rule (where it
         runs) publishes only once the requester approves the call on a card: a
         link reaches whoever holds it. A channel's own agent never answers a
         report. When the answering agent has a rule, a non-admin may only
         publish its reader from inside its channels.
-        
+        <blank line>
         Returns ``{upload_url, links}``: ``upload_url`` is a one-time
         capability URL: ``links`` maps each recipient's name to their own
         personal link.
-        
+        <blank line>
         What to do next: build ONE gzip archive (``tar -czf bundle.tar.gz
         report.pdf analysis/``) with the report PDF at its root and the
         analysis files beside it, using relative paths only — no absolute
@@ -3944,7 +3944,7 @@
     'read_channel': dict({
       'description': '''
         Read channel messages, oldest-first, with pagination metadata.
-        
+        <blank line>
         For threads use read_thread. Each platform takes only its own
         pagination parameter — the other is rejected. Discord: at most 200
         messages per call; use before to fetch older messages. Slack: use
@@ -3954,7 +3954,7 @@
         returns up to 50 posts with their replies, ordered by latest activity;
         pass next_cursor as cursor for less recently active posts. A 1:1 chat
         cannot be read back.
-        
+        <blank line>
         A channel the workspace sealed is readable only from a conversation
         inside it: pass this turn's origin_context_id when reading one. On
         Teams that also holds for private and shared channels.
@@ -4012,7 +4012,7 @@
     'read_thread': dict({
       'description': '''
         Read messages from a thread, oldest-first.
-        
+        <blank line>
         Discord: thread_id is the thread's channel id; use before for older messages.
         Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456).
         Returns the root and the newest replies; pass next_cursor as cursor for
@@ -4077,7 +4077,7 @@
       'description': '''
         Redeem a promo code for credit on this server or workspace.
         For example, apply the code someone was given to add credit to the balance.
-        
+        <blank line>
         Case, spaces and dashes in ``code`` do not matter. Each code works once
         per server or workspace. Timed credit only exists between its start and
         end and is spent before other credit; whatever is left expires at the
@@ -4100,7 +4100,7 @@
     'remove_agent_key': dict({
       'description': '''
         Remove an old API key or token, such as a Toggl key, from an agent's stored keys.
-        
+        <blank line>
         Use ``request_agent_key`` to add a key privately and ``list_agent_keys`` to
         inspect stored names. Removing a missing key also succeeds; ``removed`` says
         whether it was present. This deletes the stored environment variable and never
@@ -4174,7 +4174,7 @@
         Stop an agent using an attached skill, such as eda. Remove that one
         attachment while preserving other skills; it applies from the agent's next
         message, not the one running now.
-        
+        <blank line>
         ``delete_skill`` destroys the shared workspace skill instead;
         ``update_agent`` adds existing skills and ``add_skill`` new ones. Accept a skill
         name or raw ``skill_id``. The resource and other agents stay intact. A built-in
@@ -4223,7 +4223,7 @@
     'rename_thread': dict({
       'description': '''
         Rename a Discord thread; ``name`` is the new title (1-100 characters).
-        
+        <blank line>
         Use when the user asks to rename or retitle a thread, including the
         one you are chatting in — ``thread_id`` is the thread's channel id.
         Anyone who can post in a thread daimon opened may rename it; other
@@ -4250,12 +4250,12 @@
       'description': '''
         Give an agent an API key or token for any service: Toggl, OpenAI,
         Higgsfield, or a platform that just launched. Unknown services work too.
-        
+        <blank line>
         Never accept secret values in chat; ask for rotation if pasted. One named key
         → pass `key`. To load, upload or import a whole `.env` file of several keys at
         once, omit it. For MCP credentials use ``request_mcp_token``; GitHub access
         uses ``request_repo_binding``.
-        
+        <blank line>
         Posts a card naming the agent and the key. Only the requester can open its
         private form; it expires in 30 minutes. Values never appear in chat. Anyone
         who talks to the agent can use added keys. Members can add new keys, including
@@ -4318,17 +4318,56 @@
         'type': 'object',
       }),
     }),
+    'request_github_access': dict({
+      'description': '''
+        Ask for GitHub access needed to finish this person's current request.
+        <blank line>
+        Use the active turn's origin ID and exactly one owner/repo. Give only the
+        unfinished work, so the queued turn will not repeat completed steps.
+        Never pass a repo name found in a DM or by the agent to another person.
+        Return the message verbatim only when it is nonempty. A private card
+        handles the admin's own request without a public status line.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'remaining_work': dict({
+            'type': 'string',
+          }),
+          'repo_name': dict({
+            'type': 'string',
+          }),
+          'required_ability': dict({
+            'enum': list([
+              'read',
+              'write',
+            ]),
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'repo_name',
+          'required_ability',
+          'remaining_work',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'request_mcp_oauth': dict({
       'description': '''
         Connect an agent to an MCP server that signs people in through the browser,
         such as Notion, Slack or Atlassian. Each person connects their own account:
         the grant is theirs alone, and other members connect separately when asked.
-        
+        <blank line>
         Use ``request_mcp_token`` for servers that take a pasted bearer token and
         ``attach_mcp_server`` for public servers. Members can use this on shared
         agents and built-in Daimon; repointing an existing server name at another
         URL needs an admin there.
-        
+        <blank line>
         Posts a requester-only card; its button opens a private sign-in link that
         expires in ten minutes. Finishing sign-in stores the grant for that person
         and attaches the server to the agent, not this session's toolset. Check
@@ -4390,12 +4429,12 @@
         signs people in through a browser (Notion, Slack, Atlassian) use
         ``request_mcp_oauth`` instead; such servers reject a pasted key.
         Match supported authentication; an API key is not automatically an MCP token.
-        
+        <blank line>
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
         credentials in chat. Members can use this form on shared agents and built-in
         Daimon to add a server; replacing one the agent already has (same name at
         another URL, or a new token for a connected URL) needs an admin there.
-        
+        <blank line>
         Posts a requester-only card naming the agent and the server, opening a private
         form, expiring in 30 minutes. Submission attaches the server to the agent, not
         this session's toolset. Check tool availability before promising use here.
@@ -4454,13 +4493,13 @@
     'request_repo_binding': dict({
       'description': '''
         Let an agent read a GitHub working repo or repository, public or private.
-        
+        <blank line>
         For requests to set up or hook up GitHub for an agent, use
         ``github_connect`` instead.
         For a private skill repo use ``request_skill_repo_token``. If the user has
         no working token, ``post_github_app_install_link`` offers a GitHub App install;
         installing alone does not bind the repo or verify this tenant's access.
-        
+        <blank line>
         Posts a requester-only card naming the agent and the repo, expiring in 30
         minutes. Only the requester can open its private form, which collects a GitHub
         token only when needed; values never appear in chat. Saving binds the working
@@ -4523,11 +4562,11 @@
     'request_skill_repo_token': dict({
       'description': '''
         The skills repo is private: collect a GitHub token to import its skills.
-        
+        <blank line>
         After ``sync_skills`` cannot read a private skill repository, use this form.
         The skill repo is separate from the working repo; for that one use
         ``request_repo_binding``.
-        
+        <blank line>
         Posts a requester-only card naming the agent and the repo, expiring in 30
         minutes. Its private form retries import and attachment; tokens never appear
         in chat. Anyone talking to the agent can use the imported skills. Pass the
@@ -4593,7 +4632,7 @@
     'revoke_promo_code': dict({
       'description': '''
         Stop a promo code from being redeemed again. Operator-only.
-        
+        <blank line>
         Credit already redeemed stays, including timed credit that has not started.
       ''',
       'parameters': dict({
@@ -4612,7 +4651,7 @@
     'search_messages': dict({
       'description': '''
         Search messages with server-side filters.
-        
+        <blank line>
         Limit caps at 25 per page — paginate with offset. When the search is
         scoped to channel_ids, total_results is the exact count for those
         channels (you must be able to view them; they are rejected before
@@ -4737,7 +4776,7 @@
     'self_delete_file': dict({
       'description': '''
         Delete a per-agent key by `key`. Idempotent — succeeds whether or not it existed.
-        
+        <blank line>
         Refused on the built-in agent and on any agent that answers somewhere in
         the workspace: removing a key there takes it from everyone, so a person
         with admin rights removes it with `remove_agent_key`.
@@ -4767,7 +4806,7 @@
     'self_read_file': dict({
       'description': '''
         Check a per-agent file by `key`. Returns null if no file exists at that key.
-        
+        <blank line>
         The value is always redacted: use it from the session `.env` without
         echoing it. The result shows when it was last set.
       ''',
@@ -4787,7 +4826,7 @@
     'self_write_file': dict({
       'description': '''
         Add a per-agent key under `key`. Add-only: never replaces a stored key.
-        
+        <blank line>
         Stored in your private agent_files namespace; isolated from other agents.
         A key that is already set, or a name your tools read as the same
         credential as one already set (`GITHUB_TOKEN` beside `GH_TOKEN`), is
@@ -4818,7 +4857,7 @@
     'send_direct_message': dict({
       'description': '''
         Privately message one human member of the current server/workspace.
-        
+        <blank line>
         Pass a platform user ID, not a channel or mention. Both sender and
         recipient must still belong to this tenant. Teams: the recipient's
         Entra object id; both of you must be in a team daimon is in, and the
@@ -4848,19 +4887,19 @@
     'send_message': dict({
       'description': '''
         Post a message to a channel.
-        
+        <blank line>
         For TEXT: only call this when the user explicitly asks you to send or
         post something to a channel. Do NOT call it to share results,
         summaries, or outputs unless the user specifically requested a post.
         Deliver text output in your reply instead.
-        
+        <blank line>
         For FILES that rule does not apply, because a reply cannot carry an
         attachment. Posting a file in the thread you were invoked from is
         delivery, not a duplicate — asking you to "attach it here" is a
         request to call this tool with ``file_handles``. Read the two
         paragraphs above together or you will conclude, wrongly, that you
         should hand a file back "in your reply" and silently deliver nothing.
-        
+        <blank line>
         ``file_handles=[handle_id, ...]`` references a file daimon is
         holding: to post a file you made in your sandbox, call
         ``create_file_upload_url`` first and PUT the bytes to the URL it
@@ -4873,13 +4912,13 @@
         refused. Include a short caption: the text posts first, then files
         upload into that thread. If upload fails, the text remains posted;
         do not send it again. Requires the bot's files:write scope.
-        
+        <blank line>
         Slack: ``channel_id`` may be ``channel_id:thread_ts`` (e.g.
         ``C0123456789:1717171717.123456``) to post into a thread. Content is
         sent as-is — nothing is escaped, so ``<@U…>`` mentions work — and is
         capped at 12,000 characters. daimon must already be in the channel
         (a member can run ``/invite @daimon``).
-        
+        <blank line>
         Teams: ``channel_id`` is a conversation id — ``thread_id`` from
         turn_controls replies here; a 1:1 chat is ``a:…``, a channel thread
         ``19:…@thread.tacv2;messageid=…``. Markdown, capped at 6,000
@@ -4946,7 +4985,7 @@
         Make an agent answer in a channel or become the whole server/workspace default.
         For example, make churn-explorer answer in #growth. Changes the agent that answers;
         use ``clear_agent_default`` to stop that routing.
-        
+        <blank line>
         When ``channel_id`` is provided the default is scoped to that channel;
         omit it to set the workspace-wide default.  Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
@@ -4954,7 +4993,7 @@
         that channel's default to a built-in agent, the workspace default, an
         agent that answers nowhere yet, or one that answers only in channels
         they administer.
-        
+        <blank line>
         Discord: ``channel_id`` MUST be the parent channel's id — the one
         your context gives as
         ``<channel platform="discord" id="..." role="parent_channel">``.
@@ -5007,7 +5046,7 @@
         Set where an agent runs: only in the ``runs_in`` channels and their threads,
         or, with null, wherever it is set to answer; an empty list runs it nowhere.
         Requires a server or workspace admin.
-        
+        <blank line>
         Outside its rule its turns are refused. An agent with a rule messages only
         whoever asked, asks before publishing, and can't be copied. A channel's own
         agent keeps its rule until that channel's readers change (``set_channel_rule``).
@@ -5046,18 +5085,18 @@
         Name who administers one channel, on top of the server admins. For example,
         let the @support-leads role run #support. Replaces that channel's whole list;
         pass both lists empty to clear it. Requires Manage Server (admin).
-        
+        <blank line>
         A channel admin may change agents that answer only in the channels they
         administer (instructions, skills, keys, MCP servers) and set or clear those
         channels' default agent. Built-in agents and the workspace default stay with
         server admins.
-        
+        <blank line>
         Ids are the platform's own. ``user_ids``: Discord or Slack user ids, Teams
         Entra object ids. ``role_ids`` names groups whose members all count: Discord
         role ids, Slack user group ids (``S...``), or a Teams team's Entra group id,
         which admits that team's owners. ``channel_id`` MUST be the parent channel's
         id; a Slack or Teams thread id names its channel.
-        
+        <blank line>
         A Slack user group makes anyone who can join or edit it a channel admin, and
         Slack lets every member edit user groups by default: name one only where the
         workspace limits user group management to admins.
@@ -5092,12 +5131,12 @@
     'set_channel_budget': dict({
       'description': '''
         Set or replace a channel's spending budget. Admin-only.
-        
+        <blank line>
         Once the channel's spend in the window reaches ``limit_usd`` (a
         decimal string such as ``"25.00"``; ``"0"`` stops the channel), new
         turns there are refused, including routines that post there. Spend
         is the tenant's debits for the channel, markup included.
-        
+        <blank line>
         ``window``: ``monthly`` resets each UTC calendar month and takes no
         dates; ``total`` counts everything since ``starts_at`` (or ever);
         ``fixed`` counts only between ``starts_at`` and ``ends_at`` and gates
@@ -5157,7 +5196,7 @@
         Choose the environment a channel's turns run in, or the workspace default.
         For example, run #growth in the pymc environment. Changes where the agent runs,
         not which agent answers; use ``set_agent_default`` for that.
-        
+        <blank line>
         Omit ``channel_id`` to set the workspace default, which every channel without
         its own environment uses. The environment must already exist
         (``list_environments``). Conversations pick it up from their next message.
@@ -5166,7 +5205,7 @@
         a sealed channel, which needs a server admin and their confirmation, as does a
         workspace default sealed channels would run in: pass
         ``confirm_open_network=true`` only after the caller confirms it.
-        
+        <blank line>
         Pass the parent channel's id: Discord
         ``<channel platform="discord" id="..." role="parent_channel">``, Slack
         ``<channel platform="slack" id="...">``, Teams ``19:…@thread.tacv2``; a thread
@@ -5204,13 +5243,13 @@
       'description': '''
         Set who can read a channel and who can post there. Requires a server or
         workspace admin. Leave one out to keep it.
-        
+        <blank line>
         ``readers``: ``any``; ``inside``, only turns in this channel read its messages
         and conversations; or ``own``, which also keeps it to its own agents: only they
         run and show there, and they run and show nowhere else. ``writers``: ``any``;
         ``own`` (only with readers ``own``); or ``none``, nothing posts there, daimon
         included.
-        
+        <blank line>
         To isolate a channel so nothing leaks in or out, set readers and writers
         ``own``. Its default agent becomes its own agent, by an agent rule naming the
         channel alone; it must be custom and answer nowhere else. Otherwise pass
@@ -5285,7 +5324,7 @@
       'description': '''
         Change how Daimon appears in this Discord server: its display name,
         its avatar, or both.
-        
+        <blank line>
         Use when the user asks you to rename yourself or change your profile
         picture. ``display_name`` is the new nickname (1-32 characters).
         ``avatar_url`` is the URL of an image the user attached to a message
@@ -5340,7 +5379,7 @@
     'set_repo_binding': dict({
       'description': '''
         Bind your agent to a git repo.
-        
+        <blank line>
         Mints a credential, stores it in your MA Vault, and records the binding.
         Replaces any existing binding for your agent.
       ''',
@@ -5369,7 +5408,7 @@
     'set_setup_target': dict({
       'description': '''
         Switch this setup conversation to an explicitly selected MA agent identity.
-        
+        <blank line>
         Pass the current turn's origin_context_id and a current agent's MA id.
         State the target switch briefly. Other running turns keep their own target.
         This changes no routing or editing permissions.
@@ -5394,13 +5433,13 @@
     'set_thread_participation': dict({
       'description': '''
         Start or stop replying in a thread without being addressed each time.
-        
+        <blank line>
         Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
         thread (its parent is looked up, so ``channel_id`` is optional);
         ``channel_id`` from ``<channel role="parent_channel">`` alone for a
         channel; neither for the workspace. Channel and workspace scope need an
         admin (Manage Server on Discord, a listed admin on Teams).
-        
+        <blank line>
         Modes: ``on`` follow, ``off`` do not, ``disabled`` lock a channel or
         workspace so nothing below can turn it on (not valid for a thread),
         ``inherit`` drop this scope's setting. Read the returned ``note`` back
@@ -5450,11 +5489,11 @@
     'start_fresh_task': dict({
       'description': '''
         Start this conversation's work over with an empty workspace: "let's start fresh", "start over", "clear the workspace and begin a new task".
-        
+        <blank line>
         Only when someone asks for a clean slate. A key, model, repo or instruction
         change keeps the task; `hand_off_task` moves it to another agent. Neither needs
         this.
-        
+        <blank line>
         From the next message here, the agent works in a new empty workspace. It leaves
         behind this task's working files and unfinished work. It keeps everything
         already posted in this thread, and the agent's saved memory, keys and
@@ -5477,7 +5516,7 @@
     'start_turn': dict({
       'description': '''
         Start a new conversation turn with the agent and return a handle.
-        
+        <blank line>
         Creates a persistent MA session with vault/repo/env parity and sends
         the first user message. Returns ``{"handle": "<session_id>",
         "turn_event_id": "<event_id>", "turn_started_at": "<iso8601>"}``.
@@ -5486,7 +5525,7 @@
         this turn's first event: poll ``list_events`` with
         ``created_at_gte=turn_started_at`` and discard everything up to and
         including ``turn_event_id`` to read only this turn's transcript.
-        
+        <blank line>
         ``bundle`` is an opaque handle returned by the bundle upload route.
         Passing it mounts that archive read-only in the session's uploads
         directory instead of the normal vault/repo/env mounts, and requires
@@ -5525,11 +5564,11 @@
     'sync_skills': dict({
       'description': '''
         Install skills from a GitHub repo into the workspace's shared skill library.
-        
+        <blank line>
         First use ``list_skills`` and prefer existing skills; import only a repository
         the user requested. If the skills repo is private, use ``request_skill_repo_token``;
         ``request_repo_binding`` provides working-repo access. Never accept tokens in chat.
-        
+        <blank line>
         Discovers SKILL.md files and imports or updates skills. Pass ``agent_name`` to
         also attach them, preserving existing skills; omit it only to stock the library.
         Importing alone attaches nothing. Report returned source, branch, path and
@@ -5583,13 +5622,13 @@
       'description': '''
         Change an agent's system prompt or switch its model; add existing skills such as
         build-models. Scalar ``model``, ``description`` and ``system`` fields replace.
-        
+        <blank line>
         Prefer current-generation ``claude-sonnet-5-5`` for Sonnet and ``claude-opus-5-5``
         for Opus unless an older version is explicitly requested. List fields
         (``tools``, ``mcp_servers``, ``skills``) are added to, never replaced; shorter
         lists remove nothing. Use ``remove_skill`` or ``detach_mcp_server`` to remove.
         Daimon requires ``fork_agent`` first; channel/workspace defaults require admin.
-        
+        <blank line>
         Prompt, model and skill changes reach a conversation on its next message, not the
         one running now. ``skills`` accepts names such as
         ``["build-models", "compare-models"]``, resolved server-side; explicit
@@ -5647,7 +5686,7 @@
           'BetaManagedAgentsAgentToolset20260401Params': dict({
             'description': '''
               Configuration for built-in agent tools.
-              
+              <blank line>
               Use this to enable or disable groups of tools available to the agent.
             ''',
             'properties': dict({
@@ -5827,7 +5866,7 @@
           'BetaManagedAgentsCustomToolParams': dict({
             'description': '''
               A custom tool that is executed by the API client rather than the agent.
-              
+              <blank line>
               When the agent calls this tool, an `agent.custom_tool_use` event is emitted and the session goes idle, waiting for the client to provide the result via a `user.custom_tool_result` event.
             ''',
             'properties': dict({
@@ -6121,7 +6160,7 @@
     'update_environment': dict({
       'description': '''
         Patch-update an environment. Omitted (None) fields are preserved.
-        
+        <blank line>
         Opening the network of an environment a sealed channel runs in needs the
         caller's confirmation: pass ``confirm_open_network=true`` only after they
         confirm it.
@@ -6131,7 +6170,7 @@
           'BetaCloudConfigParams': dict({
             'description': '''
               Request params for `cloud` environment configuration.
-              
+              <blank line>
               Fields default to null; on update, omitted fields preserve the
               existing value.
             ''',
@@ -6172,7 +6211,7 @@
           'BetaLimitedNetworkParams': dict({
             'description': '''
               Limited network request params.
-              
+              <blank line>
               Fields default to null; on update, omitted fields preserve the
               existing value.
             ''',
@@ -6223,7 +6262,7 @@
           'BetaPackagesParams': dict({
             'description': '''
               Specify packages (and optionally their versions) available in this environment.
-              
+              <blank line>
               When versioning, use the version semantics relevant for the package manager, e.g. for `pip` use `package==1.0.0`. You are responsible for validating the package and version exist. Unversioned installs the latest.
             ''',
             'properties': dict({
@@ -6367,13 +6406,13 @@
     'update_routine': dict({
       'description': '''
         PATCH-update a routine. Only provided fields are changed.
-        
+        <blank line>
         ``destination_kind`` + ``destination_id`` set where results go (see
         ``create_routine``); ``clear_destination=true`` removes it, and the
         routine's spend still counts toward the same channel's budget.
-        
+        <blank line>
         ``catch_up_policy`` selects ``skip`` or one coalesced ``run-once`` after downtime.
-        
+        <blank line>
         ``agent_name`` reassigns the routine to a different daimon-tagged agent;
         the tool resolves it to a live MA agent id at the call boundary.
       ''',

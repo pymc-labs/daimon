@@ -19,9 +19,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-def _load_migration():
-    path = Path(__file__).parents[1] / "alembic/versions/0048_github_access_foundation.py"
-    spec = importlib.util.spec_from_file_location("migration_github_access_foundation", path)
+def _load_migration(revision: str = "0048_github_access_foundation"):
+    path = Path(__file__).parents[1] / f"alembic/versions/{revision}.py"
+    spec = importlib.util.spec_from_file_location(f"migration_{revision}", path)
     assert spec and spec.loader
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
@@ -32,21 +32,24 @@ def _load_migration():
 async def test_github_access_migration_round_trips(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
     migration = _load_migration()
+    panel_migration = _load_migration("0066_github_panel_notices")
     conn = await db_session.connection()
 
-    def run(step: str) -> Callable[[Connection], None]:
+    def run(migration_module: object, step: str) -> Callable[[Connection], None]:
         def inner(sync_conn: Connection) -> None:
             with Operations.context(MigrationContext.configure(sync_conn)):
-                getattr(migration, step)()
+                getattr(migration_module, step)()
 
         return inner
 
-    await conn.run_sync(run("downgrade"))
+    await conn.run_sync(run(panel_migration, "downgrade"))
+    await conn.run_sync(run(migration, "downgrade"))
     gone = await db_session.scalar(
         text("SELECT to_regclass(current_schema() || '.tenant_github_repos')")
     )
     assert gone is None
-    await conn.run_sync(run("upgrade"))
+    await conn.run_sync(run(migration, "upgrade"))
+    await conn.run_sync(run(panel_migration, "upgrade"))
     restored = await db_session.scalar(
         text("SELECT to_regclass(current_schema() || '.tenant_github_repos')")
     )

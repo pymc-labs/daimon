@@ -30,15 +30,15 @@ def test_discord_stale_card_age_exceeds_turn_ceiling_and_attempts_are_bounded() 
     assert defaults.turn_card_unrecoverable_after_attempts == 3
     with pytest.raises(ValidationError):
         DiscordSettings(
-            bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=int(TURN_CEILING_S)
+            bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=int(TURN_CEILING_S) + 899
         )
     with pytest.raises(ValidationError):
         DiscordSettings(bot_token=SecretStr("test"), turn_card_unrecoverable_after_attempts=1)
     assert (
         DiscordSettings(
-            bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=int(TURN_CEILING_S) + 1
+            bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=int(TURN_CEILING_S) + 900
         ).turn_card_unrecoverable_after_s
-        == int(TURN_CEILING_S) + 1
+        == int(TURN_CEILING_S) + 900
     )
 
 
@@ -63,8 +63,8 @@ def test_agent_identity_workspace_exclusions_read_json_env(
     default = load_settings(_env_file=None).agent_identity
     assert default.excluded_discord_guild_ids == []
     assert default.excluded_slack_team_ids == []
-    monkeypatch.setenv("DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS", '[123, "456"]')
-    monkeypatch.setenv("DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS", '["T123"]')
+    monkeypatch.setenv("DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS", '[123, " 456 "]')
+    monkeypatch.setenv("DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS", '[" T123 "]')
     configured = load_settings(_env_file=None).agent_identity
     assert configured.excluded_discord_guild_ids == ["123", "456"]
     assert configured.excluded_slack_team_ids == ["T123"]

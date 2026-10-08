@@ -57,12 +57,6 @@ async def set_agent_github_binding(
     return AgentGithubBindingRow.model_validate(orm)
 
 
-async def delete_for_agent(session: AsyncSession, *, agent_id: uuid.UUID) -> None:
-    """Drop one agent's PAT overlay after App activation succeeds."""
-    await session.execute(delete(AgentGithubBinding).where(AgentGithubBinding.agent_id == agent_id))
-    await session.flush()
-
-
 async def delete_for_principal(
     session: AsyncSession,
     *,
@@ -84,6 +78,15 @@ async def delete_for_principal(
     rowcount = cast(CursorResult[Any], result).rowcount
     await session.flush()
     return rowcount
+
+
+async def delete_for_agent(session: AsyncSession, *, agent_id: uuid.UUID) -> int:
+    """Retire one agent's PAT overlay without changing another agent's binding."""
+    result = await session.execute(
+        delete(AgentGithubBinding).where(AgentGithubBinding.agent_id == agent_id)
+    )
+    await session.flush()
+    return cast(CursorResult[Any], result).rowcount
 
 
 async def count_for_principal(

@@ -211,6 +211,9 @@ from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
+from daimon.core.github_new_repo_delivery import run_new_repo_notice_poller
+from daimon.core.github_removal_delivery import run_removal_notice_poller
+from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
@@ -218,6 +221,9 @@ from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role, TaskContinuationRow
+from daimon.core.stores.github_access_requests import AccessRequest
+from daimon.core.stores.github_new_repo_notices import NewRepoNoticeGroup
+from daimon.core.stores.github_removal_notices import RemovalNotice
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.slack_connect_prompts import mark_connect_prompted, was_connect_prompted
 from daimon.core.stores.slack_event_dedup import insert_if_new
@@ -440,6 +446,67 @@ class SlackApp:
                 should_stop=lambda: self.draining,
             )
         )
+
+    def start_github_request_expiry_poller(self) -> asyncio.Task[None]:
+        return self._spawn(
+            run_request_expiry_poller(
+                self.runtime.sessionmaker,
+                platform="slack",
+                post=self._post_github_request_expiry,
+                should_stop=lambda: self.draining,
+            )
+        )
+
+    def start_github_new_repo_poller(self) -> asyncio.Task[None]:
+        return self._spawn(
+            run_new_repo_notice_poller(
+                self.runtime.sessionmaker,
+                platform="slack",
+                deliver=self._send_new_repo_group,
+                should_stop=lambda: self.draining,
+            )
+        )
+
+    def start_github_removal_poller(self) -> asyncio.Task[None]:
+        return self._spawn(
+            run_removal_notice_poller(
+                self.runtime.sessionmaker,
+                platform="slack",
+                deliver=self._send_github_removal_notice,
+                should_stop=lambda: self.draining,
+            )
+        )
+
+    async def _send_new_repo_group(self, group: NewRepoNoticeGroup) -> bool:
+        from daimon.adapters.slack.agent_setup.github_new_repo import send_group_dm
+
+        return await send_group_dm(self.runtime, group)
+
+    async def _send_github_removal_notice(self, notice: RemovalNotice) -> bool:
+        from daimon.adapters.slack.agent_setup.github_removal import send_removal_dm
+
+        return await send_removal_dm(self.runtime, notice)
+
+    async def _post_github_request_expiry(self, request: AccessRequest) -> bool:
+        try:
+            async with self.runtime.sessionmaker() as session:
+                tenant = await get_tenant(session, request.tenant_id)
+            if tenant is None:
+                return True
+            client = await resolve_web_client(self.runtime, team_id=tenant.external_id)
+            if client is None:
+                return False
+            await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                channel=request.parent_channel_id,
+                thread_ts=request.thread_id,
+                text="Stopped waiting for GitHub access. Ask again any time.",
+            )
+            return True
+        except SlackApiError as error:
+            return error.response.get("error") in (  # pyright: ignore[reportUnknownMemberType]
+                "channel_not_found",
+                "is_archived",
+            )
 
     def start_delivery_poller(self) -> asyncio.Task[None]:
         """Post routine results to their destinations (FEAT-085) until draining."""
@@ -1086,10 +1153,10 @@ class SlackApp:
                 self._spawn(handle_billing_command(self.runtime, payload))
             elif cmd == "/privacy":
                 self._spawn(handle_privacy_command(self.runtime, payload))
-            elif cmd == "/agent-setup":
-                self._spawn(handle_agent_setup_command(self.runtime, payload))
-            elif cmd == "/github":
+            elif cmd == "/github" and str(payload.get("text") or "").strip().startswith("connect"):
                 self._spawn(handle_github_command(self.runtime, payload))
+            elif cmd in ("/agent-setup", "/github"):
+                self._spawn(handle_agent_setup_command(self.runtime, payload))
             elif cmd == "/memory":
                 self._spawn(handle_memory_command(self.runtime, payload))
             else:
@@ -1131,6 +1198,18 @@ class SlackApp:
                     self._spawn(handle_privacy_block_action(self.runtime, payload))
                 elif action_id.startswith("agent_setup__"):
                     self._spawn(handle_agent_setup_action(self.runtime, payload))
+                elif action_id.startswith("github_new_repo__"):
+                    from daimon.adapters.slack.agent_setup.github_new_repo import handle_action
+
+                    self._spawn(handle_action(self.runtime, payload))
+                elif action_id.startswith("github_link__"):
+                    from daimon.adapters.slack.agent_setup.github_link import handle_action
+
+                    self._spawn(handle_action(self.runtime, payload))
+                elif action_id.startswith("github_request__"):
+                    from daimon.adapters.slack.agent_setup.github_requests import handle_action
+
+                    self._spawn(handle_action(self.runtime, payload))
                 elif action_id == SLACK_CREDENTIAL_ACTION_ID:
                     self._spawn(handle_credential_request_click(self.runtime, payload))
                 elif action_id == ACTION_UPDATE:
@@ -2305,6 +2384,16 @@ class SlackApp:
                     prepared.continuity.transfer_kind, lost=[]
                 )
                 lifecycle.answer_prefix = replacement_summary
+            if prepared.continuity.state == "replaced" and prepared.mapping_id is not None:
+                from daimon.core.stores.thread_sessions import github_key_restart_line
+
+                async with self.runtime.sessionmaker() as notice_session:
+                    key_restart = await github_key_restart_line(
+                        notice_session, mapping_id=prepared.mapping_id
+                    )
+                if key_restart is not None:
+                    replacement_summary = key_restart
+                    lifecycle.answer_prefix = key_restart
 
             # Turn marker: message ts + channel + start time, written as soon as
             # the mapping row is known and the card exists. Slack passes
@@ -3000,6 +3089,13 @@ class SlackApp:
                     now=datetime.now(UTC),
                 )
                 await _at_session.commit()
+
+        if row.reason == "github_access_ready":
+            await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel,
+                thread_ts=thread_id,
+                text="Access is ready, continuing.",
+            )
 
         handoff_notice = (
             build_handoff_notice(

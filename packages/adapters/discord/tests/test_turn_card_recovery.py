@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import discord
 import pytest
@@ -113,6 +113,69 @@ async def test_fresh_unresolved_card_stays_recoverable(
         now=intent.created_at + timedelta(hours=1),
     )
     assert await turn_card_intent_is_active(db_session, id=intent.id)
+
+
+async def test_exhausted_recovery_can_retire_when_guild_member_is_unavailable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    tenant = await make_tenant(db_session)
+    intent = await create_turn_card_intent(
+        db_session, tenant_id=tenant.id, platform="discord", thread_id="456", turn_token=uuid4()
+    )
+    await db_session.execute(
+        text("UPDATE turn_card_intents SET created_at = :at WHERE id = :id"),
+        {"at": now - timedelta(days=2), "id": intent.id},
+    )
+    await db_session.commit()
+    thread = MagicMock(spec=discord.Thread)
+    thread.guild.me = None
+    thread.fetch_message = AsyncMock()
+    assert await expire_unrecoverable_turn_card(
+        db_session_factory,
+        intent=intent.model_copy(update={"created_at": now - timedelta(days=2)}),
+        thread=thread,
+        max_age_s=86400,
+        reason="recovery attempts exhausted",
+        allow_missing_member=True,
+        now=now,
+    )
+    assert not await turn_card_intent_is_active(db_session, id=intent.id)
+    thread.fetch_message.assert_not_awaited()
+
+
+async def test_incomplete_history_pass_keeps_found_candidate_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intent = TurnCardIntentRow(
+        id=uuid4(),
+        tenant_id=uuid4(),
+        platform="discord",
+        thread_id="456",
+        turn_token=uuid4(),
+        channel_id=None,
+        message_id=None,
+        status="prepared",
+        created_at=datetime.now(UTC) - timedelta(days=2),
+        updated_at=datetime.now(UTC),
+    )
+    search = AsyncMock(
+        return_value=turn_card_recovery.TurnCardSearchResult(
+            state=TurnCardSearchState.INDETERMINATE, message_ids=(123, 124)
+        )
+    )
+    monkeypatch.setattr(turn_card_recovery, "find_turn_card_message", search)
+    candidates: set[int] = set()
+    await reconcile_turn_card_intent(
+        MagicMock(),
+        intent=intent,
+        thread=MagicMock(spec=discord.Thread),
+        sleep=AsyncMock(),
+        candidate_message_ids=candidates,
+    )  # type: ignore[arg-type]
+    assert candidates == {123, 124}
+    assert search.await_count == 3
 
 
 async def test_age_out_waits_for_guild_member_before_marking(

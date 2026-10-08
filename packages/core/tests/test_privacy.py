@@ -944,6 +944,15 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # account; its encrypted flow rows cascade from the invitation.
             "github_connect_invitations",
             "agent_github_grants",
+            # Drafts belong to the tenant; deleting an account clears the
+            # nullable actor reference and leaves the pending repo choice.
+            "agent_github_grant_drafts",
+            # A request is personal to the asker and cascades with their account.
+            "github_access_requests",
+            # A recipient's private card row cascades with their account.
+            "github_access_request_deliveries",
+            # Browser link attempts last ten minutes and cascade with the account.
+            "github_personal_link_intents",
             # The account link is removed by ON DELETE CASCADE. A token's
             # requester reference is erased by SET NULL and its GitHub user ID
             # is explicitly cleared; its recorded link

@@ -229,6 +229,12 @@ class RosterView(PanelViewBase):
         )
         routing_button.callback = self._on_routing  # type: ignore[method-assign]  # per-instance callback
         navigation.add_item(routing_button)
+        if state.is_admin:
+            connect_button: discord.ui.Button[RosterView] = discord.ui.Button(
+                label="🐙 GitHub", style=discord.ButtonStyle.secondary
+            )
+            connect_button.callback = self._on_connect_github  # type: ignore[method-assign]
+            navigation.add_item(connect_button)
         navigation.add_item(self.done_button())
         container.add_item(navigation)  # pyright: ignore[reportArgumentType]  # ActionRow[Self] is the same runtime item
 
@@ -237,6 +243,19 @@ class RosterView(PanelViewBase):
             container.add_item(pager)  # pyright: ignore[reportArgumentType]  # ActionRow[Self] is the same runtime item
 
         self.add_item(container)
+
+    async def _on_connect_github(self, interaction: discord.Interaction) -> None:
+        from daimon.adapters.discord.agent_setup.github_home import load_home
+        from daimon.adapters.discord.checks import is_guild_admin
+
+        if interaction.guild_id != self.state.guild_id or not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+            await interaction.response.send_message(
+                "Only a server admin can connect GitHub.", ephemeral=True
+            )
+            return
+        await interaction.response.defer()
+        home = await load_home(self.state, runtime=self.runtime, user_id=interaction.user.id)
+        await self.swap_to(interaction, home)
 
     def _attach_details_callbacks(
         self, container: discord.ui.Container[discord.ui.LayoutView], page: Page[RosterRow]

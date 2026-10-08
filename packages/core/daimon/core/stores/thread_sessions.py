@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import uuid as _uuid
 from collections.abc import Collection
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from daimon.core._models import ThreadSession, UsageEvent
@@ -117,6 +117,41 @@ async def list_live_sessions_for_agent(
         if row.ma_agent_id is not None
         and derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.ma_agent_id) == agent_id
     ]
+
+
+GITHUB_KEY_RESTART_LINE = (
+    "GitHub connection updated. Chat restarted. Earlier messages are still here; "
+    "unsaved work in the old workspace is gone."
+)
+
+
+async def mark_github_key_restart(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, agent_id: _uuid.UUID
+) -> int:
+    """Force each open PAT session to start fresh after its key is retired."""
+    from daimon.core.stores.thread_session_lineage import request_fresh_start
+
+    live = await list_live_sessions_for_agent(session, tenant_id=tenant_id, agent_id=agent_id)
+    moment = datetime.now(UTC)
+    for mapped in live:
+        await request_fresh_start(session, id=mapped.id, at=moment)
+        await session.execute(
+            update(ThreadSession)
+            .where(ThreadSession.id == mapped.id)
+            .values(github_key_restart_notice=True)
+        )
+    return len(live)
+
+
+async def github_key_restart_line(session: AsyncSession, *, mapping_id: _uuid.UUID) -> str | None:
+    """Return the one-time prefix for a replacement of a marked PAT session."""
+    current = await session.get(ThreadSession, mapping_id)
+    if current is None or current.predecessor_id is None:
+        return None
+    old = await session.get(ThreadSession, current.predecessor_id)
+    if old is None or not old.github_key_restart_notice:
+        return None
+    return GITHUB_KEY_RESTART_LINE
 
 
 async def get_thread_session_at(

@@ -188,6 +188,23 @@ async def _seed_pending_row(
     return tenant.id, idempotency_key
 
 
+async def test_excluded_guild_dispatch_disables_identity(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = _make_runtime(db_session_factory)
+    runtime.settings.agent_identity.enabled = True
+    runtime.settings.agent_identity.excluded_discord_guild_ids = ["710000001"]
+    bot = make_bot(runtime)
+    thread = _make_thread()
+    with patch(
+        "daimon.adapters.discord.bot.dispatch_pending_continuations", new_callable=AsyncMock
+    ) as dispatch:
+        await bot._dispatch_continuations(  # pyright: ignore[reportPrivateUsage]
+            tenant_id=uuid.uuid4(), thread=thread, guild_id="710000001"
+        )
+    assert dispatch.await_args.kwargs["identity_enabled"] is False
+
+
 async def test_dispatch_continuations_in_thread_skips_a_thread_already_processing(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

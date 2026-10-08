@@ -17,16 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tens of thousands of metered calls those passes ran for many minutes of CPU.
   The sweep also runs on its own loop now, so a long pass no longer holds up
   routine claims. Billing is unchanged.
+- Identity exclusions now leave unscoped DMs on the deployment switch, and Discord card recovery retires aged pending cards after repeated lookup failures without dropping cards found during a pass.
 - Discord card recovery now keeps the hourly pass away from live turns and startup reconciliation, retires aged intents after repeated failed passes, and uses "Stopped." for cards found while the bot is running.
 - The Discord webhook capacity model now accounts for lifecycle edit debounce; its overload cases distinguish cold bursts from the removed-debounce counterfactual.
 - Discord restart recovery does not replace an uneditable orphan card. Aged intents stop blocking channel tidy only after a definite recovery failure; a periodic pass revisits them. The bot deletes a known stale card only while it still carries that turn's pending button. Missing messages no longer count as failed deletes, while unknown webhooks do.
 - Discord keeps a pending turn-card intent when recovery cannot edit its webhook card or an unprompted turn cannot delete its card, instead of retiring an unresolved card.
 - Discord picture upload retry expires cleanly, and a completed upload still succeeds if its setup panel was dismissed.
+- The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
 - Agent identity can be disabled for selected Discord guilds or Slack workspaces
   while remaining enabled elsewhere in the deployment.
-- Agents can offer an admin a private GitHub connect link bound to the current agent; members can record a setup request. `/github connect` is available in Discord and Slack with a private button. Self-serve links activate only agents with no saved GitHub key, working repo or skill repo, and no channel pin. An operator can issue an agent-bound CLI link for a saved-key agent; it stages an update that requires **Update and restart chats**. New selections default to **Read and write**: push branches, open issues and pull requests. **Read only** reads code, issues and pull requests.
+- Discord and Slack GitHub setup panels now manage connected repos, agent grants,
+  personal links, waiting requests, and disconnects. The
+  server-rendered connection pages include a searchable picker, a persistent
+  Connect repos action, and pages for approval and recovery states.
+- Agents can offer an admin a private GitHub connect link bound to the current agent; members can record a setup request. `/github connect` is available in Discord and Slack with a private button. Self-serve links refuse legacy-mode agents with a saved GitHub key, working repo, skill repo, or channel pin. An operator can issue an agent-bound CLI link for a saved-key agent, then finish the staged update with `daimon github finish-update`. New selections default to **Read and write**: push branches, open issues and pull requests. **Read only** reads code, issues and pull requests.
 - With agent identity enabled, new default pictures use a tenant-assigned
   Daimon face built from the production mascot and canonical expressions.
   Layer IDs and draw weights live in a manifest; stored variants keep their
@@ -142,6 +148,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Repeated GitHub Connect repos submissions show the successful repo count.
+  The submit button disables while connecting, and new selections default to
+  read and write access.
 - **Sonnet 5.5 cache reads are billed at $0.10 per million tokens**, Anthropic's price since 2026-10-07. Daimon still charged the old $0.20, so the default model's cache reads cost tenants twice the list price in estimates and ledger debits.
 - Approving a tool call no longer fails the turn with "re-requested approval for tool call(s) already confirmed". The approved call now runs inside the turn, so a notebook or attachment publish is no longer refused after Approve.
 - Allow-listed Discord QA bots can start a turn by replying without a mention to a recorded agent post, as they already can by mentioning Daimon.
@@ -421,6 +430,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Building the image needs Docker 23 or later: the Dockerfile uses BuildKit instructions the legacy builder rejects.
 - Run migrations `0046_account_external` and `0047_turn_origin_external` before deploying. The new code leaves an empty member guest list out of the stored access policy, so older processes still read it; once one is listed, upgrade every process.
 - Isolated channels' agents no longer read other channels, nor sessions with no channel stamp: setups that relied on it stop working.
 - Teams guests in standard and private channels and 1:1 chats are no longer answered outside isolated channels unless listed with `daimon tenants access-policy --add-member-guest`, or unless `DAIMON_TEAMS__RESTRICT_GUESTS=false`.

@@ -6,7 +6,8 @@ login mounts, chart storage and connecting MCP servers.
 
 ## Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) with Compose.
+- [Docker](https://docs.docker.com/get-docker/) 23 or later (the image build
+  needs BuildKit) with Compose.
 - An Anthropic API key **in a workspace dedicated to this deployment**.
   Daimon manages the workspace's Managed Agents resources as its own, so
   sharing the workspace with anything else causes collisions.
@@ -187,20 +188,29 @@ tokens. Run it alongside the MCP service.
 
 Ask an agent to connect GitHub, or run `/github connect` in Discord or Slack.
 The admin gets a private, agent-bound link; the selected repos activate for
-that agent when confirmed. Self-serve links refuse agents with a saved GitHub
-key, working repo or skill repo credential, or a channel pin. An operator can
-issue an agent-bound link with `daimon github connect-link --tenant <workspace-uuid>
+that agent when confirmed. Self-serve links refuse legacy-mode agents with a
+saved GitHub key, working repo or skill repo credential, or a channel pin. An
+operator can issue an agent-bound link with `daimon github connect-link --tenant <workspace-uuid>
 --requester <platform-user-id> --agent <agent-uuid> --agent-name <agent-name>`.
-That link stages a saved-key update; an admin then confirms **Update and restart
-chats** in `/github connect` before switching.
+That link stages an update. After the recipient confirms repos on the web, run
+`daimon github finish-update --tenant <workspace-uuid> --agent <agent-uuid>`
+as the operator to switch the agent and restart its open chats.
 Members can request setup; their request is recorded for an admin. For an
 operator fallback, print a seven-day, single-use invitation with
 `daimon github connect-link --tenant <workspace-uuid> --requester <platform-user-id>`.
 The invitation is minted on that workspace admin's behalf. The recipient signs in
 to GitHub and confirms the repositories they administer. No repository is
 preselected.
-The confirmation page has **Select all repos you administer** for bulk selection;
+The confirmation page has **Select all repos you manage** for bulk selection;
 each selected repository still requires a fresh GitHub admin check at confirmation.
+
+In Discord or Slack, open `/github` to see the server connection, your personal
+GitHub link, and waiting requests. An admin can also open GitHub from
+`/agent-setup` to add or change repos for an agent. The browser page searches
+repos, shows the selected access level, and keeps Connect repos visible until
+confirmation. A second submission shows the connected count. People link their
+GitHub account when a request needs repo access; their GitHub permissions cap
+what the agent can use. Admins can review requests and disconnect the server connection.
 
 Operator-issued links without an agent target only connect repos to the
 workspace. In that fallback, agents remain in legacy GitHub mode until an

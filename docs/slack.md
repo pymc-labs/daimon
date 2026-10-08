@@ -155,11 +155,22 @@ Trust model notes for operators:
 `/github connect` sends a workspace admin a private link for the agent answering
 in that channel. Use `/github connect AgentName` to choose another agent. The
 link lets the admin pick repos, then activates them for that agent. If the
-agent still has a saved GitHub key, `/github connect` shows the **Update and
-restart chats** confirmation instead. Existing Slack installations need the
+agent still has a saved GitHub key, `/github connect` asks the admin to contact
+the Daimon operator to switch it. Existing Slack installations need the
 `/github` command added from `docs/slack-app-manifest.yaml` and reinstallation.
 
 Existing Slack apps must update **Event Subscriptions → Subscribe to bot events** to match `docs/slack-app-manifest.yaml`, including `message.channels`, `message.groups`, channel/group archive, unarchive, and deletion events. These subscriptions track setup lifecycle only; messages still trigger conversation only through `app_mention`. An `app_mention` runs a turn only when the message actually contains `@daimon`, so follow-ups in a thread need the mention too; Slack has been reported to deliver the event for un-mentioned thread replies, and those are dropped. Root deletion is delivered as the [`message_deleted` message subtype](https://docs.slack.dev/reference/events/message/message_deleted/).
+
+Workspace admins can click **🐙 GitHub** in `/agent-setup` or run `/github`.
+Anyone can run `/github` to see their personal GitHub link. Admins also see
+pending connection links and **Requests waiting**. The private link opens GitHub to
+confirm repos. Each agent's Details view has
+**🐙 GitHub repos** to add connected repos to an agent. **Settings** changes or
+removes the agent's repos; **Manage connected repos** changes or disconnects
+them for the workspace. New repos appear in a private, grouped
+**Connect more repos** or **Not now** card after the UTC day closes. Add the
+`/github` command from `docs/slack-app-manifest.yaml` and reinstall the Slack
+app before testing it.
 
 Completion notifications can be enabled per tenant with `DAIMON_COMPLETION_PINGS`
 (see [architecture](architecture.md#completion-signals)). Enabled turns post their

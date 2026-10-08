@@ -233,11 +233,23 @@ def test_github_migrations_follow_agent_avatars() -> None:
     script = ScriptDirectory.from_config(config)
     notices = script.get_revision("0054_github_new_repo_notices")
     audit = script.get_revision("0055_github_token_audit_versions")
+    teams_sites = script.get_revision("0056_teams_channel_sites")
+    panel = script.get_revision("0066_github_panel_notices")
+    access_requests = script.get_revision("0067_github_access_requests")
     assert notices is not None and notices.down_revision == "0053_agent_avatars"
     assert audit is not None and audit.down_revision == "0054_github_new_repo_notices"
+    assert (
+        teams_sites is not None and teams_sites.down_revision == "0055_github_token_audit_versions"
+    )
+    assert panel is not None and panel.down_revision == "0065_turn_card_recovery_failures"
+    assert (
+        access_requests is not None and access_requests.down_revision == "0066_github_panel_notices"
+    )
     [head] = script.get_heads()
     chain = {rev.revision for rev in script.iterate_revisions(head, "base")}
     assert "0055_github_token_audit_versions" in chain, "on the line to the head"
+    assert "0066_github_panel_notices" in chain, "on the line to the head"
+    assert "0067_github_access_requests" in chain, "on the line to the head"
     refresh = script.get_revision("0057_github_mcp_session_refresh")
     assert refresh is not None and refresh.down_revision == "0056_teams_channel_sites"
     installation_kind = script.get_revision("0058_github_app_install_kind")

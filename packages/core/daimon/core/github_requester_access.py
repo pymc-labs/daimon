@@ -41,19 +41,16 @@ _LEVELS: tuple[Access, ...] = ("none", "read", "write")
 
 
 def effective_access(
-    baseline_rows: Mapping[int, Access],
-    ceiling_rows: Mapping[int, Access],
+    agent_abilities: Mapping[int, Access],
     asker_permissions: Mapping[int, Access],
+    baselines: Mapping[int, Access] | None = None,
 ) -> dict[int, Literal["read", "write"]]:
-    """Compute max(baseline, min(ceiling, asker)) for each granted repository."""
+    """Give the agent's baseline, plus asker access up to its ceiling."""
     result: dict[int, Literal["read", "write"]] = {}
-    for repo_id in baseline_rows.keys() | ceiling_rows.keys():
-        baseline = baseline_rows.get(repo_id, "none")
-        ceiling = ceiling_rows.get(repo_id, baseline)
-        if _RANK[baseline] > _RANK[ceiling]:
-            raise ValueError("baseline exceeds ceiling")
+    for repo_id, ability in agent_abilities.items():
+        baseline = (baselines or {}).get(repo_id, "none")
         level = _LEVELS[
-            max(_RANK[baseline], min(_RANK[ceiling], _RANK[asker_permissions.get(repo_id, "none")]))
+            max(_RANK[baseline], min(_RANK[ability], _RANK[asker_permissions.get(repo_id, "none")]))
         ]
         if level != "none":
             result[repo_id] = level

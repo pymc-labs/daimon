@@ -1155,15 +1155,25 @@ admission before any of this runs.
 - **GitHub connection invitations** are issued with `daimon github connect-link`
   for a tenant admin, `/github connect` on Discord and Slack, or the
   `github_connect` MCP tool from a conversation. They can target one agent;
-  self-serve links are refused for agents with a saved GitHub key, working or
-  skill repo credential, or a channel pin. An operator-issued agent link may
-  stage a saved-key update for explicit confirmation. When the separate
-  `DAIMON_GITHUB_APP__*` credentials and
+  self-serve links are refused for legacy-mode agents with a saved GitHub key,
+  working or skill repo credential, or a channel pin. An operator-issued agent
+  link may stage an update for an operator to finish with
+  `daimon github finish-update`. When the separate `DAIMON_GITHUB_APP__*`
+  credentials and
   encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,
   `/oauth/github/callback`, `/oauth/github/setup` and GET/POST
   `/oauth/github/confirm`. The browser flow checks the confirming person's
   GitHub admin access before authorizing tenant repositories. These routes
   are absent when GitHub connection is unconfigured.
+  Discord `/github home` and Slack `/github`, plus `/agent-setup` on both,
+  expose connected repos, agent grants, personal links, waiting requests, and
+  disconnects.
+  The connection page offers a searchable repo picker and confirms each repo
+  against the signed-in GitHub account. The same browser can safely repeat a
+  successful submission; a signed invitation receipt also handles concurrent
+  submissions. New installation repos queue private admin notices after the
+  UTC day closes. Confirmed installation removal cancels affected requests and
+  notifies known admins.
 
 - **Scheduled routines** go through
   `packages/core/daimon/core/headless_runner.py`, which creates a session with

@@ -43,7 +43,7 @@ class PostAppInstallLinkResult(BaseModel):
 
     channel_id: str
     message_id: str
-    install_url: str
+    install_url: str | None
 
 
 async def _post_app_install_link_impl(
@@ -55,6 +55,13 @@ async def _post_app_install_link_impl(
 ) -> PostAppInstallLinkResult:
     if auth.platform_user_id is None:
         raise ToolError("posting the install link requires a platform-bound identity")
+    if auth.platform == "teams":
+        message_id = await _post_teams_app_install_link_impl(
+            runtime, auth, channel_id=channel_id, slug="", purpose=""
+        )
+        return PostAppInstallLinkResult(
+            channel_id=channel_id, message_id=message_id, install_url=None
+        )
     slug = runtime.settings.github.app_slug
     if slug is None:
         raise ToolError(
@@ -64,7 +71,6 @@ async def _post_app_install_link_impl(
         )
     post_button = {
         "slack": _post_slack_app_install_button_impl,
-        "teams": _post_teams_app_install_link_impl,
     }.get(auth.platform or "", _post_app_install_button_impl)
     message_id = await post_button(
         runtime,

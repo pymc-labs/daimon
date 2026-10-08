@@ -12,7 +12,7 @@ live view instance, within the panel's ten-minute life.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Final, Self
+from typing import TYPE_CHECKING, Final, Self
 
 from daimon.adapters.discord.agent_setup.expiry import ExpiringView
 from daimon.adapters.discord.agent_setup.state import PanelState
@@ -20,6 +20,9 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.roster import Page
 
 import discord
+
+if TYPE_CHECKING:
+    from daimon.adapters.discord.agent_setup.github_embed_panel import GitHubEmbedPanel
 
 INVOKER_ONLY_MESSAGE: Final = "Only the command invoker can use these buttons."
 STALE_PANEL_MESSAGE: Final = "This panel has moved on. Use the controls currently shown."
@@ -60,7 +63,9 @@ class PanelViewBase(ExpiringView, discord.ui.LayoutView):
             return False
         return True
 
-    async def swap_to(self, interaction: discord.Interaction, view: PanelViewBase) -> None:
+    async def swap_to(
+        self, interaction: discord.Interaction, view: PanelViewBase | GitHubEmbedPanel
+    ) -> None:
         """Replace what the panel's one message shows with ``view``.
 
         ``interaction.response.edit_message`` is the path for a click that has
@@ -74,6 +79,28 @@ class PanelViewBase(ExpiringView, discord.ui.LayoutView):
                 await interaction.followup.send(STALE_PANEL_MESSAGE, ephemeral=True)
             else:
                 await interaction.response.send_message(STALE_PANEL_MESSAGE, ephemeral=True)
+            return
+        if isinstance(view, discord.ui.View):
+            # Component V2 messages cannot gain embeds. Open the GitHub embed
+            # in a fresh private response when entering it from setup.
+            embed = view.embed
+            if interaction.response.is_done():
+                message = await interaction.followup.send(
+                    embed=embed,
+                    view=view.bind_render_interaction(interaction, panel=self.state),
+                    ephemeral=True,
+                    wait=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                view.attach_message(message)
+            else:
+                await interaction.response.send_message(
+                    embed=embed,
+                    view=view.bind_render_interaction(interaction, panel=self.state),
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                view.attach_message(await interaction.original_response())
             return
         if interaction.response.is_done():
             await interaction.edit_original_response(
