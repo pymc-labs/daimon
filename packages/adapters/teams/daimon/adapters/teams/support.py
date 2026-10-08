@@ -74,7 +74,9 @@ from daimon.adapters.teams.identity import DENIED, TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import (
@@ -522,13 +524,20 @@ class SupportCommand:
 async def post_to_support_channel(
     runtime: TeamsRuntime, direct: DirectChats | None, body: str
 ) -> bool:
-    """Post `body` to the escalation channel; False when it did not land."""
+    """Post `body` to the escalation channel; False when it did not land.
+
+    A Teams channel is asked `authorize(POST)` with no agent, on a policy read
+    just before the send, as Slack does, so a channel protected meanwhile is
+    refused. No lock is held across the send.
+    """
     settings = runtime.settings
     channel = settings.support.escalation_channel_id
     try:
         if channel is None or (_teams_channel(channel) and direct is None):
             return False
         if _teams_channel(channel) and direct is not None:
+            if not await _may_post_to(runtime, channel):
+                return False
             await direct.post(channel, body)
             return True
         if settings.discord is None:
@@ -541,6 +550,25 @@ async def post_to_support_channel(
         )
         response.raise_for_status()
         return True
-    except TEAMS_SEND_ERRORS as exc:
+    except (SQLAlchemyError, *TEAMS_SEND_ERRORS) as exc:
         log.warning("support.channel_undeliverable", err_type=type(exc).__name__)
         return False
+
+
+async def _may_post_to(runtime: TeamsRuntime, channel: str) -> bool:
+    """Whether the deployment's organisation lets this bot post in `channel`."""
+    teams = runtime.settings.teams
+    if teams is None:
+        return False
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=teams.tenant_id)
+    async with runtime.sessionmaker() as session:
+        try:
+            policy = await load_access_policy(session, tenant_id=tenant_id)
+        except AccessPolicyUnreadable:
+            log.warning("support.destination_policy_unreadable")
+            return False
+    place = Place(channel_id=channel)
+    if not authorize(policy, subject=Subject(), action=Action.POST, place=place):
+        log.warning("support.destination_protected", channel_id=channel)
+        return False
+    return True

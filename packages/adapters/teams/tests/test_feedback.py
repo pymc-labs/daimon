@@ -3,6 +3,7 @@ vote, and a tenant's forms routed to the support channel."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import AbstractAsyncContextManager
 from typing import Any
@@ -69,7 +70,16 @@ async def _send(
     user: str = AAD_OBJECT_ID,
 ) -> Any:
     data = {"action": FEEDBACK_DIALOG, "message": ANSWER, "reasons": reasons, "text": note}
-    return await post_activity(service, make_invoke("task/submit", {"data": data}, user=user))
+    reply = await post_activity(service, make_invoke("task/submit", {"data": data}, user=user))
+    await _routed(service)
+    return reply
+
+
+async def _routed(service: TeamsHttpService) -> None:
+    """Wait for a routed form's background post: tests share one database connection."""
+    async with asyncio.timeout(10):
+        while service.turns.in_flight:
+            await asyncio.sleep(0.01)
 
 
 async def _send_as_action(
@@ -78,7 +88,9 @@ async def _send_as_action(
     """The form's Send as Teams' custom loop may deliver it: `message/submitAction`."""
     typed = json.dumps({"reasons": reasons, "text": note} | marker)
     value = {"actionName": "feedback", "actionValue": {"reaction": "dislike", "feedback": typed}}
-    return await post_activity(service, make_invoke("message/submitAction", value))
+    reply = await post_activity(service, make_invoke("message/submitAction", value))
+    await _routed(service)
+    return reply
 
 
 def _message(response: Any) -> str:
@@ -350,3 +362,17 @@ async def test_a_form_sent_as_a_submit_action_is_refused_like_the_dialog(
 
     assert await _rows(db_session_factory) == [], "the same voter rule on either route"
     assert _posts_to_ops(teams_api_fake) == []
+
+
+async def test_a_routed_form_is_not_posted_to_a_protected_support_channel(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with db_session_factory.begin() as session:
+        policy = TenantAccessPolicy(protected_channel_ids=(OPS,))
+        await set_access_policy(session, tenant_id=TENANT, policy=policy)
+    async with _running(db_session_factory, teams_api_fake, routed=True) as service:
+        await _send(service, reasons="other", note=CRITICISM)
+
+    assert _posts_to_ops(teams_api_fake) == [], "the bot does not post where it may not"
+    [row] = await _rows(db_session_factory)
+    assert row["feedback_text"] == CRITICISM, "the form is still recorded"

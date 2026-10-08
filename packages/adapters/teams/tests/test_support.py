@@ -407,6 +407,21 @@ async def test_a_database_error_picking_admins_still_reaches_the_support_channel
     assert row.delivered_at is not None, "and stamped once it lands"
 
 
+async def test_a_protected_support_channel_gets_no_post(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    policy = TenantAccessPolicy(protected_channel_ids=(OPS,))
+    async with db_session_factory.begin() as session:
+        await set_access_policy(session, tenant_id=TENANT, policy=policy)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        card = await _form(service, teams_api_fake, make_message_activity(text="support"))
+        await _send(service, _token(card), "help")
+
+    assert _posts_to(teams_api_fake, OPS) == [], "the bot does not post where it may not"
+    [row] = await _rows(db_session_factory)
+    assert row.delivered_at is None, "kept as undelivered"
+
+
 async def test_a_sealed_channel_warns_in_the_form_and_marks_the_post(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
