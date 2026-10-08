@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from urllib.parse import parse_qs, urlparse
 
@@ -221,6 +222,9 @@ async def test_connection_happy_path_and_rechecks(
         assert "All repos in this org" not in page.text
         assert 'name="repo" value="101"' in page.text
         assert 'name="repo" value="101" checked' not in page.text
+        assert '<option value="write" selected>' in page.text
+        assert 'id="connect-repos"' in page.text
+        assert 'button.textContent = "Connecting…"' in page.text
         spoof = await browser.get(
             "/oauth/github/setup", params={"state": state, "installation_id": "999999"}
         )
@@ -262,7 +266,6 @@ async def test_connection_happy_path_and_rechecks(
             data={
                 "state": state,
                 "repo": ["101", "102"],
-                "access_101": "write",
                 "access_102": "read",
             },
         )
@@ -288,7 +291,27 @@ async def test_connection_happy_path_and_rechecks(
             assert events[0].operation == "github_connect"
             assert events[0].github_repo_ids == [101, 102]
         reused = await browser.post("/oauth/github/confirm", data={"state": state, "repo": "101"})
-        assert reused.status_code == 400
+        assert reused.status_code == 200
+        assert "Already connected: 2 repos" in reused.text
+        refreshed = await browser.get("/oauth/github/confirm", params={"state": state})
+        assert "Already connected: 2 repos" in refreshed.text
+        receipt = re.search(r'name="receipt" value="([a-f0-9]+)"', page.text)
+        invitation = re.search(r'name="invitation" value="([a-f0-9]+)"', page.text)
+        assert receipt is not None and invitation is not None
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"
+        ) as no_cookie_browser:
+            queued_post = await no_cookie_browser.post(
+                "/oauth/github/confirm",
+                data={
+                    "state": state,
+                    "repo": "101",
+                    "invitation": invitation.group(1),
+                    "receipt": receipt.group(1),
+                },
+            )
+        assert queued_post.status_code == 200
+        assert "Already connected: 2 repos" in queued_post.text
     assert any(request.url.path == "/user/installations" for request in requests)
     assert all(request.url.path != "/user/memberships/orgs" for request in requests)
     assert sum(request.url.path == "/applications/client/token" for request in requests) == 1

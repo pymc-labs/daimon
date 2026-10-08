@@ -17,11 +17,14 @@ from daimon.core import github_app_session
 from daimon.core._models import (
     Account,
     AccountGitHubLink,
+    AgentFile,
+    AgentGithubBinding,
     AgentGitHubGrant,
     AgentGitHubMode,
     CliPrincipal,
     GitHubConnectFlow,
     GitHubConnectInvitation,
+    GitHubConnectRequest,
     GitHubUserLink,
     PlatformPrincipal,
     Tenant,
@@ -41,13 +44,15 @@ from daimon.core.github_requester_access import (
     effective_access,
     linked_permissions,
 )
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import (
+    github_access,
     github_app_installations,
     github_connect,
     github_issued_tokens,
     github_links,
 )
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
@@ -149,7 +154,13 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
         ],
     )
     assert saved
-    assert await db_session.get(GitHubConnectFlow, github_connect.digest("other-browser")) is None
+    assert (
+        await github_connect.get_flow(db_session, state="other-browser", cookie="other-cookie")
+        is None
+    )
+    assert (
+        await github_connect.successful_confirmation(db_session, state="state", cookie="cookie")
+    ).connected_repo_count == 1
     assert await github_connect.get_invitation(db_session, github_connect.digest(token)) is None
     assert not await github_connect.confirm(
         db_session, state="state", cookie="cookie", github_user_id=17, repos=[]
@@ -179,6 +190,152 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
     assert await github_connect.get_flow(db_session, state="expired-flow", cookie="cookie") is None
     assert await github_connect.delete_expired_flows(db_session, now=datetime.now(UTC)) == 1
     assert await db_session.get(GitHubConnectFlow, github_connect.digest("expired-flow")) is None
+
+
+@pytest.mark.asyncio
+async def test_agent_bound_connection_activates_without_a_saved_key_and_waits_with_one(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, admin_id, member_id = (uuid.uuid4() for _ in range(3))
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="workspace"))
+    await db_session.flush()
+    db_session.add_all(
+        [
+            Account(id=admin_id, tenant_id=tenant_id, role="admin"),
+            Account(id=member_id, tenant_id=tenant_id, role="user"),
+        ]
+    )
+    await db_session.flush()
+    confirmation = github_connect.RepoConfirmation(
+        repo_id=101,
+        owner_id=55,
+        installation_id=77,
+        full_name="example/work",
+        max_access="write",
+    )
+    for index, has_key in enumerate((False, True)):
+        ma_agent_id = f"ma-agent-{index}"
+        agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+        await github_connect.record_connect_request(
+            db_session,
+            tenant_id=tenant_id,
+            requester_account_id=member_id,
+            agent_id=agent_id,
+            agent_name="ResearchBot",
+        )
+        await github_connect.record_connect_request(
+            db_session,
+            tenant_id=tenant_id,
+            requester_account_id=member_id,
+            agent_id=agent_id,
+            agent_name="ResearchBot",
+        )
+        assert (
+            await db_session.scalar(
+                select(func.count())
+                .select_from(GitHubConnectRequest)
+                .where(GitHubConnectRequest.agent_id == agent_id)
+            )
+            == 1
+        )
+        token = await github_connect.mint_invitation(
+            db_session,
+            tenant_id=tenant_id,
+            requester_account_id=admin_id,
+            agent_id=agent_id,
+            agent_name="ResearchBot",
+        )
+        invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
+        assert invitation is not None and invitation.agent_id == agent_id
+        if has_key:
+            db_session.add(AgentGithubBinding(agent_id=agent_id, principal_id=agent_id))
+            db_session.add(
+                AgentFile(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    key="GH_TOKEN",
+                    content="encrypted-placeholder",
+                    encoding="plain",
+                )
+            )
+            db_session.add(
+                ThreadSession(
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    thread_id="old-chat",
+                    ma_session_id="old-session",
+                    ma_agent_id=ma_agent_id,
+                    status="live",
+                )
+            )
+            await db_session.flush()
+        await github_connect.create_flow(
+            db_session,
+            invitation_hash=github_connect.digest(token),
+            state=f"state-{index}",
+            cookie=f"cookie-{index}",
+            encrypted_verifier=b"encrypted",
+        )
+        assert await github_connect.confirm(
+            db_session,
+            state=f"state-{index}",
+            cookie=f"cookie-{index}",
+            github_user_id=17,
+            repos=[confirmation],
+        )
+        await github_app_installations.upsert_github_app(
+            db_session,
+            installation_id=77,
+            account_id=55,
+            account_login="example",
+            account_type="Organization",
+            repository_selection="selected",
+            suspended_at=None,
+        )
+        status = await github_connect.activate_confirmed_agent(
+            db_session, invitation=invitation, repos=[confirmation]
+        )
+        grants = await github_access.list_agent_grants(
+            db_session, tenant_id=tenant_id, agent_id=agent_id
+        )
+        assert [(row.baseline_access, row.ceiling_access, row.staged) for row in grants] == [
+            ("write", "write", has_key)
+        ]
+        assert status == ("update_pending" if has_key else "activated")
+        assert await github_access.get_agent_mode(
+            db_session, tenant_id=tenant_id, agent_id=agent_id
+        ) == ("legacy" if has_key else "app")
+        if has_key:
+            assert (
+                await github_connect.pending_update_for_agent(
+                    db_session, tenant_id=tenant_id, agent_id=agent_id
+                )
+                is not None
+            )
+            assert await github_connect.activate_pending_agent(
+                db_session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                account_id=admin_id,
+            )
+            assert await db_session.get(AgentGithubBinding, agent_id) is None
+            assert await db_session.get(AgentFile, (tenant_id, agent_id, "GH_TOKEN")) is None
+            session_row = await db_session.scalar(
+                select(ThreadSession).where(ThreadSession.ma_agent_id == ma_agent_id)
+            )
+            assert session_row is not None and session_row.fresh_start_requested_at is not None
+            assert (
+                await github_access.get_agent_mode(
+                    db_session, tenant_id=tenant_id, agent_id=agent_id
+                )
+                == "app"
+            )
+            assert not await github_connect.activate_pending_agent(
+                db_session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                account_id=admin_id,
+            )
 
 
 @pytest.mark.asyncio

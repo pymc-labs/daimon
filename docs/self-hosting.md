@@ -185,7 +185,12 @@ are mounted only when these values and `DAIMON_MCP__PUBLIC_URL` are present.
 The scheduler removes expired connection flows, including their encrypted
 tokens. Run it alongside the MCP service.
 
-A deployment operator can print a seven-day, single-use invitation with
+Ask an agent to connect GitHub, or run `/github connect` in Discord or Slack.
+The admin gets a private, agent-bound link; the selected repos activate for
+that agent when confirmed. An agent with a saved GitHub key waits for an admin
+to confirm **Update and restart chats** in `/github connect` before switching.
+Members can request setup; their request is recorded for an admin. For an
+operator fallback, print a seven-day, single-use invitation with
 `daimon github connect-link --tenant <workspace-uuid> --requester <platform-user-id>`.
 The invitation is minted on that workspace admin's behalf. The recipient signs in
 to GitHub and confirms the repositories they administer. No repository is
@@ -193,7 +198,9 @@ preselected.
 The confirmation page has **Select all repos you administer** for bulk selection;
 each selected repository still requires a fresh GitHub admin check at confirmation.
 
-Agents remain in legacy GitHub mode until a server admin stages grants with
+Operator-issued links without an agent target only connect repos to the
+workspace. In that fallback, agents remain in legacy GitHub mode until an
+admin stages grants with
 `daimon github grants stage --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id> --baseline read --ceiling read`
 and runs `daimon github grants activate --tenant <workspace-uuid> --agent <agent-uuid>`.
 Use `grants list`, `remove`, and `deactivate` with the same tenant and agent options.

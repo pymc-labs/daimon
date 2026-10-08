@@ -2489,6 +2489,12 @@ class TenantGitHubRepo(Base):
 
 class GitHubConnectInvitation(Base):
     __tablename__ = "github_connect_invitations"
+    __table_args__ = (
+        CheckConstraint(
+            "activation_status IS NULL OR activation_status IN ('activated', 'update_pending')",
+            name="ck_github_connect_invitation_activation",
+        ),
+    )
     token_hash: Mapped[str] = mapped_column(Text, primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
@@ -2498,8 +2504,34 @@ class GitHubConnectInvitation(Base):
     )
     workspace_label: Mapped[str] = mapped_column(Text)
     requester_label: Mapped[str] = mapped_column(Text)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    agent_name: Mapped[str | None] = mapped_column(Text)
+    activation_status: Mapped[str | None] = mapped_column(Text)
+    connected_repo_count: Mapped[int | None] = mapped_column(Integer)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GitHubConnectRequest(Base):
+    __tablename__ = "github_connect_requests"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "requester_account_id", "agent_id", name="uq_github_connect_request"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    requester_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class GitHubConnectFlow(Base):

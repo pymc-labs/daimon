@@ -128,6 +128,13 @@ from daimon.adapters.slack.gating import (
     is_slack_connect_external,
     mentions_bot,
 )
+from daimon.adapters.slack.github_connect import (
+    ACTION_CANCEL,
+    ACTION_UPDATE,
+    handle_github_cancel_click,
+    handle_github_command,
+    handle_github_update_click,
+)
 from daimon.adapters.slack.help import handle_help_command
 from daimon.adapters.slack.here import handle_here_command
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
@@ -1076,6 +1083,8 @@ class SlackApp:
                 self._spawn(handle_privacy_command(self.runtime, payload))
             elif cmd == "/agent-setup":
                 self._spawn(handle_agent_setup_command(self.runtime, payload))
+            elif cmd == "/github":
+                self._spawn(handle_github_command(self.runtime, payload))
             elif cmd == "/memory":
                 self._spawn(handle_memory_command(self.runtime, payload))
             else:
@@ -1119,6 +1128,10 @@ class SlackApp:
                     self._spawn(handle_agent_setup_action(self.runtime, payload))
                 elif action_id == SLACK_CREDENTIAL_ACTION_ID:
                     self._spawn(handle_credential_request_click(self.runtime, payload))
+                elif action_id == ACTION_UPDATE:
+                    self._spawn(handle_github_update_click(self.runtime, payload))
+                elif action_id == ACTION_CANCEL:
+                    self._spawn(handle_github_cancel_click(self.runtime, payload))
                 elif action_id.startswith("feedback_vote:"):
                     self._spawn(handle_feedback_vote(self.runtime, payload))
                 elif action_id == FEEDBACK_DETAILS_ACTION_ID:

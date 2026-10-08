@@ -37,14 +37,19 @@ For an explicit target switch, resolve the exact agent and call
 the shared setup target and this turn's snapshot; other running callers keep
 their snapshots. Selecting a target does not change who answers or routing.
 
-1. **Working repo.** For a public GitHub repo named for a specific agent by
-   URL, use `bind_public_repo`; it checks that no token is needed and binds
-   directly. Use `request_repo_binding` when the repo is private or access is
-   unknown — it collects a token only through its private form. A GitHub App
-   install link is informational: installing alone does not verify this
-   workspace's access or bind the repo. Use the working token path where
-   access is needed; do not say an existing token stopped being used after an
-   App install.
+1. **Working repo and GitHub setup.** When someone asks to hook up GitHub or
+   asks how to set up this agent with GitHub, call `github_connect` with this
+   turn's `origin_context_id` and the selected agent identity. An admin gets a
+   private link to pick repos for that agent; a member gets `Ask an admin` and
+   a recorded request. Never repeat the link in a shared reply. For a public
+   GitHub repo named for a specific agent by URL, `bind_public_repo` can still
+   bind it directly. For a private repo on a legacy agent, offer the GitHub
+   connect link first. Use the `request_repo_binding` private PAT form only
+   if the person explicitly asks for that fallback. Connecting repos does not
+   silently replace an existing saved key; the admin confirms **Update and
+   restart chats** first. For an App-mode agent, inspect its mounted repo and
+   available GitHub repos, state only repos the person may see, and never ask
+   for a token.
 2. **Keys.** Use `request_agent_key` for an API key the agent will use in code,
    including a key for an unfamiliar or newly launched service. Infer and state
    a conventional name such as `HIGGSFIELD_API_KEY`; do not ask the person to
