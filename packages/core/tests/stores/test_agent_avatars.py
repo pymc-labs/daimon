@@ -64,6 +64,7 @@ async def test_avatar_lifecycle_and_resolver(db_session: AsyncSession) -> None:
         agent_name="ＡＤＡ",
         is_builtin=False,
         public_base_url="https://example.test/",
+        enabled=True,
     )
     assert identity.name == "ＡＤＡ"
     row = await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="ada")
@@ -126,6 +127,7 @@ async def test_avatar_url_absent_without_public_base(db_session: AsyncSession) -
         agent_name="Helper",
         is_builtin=False,
         public_base_url=None,
+        enabled=True,
     )
     assert identity.avatar_url is None
     assert await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="Helper")

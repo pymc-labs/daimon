@@ -106,7 +106,7 @@ class DiscordPostTransport:
             runtime = getattr(client, "runtime", None)
             settings = getattr(runtime, "settings", None)
             configured = getattr(getattr(settings, "agent_identity", None), "enabled", None)
-            identity_enabled = configured if isinstance(configured, bool) else True
+            identity_enabled = configured if isinstance(configured, bool) else False
         self.identity_enabled = identity_enabled
         self.fallback_used = False
         self._fallback_prefix_applied = False
@@ -139,7 +139,7 @@ class DiscordPostTransport:
     async def _webhook(
         self, *, create: bool = True, webhook_id: int | None = None
     ) -> discord.Webhook | None:
-        if not self.identity_enabled or (self.builtin and create):
+        if create and (self.builtin or not self.identity_enabled):
             return None
         destination = self._destination()
         if destination is None:
@@ -320,8 +320,6 @@ class DiscordPostTransport:
         ):
             self._fallback_prefix_applied = True
         if self._ours(message):
-            if not self.identity_enabled:
-                return await self.send(**_replacement_send_kwargs(kwargs))
             if self._destination() is None:
                 raise discord.ClientException("webhook channel unavailable")
             hook = await self._webhook(create=False, webhook_id=message.webhook_id)
@@ -345,8 +343,6 @@ class DiscordPostTransport:
 
     async def delete(self, message: discord.Message) -> None:
         if self._ours(message):
-            if not self.identity_enabled:
-                return
             if self._destination() is None:
                 raise discord.ClientException("webhook channel unavailable")
             hook = await self._webhook(create=False, webhook_id=message.webhook_id)

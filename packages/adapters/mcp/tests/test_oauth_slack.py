@@ -35,6 +35,7 @@ from daimon.adapters.mcp.oauth_slack import (
 )
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
+    AgentIdentitySettings,
     AnthropicSettings,
     CryptoSettings,
     DatabaseSettings,
@@ -453,12 +454,16 @@ def _make_slack_exchange_handler(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("identity_enabled", [False, True])
 async def test_install_landing_has_authorize_url_and_state(
     sessionmaker: async_sessionmaker[AsyncSession],
+    identity_enabled: bool,
 ) -> None:
     """install_handler returns 200 with a branded page containing a signed-state authorize URL."""
     fernet_key = Fernet.generate_key().decode()
-    settings = _build_slack_settings()
+    settings = _build_slack_settings().model_copy(
+        update={"agent_identity": AgentIdentitySettings(enabled=identity_enabled)}
+    )
     fernet = build_multifernet((fernet_key,))
 
     def make_client() -> httpx.AsyncClient:
@@ -476,6 +481,7 @@ async def test_install_landing_has_authorize_url_and_state(
     assert "slack.com/oauth/v2/authorize" in body, "install page must contain Slack authorize URL"
     assert "state=" in body, "install page must carry a signed state parameter"
     assert "Add to Slack" in body, "install page must have the 'Add to Slack' CTA"
+    assert ("chat%3Awrite.customize" in body) is identity_enabled
 
 
 async def test_callback_persists_token_and_tenant(

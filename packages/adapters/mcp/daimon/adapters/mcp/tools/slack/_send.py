@@ -221,6 +221,8 @@ async def _post_with_identity(
 
 
 async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dict[str, str] | None:
+    if not runtime.settings.agent_identity.enabled:
+        return None
     agent_id = auth.chat_agent_id or auth.agent_id
     if agent_id is None:
         return None

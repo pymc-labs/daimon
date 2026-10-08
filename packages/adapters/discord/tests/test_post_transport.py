@@ -3,6 +3,7 @@
 import asyncio
 import io
 import logging
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -36,6 +37,9 @@ def _world(*, manage_webhooks: bool = True) -> tuple[MagicMock, MagicMock, Magic
     client = MagicMock()
     client.user.id = 10
     client.application_id = 10
+    client.runtime = SimpleNamespace(
+        settings=SimpleNamespace(agent_identity=SimpleNamespace(enabled=True))
+    )
     client.http.channel_webhooks = AsyncMock(return_value=[])
     parent = MagicMock(spec=discord.TextChannel)
     parent.id = 20
@@ -274,6 +278,32 @@ async def test_webhook_message_edits_and_deletes_through_webhook() -> None:
     channel.create_webhook.assert_not_awaited()
     message.edit.assert_not_awaited()
     message.delete.assert_not_awaited()
+
+
+async def test_existing_webhook_message_is_edited_and_deleted_with_identity_off() -> None:
+    client, channel, hook = _world()
+    message = MagicMock(spec=discord.Message)
+    message.id = 40
+    message.webhook_id = hook.id
+    message.application_id = client.application_id
+    hook.edit_message = AsyncMock(return_value=message)
+    hook.delete_message = AsyncMock()
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False, identity_enabled=False
+    )
+    _webhooks[channel.id] = {hook.id: hook}
+
+    await transport.edit(message, content="updated")
+    controls = MagicMock(spec=discord.ui.View)
+    await transport.edit(message, view=controls)
+    await transport.delete(message)
+
+    assert hook.edit_message.await_args_list[0].args == (40,)
+    assert hook.edit_message.await_args_list[0].kwargs == {"content": "updated"}
+    assert hook.edit_message.await_args_list[1].kwargs == {"view": controls}
+    hook.delete_message.assert_awaited_once_with(40)
+    channel.send.assert_not_awaited()
+    channel.create_webhook.assert_not_awaited()
 
 
 async def test_bot_message_edits_and_deletes_through_bot() -> None:

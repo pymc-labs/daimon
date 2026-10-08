@@ -296,6 +296,28 @@ async def test_turn_posts_use_agent_header_and_record_intent(
     assert all(row["thread_ts"] == "1700000000.000000" for row in recorded)
 
 
+async def test_identity_off_posts_as_bot_and_keeps_agent_footer(
+    fake_slack_web_client: Any,
+) -> None:
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client,
+        agent_name="Ada",
+        identity=AgentIdentity("Ada", None, True),
+    )
+    await lc.post_initial()
+    await lc.post_notice("continued")
+    posts = [
+        call.kwargs["json"] for call in fake_slack_web_client.mock.requests[("POST", _POST_URL)]
+    ]
+    assert all("username" not in post and "icon_url" not in post for post in posts)
+    assert not lc.header_customized
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="Done.")]))
+    footer = next(
+        block for block in _last_update_blocks(fake_slack_web_client) if block["type"] == "context"
+    )
+    assert "Ada" in footer["elements"][0]["text"]
+
+
 @pytest.mark.parametrize("status", [400, 429])
 async def test_spend_limit_posts_notice_and_error_log(
     fake_slack_web_client: Any, status: int, monkeypatch: pytest.MonkeyPatch

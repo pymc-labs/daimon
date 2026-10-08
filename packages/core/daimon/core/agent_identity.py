@@ -34,7 +34,7 @@ async def resolve_agent_identity(
     agent_name: str,
     is_builtin: bool,
     public_base_url: str | None,
-    enabled: bool = True,
+    enabled: bool = False,
 ) -> AgentIdentity:
     """Resolve the identity once when a turn admits an agent.
 

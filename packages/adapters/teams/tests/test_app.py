@@ -60,6 +60,21 @@ from .conftest import (
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 
 
+def test_agent_name_prefix_follows_deployment_switch() -> None:
+    assert (
+        app_module._agent_name_prefix(  # pyright: ignore[reportPrivateUsage]
+            enabled=False, name="Ada", metadata=None, default_name="daimon"
+        )
+        is None
+    )
+    assert (
+        app_module._agent_name_prefix(  # pyright: ignore[reportPrivateUsage]
+            enabled=True, name="Ada", metadata=None, default_name="daimon"
+        )
+        == "Ada"
+    )
+
+
 def _app(
     db_factory: async_sessionmaker[AsyncSession], sender: FakeSender, cap: int = 3
 ) -> TeamsApp:
@@ -471,9 +486,7 @@ async def test_an_unprompted_turn_posts_only_its_answer(
     ):
         await teams._participate(_unprompted_reply(), TENANT)
 
-    assert [a.text for a in sender.activities] == [
-        "**test-agent**\n\nThursday, per the release notes."
-    ]
+    assert [a.text for a in sender.activities] == ["Thursday, per the release notes."]
     assert 'unprompted="true"' in turns[0]["user_message"], "the agent knows nobody asked"
     assert await _open_intents(db_session_factory) == [], "no card, so no intent"
 

@@ -13,7 +13,7 @@ def should_process_message(
     author_id: str,
     bot_mentioned: bool,
     reply_to_recorded_post: bool = False,
-    identity_enabled: bool = True,
+    identity_enabled: bool = False,
     author_is_webhook: bool = False,
     guild_id: str | None,
     self_user_id: str | None = None,

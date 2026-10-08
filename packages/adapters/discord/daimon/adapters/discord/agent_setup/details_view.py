@@ -196,7 +196,7 @@ def build_details_container(
     is_admin: bool,
     attribution: str | None,
     is_builtin: bool = False,
-    identity_enabled: bool = True,
+    identity_enabled: bool = False,
 ) -> discord.ui.Container[discord.ui.LayoutView]:
     """Fold one agent's details into the panel card. Pure — no I/O, no clock.
 

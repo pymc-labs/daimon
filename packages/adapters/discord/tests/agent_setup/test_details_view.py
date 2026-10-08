@@ -17,6 +17,7 @@ import discord
 import jwt as pyjwt
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.adapters.discord.agent_setup import hydrate as hydrate_mod
 from daimon.adapters.discord.agent_setup import mcp_access as mcp_access_mod
 from daimon.adapters.discord.agent_setup.budget import (
     LAYOUT_COMPONENT_BUDGET,
@@ -206,7 +207,7 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
     state = _state(details, account_id=account_id, is_admin=True)
     state.avatar_urls[details.name] = "https://mcp.example.com/avatars/token/abcdef123456.png"
     container = build_details_container(
-        state, details, expanded_detail=None, is_admin=True, attribution=None
+        state, details, expanded_detail=None, is_admin=True, attribution=None, identity_enabled=True
     )
     assert any(isinstance(item, discord.ui.Thumbnail) for item in _walk(container))
     assert "Avatars are public" in _container_text(container)
@@ -216,14 +217,25 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
     }
 
     member = build_details_container(
-        state, details, expanded_detail=None, is_admin=False, attribution=None
+        state,
+        details,
+        expanded_detail=None,
+        is_admin=False,
+        attribution=None,
+        identity_enabled=True,
     )
     assert not any(
         isinstance(item, discord.ui.Button) and item.label in {"Change avatar", "Reset avatar"}
         for item in _walk(member)
     )
     built_in = build_details_container(
-        state, details, expanded_detail=None, is_admin=True, attribution=None, is_builtin=True
+        state,
+        details,
+        expanded_detail=None,
+        is_admin=True,
+        attribution=None,
+        is_builtin=True,
+        identity_enabled=True,
     )
     assert "Avatars are public" not in _container_text(built_in)
 
@@ -237,6 +249,31 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
     )
     assert "Avatars are public" not in _container_text(disabled)
     assert not any(isinstance(item, discord.ui.Thumbnail) for item in _walk(disabled))
+
+
+async def test_load_details_for_skips_avatar_with_identity_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    details = _details()
+    state = _state(details, account_id=uuid.uuid4())
+    session = AsyncMock()
+    sessionmaker = MagicMock()
+    sessionmaker.return_value.__aenter__ = AsyncMock(return_value=session)
+    sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
+    settings = _mcp_settings()
+    settings.agent_identity.enabled = False
+    runtime = _make_runtime(sessionmaker, settings=settings)
+    monkeypatch.setattr(hydrate_mod, "load_agent_details", AsyncMock(return_value=details))
+    avatar_lookup = AsyncMock()
+    monkeypatch.setattr(hydrate_mod, "get_or_create_avatar", avatar_lookup)
+
+    result = await hydrate_mod.load_details_for(
+        runtime, state=state, agent=_roster_agent(details.name)
+    )
+
+    assert result is details
+    assert state.avatar_urls[details.name] is None
+    avatar_lookup.assert_not_awaited()
 
 
 def test_managed_agent_details_hide_avatar_controls_even_if_roster_flag_is_false(

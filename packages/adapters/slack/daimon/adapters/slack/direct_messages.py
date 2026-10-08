@@ -251,6 +251,8 @@ async def handle_direct_message(
 
         async def on_agent(name: str) -> None:
             nonlocal identity
+            if not runtime.settings.agent_identity.enabled:
+                return
             try:
                 agent = await find_agent_by_daimon_tag(
                     runtime.anthropic, tenant_id=conversation.tenant_id, name=name

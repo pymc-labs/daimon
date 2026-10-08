@@ -47,7 +47,7 @@ async def dispatch_pending_continuations(
     may_post: MayPost,
     client: discord.Client | None = None,
     public_base_url: str | None = None,
-    identity_enabled: bool = True,
+    identity_enabled: bool = False,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
     """Dispatch under the caller's existing thread guard."""

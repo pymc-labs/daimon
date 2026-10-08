@@ -666,6 +666,13 @@ async def _dispatch_panel_action(
                 reason="needs_admin_or_agent_gone",
                 agent_name=meta.agent_name,
             )
+            if not runtime.settings.agent_identity.enabled and view_id:
+                await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+                    view_id=view_id,
+                    view=panel_views.build_avatar_status_view(
+                        meta=meta, message="Agent pictures are turned off."
+                    ),
+                )
             return
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]
             trigger_id=trigger_id,

@@ -102,6 +102,11 @@ async def upload_agent_avatar(
     attachment: discord.Attachment,
 ) -> tuple[str, AvatarRow | None]:
     """Authorize, read only the supplied Discord attachment, and replace the avatar."""
+    if not runtime.settings.agent_identity.enabled:
+        await _may_edit(
+            interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=True
+        )
+        return "Agent pictures are turned off.", None
     if not await _may_edit(
         interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=True
     ):
@@ -177,6 +182,11 @@ async def reset_agent_avatar(
     agent_name: str,
 ) -> tuple[str, AvatarRow | None]:
     """Restore the generated avatar with a fresh public token."""
+    if not runtime.settings.agent_identity.enabled:
+        await _may_edit(
+            interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=False
+        )
+        return "Agent pictures are turned off.", None
     if not await _may_edit(
         interaction, runtime, tenant_id=tenant_id, agent_name=agent_name, change=False
     ):

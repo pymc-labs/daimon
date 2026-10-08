@@ -168,7 +168,7 @@ async def send_agent_message(
     content: str,
     files: list[discord.File] | None = None,
     extra_messages: list[discord.Message] | None = None,
-    identity_enabled: bool = True,
+    identity_enabled: bool = False,
 ) -> discord.Message:
     fallback_files = _fresh_files(files or [])
     hook = (
@@ -215,6 +215,7 @@ async def edit_own_message(
     channel: discord.abc.GuildChannel | discord.Thread,
     message: discord.Message,
     extra_messages: list[discord.Message] | None = None,
+    identity_enabled: bool = False,
     **kwargs: Any,  # noqa: ANN401
 ) -> discord.Message | None:
     await ensure_application_id(client)
@@ -247,6 +248,7 @@ async def edit_own_message(
             AgentIdentity(name=message.author.name, avatar_url=None, builtin=False),
             content=content,
             extra_messages=extra_messages,
+            identity_enabled=identity_enabled,
         )
     await message.edit(**kwargs)
     return None

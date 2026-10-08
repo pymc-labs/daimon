@@ -32,11 +32,11 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.slack_customize_scope import clear_missing_customize_scope
 from daimon.core.slack_oauth import (
-    SLACK_BOT_SCOPES,
     SLACK_USER_SCOPES,
     build_authorize_url,
     exchange_code,
     mint_state,
+    slack_bot_scopes,
     verify_state,
 )
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
@@ -553,7 +553,7 @@ def build_oauth_slack_routes(
             client_id=cfg.client_id,
             redirect_url=cfg.redirect_url,
             state=state,
-            scopes=SLACK_BOT_SCOPES,
+            scopes=slack_bot_scopes(identity_enabled=settings.agent_identity.enabled),
         )
         return _install_landing_html(
             authorize_url=authorize_url,

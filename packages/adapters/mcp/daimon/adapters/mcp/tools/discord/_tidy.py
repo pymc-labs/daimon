@@ -263,6 +263,7 @@ async def _edit_message_impl(  # pyright: ignore[reportUnusedFunction]
                     target.channel,
                     message,
                     extra_messages=extra_messages,
+                    identity_enabled=runtime.settings.agent_identity.enabled,
                     content=content,
                     embeds=[],
                     attachments=[],
@@ -270,7 +271,12 @@ async def _edit_message_impl(  # pyright: ignore[reportUnusedFunction]
                 )
             else:
                 replacement = await edit_own_message(
-                    c, target.channel, message, extra_messages=extra_messages, content=content
+                    c,
+                    target.channel,
+                    message,
+                    extra_messages=extra_messages,
+                    identity_enabled=runtime.settings.agent_identity.enabled,
+                    content=content,
                 )
 
         await run_action(
