@@ -173,8 +173,9 @@ _ROSTER_TEAMS = 5
 _MARKDOWN = re.compile(r"([\\*_`~\[\]])")
 # Every button carries the card's place token ("" for none), so a click keeps its channel.
 PLACE = "place"
-# Channels held for "This channel" across clicks; the oldest is dropped first.
-_MAX_PLACES = 512
+# Channels held for "This channel" across clicks, per person; their oldest is dropped first.
+# Per person, so someone typing `billing` again and again never drops another's channel.
+_MAX_PLACES = 8
 
 RosterName = Callable[[str, str], Awaitable[str | None]]
 """(team id, Entra object id) -> the person's name on that team's roster, or None."""
@@ -536,16 +537,17 @@ class BillingPanel:
         self._runtime = runtime
         self._roster_name = roster_name
         self._team_channels = team_channels
-        # Token -> (who typed the command, the channel it was typed in).
-        self._places: OrderedDict[str, tuple[str, str]] = OrderedDict()
+        # Who typed the command -> token -> the channel it was typed in.
+        self._places: dict[str, OrderedDict[str, str]] = {}
 
     async def command(self, context: CommandContext) -> None:
         asked, place = context.asked_in, None
         if asked is not None:
             place = secrets.token_urlsafe(16)
-            self._places[place] = (asked.user_id, asked.channel_id)
-            while len(self._places) > _MAX_PLACES:
-                self._places.popitem(last=False)
+            held = self._places.setdefault(asked.user_id, OrderedDict())
+            held[place] = asked.channel_id
+            while len(held) > _MAX_PLACES:
+                held.popitem(last=False)
         user_id = context.inbound.user_id
         card = await self._panel(context.tenant_id, user_id, context.is_admin, place=place)
         await context.send_card(card)
@@ -557,8 +559,8 @@ class BillingPanel:
 
     def _channel_of(self, place: str | None, user_id: str) -> str | None:
         """The channel a held token names, for the person who typed the command only."""
-        held = self._places.get(place) if place is not None else None
-        return held[1] if held is not None and held[0] == user_id else None
+        held = self._places.get(user_id)
+        return held.get(place) if held is not None and place is not None else None
 
     async def _panel(
         self,

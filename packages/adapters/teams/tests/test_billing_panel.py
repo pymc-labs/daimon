@@ -18,6 +18,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from daimon.adapters.teams import billing_panel
 from daimon.adapters.teams.billing_panel import (
     ADMIN_ONLY,
     ENTER_CODE,
@@ -81,9 +82,10 @@ def _running(
     db_factory: async_sessionmaker[AsyncSession],
     fake: TeamsApiFake,
     mcp: httpx.MockTransport | None = None,
+    admins: tuple[str, ...] = (AAD_OBJECT_ID,),
 ) -> AbstractAsyncContextManager[TeamsHttpService]:
     """An admin (AAD_OBJECT_ID) and a member (OTHER_AAD_OBJECT_ID); `mcp` fakes checkout."""
-    settings = teams_settings(admins=(AAD_OBJECT_ID,))
+    settings = teams_settings(admins=admins)
     client = None if mcp is None else httpx.AsyncClient(transport=mcp)
     runtime = build_teams_runtime(db_factory, teams=settings, http_client=client)
     runtime.settings.mcp.app_root_url = "https://mcp.example"
@@ -363,6 +365,52 @@ async def test_billing_typed_in_a_channel_shows_its_budget_on_every_click_of_its
         "someone else's click gets their own panel, naming no channel"
     )
     assert '"This channel"' not in in_chat, "typed in the chat, there is no channel"
+
+
+async def test_one_persons_billing_commands_never_drop_anothers_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tokens are held per person: only the typer's own older tokens make way.
+
+    Both are admins, whose cards carry the token on their buttons.
+    """
+    monkeypatch.setattr(billing_panel, "_MAX_PLACES", 1)
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with db_session_factory.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None
+        await make_channel_budget(session, tenant=tenant, platform="teams", channel_id=CHANNEL_ID)
+    admins = (AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID)
+
+    def direct() -> list[Any]:
+        return [r for r in teams_api_fake.activity_requests if DIRECT_CHAT_ID in r.url]
+
+    async with _running(db_session_factory, teams_api_fake, admins=admins) as service:
+        places: list[str] = []
+        for n, user in enumerate((AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID)):
+            activity = make_channel_activity(
+                text="billing", activity_id=f"b-{n}", aad_object_id=user
+            )
+            await post_activity(service, activity)
+            async with asyncio.timeout(10):
+                while len(chat := direct()) <= n:
+                    await asyncio.sleep(0.01)
+            found = re.search(r'"place": "([^"]+)"', json.dumps(chat[n].body))
+            assert found is not None, "the card's buttons carry the channel's token"
+            places.append(found[1])
+        mine = json.dumps(await post_activity(service, _click("refresh", place=places[0])))
+        dropped, kept = [
+            json.dumps(
+                await post_activity(service, _click("refresh", user=OTHER_AAD_OBJECT_ID, place=p))
+            )
+            for p in places[1:]
+        ]
+
+    assert '"This channel"' in mine, "another person's commands left the first typer's channel"
+    assert '"This channel"' not in dropped, "the second person's older token made way"
+    assert '"This channel"' in kept, "their newest token is held"
 
 
 async def test_an_admin_looks_up_a_person_with_the_people_picker(
