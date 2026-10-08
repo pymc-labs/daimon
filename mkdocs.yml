@@ -21,6 +21,7 @@ nav:
   - Routines: routines.md
   - Billing: billing.md
   - Defaults: defaults.md
+  - GitHub push resync: github-push-resync.md
   - Slack: slack.md
   - Agent identity: agent-identity.md
   - Teams: teams.md

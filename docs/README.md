@@ -24,6 +24,8 @@ pieces fit together.
   and cap gates, the signup credit, top-ups and the ledger tables.
 - [defaults.md](defaults.md) — authoring `defaults/`: agents, environments and
   skills, `daimon defaults apply` and `verify`, the seeded-skill fingerprint.
+- [github-push-resync.md](github-push-resync.md) — how a GitHub push resyncs
+  bound skills: the queue, retries, rate limits and delivery guarantees.
 - [slack.md](slack.md) — the Slack adapter's trust model: file delivery and
   per-user access.
 - [agent-identity.md](agent-identity.md) — per-message agent names, avatars,
