@@ -6,9 +6,10 @@ feedback loop in its custom mode (`card.rated`): a click arrives as a
 vote and says thanks. 👎 records the vote and opens Slack's "What went wrong?"
 form: optional reasons (`FEEDBACK_REASONS`) and optional text, at least one.
 Its submit (`task/submit`) records the down-vote and the form on the
-submitter's own row; the form carries the answer's id, never a row id, so a
-forged one only points the submitter's own feedback at another message in
-the same conversation, under the same access check. Teams may instead
+submitter's own row. The answer is the invoke's `replyToId` when Teams sends
+one, else the id the form carries (never a row id), so a forged one only
+points the submitter's own feedback at another message in the same
+conversation, under the same access check. Teams may instead
 deliver the form's Send as `message/submitAction`, its inputs JSON-encoded in
 `actionValue.feedback`, as Microsoft's samples for the custom mode handle it;
 `on_builtin` recognises the form there and takes the same submit path,
@@ -284,6 +285,9 @@ class TeamsFeedback:
         """Submitting the form is a down-vote in its own right: upserted with the form."""
         actor = await card_actor(self._runtime, activity)
         form = form_details(activity.value.data)
+        if activity.reply_to_id:
+            # The answer Teams says the dialog came from beats the client-built form's copy.
+            form = replace(form, message_id=activity.reply_to_id)
         if actor is None or not form.message_id:
             return dialog_message(DENIED)
         if not form.text and not form.reasons:

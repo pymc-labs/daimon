@@ -376,3 +376,18 @@ async def test_a_routed_form_is_not_posted_to_a_protected_support_channel(
     assert _posts_to_ops(teams_api_fake) == [], "the bot does not post where it may not"
     [row] = await _rows(db_session_factory)
     assert row["feedback_text"] == CRITICISM, "the form is still recorded"
+
+
+async def test_the_submit_names_the_answer_teams_replied_to_over_the_forms_copy(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    data = {"action": FEEDBACK_DIALOG, "message": "forged", "reasons": "other", "text": ""}
+    replied = make_invoke("task/submit", {"data": data})
+    bare = make_invoke("task/submit", {"data": data | {"message": "m-9"}})
+    del bare["replyToId"]
+    async with _running(db_session_factory, teams_api_fake) as service:
+        await post_activity(service, replied)
+        await post_activity(service, bare)
+
+    ids = {row["message_id"] for row in await _rows(db_session_factory)}
+    assert ids == {ANSWER, "m-9"}, "replyToId when Teams sends it, else the form's id"

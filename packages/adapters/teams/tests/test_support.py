@@ -323,6 +323,17 @@ async def test_a_typed_request_is_refused_when_the_policy_changed_before_send(
     assert await _rows(db_session_factory) == [] and _posts_to(teams_api_fake, OPS) == []
 
 
+async def test_ask_a_human_names_the_answer_teams_replied_to_over_the_forms_copy(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with _running(db_session_factory, teams_api_fake) as service:
+        await post_activity(service, _ask("send", message="forged", note="help"))
+        await _delivered(service)
+
+    [row] = await _rows(db_session_factory)
+    assert row.message_id == "m-7", "the invoke's replyToId, not the client-built form's id"
+
+
 async def test_ask_a_human_with_no_note_shows_the_form_again(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:

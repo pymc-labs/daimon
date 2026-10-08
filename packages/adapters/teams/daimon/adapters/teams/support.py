@@ -348,12 +348,13 @@ class SupportCommand:
     async def _ask_submit(self, activity: TaskSubmitInvokeActivity) -> TaskModuleResponse:
         """Decided again in `_escalate`: the policy may have changed while the dialog was open.
 
-        The answer's id rides in the form; a forged one only points the
-        submitter's own request at another message in the same conversation.
+        The answer is the invoke's `replyToId` when Teams sends one, else the
+        id the form carries; a forged one only points the submitter's own
+        request at another message in the same conversation.
         """
         actor = await card_actor(self._runtime, activity)
         data = submitted_fields(activity.value.data)
-        message_id = str(data.get("message") or "")
+        message_id = activity.reply_to_id or str(data.get("message") or "")
         if actor is None or not message_id:
             return dialog_message(DENIED)
         note = str(data.get(NOTE_INPUT) or "").strip()[:MAX_NOTE_CHARS]
