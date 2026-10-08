@@ -222,6 +222,12 @@ class SetupPanel:
         agent = await self._skill_target(actor, str(data.get("agent") or ""))
         if agent is None:
             return dialog_message(GONE)
+        account_id = await get_or_create_account(self._runtime, actor)
+        # Every submit, as on Discord: a preview is a step of the add, not open to everyone.
+        if refusal := await skill_change_refusal(
+            self._runtime, actor, agent, account_id=account_id
+        ):
+            return dialog_message(refusal)
         title, text = f"Add a skill to {agent.name}", str(data.get("skill") or "")
         try:
             bundle = bundle_from_markdown(text.strip())
@@ -230,7 +236,6 @@ class SetupPanel:
         if data.get("hash") != bundle.preview.content_hash:
             form = cards.add_skill_form(agent.name, text=text, preview=bundle.preview)
             return dialog(title, form)
-        account_id = await get_or_create_account(self._runtime, actor)
         try:
             result = await add_previewed_skill(
                 self._runtime, actor, agent, bundle, account_id=account_id

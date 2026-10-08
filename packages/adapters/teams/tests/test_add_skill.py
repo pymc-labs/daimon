@@ -17,6 +17,7 @@ from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.scope import TenantScopeRef
+from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill
 from daimon.testing import build_fake_anthropic, ma_agent
@@ -220,9 +221,11 @@ async def test_a_member_is_refused_on_the_organisation_default(
     skills = _Skills()
     async with _running(db_session_factory, teams_api_fake, skills) as service:
         opened = await _dialog(service, "fetch", agent="helper")
-        preview = _form(await _dialog(service, "submit", agent="helper", skill=SKILL_MD))
-        forced = await _dialog(service, "submit", **_submit_data(preview), skill=SKILL_MD)
+        preview = await _dialog(service, "submit", agent="helper", skill=SKILL_MD)
+        content_hash = bundle_from_markdown(SKILL_MD).preview.content_hash
+        forced = await _dialog(service, "submit", agent="helper", skill=SKILL_MD, hash=content_hash)
 
     assert opened["task"]["value"] == add_skill.needs_admin("helper"), "others depend on it"
+    assert preview["task"]["value"] == add_skill.needs_admin("helper"), "no preview either"
     assert forced["task"]["value"] == add_skill.needs_admin("helper"), "decided again on add"
     assert skills.created == [], "nothing uploaded"
