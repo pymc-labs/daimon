@@ -66,6 +66,25 @@ def test_props_reach_inside_the_circular_header_crop() -> None:
         assert float(delta[inside].mean()) > 2, "the prop must be visible inside a circular header"
 
 
+def test_hats_leave_top_margin_in_square_and_rounded_headers() -> None:
+    plain = list(classic_combo())
+    plain[3] = 0
+    base = np.asarray(render_image(tuple(plain), 512))
+    for layer_id in (
+        "hat-hardhat-base",
+        "hat-beanie-base",
+        "hat-cap-base",
+        "hat-gradcap-base",
+        "hat-headset-base",
+    ):
+        combo = plain.copy()
+        combo[3] = agent_faces._catalogue().hat_index[layer_id]
+        picture = np.asarray(render_image(tuple(combo), 512))
+        assert np.array_equal(picture[:10], base[:10]), (
+            "hat must sit below the top edge, including rounded-square corners"
+        )
+
+
 def test_assignment_prefers_hue_separation_before_expression_distance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

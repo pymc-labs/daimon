@@ -26,7 +26,7 @@ from daimon.core.agent_faces import (
     thumbnail,
 )
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -371,11 +371,25 @@ async def reset_avatar(
     )
 
 
-async def get_avatar_by_token(session: AsyncSession, *, token: str) -> AvatarRow | None:
-    orm = (
-        await session.scalars(select(AgentAvatar).where(AgentAvatar.token == token))
-    ).one_or_none()
-    return None if orm is None else _row(orm)
+async def get_avatar_by_token(
+    session: AsyncSession, *, token: str, sha12: str, size: int | None = None
+) -> bytes | None:
+    """Fetch one requested PNG without loading every image or decoding a face."""
+    current_hash = func.substr(AgentAvatar.sha256, 1, 12) == sha12
+    previous_hash = func.substr(AgentAvatar.previous_sha256, 1, 12) == sha12
+    if size == 128:
+        current_png = func.coalesce(AgentAvatar.png_128, AgentAvatar.png)
+        previous_png = func.coalesce(AgentAvatar.previous_png_128, AgentAvatar.previous_png)
+    elif size == 512:
+        current_png = func.coalesce(AgentAvatar.png_512, AgentAvatar.png)
+        previous_png = func.coalesce(AgentAvatar.previous_png_512, AgentAvatar.previous_png)
+    else:
+        current_png = AgentAvatar.png
+        previous_png = AgentAvatar.previous_png
+    image = case((current_hash, current_png), else_=previous_png)
+    return await session.scalar(
+        select(image).where(AgentAvatar.token == token, or_(current_hash, previous_hash)).limit(1)
+    )
 
 
 async def get_agent_avatar(

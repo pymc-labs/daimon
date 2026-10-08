@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 from daimon.adapters.mcp.server import _build_avatar_route
-from daimon.core.stores.agent_avatars import get_or_create_avatar, reset_avatar
+from daimon.core.stores.agent_avatars import (
+    generate_default_png,
+    get_or_create_avatar,
+    reset_avatar,
+)
 from daimon.testing.factories import make_tenant
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -81,6 +88,13 @@ async def test_first_face_keeps_prior_initials_url_until_admin_change(
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session)
         initials = await get_or_create_avatar(session, tenant_id=tenant.id, agent_name="Analyst")
+        await session.execute(
+            text(
+                "UPDATE agent_avatars SET png_128 = NULL, png_512 = NULL "
+                "WHERE tenant_id = :tenant AND agent_name = 'analyst'"
+            ),
+            {"tenant": tenant.id},
+        )
     async with db_session_factory.begin() as session:
         face = await get_or_create_avatar(
             session, tenant_id=tenant.id, agent_name="Analyst", face_enabled=True
@@ -96,7 +110,7 @@ async def test_first_face_keeps_prior_initials_url_until_admin_change(
         transport=ASGITransport(app=app), base_url="https://example.test"
     ) as client:
         assert (await client.get(old_path)).content == initials.png
-        assert (await client.get(f"{old_path}?size=128")).status_code == 200
+        assert (await client.get(f"{old_path}?size=128")).content == initials.png
         assert (await client.get(new_path)).content == face.png
         async with db_session_factory.begin() as session:
             await reset_avatar(
@@ -104,3 +118,30 @@ async def test_first_face_keeps_prior_initials_url_until_admin_change(
             )
         assert (await client.get(old_path)).status_code == 404
         assert (await client.get(new_path)).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_avatar_route_serves_legacy_insert_without_pre_rendered_sizes(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    png = generate_default_png("Legacy")
+    sha = hashlib.sha256(png).hexdigest()
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        await session.execute(
+            text(
+                "INSERT INTO agent_avatars (tenant_id, agent_name, token, sha256, png, source) "
+                "VALUES (:tenant, 'legacy', 'legacy-token', :sha, :png, 'default')"
+            ),
+            {"tenant": tenant.id, "sha": sha, "png": png},
+        )
+    app = Starlette(
+        routes=[Route("/avatars/{token}/{sha12}.png", _build_avatar_route(db_session_factory))]
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://example.test"
+    ) as client:
+        path = f"/avatars/legacy-token/{sha[:12]}.png"
+        assert (await client.get(path)).content == png
+        assert (await client.get(f"{path}?size=128")).content == png
+        assert (await client.get(f"{path}?size=512")).content == png

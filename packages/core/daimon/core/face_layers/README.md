@@ -10,8 +10,8 @@ thumbnail used when assigning other agents. Posting reuses that row;
 uploading a picture retains the variant; Reset renders the same variant again.
 The identity switch must be on for a new default face to be assigned.
 The first turn uses the current picture or none and queues missing artwork in a
-background database session. The stored PNG's URL remains valid until the new
-face is ready.
+background database session. An initials URL remains valid after the new face
+is stored, until an admin changes or resets the picture.
 
 ## Edit the catalogue
 
@@ -50,10 +50,13 @@ Render the pick sheet and the Slack thread preview from the shipped code:
 ```bash
 uv run python scripts/render_agent_face_sheet.py
 uv run python scripts/render_agent_face_slack_mock.py
+uv run python scripts/render_agent_face_hat_sheet.py
 ```
 
-The output files are `docs/assets/agent-faces-50.png` and
-`docs/assets/agent-face-slack-thread.png`. The mock renders agents at 36 px and
+The output files are `docs/assets/agent-faces-50.png`,
+`docs/assets/agent-face-slack-thread.png`, and
+`docs/assets/agent-face-hats.png`. The hat sheet shows 512 px and actual-size
+36 px square and rounded-square headers. The mock renders agents at 36 px and
 uses the classic generated face for the built-in app. Pass
 `--built-in-image PATH` to use a platform's current app picture, and
 `--output PATH` to write another copy.

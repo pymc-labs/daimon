@@ -689,7 +689,7 @@
       "retired": false,
       "legacy_index": 1,
       "width": 0.58,
-      "bottom": 0.215,
+      "bottom": 0.305,
       "sha256": "22b382dbf34a6c9f7722843ed4316eac2795bc5347325698596f8be0819fb488"
     },
     {
@@ -701,7 +701,7 @@
       "legacy_index": 2,
       "colour_override": "#F28C28",
       "width": 0.58,
-      "bottom": 0.215,
+      "bottom": 0.305,
       "sha256": "22b382dbf34a6c9f7722843ed4316eac2795bc5347325698596f8be0819fb488"
     },
     {
@@ -713,7 +713,7 @@
       "legacy_index": 3,
       "colour_override": "#F4F4F0",
       "width": 0.58,
-      "bottom": 0.215,
+      "bottom": 0.305,
       "sha256": "22b382dbf34a6c9f7722843ed4316eac2795bc5347325698596f8be0819fb488"
     },
     {
@@ -724,7 +724,7 @@
       "retired": false,
       "legacy_index": 4,
       "width": 0.58,
-      "bottom": 0.215,
+      "bottom": 0.305,
       "sha256": "881017d42fadbc8b4dd392d85a330591f23d62ae20ed1a83008e681dc383ca3f"
     },
     {
@@ -736,7 +736,7 @@
       "legacy_index": 5,
       "colour_override": "#3E6FB0",
       "width": 0.58,
-      "bottom": 0.215,
+      "bottom": 0.305,
       "sha256": "881017d42fadbc8b4dd392d85a330591f23d62ae20ed1a83008e681dc383ca3f"
     },
     {
@@ -748,7 +748,7 @@
       "legacy_index": 6,
       "colour_override": "#3F9E5A",
       "width": 0.58,
-      "bottom": 0.215,
+      "bottom": 0.305,
       "sha256": "881017d42fadbc8b4dd392d85a330591f23d62ae20ed1a83008e681dc383ca3f"
     },
     {
@@ -759,7 +759,7 @@
       "retired": false,
       "legacy_index": 7,
       "width": 0.6,
-      "bottom": 0.215,
+      "bottom": 0.35,
       "sha256": "0177ed25836574a717a1782658ac9bc6bcd6ba9b8a960e7ebf82e9e3d615c155"
     },
     {
@@ -771,7 +771,7 @@
       "legacy_index": 8,
       "colour_override": "#C23B3B",
       "width": 0.6,
-      "bottom": 0.215,
+      "bottom": 0.35,
       "sha256": "0177ed25836574a717a1782658ac9bc6bcd6ba9b8a960e7ebf82e9e3d615c155"
     },
     {
@@ -783,7 +783,7 @@
       "legacy_index": 9,
       "colour_override": "#6A4BA8",
       "width": 0.6,
-      "bottom": 0.215,
+      "bottom": 0.35,
       "sha256": "0177ed25836574a717a1782658ac9bc6bcd6ba9b8a960e7ebf82e9e3d615c155"
     },
     {
@@ -795,7 +795,7 @@
       "legacy_index": 10,
       "width": 0.7,
       "bottom": 0.215,
-      "sha256": "25901e29b97f1736c3c55a2db04ab072ca30e40983d611e4120439451dc5fafd"
+      "sha256": "d8b56c41be23dc90f588f42f8dd2d8dc38a2e4d602316799971453eb95ba88e9"
     },
     {
       "id": "hat-headset-base",

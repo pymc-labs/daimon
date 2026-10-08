@@ -49,5 +49,15 @@ async def test_existing_avatar_backfills_and_matches_orm(db_session: AsyncSessio
     assert avatar is not None
     assert avatar.png == png
     assert avatar.face_combo is None
+    assert avatar.png_128 is not None and avatar.png_512 is not None
     assert Image.open(BytesIO(avatar.png_128)).size == (128, 128)
     assert Image.open(BytesIO(avatar.png_512)).size == (512, 512)
+    await db_session.execute(
+        text(
+            "INSERT INTO agent_avatars (tenant_id, agent_name, token, sha256, png, source) "
+            "VALUES (:tenant, 'legacy-worker', 'legacy-token', 'legacy-hash', :png, 'default')"
+        ),
+        {"tenant": tenant.id, "png": png},
+    )
+    legacy = await db_session.get(AgentAvatar, (tenant.id, "legacy-worker"))
+    assert legacy is not None and legacy.png_128 is None and legacy.png_512 is None

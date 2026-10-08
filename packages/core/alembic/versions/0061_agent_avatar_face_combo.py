@@ -48,8 +48,8 @@ def upgrade() -> None:
                 "agent_name": row["agent_name"],
             },
         )
-    op.alter_column("agent_avatars", "png_128", nullable=False)
-    op.alter_column("agent_avatars", "png_512", nullable=False)
+    # Old worker pods may still insert initials rows during a rolling deploy.
+    # Leave these nullable and let the public route serve the original PNG.
 
 
 def downgrade() -> None:

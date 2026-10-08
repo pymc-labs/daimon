@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-import traceback
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -109,7 +108,7 @@ def _schedule_face(
                 log.error(
                     "agent_identity.avatar_generation_failed",
                     error_type=type(exc).__name__,
-                    traceback="".join(traceback.format_tb(exc.__traceback__)),
+                    exc_info=True,
                 )
             else:
                 log.warning(

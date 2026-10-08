@@ -171,20 +171,9 @@ def _build_avatar_route(
         size_arg = req.query_params.get("size")
         if size_arg is not None and size_arg not in ("128", "512"):
             return Response(status_code=400)
+        size = int(size_arg) if size_arg is not None else None
         async with sessionmaker() as session:
-            row = await get_avatar_by_token(session, token=token)
-        if row is None:
-            return Response(status_code=404)
-        if row.sha256[:12] == sha12:
-            png = {None: row.png, "128": row.png_128, "512": row.png_512}[size_arg]
-        elif row.previous_sha256 and row.previous_sha256[:12] == sha12:
-            png = {
-                None: row.previous_png,
-                "128": row.previous_png_128,
-                "512": row.previous_png_512,
-            }[size_arg]
-        else:
-            return Response(status_code=404)
+            png = await get_avatar_by_token(session, token=token, sha12=sha12, size=size)
         if png is None:
             return Response(status_code=404)
         return Response(
