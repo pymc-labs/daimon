@@ -6,7 +6,8 @@ login mounts, chart storage and connecting MCP servers.
 
 ## Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) with Compose.
+- [Docker](https://docs.docker.com/get-docker/) 23 or later (the image build
+  needs BuildKit) with Compose.
 - An Anthropic API key **in a workspace dedicated to this deployment**.
   Daimon manages the workspace's Managed Agents resources as its own, so
   sharing the workspace with anything else causes collisions.
