@@ -167,12 +167,21 @@ async def _write_batch() -> None:
     groups: dict[tuple[uuid.UUID, str, Kind], dict[str, KnownName]] = {}
     for (tenant_id, platform, kind, item_id), name in batch.items():
         groups.setdefault((tenant_id, platform, kind), {})[item_id] = name
+    # A person with no principal yet (their first message, before admission
+    # creates one) stores nothing; they stay unremembered so a later sighting
+    # stores the name once the principal exists.
+    skipped: set[_Key] = set()
     try:
         async with sessionmaker() as session, session.begin():
             for (tenant_id, platform, kind), names in groups.items():
                 if kind == "user":
-                    await upsert_user_names(
+                    stored = await upsert_user_names(
                         session, tenant_id=tenant_id, platform=platform, names=names
+                    )
+                    skipped.update(
+                        (tenant_id, platform, kind, user_id)
+                        for user_id in names
+                        if user_id not in stored
                     )
                 else:
                     labels = {cid: n.label for cid, n in names.items() if n.label is not None}
@@ -184,7 +193,8 @@ async def _write_batch() -> None:
         log.warning("platform_names.write_failed", count=len(batch), error=type(exc).__name__)
         return
     for key, name in batch.items():
-        _note(key, name)
+        if key not in skipped:
+            _note(key, name)
 
 
 def _note(key: _Key, name: KnownName) -> None:

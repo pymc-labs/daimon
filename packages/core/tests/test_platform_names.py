@@ -109,7 +109,7 @@ async def test_no_name_is_stored_for_someone_without_a_principal(db_session: Asy
         names={"1": KnownName("Ann"), "2": KnownName("Bo"), "3": KnownName("Cy")},
     )
 
-    assert stored == 1
+    assert stored == {"1"}
     known = await get_user_names(
         db_session, tenant_id=tenant.id, platform="discord", user_ids=["1", "2", "3"]
     )
@@ -329,10 +329,41 @@ async def test_a_write_racing_a_purge_cannot_put_the_name_back(
             session, tenant_id=tenant.id, platform="discord", names={"111": KnownName("A")}
         )
 
-    assert stored == 0
+    assert stored == frozenset()
 
 
 # ---- the background writer ----
+
+
+async def test_a_first_message_before_the_principal_is_stored_on_a_later_sighting(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The first message is seen before admission creates the principal."""
+    tenant = await make_tenant(db_session, platform="discord")
+    await db_session.commit()
+
+    def sighting() -> None:
+        remember_user_name(
+            db_session_factory,
+            tenant_id=tenant.id,
+            platform="discord",
+            user_id="7",
+            display_name="New Person",
+        )
+
+    sighting()
+    await settle()
+    await _people(db_session, tenant.id, "discord", "7")
+    await db_session.commit()
+    sighting()
+    await settle()
+
+    known = await get_user_names(
+        db_session, tenant_id=tenant.id, platform="discord", user_ids=["7"]
+    )
+    assert known == {"7": KnownName("New Person")}, (
+        "a name that found no principal is not remembered as written, so it is stored later"
+    )
 
 
 async def test_remember_writes_once_and_skips_a_repeat(
@@ -423,7 +454,7 @@ async def test_a_burst_of_people_is_bounded_and_written_by_one_consumer_in_batch
     rows_per_batch: list[int] = []
     real = platform_names.upsert_user_names
 
-    async def counting_upsert(session: AsyncSession, **kwargs: Any) -> int:
+    async def counting_upsert(session: AsyncSession, **kwargs: Any) -> frozenset[str]:
         rows_per_batch.append(len(kwargs["names"]))
         return await real(session, **kwargs)
 
@@ -635,4 +666,4 @@ async def test_the_migration_round_trips(db_session: AsyncSession) -> None:
     stored = await upsert_user_names(
         db_session, tenant_id=tenant.id, platform="slack", names={"U1": KnownName("Ann")}
     )
-    assert stored == 1, "the upgraded table takes a name"
+    assert stored == {"U1"}, "the upgraded table takes a name"

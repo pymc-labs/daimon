@@ -51,8 +51,8 @@ async def upsert_user_names(
     tenant_id: uuid.UUID,
     platform: str,
     names: Mapping[str, KnownName],
-) -> int:
-    """Store the name of each person who has a principal here; return how many were stored.
+) -> frozenset[str]:
+    """Store the name of each person who has a principal here; return whose were stored.
 
     A part not given (None) keeps the stored one. Blank names are dropped, a
     person with neither part is skipped, and so is anyone without a principal
@@ -60,7 +60,7 @@ async def upsert_user_names(
     """
     wanted = sorted(user_id for user_id in names if user_id)
     if not wanted:
-        return 0
+        return frozenset()
     known = set(
         await session.scalars(
             select(PlatformPrincipal.external_id)
@@ -89,7 +89,7 @@ async def upsert_user_names(
                 }
             )
     if not values:
-        return 0
+        return frozenset()
     stmt = pg_insert(PlatformUserName).values(values)
     stmt = stmt.on_conflict_do_update(
         index_elements=[
@@ -107,7 +107,7 @@ async def upsert_user_names(
     )
     await session.execute(stmt)
     await session.flush()
-    return len(values)
+    return frozenset(str(value["platform_user_id"]) for value in values)
 
 
 async def get_user_names(
