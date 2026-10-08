@@ -9,8 +9,8 @@ import sqlalchemy as sa
 from alembic import op
 from PIL import Image
 
-revision: str = "0061_agent_avatar_face_combo"
-down_revision: str | None = "0060_platform_names"
+revision: str = "0063_agent_avatar_face_combo"
+down_revision: str | None = "0062_github_connect_origin"
 branch_labels: str | None = None
 depends_on: str | None = None
 
