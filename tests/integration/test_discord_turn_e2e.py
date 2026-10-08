@@ -54,6 +54,7 @@ def _make_runtime(
     which uses AsyncMock — here run_turn is exercised for real.
     """
     settings = MagicMock()
+    settings.agent_identity.enabled = True
     settings.mcp = McpSettings()
     settings.billing.markup = Decimal("1.0")
     settings.billing.signup_credit = Decimal("0")
