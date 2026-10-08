@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -46,6 +46,7 @@ from daimon.core.stores.github_issued_tokens import (
     create_pending,
     decrypt_issued_token,
     finish_headless_app_session,
+    keep_failed_rotation_tokens,
     list_session_tokens,
     mark_delivered,
     mark_headless_app_session_closed,
@@ -424,6 +425,7 @@ async def add_app_credentials(
     vault_id: str,
     access: AppSessionAccess,
     on_mutation: Callable[[], None] | None = None,
+    on_delivered: Callable[[str], None] | None = None,
 ) -> None:
     desired = {issued.credential_name: issued.token for issued in access.tokens}
     if access.working_token is not None:
@@ -457,6 +459,8 @@ async def add_app_credentials(
             )
         if on_mutation is not None:
             on_mutation()
+        if on_delivered is not None:
+            on_delivered(token)
     for name, credential_id in existing.items():
         if name not in desired:
             await anthropic.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
@@ -468,6 +472,8 @@ async def add_app_credentials(
         )
         if on_mutation is not None:
             on_mutation()
+        if on_delivered is not None:
+            on_delivered(access.working_token)
     else:
         async for cred in anthropic.beta.vaults.credentials.list(vault_id=vault_id):
             if (
@@ -689,6 +695,9 @@ async def rotate_live_app_tokens(
     provisional = f"pending:{uuid.uuid4()}"
     swapped = False
 
+    # Token values MA already holds, in a resource or the vault.
+    delivered: set[str] = set()
+
     def mark_swapped() -> None:
         nonlocal swapped
         swapped = True
@@ -737,6 +746,7 @@ async def rotate_live_app_tokens(
                         authorization_token=resource["authorization_token"],
                     )
                     swapped = True
+                    delivered.add(resource["authorization_token"])
                 except APIStatusError:
                     if not active_turn:
                         raise
@@ -748,7 +758,11 @@ async def rotate_live_app_tokens(
                         resource_id,
                     )
             await add_app_credentials(
-                anthropic, vault_id=vault_id, access=access, on_mutation=mark_swapped
+                anthropic,
+                vault_id=vault_id,
+                access=access,
+                on_mutation=mark_swapped,
+                on_delivered=delivered.add,
             )
             await finish_app_delivery(
                 sessionmaker,
@@ -765,6 +779,7 @@ async def rotate_live_app_tokens(
                     now=datetime.now(UTC),
                 )
         except Exception:
+            kept: frozenset[uuid.UUID] = frozenset()
             try:
                 if old_access is not None:
                     try:
@@ -809,6 +824,34 @@ async def rotate_live_app_tokens(
                         "App refresh failed mid-swap during active turn %s; left running",
                         session_id,
                     )
+                if active_turn:
+                    # A running tool may already hold a new token. Let those
+                    # expire unless they are wider than what the session keeps.
+                    try:
+                        async with sessionmaker.begin() as session:
+                            kept = await keep_failed_rotation_tokens(
+                                session,
+                                session_id=session_id,
+                                token_ids=frozenset(
+                                    token.token_id
+                                    for token in access.tokens
+                                    if token.token in delivered
+                                ),
+                                now=datetime.now(UTC),
+                            )
+                    except Exception:
+                        _log.exception(
+                            "Failed to keep delivered App tokens for active session %s", session_id
+                        )
             finally:
-                await revoke_app_access(sessionmaker, client, access)
+                await revoke_app_access(
+                    sessionmaker,
+                    client,
+                    replace(
+                        access,
+                        tokens=tuple(
+                            token for token in access.tokens if token.token_id not in kept
+                        ),
+                    ),
+                )
             raise
