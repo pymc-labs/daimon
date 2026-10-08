@@ -18,6 +18,7 @@ from typing import Any, cast
 
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.billing_panel.names import name_shown_spenders
 from daimon.adapters.slack.billing_panel.views import build_billing_view, slack_time
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
@@ -195,11 +196,12 @@ async def _refresh_panel(
 ) -> None:
     """Redraw the /billing panel under the form. A failure leaves the success reply alone."""
     since = month_start(now)
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
     try:
         async with runtime.sessionmaker() as session:
             state = await load_billing_snapshot(
                 session,
-                tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
+                tenant_id=tenant_id,
                 platform_user_id=user_id,
                 is_admin=True,
                 since=since,
@@ -207,6 +209,9 @@ async def _refresh_panel(
                 platform="slack",
                 channel_id=channel_id or None,
             )
+        state = await name_shown_spenders(
+            client, state, sessionmaker=runtime.sessionmaker, tenant_id=tenant_id
+        )
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=root_view_id,
             view=build_billing_view(state, now=now, since=since, channel_id=channel_id),

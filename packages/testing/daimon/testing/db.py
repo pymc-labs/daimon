@@ -54,6 +54,7 @@ from urllib.parse import urlparse
 import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
+from daimon.core import platform_names
 from daimon.core._models import Base
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -364,6 +365,13 @@ async def db_nullpool_engine(db_engine: AsyncEngine, db_schema: str) -> AsyncIte
         await engine.dispose()
 
 
+# Name writes (`daimon.core.platform_names`) run in the background in
+# production. A test's sessions share one connection, which such a write would
+# use concurrently with the code under test, so tests hold them for
+# `_drain_background_tasks` (or an explicit `settle()`) to run one at a time.
+platform_names.defer_writes()
+
+
 @pytest_asyncio.fixture
 async def db_clean(
     db_engine: AsyncEngine, db_schema: str, request: pytest.FixtureRequest
@@ -375,6 +383,9 @@ async def db_clean(
     """
     global _last_db_test
     item = _request_item(request)
+    # A test before this one may have left name writes running, or remembered
+    # names the wipe below deletes.
+    await _drain_background_tasks()
     if item.get_closest_marker("fresh_schema") is None:
         try:
             async with db_engine.begin() as conn:
@@ -391,17 +402,20 @@ async def db_clean(
 
 
 async def _drain_background_tasks() -> None:
-    """Await the turn outcomes and budget notices a test left running.
+    """Await the turn outcomes, budget notices and name writes a test left running.
 
     They write through the test's sessionmaker, so they must finish before its
     connection is rolled back and returned: one still running then breaks the
-    connection for every later test in the worker.
+    connection for every later test in the worker. The names this process
+    remembers writing are forgotten too, since the wipe deletes them.
     """
     from daimon.core.channel_budget_notice import drain_budget_notices
     from daimon.core.turn.outcomes import drain_outcomes
 
     await drain_outcomes()
     await drain_budget_notices()
+    await platform_names.settle()
+    platform_names.forget_all()
 
 
 @asynccontextmanager

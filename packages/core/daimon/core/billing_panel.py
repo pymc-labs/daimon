@@ -28,6 +28,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.mcp_auth import mint_jwt
 from daimon.core.promo_credit import ActiveTimedCredit, get_active_timed_credit
 from daimon.core.stores import tenant_user_caps
+from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenant_ledger import get_balance
 from daimon.core.stores.usage_events import (
@@ -75,7 +76,9 @@ CHANNEL_BUDGETS = "Channel budgets"
 @dataclasses.dataclass(frozen=True)
 class MemberRow:
     platform_user_id: str
-    display_name: str
+    # The person's stored name, or the one an adapter resolved; None when no
+    # name is known (each adapter then shows them its own way, never by id).
+    display_name: str | None
     cost_usd: float
     turn_count: int
     is_caller: bool
@@ -104,17 +107,6 @@ class BillingPanelState:
     channel_budget: ChannelBudgetStatus | None = None
     # Every channel budget, by share of its limit spent (admin view only); empty for a member
     channel_budgets: tuple[ChannelBudgetStatus, ...] = ()
-
-
-def member_label(user_id: str) -> str:
-    """`User XXXX` from the id's last four characters: the fallback label for a person.
-
-    Rows start with it, and each adapter replaces it on the rows it shows with
-    the person's name where its platform can tell it (a Discord member fetch,
-    a Slack user mention, a Teams team roster). Anyone it cannot resolve, such
-    as someone who has left, keeps this label.
-    """
-    return f"User {user_id[-4:]}" if len(user_id) >= 4 else "<unknown user>"
 
 
 async def _has_redeemable_promo_code_or_false(session: AsyncSession, *, now: datetime) -> bool:
@@ -184,7 +176,7 @@ async def load_billing_snapshot(
         (
             MemberRow(
                 platform_user_id=user_id,
-                display_name=member_label(user_id),
+                display_name=None,
                 cost_usd=costs.get(user_id, 0.0),
                 turn_count=turns.get(user_id, 0),
                 is_caller=user_id == platform_user_id,
@@ -193,13 +185,26 @@ async def load_billing_snapshot(
         ),
         key=lambda row: (-row.cost_usd, row.platform_user_id),
     )
+    stored = (
+        {}
+        if platform is None
+        else await stored_name_labels(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            user_ids=[row.platform_user_id for row in rows[:MEMBER_CAP]],
+        )
+    )
     return dataclasses.replace(
         state,
         is_admin=True,
         guild_spend=await cost_for_tenant_since(session, tenant_id=tenant_id, since=since),
         guild_turns=await turn_count_for_tenant_since(session, tenant_id=tenant_id, since=since),
         guild_distinct_members=len(user_ids),
-        member_rows=tuple(rows[:MEMBER_CAP]),
+        member_rows=tuple(
+            dataclasses.replace(row, display_name=stored.get(row.platform_user_id))
+            for row in rows[:MEMBER_CAP]
+        ),
         over_cap_count=max(0, len(rows) - MEMBER_CAP),
         has_redeemable_promo_code=await _has_redeemable_promo_code_or_false(session, now=now),
         channel_budgets=tuple(
@@ -208,6 +213,18 @@ async def load_billing_snapshot(
             )
         ),
     )
+
+
+async def stored_name_labels(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, user_ids: Sequence[str]
+) -> dict[str, str]:
+    """Each person's stored name (`platform_user_names`), for those who have one.
+
+    The adapter then tries the platform's live name for the rows it shows,
+    which wins over this one.
+    """
+    known = await get_user_names(session, tenant_id=tenant_id, platform=platform, user_ids=user_ids)
+    return {user_id: label for user_id, name in known.items() if (label := name.label)}
 
 
 def fmt_usd(value: float | Decimal) -> str:
@@ -243,13 +260,13 @@ def timed_credit_note(credits: Sequence[ActiveTimedCredit]) -> str | None:
 def expiry_rows(
     credits: Sequence[ActiveTimedCredit], *, when: Callable[[datetime], str]
 ) -> list[str]:
-    """`$20.00 · Oct 12` per timed credit, soonest first, at most ``EXPIRY_SHOWN``, then `+ N more`.
+    """`$20.00 on Oct 12` per timed credit, soonest first, ``EXPIRY_SHOWN`` at most, then a count.
 
     ``when`` renders a date in the platform's own syntax.
     """
     ordered = sorted(credits, key=lambda credit: credit.ends_at)
     rows = [
-        f"{fmt_usd(credit.remaining_usd)} · {when(credit.ends_at)}"
+        f"{fmt_usd(credit.remaining_usd)} on {when(credit.ends_at)}"
         for credit in ordered[:EXPIRY_SHOWN]
     ]
     if (more := len(ordered) - EXPIRY_SHOWN) > 0:
@@ -314,12 +331,15 @@ def month_label(since: datetime) -> str:
     return since.strftime("%B %Y")
 
 
-def admin_summary(since: datetime, *, spend: float, people: int) -> str:
-    """The admin view's subtext: `October 2026 · $48.17 spent by 9 people`."""
+def admin_summary(since: datetime, *, spend: float, people: int) -> tuple[str, str]:
+    """The admin view's two subtitle lines: `October 2026`, `$48.17 spent by 9 people`.
+
+    With nothing spent the second line is `Nothing used yet`.
+    """
     if people == 0:
-        return f"{month_label(since)} · nothing used yet"
+        return month_label(since), "Nothing used yet"
     who = "1 person" if people == 1 else f"{people} people"
-    return f"{month_label(since)} · {fmt_usd(spend)} spent by {who}"
+    return month_label(since), f"{fmt_usd(spend)} spent by {who}"
 
 
 def spend_over_cap(spend: float, cap: Decimal | None) -> bool:
@@ -348,6 +368,11 @@ def spender_line(rank: int, name: str, *, cost: float, is_caller: bool, you: str
 def more_spenders(row_count: int, over_cap_count: int) -> int:
     """Spenders past the first ``TOP_SPENDERS_SHOWN``, for a `+ N more` line."""
     return max(0, row_count - TOP_SPENDERS_SHOWN) + over_cap_count
+
+
+def turns_phrase(turns: int) -> str:
+    """What a top-up buys, under its amount: `about 1,250 turns`."""
+    return f"about {turns:,} turns"
 
 
 def estimate_turns(amount_usd: float, *, guild_spend: float, guild_turns: int) -> int:

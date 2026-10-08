@@ -13,8 +13,15 @@ expires.
 The top spenders are named from the rosters of the teams the bot is installed
 in (`teams_installations`): Teams has no app-only way to name a person from
 their Entra id without a tenant-wide Graph permission, but the Bot Framework
-answers for any member of a team the bot is in. Someone in none of those teams
-keeps the `User XXXX` label. Names are plain text, never an `<at>` mention.
+answers for any member of a team the bot is in. Someone no roster has, or
+whose lookup times out, gets the name stored from their last message or click
+(`daimon.core.platform_names`); someone never named to us reads
+`Name unavailable`. Names are plain text, never an `<at>` mention, which would
+notify them.
+
+Channel budgets are named the same way: the channel listings of those teams,
+else the name stored from a message there, else `General` for a team's own
+id; never the raw `19:…` id.
 """
 
 from __future__ import annotations
@@ -24,7 +31,7 @@ import dataclasses
 import functools
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import cast
 
@@ -80,12 +87,20 @@ from daimon.core.billing_panel import (
     spend_over_cap,
     spender_line,
     timed_credit_note,
+    turns_phrase,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.panel_audit import record_panel_write
+from daimon.core.platform_names import (
+    KnownName,
+    remember_channel_names,
+    remember_user_names,
+    resolve_names,
+)
 from daimon.core.promo_codes import describe_refusal
 from daimon.core.promo_credit import PromoRedeemed, PromoRedeemRefused, redeem_promo_code
+from daimon.core.stores.platform_names import get_channel_names
 from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.teams_bot_framework import SERVICE_URL
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
@@ -95,6 +110,8 @@ from microsoft_teams.cards import (
     ActionSet,
     AdaptiveCard,
     CardElement,
+    Column,
+    ColumnSet,
     Container,
     ExecuteAction,
     OpenUrlAction,
@@ -119,12 +136,20 @@ ENTER_CODE = "Enter a promo code."
 CODE_INPUT = "code"
 # The panel waits at most this long for roster lookups, all together.
 NAME_LOOKUP_TIMEOUT_S = 2.0
+# Someone no roster, message or click ever named to us.
+NAME_UNAVAILABLE = "Name unavailable"
+# A budgeted channel no listing or message ever named to us.
+CHANNEL_NAME_UNAVAILABLE = "Channel name unavailable"
+GENERAL = "General"
 # Team rosters tried per person, in `list_teams_installations` order.
 _ROSTER_TEAMS = 5
 _MARKDOWN = re.compile(r"([\\*_`~\[\]])")
 
 RosterName = Callable[[str, str], Awaitable[str | None]]
 """(team id, Entra object id) -> the person's name on that team's roster, or None."""
+
+TeamChannels = Callable[[str], Awaitable[dict[str, str]]]
+"""Team id -> every channel of that team the bot can list, by id, with its name."""
 
 
 def card_time(moment: datetime) -> str:
@@ -157,8 +182,8 @@ def _block(*items: CardElement, element_id: str | None = None, hidden: bool = Fa
     )
 
 
-def _header(title: str, subtext: str) -> Container:
-    return Container(items=[heading(title), *_details(subtext)])
+def _header(title: str, *subtext: str) -> Container:
+    return Container(items=[heading(title), *_details(*subtext)])
 
 
 def _credit(state: BillingPanelState) -> list[CardElement]:
@@ -192,41 +217,98 @@ def sdk_roster_name(app: App) -> RosterName:
     return roster_name
 
 
+def sdk_team_channels(app: App) -> TeamChannels:
+    """List a team's channels over the Bot Framework, General's name filled in."""
+
+    async def team_channels(team_id: str) -> dict[str, str]:
+        channels = await app.api.from_service_url(SERVICE_URL).teams.get_conversations(team_id)
+        names = {channel.id: channel.name for channel in channels if channel.id and channel.name}
+        # Teams names General nowhere: its id is the team's.
+        return {team_id: GENERAL} | names
+
+    return team_channels
+
+
 async def roster_names(
     roster_name: RosterName,
     *,
     team_ids: Sequence[str],
     user_ids: Sequence[str],
+    stored: Mapping[str, str] | None = None,
     timeout_s: float = NAME_LOOKUP_TIMEOUT_S,
-) -> dict[str, str]:
-    """Each person's name from the first team roster that has them.
+) -> tuple[dict[str, str], dict[str, KnownName]]:
+    """Each person's label, and the names the rosters gave, to remember.
 
-    People are looked up concurrently; whoever is unresolved after ``timeout_s``
-    is left out, as is anyone no roster has (a 404 for someone who left).
+    A person's name comes from the first team roster that has them, else from
+    ``stored``. People are looked up concurrently; whoever is unresolved after
+    ``timeout_s`` gets their stored name, as does anyone no roster has (a 404
+    for someone who left). Someone with neither is left out.
     """
 
-    async def lookup(user_id: str) -> str | None:
+    async def lookup(user_id: str) -> KnownName | None:
         for team_id in team_ids[:_ROSTER_TEAMS]:
             try:
                 if name := await roster_name(team_id, user_id):
-                    return name
+                    return KnownName(display_name=name)
             except TEAMS_SEND_ERRORS as err:
                 log.info("teams.billing.roster_lookup_failed", error=type(err).__name__)
         return None
 
-    if not team_ids or not user_ids:
-        return {}
-    tasks = {asyncio.create_task(lookup(user_id)): user_id for user_id in user_ids}
-    done, pending = await asyncio.wait(tasks, timeout=timeout_s)
-    for task in pending:
-        task.cancel()
-    if pending:
-        log.info("teams.billing.roster_lookup_timed_out", unresolved=len(pending))
-    return {
-        tasks[task]: name
-        for task in done
-        if not task.cancelled() and task.exception() is None and (name := task.result())
+    return await resolve_names(
+        user_ids,
+        live=lookup if team_ids else None,
+        stored=stored or {},
+        timeout_s=timeout_s,
+        log_event="teams.billing.roster_lookup_timed_out",
+    )
+
+
+async def channel_labels(
+    team_channels: TeamChannels | None,
+    *,
+    team_ids: Sequence[str],
+    channel_ids: Sequence[str],
+    stored: Mapping[str, str],
+    timeout_s: float = NAME_LOOKUP_TIMEOUT_S,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Each channel's name, and every name the listings gave, to remember.
+
+    The installed teams' channel listings run concurrently under ``timeout_s``;
+    a channel they do not name gets its ``stored`` name, else `General` when
+    its id is a team's, else `Channel name unavailable`.
+    """
+    listed: dict[str, str] = {}
+
+    async def listing(team_id: str) -> dict[str, str]:
+        assert team_channels is not None
+        try:
+            return await team_channels(team_id)
+        except TEAMS_SEND_ERRORS as err:
+            log.info("teams.billing.channel_listing_failed", error=type(err).__name__)
+            return {}
+
+    if team_channels is not None and team_ids and channel_ids:
+        tasks = [asyncio.create_task(listing(team_id)) for team_id in team_ids[:_ROSTER_TEAMS]]
+        done, pending = await asyncio.wait(tasks, timeout=timeout_s)
+        for task in pending:
+            task.cancel()
+        if pending:
+            log.info("teams.billing.channel_listing_timed_out", unresolved=len(pending))
+        for task in tasks:
+            if task in done:
+                listed |= task.result()
+    teams = set(team_ids)
+    labels = {
+        channel_id: listed.get(channel_id)
+        or stored.get(channel_id)
+        or (GENERAL if channel_id in teams else CHANNEL_NAME_UNAVAILABLE)
+        for channel_id in channel_ids
     }
+    return labels, listed
+
+
+async def _no_roster(_team_id: str, _user_id: str) -> str | None:
+    return None
 
 
 def redeemed_text(result: PromoRedeemed) -> str:
@@ -242,9 +324,11 @@ def redeemed_text(result: PromoRedeemed) -> str:
     )
 
 
-def _topup(amount: int, state: BillingPanelState) -> Action:
+def _topup(amount: int, state: BillingPanelState) -> Column:
+    """`$10` as a button, and under it in grey what it buys: `about 100 turns`."""
     turns = estimate_turns(amount, guild_spend=state.guild_spend, guild_turns=state.guild_turns)
-    return button(VERB, f"${amount} (≈ {turns:,} turns)", "topup", amount=str(amount))
+    pay = ActionSet(actions=[button(VERB, f"${amount}", "topup", amount=str(amount))])
+    return Column(width="auto", items=[pay, *_details(turns_phrase(turns))])
 
 
 def _sub_card(*items: CardElement) -> AdaptiveCard:
@@ -255,7 +339,7 @@ def _actions(state: BillingPanelState) -> list[Action]:
     """`Add credit` and `Redeem code` for an admin; `Expiry dates` with timed credit."""
     actions: list[Action] = []
     if state.is_admin:
-        amounts = ActionSet(actions=[_topup(amount, state) for amount in TOPUP_AMOUNTS])
+        amounts = ColumnSet(columns=[_topup(amount, state) for amount in TOPUP_AMOUNTS])
         actions.append(ShowCardAction(title=ADD_CREDIT, card=_sub_card(amounts)))
         if state.has_redeemable_promo_code:
             code = TextInput(id=CODE_INPUT, placeholder="XXXXX-XXXXX-XXXXX-XXXXX", max_length=100)
@@ -274,10 +358,16 @@ def _titled(
     return _block(label, *items, element_id=element_id, hidden=hidden)
 
 
+def spender_name(row: MemberRow) -> str:
+    """The row's name as plain card text, or `Name unavailable` when none is known."""
+    name = plain_name(row.display_name) if row.display_name else ""
+    return name or NAME_UNAVAILABLE
+
+
 def _spenders(state: BillingPanelState) -> Container:
-    """`Top spenders` by roster name, then a grey `+ N more`."""
+    """`Top spenders` by name, then a grey `+ N more`."""
     rows = [
-        spender_line(rank, plain_name(row.display_name), cost=row.cost_usd, is_caller=row.is_caller)
+        spender_line(rank, spender_name(row), cost=row.cost_usd, is_caller=row.is_caller)
         for rank, row in enumerate(state.member_rows[:TOP_SPENDERS_SHOWN], start=1)
     ] or [NOTHING_USED]
     items: list[CardElement] = _rows(*rows)
@@ -286,10 +376,18 @@ def _spenders(state: BillingPanelState) -> Container:
     return _titled(TOP_SPENDERS, *items)
 
 
-def _channel_budgets(state: BillingPanelState, now: datetime) -> Container:
-    """`Channel budgets`, most used first, five then a grey `+ N more`."""
+def _channel_label(channel_id: str, names: Mapping[str, str]) -> str:
+    """The channel's name as plain card text; never its id."""
+    name = plain_name(names.get(channel_id) or "")
+    return name or CHANNEL_NAME_UNAVAILABLE
+
+
+def _channel_budgets(
+    state: BillingPanelState, now: datetime, names: Mapping[str, str]
+) -> Container:
+    """`Channel budgets` by channel name, most used first, five then a grey `+ N more`."""
     lines = [
-        channel_budget_line(status, label=f"Channel `{status.budget.channel_id}`", now=now)
+        channel_budget_line(status, label=_channel_label(status.budget.channel_id, names), now=now)
         for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
     ]
     items: list[CardElement] = _rows(*lines)
@@ -303,13 +401,15 @@ def _rows(*lines: str) -> list[CardElement]:
     return [TextBlock(text=line, spacing="Small", wrap=True) for line in lines]
 
 
-def _panel_body(state: BillingPanelState, since: datetime, now: datetime) -> list[CardElement]:
+def _panel_body(
+    state: BillingPanelState, since: datetime, now: datetime, channel_names: Mapping[str, str]
+) -> list[CardElement]:
     subtext = (
         admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
         if state.is_admin
-        else month_label(since)
+        else (month_label(since),)
     )
-    body: list[CardElement] = [_header(TITLE, subtext)]
+    body: list[CardElement] = [_header(TITLE, *subtext)]
     if not state.is_admin:
         own = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
         over = "  ⚠️ Over your cap" if spend_over_cap(state.caller_spend, state.caller_cap) else ""
@@ -321,7 +421,7 @@ def _panel_body(state: BillingPanelState, since: datetime, now: datetime) -> lis
     if state.is_admin:
         body.append(_spenders(state))
         if state.channel_budgets:
-            body.append(_channel_budgets(state, now))
+            body.append(_channel_budgets(state, now, channel_names))
     if state.timed_credit:
         rows = expiry_rows(state.timed_credit, when=card_date)
         body.append(_titled(EXPIRY_INTRO, *_rows(*rows), element_id=EXPIRY_ID, hidden=True))
@@ -336,9 +436,13 @@ def panel_card(
     since: datetime,
     now: datetime | None = None,
     notice: str | None = None,
+    channel_names: Mapping[str, str] | None = None,
 ) -> AdaptiveCard:
-    """The member view, or for an admin the tenant view with its admin actions."""
-    body = _panel_body(state, since, now or datetime.now(UTC))
+    """The member view, or for an admin the tenant view with its admin actions.
+
+    ``channel_names`` names the channel budgets by id (`channel_labels`).
+    """
+    body = _panel_body(state, since, now or datetime.now(UTC), channel_names or {})
     if notice is not None:
         body = [*text_lines(notice), *body]
     return AdaptiveCard(body=body, fallback_text=TITLE)
@@ -361,9 +465,16 @@ def checkout_card(url: str, amount: int) -> AdaptiveCard:
 class BillingPanel:
     """Handlers for the command and the panel buttons."""
 
-    def __init__(self, runtime: TeamsRuntime, *, roster_name: RosterName | None = None) -> None:
+    def __init__(
+        self,
+        runtime: TeamsRuntime,
+        *,
+        roster_name: RosterName | None = None,
+        team_channels: TeamChannels | None = None,
+    ) -> None:
         self._runtime = runtime
         self._roster_name = roster_name
+        self._team_channels = team_channels
 
     async def command(self, context: CommandContext) -> None:
         await context.send_card(
@@ -391,24 +502,57 @@ class BillingPanel:
                 platform="teams",
             )
             teams = await list_teams_installations(session, tenant_id=tenant_id)
-        state = await self._named(state, [team.team_id for team in teams])
-        return panel_card(state, since=since, now=now, notice=notice)
-
-    async def _named(self, state: BillingPanelState, team_ids: list[str]) -> BillingPanelState:
-        """The state with the shown top spenders' roster names in place of `User XXXX`."""
-        shown = state.member_rows[:TOP_SPENDERS_SHOWN]
-        if self._roster_name is None or not shown:
-            return state
-        names = await roster_names(
-            self._roster_name,
-            team_ids=team_ids,
-            user_ids=[row.platform_user_id for row in shown],
+            budget_ids = [
+                s.budget.channel_id for s in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
+            ]
+            stored_channels = await get_channel_names(
+                session, tenant_id=tenant_id, platform="teams", channel_ids=budget_ids
+            )
+        team_ids = [team.team_id for team in teams]
+        (state, channel_names) = await asyncio.gather(
+            self._named(state, tenant_id, team_ids),
+            self._channel_names(tenant_id, team_ids, budget_ids, stored_channels),
         )
+        return panel_card(state, since=since, now=now, notice=notice, channel_names=channel_names)
+
+    async def _named(
+        self, state: BillingPanelState, tenant_id: uuid.UUID, team_ids: list[str]
+    ) -> BillingPanelState:
+        """The state with the shown top spenders' roster names, else their stored names."""
+        shown = state.member_rows[:TOP_SPENDERS_SHOWN]
+        if not shown:
+            return state
+        stored = {row.platform_user_id: row.display_name for row in shown if row.display_name}
+        labels, found = await roster_names(
+            self._roster_name or _no_roster,
+            team_ids=team_ids if self._roster_name is not None else [],
+            user_ids=[row.platform_user_id for row in shown],
+            stored=stored,
+        )
+        if found:
+            remember_user_names(
+                self._runtime.sessionmaker, tenant_id=tenant_id, platform="teams", names=found
+            )
         rows: tuple[MemberRow, ...] = tuple(
-            dataclasses.replace(row, display_name=names.get(row.platform_user_id, row.display_name))
-            for row in shown
+            dataclasses.replace(row, display_name=labels.get(row.platform_user_id)) for row in shown
         )
         return dataclasses.replace(state, member_rows=rows + state.member_rows[TOP_SPENDERS_SHOWN:])
+
+    async def _channel_names(
+        self,
+        tenant_id: uuid.UUID,
+        team_ids: list[str],
+        channel_ids: list[str],
+        stored: dict[str, str],
+    ) -> dict[str, str]:
+        labels, listed = await channel_labels(
+            self._team_channels, team_ids=team_ids, channel_ids=channel_ids, stored=stored
+        )
+        if listed:
+            remember_channel_names(
+                self._runtime.sessionmaker, tenant_id=tenant_id, platform="teams", names=listed
+            )
+        return labels
 
     async def _act(self, activity: AdaptiveCardInvokeActivity) -> AdaptiveCardInvokeResponse:
         actor = await card_actor(self._runtime, activity)

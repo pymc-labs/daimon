@@ -20,7 +20,8 @@ COLOR_WARNING = theme.COLOR_AMBER  # timed credit expires within a week
 @dataclasses.dataclass(frozen=True)
 class MemberRow:
     platform_user_id: str
-    display_name: str
+    # Their name, live or last stored; None when Discord never named them to us.
+    display_name: str | None
     cost_usd: float
     turn_count: int
     is_caller: bool

@@ -12,13 +12,15 @@ github_oauth_states (both kinds where the table permits) -> credential_requests
 (both kinds, platform-user-scoped like github_oauth_states) -> wizard_session
 (both kinds, platform-user-scoped like credential_requests) -> message_feedback
 (platform only, platform-user-scoped) -> routines (platform only) ->
-principal_links -> principal row. Account-level deletes (mcp_tokens,
-message_feedback, user_configs, accounts) run in `purge_account` after all
-principal rows are gone; mcp_tokens and message_feedback are keyed by
-account_id and are deleted before delete_account so their CASCADE FKs to
-accounts.id are satisfied. message_feedback is deleted by an account-id
-predicate OR'd with the account's (tenant, platform-user) keys, because a
-vote cast before the person had an account row carries a null account id.
+principal_links -> principal row -> platform_user_names (platform only,
+platform-user-scoped, after the principal row on purpose: see the call).
+Account-level deletes (mcp_tokens, message_feedback, user_configs, accounts)
+run in `purge_account` after all principal rows are gone; mcp_tokens and
+message_feedback are keyed by account_id and are deleted before delete_account
+so their CASCADE FKs to accounts.id are satisfied. message_feedback is deleted
+by an account-id predicate OR'd with the account's (tenant, platform-user)
+keys, because a vote cast before the person had an account row carries a null
+account id.
 
 message_feedback is the one table deleted on BOTH paths, because it is the
 one table whose rows can carry either identity key. The principal path
@@ -98,6 +100,7 @@ from typing import Literal
 
 import structlog
 from anthropic import APIError, AsyncAnthropic
+from daimon.core import platform_names
 from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
@@ -112,6 +115,7 @@ from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
+from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import security_audit as security_audit_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
@@ -155,6 +159,7 @@ class PurgeReport(BaseModel):
     support_escalations: int = 0
     channel_admins: int = 0
     agent_post_requesters: int = 0
+    platform_user_names: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
@@ -181,6 +186,7 @@ class PurgeReport(BaseModel):
             support_escalations=self.support_escalations + other.support_escalations,
             channel_admins=self.channel_admins + other.channel_admins,
             agent_post_requesters=self.agent_post_requesters + other.agent_post_requesters,
+            platform_user_names=self.platform_user_names + other.platform_user_names,
         )
 
 
@@ -205,6 +211,7 @@ async def _purge_principal_in_session(
     propagate so the caller's transaction rolls back.
     """
     agent_post_requesters_count = 0
+    platform_user_names_count = 0
     if isinstance(principal, PlatformPrincipalRow):
         routines_count = await routines_store.delete_for_principal(
             session,
@@ -364,6 +371,21 @@ async def _purge_principal_in_session(
     principal_count = await identity_store.delete_for_principal(
         session, principal_id=principal.id, kind=kind
     )
+    if isinstance(principal, PlatformPrincipalRow):
+        # The name the platform last gave for them (the billing panel's
+        # fallback), keyed by (tenant, platform, platform user) like the grants
+        # above. Deleted AFTER the principal row: a name write locks that row,
+        # so one racing this purge has either committed (and is deleted here)
+        # or will find no principal and store nothing. The in-process queue is
+        # dropped too, so a queued write cannot follow.
+        user_key = (principal.tenant_id, principal.platform, principal.external_id)
+        platform_names.forget_users([user_key])
+        platform_user_names_count = await platform_names_store.delete_user_names_for_platform_user(
+            session,
+            tenant_id=principal.tenant_id,
+            platform=principal.platform,
+            platform_user_id=principal.external_id,
+        )
 
     return PurgeReport(
         routines=routines_count,
@@ -381,6 +403,7 @@ async def _purge_principal_in_session(
         support_escalations=support_escalations_count,
         channel_admins=channel_admins_count,
         agent_post_requesters=agent_post_requesters_count,
+        platform_user_names=platform_user_names_count,
     )
 
 

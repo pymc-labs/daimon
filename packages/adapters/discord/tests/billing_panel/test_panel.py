@@ -17,6 +17,7 @@ import pytest
 from daimon.adapters.discord.billing_panel.panel import (
     BillingPanelView,
     build_billing_container,
+    build_expiry_container,
     build_member_lookup_container,
     estimate_turns,
 )
@@ -198,9 +199,11 @@ def test_admin_view_has_topup_select_with_4_options() -> None:
         "top-up select options must be ['10','25','50','100']"
     )
     for opt in options:
-        assert opt.description is not None and opt.description.startswith("≈ "), (
-            f"option '{opt.label}' description must start with '≈ '"
+        assert opt.label == f"${opt.value}", "the label is the amount alone"
+        assert opt.description is not None and opt.description.startswith("about "), (
+            f"option '{opt.label}' says what it buys as `about N turns`"
         )
+        assert opt.description.endswith(" turns")
 
 
 def test_the_admin_panel_has_the_member_lookup_and_a_member_panel_does_not() -> None:
@@ -261,8 +264,8 @@ async def test_expiry_dates_replies_privately_with_each_credit_soonest_first() -
     assert _joined_view_text(kwargs["view"]) == (
         "## Expiry dates\n"
         "Unused credit expires:\n"
-        f"$20.00 · <t:{first}:D> (<t:{first}:R>)\n"
-        f"$5.00 · <t:{last}:D> (<t:{last}:R>)"
+        f"$20.00 on <t:{first}:D> (<t:{first}:R>)\n"
+        f"$5.00 on <t:{last}:D> (<t:{last}:R>)"
     )
 
 
@@ -743,7 +746,7 @@ def test_the_admin_panel_is_header_credit_channel_and_spenders_apart() -> None:
         channel_budgets=(_budget_status("100", "4.1"),),
     )
     assert _blocks(build_billing_container(state, now=NOW, since=SINCE)) == [
-        "## Billing\n-# May 2026 · $48.17 spent by 9 people",
+        "## Billing\n-# May 2026\n-# $48.17 spent by 9 people",
         "---",
         "### $62.40\ntotal credit left\n-# Includes $25.00 that expires. It's used first.",
         "---",
@@ -853,6 +856,49 @@ def test_top_spender_names_are_escaped() -> None:
     line = _section(_make_state(is_admin=True, member_rows=(row,)), "**Top spenders**")
     assert "@everyone" not in line and "<@100000000000000009>" not in line, line
     assert "\\*\\*x\\*\\*" in line, "markdown in a name is shown literally"
+
+
+def test_someone_never_named_to_us_is_a_mention_the_client_names() -> None:
+    row = _make_member_row(platform_user_id="100000000000004993", display_name=None)
+    line = _section(_make_state(is_admin=True, member_rows=(row,)), "**Top spenders**")
+    assert line.splitlines()[1] == "1. <@100000000000004993>  $1.23", (
+        "no `User 4993`: the client renders the mention as their name"
+    )
+    assert "User " not in line
+
+
+def test_no_rendered_panel_has_a_dot_separator_or_a_user_label() -> None:
+    rows = tuple(
+        _make_member_row(
+            platform_user_id=f"10000000000000000{i}",
+            display_name=None if i % 2 else f"user{i}",
+            cost_usd=float(9 - i),
+        )
+        for i in range(7)
+    )
+    for is_admin in (True, False):
+        state = _make_state(
+            is_admin=is_admin,
+            guild_spend=48.17,
+            guild_turns=300,
+            guild_distinct_members=9,
+            member_rows=rows if is_admin else (),
+            timed_credit=(_credit("20", 30), _credit("5", 31)),
+            has_redeemable_promo_code=True,
+            channel_budget=_this_channel_budget(),
+            channel_budgets=(_budget_status("100", "4.1"),),
+        )
+        view = _panel(**{f.name: getattr(state, f.name) for f in dataclasses.fields(state)})
+        texts = [_joined_view_text(view), _text(build_expiry_container(state))]
+        texts += [
+            f"{option.label} {option.description}"
+            for item in view.walk_children()
+            if isinstance(item, discord.ui.Select)
+            for option in item.options
+        ]
+        for text in texts:
+            assert "·" not in text and "≈" not in text, text
+            assert "User " not in text, text
 
 
 def test_member_lookup_reply_is_the_name_and_the_month() -> None:

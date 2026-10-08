@@ -336,7 +336,11 @@ def create_teams_http_service(
         return turns.spawn(coro, name=name)  # Built below; its drain waits for the task.
 
     privacy = PrivacyPanel(runtime, spawn=spawn)
-    billing = BillingPanel(runtime, roster_name=billing_panel.sdk_roster_name(teams_app))
+    billing = BillingPanel(
+        runtime,
+        roster_name=billing_panel.sdk_roster_name(teams_app),
+        team_channels=billing_panel.sdk_team_channels(teams_app),
+    )
     setup = SetupPanel(runtime)
     channel_settings = ChannelSettingsDialog(runtime, channel_names=channel_names)
     commands: dict[str, CommandHandler] = {

@@ -26,8 +26,12 @@ from daimon.adapters.discord.billing_panel.read import (
 
 # pyright: reportPrivateUsage=false
 from daimon.adapters.discord.billing_panel.state import BillingPanelState, MemberRow
+from daimon.core import platform_names
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.platform_names import KnownName
 from daimon.core.stores import tenant_ledger, usage_events
+from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.platform_names import get_user_names, upsert_user_names
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import (
     make_channel_budget,
@@ -35,15 +39,15 @@ from daimon.testing.factories import (
     make_tenant,
     make_usage_event,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---- resolve_shown_names ----
 
 
-def _row(user_id: str) -> MemberRow:
+def _row(user_id: str, stored: str | None = None) -> MemberRow:
     return MemberRow(
         platform_user_id=user_id,
-        display_name=f"User {user_id[-4:]}",
+        display_name=stored,
         cost_usd=1.0,
         turn_count=1,
         is_caller=False,
@@ -53,6 +57,7 @@ def _row(user_id: str) -> MemberRow:
 def _member(name: str) -> discord.Member:
     member = MagicMock(spec=discord.Member)
     member.display_name = name
+    member.name = name.lower().replace(" ", "")
     return member
 
 
@@ -93,33 +98,71 @@ def _guild(
     return guild, calls
 
 
+def _client(users: dict[int, tuple[str | None, str]]) -> tuple[discord.Client, list[int]]:
+    """A client whose `fetch_user` answers (global name, username) from `users`, else NotFound."""
+    client = MagicMock(spec=discord.Client)
+    calls: list[int] = []
+
+    async def fetch_user(snowflake: int) -> discord.User:
+        calls.append(snowflake)
+        if snowflake not in users:
+            raise _http_error(discord.NotFound, 404)
+        user = MagicMock(spec=discord.User)
+        user.global_name, user.name = users[snowflake]
+        return user
+
+    client.fetch_user.side_effect = fetch_user
+    return client, calls
+
+
 async def test_resolve_shown_names_uses_the_cache_before_fetching() -> None:
     guild, calls = _guild(cached={100000000000000001: "alice"})
 
-    [row] = await resolve_shown_names(guild, (_row("100000000000000001"),))
+    [row], found = await resolve_shown_names(guild, (_row("100000000000000001"),))
 
     assert row.display_name == "alice", "a cached member is named from the cache"
     assert calls == [], "a cache hit needs no REST fetch"
+    assert found == {"100000000000000001": KnownName("alice", "alice")}, "and is remembered"
 
 
 async def test_resolve_shown_names_fetches_a_cache_miss() -> None:
     guild, calls = _guild(fetched={100000000000000002: "bob"})
 
-    [row] = await resolve_shown_names(guild, (_row("100000000000000002"),))
+    [row], _ = await resolve_shown_names(guild, (_row("100000000000000002", "old bob"),))
 
-    assert row.display_name == "bob", "a cache miss is named from a member fetch"
+    assert row.display_name == "bob", "a live member fetch wins over the stored name"
     assert calls == [100000000000000002]
 
 
-async def test_resolve_shown_names_keeps_the_label_for_someone_who_left() -> None:
+async def test_someone_who_left_shows_their_stored_name() -> None:
     guild, _ = _guild(fetched={})
+    client, user_calls = _client({100000000000004993: ("Priya", "priya")})
 
-    [row] = await resolve_shown_names(guild, (_row("100000000000004993"),))
+    [row], found = await resolve_shown_names(
+        guild, (_row("100000000000004993", "Priya N."),), client=client
+    )
 
-    assert row.display_name == "User 4993", "NotFound (they left) keeps `User XXXX`"
+    assert row.display_name == "Priya N.", "NotFound (they left) falls back to the stored name"
+    assert user_calls == [] and found == {}, "a stored name needs no user fetch"
 
 
-async def test_resolve_shown_names_keeps_the_label_on_forbidden_and_http_errors() -> None:
+async def test_someone_who_left_and_was_never_seen_gets_their_account_name() -> None:
+    guild, _ = _guild(fetched={})
+    client, _ = _client(
+        {100000000000004993: ("Priya N.", "priya"), 100000000000004994: (None, "sam_o")}
+    )
+
+    rows, found = await resolve_shown_names(
+        guild, (_row("100000000000004993"), _row("100000000000004994")), client=client
+    )
+
+    assert [r.display_name for r in rows] == ["Priya N.", "sam_o"], (
+        "a user fetch answers for people who left: global name, else username"
+    )
+    assert found["100000000000004994"] == KnownName(None, "sam_o"), "and is remembered"
+
+
+async def test_forbidden_and_http_errors_fall_back_to_the_stored_name() -> None:
     guild, _ = _guild(
         fetched={
             100000000000000003: _http_error(discord.Forbidden, 403),
@@ -127,46 +170,95 @@ async def test_resolve_shown_names_keeps_the_label_on_forbidden_and_http_errors(
         }
     )
 
-    rows = await resolve_shown_names(
-        guild, (_row("100000000000000003"), _row("100000000000000004"))
+    rows, _ = await resolve_shown_names(
+        guild, (_row("100000000000000003", "Cy"), _row("100000000000000004", "Di"))
     )
 
-    assert [r.display_name for r in rows] == ["User 0003", "User 0004"], (
-        "Forbidden and other HTTP errors fall back to `User XXXX`"
-    )
+    assert [r.display_name for r in rows] == ["Cy", "Di"]
 
 
-async def test_resolve_shown_names_gives_up_on_slow_fetches_after_the_timeout() -> None:
+async def test_a_fetch_still_pending_at_the_timeout_shows_the_stored_name() -> None:
     guild, _ = _guild(fetched={100000000000000005: "eve"}, slow=frozenset({100000000000000006}))
 
     async with asyncio.timeout(2):
-        rows = await resolve_shown_names(
-            guild, (_row("100000000000000005"), _row("100000000000000006")), timeout_s=0.1
+        rows, _ = await resolve_shown_names(
+            guild,
+            (_row("100000000000000005"), _row("100000000000000006", "Sam O.")),
+            timeout_s=0.1,
         )
 
-    assert [r.display_name for r in rows] == ["eve", "User 0006"], (
-        "a fetch still pending at the timeout keeps `User XXXX`; the others are named"
+    assert [r.display_name for r in rows] == ["eve", "Sam O."], (
+        "the timed-out fetch shows the stored name; the others are named live"
     )
+
+
+async def test_someone_never_named_to_us_keeps_no_name() -> None:
+    guild, _ = _guild(fetched={})
+    client, _ = _client({})
+
+    [row], found = await resolve_shown_names(guild, (_row("100000000000000007"),), client=client)
+
+    assert row.display_name is None and found == {}, "the panel then shows a mention"
 
 
 async def test_resolve_shown_names_only_fetches_the_rows_the_panel_shows() -> None:
     ids = [f"1000000000000000{i:02d}" for i in range(10, 18)]
     guild, calls = _guild(fetched={int(uid): f"name{uid[-2:]}" for uid in ids})
 
-    rows = await resolve_shown_names(guild, tuple(_row(uid) for uid in ids))
+    rows, _ = await resolve_shown_names(guild, tuple(_row(uid, "stored") for uid in ids))
 
     assert sorted(calls) == [int(uid) for uid in ids[:5]], "only the top five are fetched"
     assert [r.display_name for r in rows[:5]] == [f"name{uid[-2:]}" for uid in ids[:5]]
-    assert rows[5].display_name == "User 0015", "rows past the top five keep `User XXXX`"
+    assert rows[5].display_name == "stored", "rows past the top five keep what was stored"
     assert [r.platform_user_id for r in rows] == ids, "order is unchanged"
 
 
 async def test_resolve_shown_names_skips_an_id_that_is_not_a_snowflake() -> None:
     guild, calls = _guild()
 
-    [row] = await resolve_shown_names(guild, (_row("not-a-number"),))
+    [row], _ = await resolve_shown_names(guild, (_row("not-a-number"),))
 
-    assert row.display_name == "User mber" and calls == [], "a bad id is neither fetched nor named"
+    assert row.display_name is None and calls == [], "a bad id is neither fetched nor named"
+
+
+async def test_the_admin_snapshot_names_spenders_and_remembers_live_names(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="777000000000000001")
+    for uid, tokens in (("100000000000000011", 3000), ("100000000000000012", 2000)):
+        await make_usage_event(db_session, tenant=tenant, platform_user_id=uid, input_tokens=tokens)
+        await get_or_create_platform_principal(
+            db_session, tenant_id=tenant.id, platform="discord", external_id=uid
+        )
+    await upsert_user_names(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        names={"100000000000000012": KnownName("Left Person", "left")},
+    )
+    await db_session.commit()
+    platform_names.forget_all()
+    guild, _ = _guild(fetched={100000000000000011: "Here Now"})
+
+    state = await load_billing_snapshot(
+        db_session,
+        guild=guild,
+        guild_id="777000000000000001",
+        caller_user_id="100000000000000011",
+        is_admin=True,
+        since=datetime(2000, 1, 1, tzinfo=UTC),
+        now=datetime.now(UTC),
+        sessionmaker=db_session_factory,
+    )
+    await platform_names.settle()
+
+    assert [row.display_name for row in state.member_rows] == ["Here Now", "Left Person"]
+    known = await get_user_names(
+        db_session, tenant_id=tenant.id, platform="discord", user_ids=["100000000000000011"]
+    )
+    assert known == {"100000000000000011": KnownName("Here Now", "herenow")}, (
+        "a live name is stored for next time"
+    )
 
 
 # ---- is_guild_admin ----

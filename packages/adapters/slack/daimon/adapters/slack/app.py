@@ -134,6 +134,7 @@ from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.memory import handle_memory_command
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.adapters.slack.names import remember_payload_names
 from daimon.adapters.slack.output_delivery import deliver_session_outputs
 from daimon.adapters.slack.privacy_panel.actions import (
     handle_privacy_block_action,
@@ -1019,6 +1020,8 @@ class SlackApp:
         if is_app_mention:
             # No await occurs before the handler task is registered below.
             self._mention_acks_pending -= 1
+        # For /billing's top spenders; in the background, never failing the event.
+        remember_payload_names(self.runtime.sessionmaker, req.type, payload)
 
         if req.type == "events_api":
             event = event_for_ack
