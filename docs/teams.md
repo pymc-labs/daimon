@@ -164,8 +164,10 @@ group ID in `role_ids` to admit that team's owners), channel budgets
 work as on Discord and Slack. Who answers where lists each channel's
 environment, and its **Channel settings** dialog changes one channel picked
 there, since the panel lives in the 1:1 chat: its environment (server admins,
-or that channel's admins), and its permissions (readers and writers) and admins by
-Entra object ID (server admins only). Channel rules work as on Discord and Slack,
+or that channel's admins), and its permissions (readers and writers), admins by
+Entra object ID and channel skills (server admins only). Channel skills are
+extra skills for whatever agent answers in that channel, added by name,
+`agent/name` or skill id and removed by ticking them, as on Discord and Slack. Channel rules work as on Discord and Slack,
 with `set_channel_rule` or `daimon channels rule set`. A thread (`;messageid=`)
 counts as its channel, and a channel's own agents send nothing to 1:1 chats. The
 CLI can't read channel names, so a copy it makes is named from the channel id.

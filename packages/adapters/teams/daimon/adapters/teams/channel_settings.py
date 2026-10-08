@@ -1,13 +1,14 @@
 """The channel settings dialog, opened from Who answers where: environment,
-permissions and channel admins of one channel the caller picks.
+permissions, channel admins and channel skills of one channel the caller picks.
 
 The panel lives in the 1:1 chat, so the caller names the channel. The rights
 mirror Discord and Slack: a channel admin sets only their own channels'
 environment, through `authorize_environment_pick`; permissions and channel
-admin grants stay with server admins, and permissions go through core
-`set_channel_rule`. Every submit re-verifies the clicker and re-reads
-their grants, so a stale or forged card grants nothing, and every write,
-allowed or not, is audited with `record_panel_write`.
+admin grants and channel skills stay with server admins, permissions go
+through core `set_channel_rule` and skills through `add_skill_to_channel`.
+Every submit re-verifies the clicker and re-reads their grants, so a stale or
+forged card grants nothing, and every write, allowed or not, is audited with
+`record_panel_write`.
 """
 
 from __future__ import annotations
@@ -62,7 +63,8 @@ from daimon.core.channel_rules import (
     channel_rule_status,
     set_channel_rule,
 )
-from daimon.core.errors import DaimonError
+from daimon.core.channel_skills import REFUSALS, add_skill_to_channel
+from daimon.core.errors import DaimonError, SkillsListTruncatedError
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.permissions import channel_rule, own_reader_channels
 from daimon.core.routine_delivery import teams_channel_of
@@ -73,6 +75,7 @@ from daimon.core.stores.channel_admins import (
     list_channel_admins,
     set_channel_admins,
 )
+from daimon.core.stores.channel_skills import list_channel_skills, remove_channel_skill
 from daimon.core.stores.teams_installations import list_teams_installations
 from microsoft_teams.api import (
     TaskFetchInvokeActivity,
@@ -90,13 +93,15 @@ CHANNELS_NEED_ADMIN: Final = (
     "Changing a channel's settings needs a server admin or an admin of that channel."
 )
 SERVER_ADMIN_ONLY: Final = (
-    "Only a server admin can change a channel's permissions or name its admins. Nothing changed."
+    "Only a server admin can change a channel's permissions, admins or skills. Nothing changed."
 )
+SKILLS_UNREADABLE: Final = "This organisation's skills could not all be read. Nothing was added."
 UNKNOWN_CHANNEL: Final = "That isn't a Teams channel id. Nothing changed."
 _AUDIT_OPS: Final[Mapping[cards.ChannelOp, PanelOp]] = {
     "environment": "environment",
     "rule": "channel_rule",
     "admins": "channel_admins",
+    "skills": "channel_skills",
 }
 _MAX_ENVIRONMENT_OPTIONS: Final = 99
 _MAX_OPTION_VALUE: Final = 250
@@ -203,6 +208,9 @@ class ChannelSettingsDialog:
             grant = await get_channel_admins(
                 session, tenant_id=tenant_id, platform="teams", channel_id=channel_id
             )
+            skills = await list_channel_skills(
+                session, tenant_id=tenant_id, platform="teams", channel_id=channel_id
+            )
         picker = None
         if may_pick:
             try:
@@ -235,6 +243,7 @@ class ChannelSettingsDialog:
             picker=picker,
             rule=channel_rule_status(policy, channel_id) if actor.is_admin else None,
             admin_user_ids=(grant.user_ids if grant else ()) if actor.is_admin else None,
+            skills=tuple(skills) if actor.is_admin else None,
         )
         return dialog("Channel settings", cards.channel_settings_form(settings, notice=notice))
 
@@ -279,6 +288,8 @@ class ChannelSettingsDialog:
             notice = await self._save_environment(actor, subject, channel_id, data)
         elif audit_op == "channel_rule":
             notice = await self._change_rule(actor, channel_id, data)
+        elif audit_op == "channel_skills":
+            notice = await self._save_skills(actor, channel_id, data)
         else:
             notice = await self._save_admins(actor, channel_id, data)
         return await self._settings(actor, subject, channel_id, notice)
@@ -421,3 +432,56 @@ class ChannelSettingsDialog:
         await self._audit(actor, "channel_admins", outcome="allowed", reason="completed")
         log.info("teams.channel_settings.channel_admins_saved", users=len(users))
         return "Channel admins saved." if users else "The channel has no admins of its own now."
+
+    async def _save_skills(
+        self,
+        actor: Actor,
+        channel_id: str,
+        data: Mapping[str, object],
+    ) -> str:
+        """A server admin's channel skills, as Slack's form saves them: removals, then an add."""
+        picked = str(data.get("skill_remove") or "")
+        remove = [skill_id for skill_id in picked.split(",") if skill_id]
+        add = str(data.get("skill_add") or "").strip()
+        if not remove and not add:
+            return "Name a skill to add or tick one to remove. Nothing changed."
+        notes: list[str] = []
+        if remove:
+            async with self._runtime.sessionmaker.begin() as session:
+                for skill_id in remove:
+                    await remove_channel_skill(
+                        session,
+                        tenant_id=actor.tenant_id,
+                        platform="teams",
+                        channel_id=channel_id,
+                        skill_id=skill_id,
+                    )
+            await self._audit(actor, "channel_skills", outcome="allowed", reason="completed")
+            notes.append(f"Removed {len(remove)}.")
+        if add:
+            notes.append(await self._add_skill(actor, channel_id, add))
+        return " ".join(notes)
+
+    async def _add_skill(self, actor: Actor, channel_id: str, skill: str) -> str:
+        account_id = await get_or_create_account(self._runtime, actor)
+        try:
+            async with self._runtime.sessionmaker.begin() as session:
+                added = await add_skill_to_channel(
+                    session,
+                    self._runtime.anthropic,
+                    tenant_id=actor.tenant_id,
+                    platform="teams",
+                    channel_id=channel_id,
+                    skill=skill,
+                    default=self._runtime.deployment_default,
+                    actor_account_id=account_id,
+                )
+        except (SkillsListTruncatedError, anthropic.APIError):
+            await self._audit(actor, "channel_skills", outcome="error", reason="skills_unreadable")
+            return SKILLS_UNREADABLE
+        if isinstance(added, str):
+            await self._audit(actor, "channel_skills", outcome="denied", reason=added)
+            return REFUSALS[added]
+        await self._audit(actor, "channel_skills", outcome="allowed", reason="completed")
+        log.info("teams.channel_settings.skill_added", skill_id=added.skill_id)
+        return f"Added {added.name}."

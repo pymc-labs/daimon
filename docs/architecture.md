@@ -656,7 +656,7 @@ shared agent carries one team's skill without every channel getting it.
 Server admins and operator tokens (`channels:write`) add and remove them,
 never a channel's own admins (`authorize(SET_CHANNEL_SKILLS)`), with the
 `*_channel_skill(s)` MCP tools, Who answers where in the Discord and Slack
-setup panels, or the CLI:
+setup panels (the Channel settings dialog on Teams), or the CLI:
 
 ```bash
 daimon channels skills list slack TEAM_ID [CHANNEL_ID]

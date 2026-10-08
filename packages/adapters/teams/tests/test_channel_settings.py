@@ -17,16 +17,19 @@ from daimon.adapters.teams import channel_settings
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.channel_skills import REFUSALS
+from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins, set_channel_admins
+from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.testing import build_fake_anthropic, ma_agent, ma_environment
-from daimon.testing.ma import FakeMAState, MARouter, make_fake_ma_handler
+from daimon.testing.ma import FakeMAState, MARouter, list_response, make_fake_ma_handler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -50,6 +53,15 @@ TEAM = "19:team@thread.tacv2"
 GROWTH, LEGAL = "19:growth@thread.tacv2", "19:legal@thread.tacv2"
 ADMIN, LEAD = AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID
 NEW_ADMIN = "cccccccc-dddd-eeee-ffff-000000000000"
+LIBRARY_SKILL = {
+    "id": "skill_lib",
+    "created_at": "2026-09-13T12:00:00Z",
+    "display_title": tenant_scoped_display_title(tenant_id=TENANT, name="pdf-tools"),
+    "latest_version": "v3",
+    "source": "custom",
+    "type": "skill",
+    "updated_at": "2026-09-13T12:00:00Z",
+}
 
 
 def _anthropic() -> Any:
@@ -65,6 +77,8 @@ def _anthropic() -> Any:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.startswith("/v1/environments"):
             return environments.dispatch(request)
+        if request.url.path == "/v1/skills":
+            return list_response([LIBRARY_SKILL])
         return agents(request)
 
     return build_fake_anthropic(handler)
@@ -262,3 +276,41 @@ async def test_a_member_gets_no_dialog_and_no_button(
     assert refused["task"]["value"] == channel_settings.CHANNELS_NEED_ADMIN
     assert "Channel settings" not in routing[member], "a member is offered nothing"
     assert "Channel settings" in routing[LEAD] and "Channel settings" in routing[ADMIN]
+
+
+async def test_a_server_admin_adds_and_removes_channel_skills_and_a_channel_admin_cannot(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with _running(db_session_factory, teams_api_fake) as service:
+        lead_form = json.dumps(await post_activity(service, _submit(LEAD, "pick", channel=GROWTH)))
+        forged = await post_activity(
+            service, _submit(LEAD, "skills", channel=GROWTH, skill_add="pdf-tools")
+        )
+        added = await post_activity(
+            service, _submit(ADMIN, "skills", channel=GROWTH, skill_add="pdf-tools")
+        )
+        unknown = await post_activity(
+            service, _submit(ADMIN, "skills", channel=GROWTH, skill_add="nope")
+        )
+        removed = await post_activity(
+            service, _submit(ADMIN, "skills", channel=GROWTH, skill_remove="skill_lib")
+        )
+
+    assert "Channel skills" not in lead_form, "a channel's own admins don't see them"
+    assert forged["task"]["value"] == channel_settings.SERVER_ADMIN_ONLY, "nor save them"
+    assert_card_renders(added["task"]["value"]["card"]["content"])
+    form = json.dumps(added, ensure_ascii=False)
+    assert "Added pdf-tools." in form and "`pdf-tools` · v3" in form, "listed with its version"
+    assert REFUSALS["not_found"] in json.dumps(unknown)
+    assert "Removed 1." in json.dumps(removed) and "No extra skills." in json.dumps(removed)
+    async with db_session_factory() as session:
+        rows = await list_channel_skills(
+            session, tenant_id=TENANT, platform="teams", channel_id=GROWTH
+        )
+    assert rows == [], "removed again"
+    assert await _events(db_session_factory) == [
+        ("panel:channel_skills", "denied", "needs_admin"),
+        ("panel:channel_skills", "allowed", "completed"),
+        ("panel:channel_skills", "denied", "not_found"),
+        ("panel:channel_skills", "allowed", "completed"),
+    ], "every write is audited"

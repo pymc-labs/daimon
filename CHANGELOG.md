@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it as the agent's own skill when sent again unchanged. The same people may
   add as on the other platforms, re-checked on every step. Teams dialogs take
   no files, so a `.zip` is attached in a message and added from chat.
+- **Channel skills in the Teams Channel settings dialog.** Server admins can
+  now see a channel's extra skills in its Channel settings dialog, add one by
+  name, `agent/name` or skill id, and tick skills to remove them, as Who
+  answers where offers on Discord and Slack. The same core checks decide
+  which skills a channel may add, refusals say why, and every save is
+  audited. A channel's own admins still can't change them.
 - **Teams files in private and shared channels, turned on by asking.** The
   Enable files sign-in now starts from a channel and grants daimon that
   channel's own SharePoint site: the team's for a standard channel, a site of
