@@ -447,9 +447,11 @@ class ChannelSettingsDialog:
             return "Name a skill to add or tick one to remove. Nothing changed."
         notes: list[str] = []
         if remove:
+            # Counted from the rows deleted: a forged id or a second Save removes nothing.
+            removed = 0
             async with self._runtime.sessionmaker.begin() as session:
                 for skill_id in remove:
-                    await remove_channel_skill(
+                    removed += await remove_channel_skill(
                         session,
                         tenant_id=actor.tenant_id,
                         platform="teams",
@@ -457,7 +459,7 @@ class ChannelSettingsDialog:
                         skill_id=skill_id,
                     )
             await self._audit(actor, "channel_skills", outcome="allowed", reason="completed")
-            notes.append(f"Removed {len(remove)}.")
+            notes.append(f"Removed {removed}." if removed else "Those were already removed.")
         if add:
             notes.append(await self._add_skill(actor, channel_id, add))
         return " ".join(notes)

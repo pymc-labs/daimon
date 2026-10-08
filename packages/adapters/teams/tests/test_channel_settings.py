@@ -9,12 +9,18 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import pytest
 from daimon.adapters.teams import channel_settings
-from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
+from daimon.adapters.teams.channel_settings_card import (
+    CHANNEL_DIALOG,
+    MAX_LISTED_SKILLS,
+    ChannelSettings,
+    channel_settings_form,
+)
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.channel_skills import REFUSALS
@@ -24,6 +30,7 @@ from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins, set_channel_admins
 from daimon.core.stores.channel_skills import list_channel_skills
+from daimon.core.stores.domain import ChannelSkillRow
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
@@ -293,6 +300,9 @@ async def test_a_server_admin_adds_and_removes_channel_skills_and_a_channel_admi
             service, _submit(ADMIN, "skills", channel=GROWTH, skill_add="nope")
         )
         removed = await post_activity(
+            service, _submit(ADMIN, "skills", channel=GROWTH, skill_remove="skill_lib,forged")
+        )
+        again = await post_activity(
             service, _submit(ADMIN, "skills", channel=GROWTH, skill_remove="skill_lib")
         )
 
@@ -302,7 +312,10 @@ async def test_a_server_admin_adds_and_removes_channel_skills_and_a_channel_admi
     form = json.dumps(added, ensure_ascii=False)
     assert "Added pdf-tools." in form and "`pdf-tools` · v3" in form, "listed with its version"
     assert REFUSALS["not_found"] in json.dumps(unknown)
-    assert "Removed 1." in json.dumps(removed) and "No extra skills." in json.dumps(removed)
+    assert "Removed 1." in json.dumps(removed) and "No extra skills." in json.dumps(removed), (
+        "a forged id is not counted"
+    )
+    assert "Those were already removed." in json.dumps(again), "a second Save removes nothing"
     async with db_session_factory() as session:
         rows = await list_channel_skills(
             session, tenant_id=TENANT, platform="teams", channel_id=GROWTH
@@ -313,4 +326,41 @@ async def test_a_server_admin_adds_and_removes_channel_skills_and_a_channel_admi
         ("panel:channel_skills", "allowed", "completed"),
         ("panel:channel_skills", "denied", "not_found"),
         ("panel:channel_skills", "allowed", "completed"),
+        ("panel:channel_skills", "allowed", "completed"),
     ], "every write is audited"
+
+
+def test_the_skills_dialog_says_when_more_exist_than_it_can_tick() -> None:
+    """Past the cap the list folds and the ticks say how to reach the rest."""
+    rows = tuple(
+        ChannelSkillRow(
+            tenant_id=TENANT,
+            platform="teams",
+            channel_id=GROWTH,
+            skill_id=f"skill_{index}",
+            version="v1",
+            name=f"skill-{index}",
+            owner_agent_name=None,
+            added_by_account_id=None,
+            added_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        for index in range(MAX_LISTED_SKILLS + 1)
+    )
+
+    def form(skills: tuple[ChannelSkillRow, ...]) -> str:
+        settings = ChannelSettings(
+            channel_id=GROWTH,
+            label="growth",
+            picker=None,
+            rule=None,
+            admin_user_ids=None,
+            skills=skills,
+        )
+        return json.dumps(
+            channel_settings_form(settings).model_dump(by_alias=True), ensure_ascii=False
+        )
+
+    full, short = form(rows), form(rows[:MAX_LISTED_SKILLS])
+    assert "…and 1 more" in full and "remove some to reach the rest" in full, "more exist"
+    assert f"skill_{MAX_LISTED_SKILLS}" not in full, "only the first ones can be ticked"
+    assert "reach the rest" not in short, "nothing more to reach"

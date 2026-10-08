@@ -174,10 +174,13 @@ def _skills_section(rows: Sequence[ChannelSkillRow]) -> list[CardElement]:
     ]
     if shown:
         choices = [Choice(title=row.name, value=row.skill_id) for row in shown]
+        label = "Remove"
+        if len(rows) > len(shown):
+            label += f" (first {len(shown)} shown; remove some to reach the rest)"
         body.append(
             ChoiceSetInput(
                 id="skill_remove",
-                label="Remove",
+                label=label,
                 is_multi_select=True,
                 style="expanded",
                 choices=choices,
