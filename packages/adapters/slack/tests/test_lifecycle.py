@@ -1006,7 +1006,8 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     section, context = blocks[2], blocks[-1]
     assert section["type"] == "section"
     assert notice.cause in section["text"]["text"]
-    assert notice.next_step in section["text"]["text"], "the next step is not truncated away"
+    assert blocks[1]["text"]["text"] == notice.next_step
+    assert "*Next:*" not in section["text"]["text"]
     assert "`fit_model`" in section["text"]["text"], "work in flight is named"
     assert "`rid: " in section["text"]["text"]
     assert "0s" in context["elements"][0]["text"]
