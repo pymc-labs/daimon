@@ -694,6 +694,7 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
         from daimon.adapters.discord.commands.billing import BillingCog
         from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
+        from daimon.adapters.discord.commands.github import GitHubCog
         from daimon.adapters.discord.commands.help import HelpCog
         from daimon.adapters.discord.commands.here import HereCog
         from daimon.adapters.discord.commands.memory import MemoryCog
@@ -703,6 +704,7 @@ class DaimonBot(commands.Bot):
 
         await self.add_cog(HelpCog(self))
         await self.add_cog(HereCog(self))
+        await self.add_cog(GitHubCog(self))
         await self.add_cog(DirectMessageCog(self))
         await self.add_cog(AgentSetupCog(self))
         await self.add_cog(RoutinesCog(self))

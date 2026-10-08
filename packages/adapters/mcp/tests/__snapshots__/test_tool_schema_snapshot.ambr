@@ -2981,6 +2981,50 @@
         'type': 'object',
       }),
     }),
+    'github_connect': dict({
+      'description': '''
+        Connect this agent to GitHub when someone asks to set up GitHub.
+        
+        Send the admin a private, single-use link bound to the selected agent.
+        Members get Ask an admin and a recorded request. Never repeat a private
+        link in a shared reply. For a setup target, pass its current name and
+        MA id from turn_controls; otherwise this defaults to the responder.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_name': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'hand_off_task': dict({
       'description': '''
         Hand this task over to another agent in the same conversation: "have that one take over", "let churn-explorer finish this".
@@ -3584,6 +3628,8 @@
       'description': '''
         Install the GitHub App: post a link inviting the user to grant repository access.
         
+        For requests to set up or hook up GitHub for an agent, use
+        ``github_connect`` instead.
         For a private repo with a working token, use ``request_repo_binding`` instead.
         A token remains the fallback and existing bound tokens keep being used.
         
@@ -4409,6 +4455,8 @@
       'description': '''
         Let an agent read a GitHub working repo or repository, public or private.
         
+        For requests to set up or hook up GitHub for an agent, use
+        ``github_connect`` instead.
         For a private skill repo use ``request_skill_repo_token``. If the user has
         no working token, ``post_github_app_install_link`` offers a GitHub App install;
         installing alone does not bind the repo or verify this tenant's access.

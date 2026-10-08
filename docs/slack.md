@@ -152,6 +152,13 @@ Trust model notes for operators:
 
 `/agent-setup` opens the Agents roster, which pushes into either an agent's Details view or Who answers where. Setup conversations can be opened with **⚙️ Manage agents** from the Agents roster or from Details; creating a new agent lands on its Details view rather than a separate confirmation screen, and Details also offers **🧰 Use from your coding tools** to connect that agent over MCP. The channel gets a short launcher with a **Reply to Daimon** button; Daimon's welcome appears inside the shared thread. The panel also provides the reply button immediately after opening setup. Follow it, reply in that thread, and mention the bot. Daimon answers while the named agent is configured. Opening setup does not run a billed turn or change channel defaults. Each participant keeps a separate session.
 
+`/github connect` sends a workspace admin a private link for the agent answering
+in that channel. Use `/github connect AgentName` to choose another agent. The
+link lets the admin pick repos, then activates them for that agent. If the
+agent still has a saved GitHub key, `/github connect` shows the **Update and
+restart chats** confirmation instead. Existing Slack installations need the
+`/github` command added from `docs/slack-app-manifest.yaml` and reinstallation.
+
 Existing Slack apps must update **Event Subscriptions → Subscribe to bot events** to match `docs/slack-app-manifest.yaml`, including `message.channels`, `message.groups`, channel/group archive, unarchive, and deletion events. These subscriptions track setup lifecycle only; messages still trigger conversation only through `app_mention`. An `app_mention` runs a turn only when the message actually contains `@daimon`, so follow-ups in a thread need the mention too; Slack has been reported to deliver the event for un-mentioned thread replies, and those are dropped. Root deletion is delivered as the [`message_deleted` message subtype](https://docs.slack.dev/reference/events/message/message_deleted/).
 
 Completion notifications can be enabled per tenant with `DAIMON_COMPLETION_PINGS`

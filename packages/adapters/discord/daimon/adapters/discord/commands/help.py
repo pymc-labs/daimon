@@ -29,6 +29,7 @@ def _body(bot_display_name: str) -> str:
     return f"""\
 **Agent management**
 -# /agent-setup — See your agents, who answers where, and make changes
+-# /github connect — Connect GitHub repos to an agent
 
 **Routines**
 -# /routines — Show scheduled routines for this guild

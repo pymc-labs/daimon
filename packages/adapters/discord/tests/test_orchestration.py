@@ -1145,6 +1145,7 @@ class TestSetupHook:
         mock_billing_cog = MagicMock()
         mock_privacy_cog = MagicMock()
         mock_memory_cog = MagicMock()
+        mock_github_cog = MagicMock()
 
         help_mod = types.ModuleType("daimon.adapters.discord.commands.help")
         help_mod.HelpCog = mock_help_cog  # type: ignore[attr-defined]
@@ -1160,6 +1161,8 @@ class TestSetupHook:
         privacy_mod.PrivacyCog = mock_privacy_cog  # type: ignore[attr-defined]
         memory_mod = types.ModuleType("daimon.adapters.discord.commands.memory")
         memory_mod.MemoryCog = mock_memory_cog  # type: ignore[attr-defined]
+        github_mod = types.ModuleType("daimon.adapters.discord.commands.github")
+        github_mod.GitHubCog = mock_github_cog  # type: ignore[attr-defined]
         mock_feedback_reaction_cog = MagicMock()
         feedback_reactions_mod = types.ModuleType("daimon.adapters.discord.feedback_reactions")
         feedback_reactions_mod.FeedbackReactionCog = mock_feedback_reaction_cog  # type: ignore[attr-defined]
@@ -1187,12 +1190,13 @@ class TestSetupHook:
                 "daimon.adapters.discord.commands.billing": billing_mod,
                 "daimon.adapters.discord.commands.privacy": privacy_mod,
                 "daimon.adapters.discord.commands.memory": memory_mod,
+                "daimon.adapters.discord.commands.github": github_mod,
                 "daimon.adapters.discord.feedback_reactions": feedback_reactions_mod,
             },
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 9, "setup_hook should add exactly 9 Cogs"
+        assert len(add_cog_calls) == 10, "setup_hook should add exactly 10 Cogs"
         assert sum(isinstance(cog, DirectMessageCog) for cog in add_cog_calls) == 1
         mock_help_cog.assert_called_once_with(bot)
         mock_here_cog.assert_called_once_with(bot)
@@ -1201,6 +1205,7 @@ class TestSetupHook:
         mock_billing_cog.assert_called_once_with(bot)
         mock_privacy_cog.assert_called_once_with(bot)
         mock_memory_cog.assert_called_once_with(bot)
+        mock_github_cog.assert_called_once_with(bot)
         mock_feedback_reaction_cog.assert_called_once_with(bot)
 
 

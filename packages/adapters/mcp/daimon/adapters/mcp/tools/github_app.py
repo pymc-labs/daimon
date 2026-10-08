@@ -89,6 +89,8 @@ def register_github_app_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> PostAppInstallLinkResult:
         """Install the GitHub App: post a link inviting the user to grant repository access.
 
+        For requests to set up or hook up GitHub for an agent, use
+        ``github_connect`` instead.
         For a private repo with a working token, use ``request_repo_binding`` instead.
         A token remains the fallback and existing bound tokens keep being used.
 
