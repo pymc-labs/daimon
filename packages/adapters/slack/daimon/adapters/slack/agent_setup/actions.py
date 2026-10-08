@@ -548,7 +548,7 @@ async def load_details_view(
             and details.name != runtime.deployment_default.agent_name
         ):
             avatar = await get_or_create_avatar(
-                session, tenant_id=tenant_id, agent_name=details.name
+                session, tenant_id=tenant_id, agent_name=details.name, face_enabled=True
             )
             base = runtime.settings.mcp.app_root_url
             if base:

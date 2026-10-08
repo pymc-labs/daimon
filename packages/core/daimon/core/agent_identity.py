@@ -42,7 +42,9 @@ async def resolve_agent_identity(
     """
     if is_builtin or not enabled:
         return AgentIdentity(name=agent_name, avatar_url=None, builtin=True)
-    avatar = await get_or_create_avatar(session, tenant_id=tenant_id, agent_name=agent_name)
+    avatar = await get_or_create_avatar(
+        session, tenant_id=tenant_id, agent_name=agent_name, face_enabled=True
+    )
     base = public_base_url.rstrip("/") if public_base_url else None
     url = f"{base}/avatars/{avatar.token}/{avatar.sha256[:12]}.png" if base else None
     return AgentIdentity(name=agent_name, avatar_url=url, builtin=False)

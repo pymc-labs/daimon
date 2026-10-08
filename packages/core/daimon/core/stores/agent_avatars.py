@@ -5,6 +5,7 @@ Agent names are immutable; archive cleanup deletes the associated avatar.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import secrets
@@ -13,7 +14,8 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from daimon.core._models import AgentAvatar
+from daimon.core._models import AgentAvatar, Tenant
+from daimon.core.agent_faces import FaceCombo, choose, decode_combo, encode_combo, render
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -29,6 +31,7 @@ class AvatarRow:
     sha256: str
     png: bytes
     source: str
+    face_combo: FaceCombo | None = None
 
 
 def normalize_agent_name(name: str) -> str:
@@ -69,28 +72,82 @@ def generate_default_png(name: str) -> bytes:
 
 
 def _row(orm: AgentAvatar) -> AvatarRow:
-    return AvatarRow(token=orm.token, sha256=orm.sha256, png=orm.png, source=orm.source)
+    return AvatarRow(
+        token=orm.token,
+        sha256=orm.sha256,
+        png=orm.png,
+        source=orm.source,
+        face_combo=decode_combo(orm.face_combo) if orm.face_combo else None,
+    )
+
+
+async def _choose_face(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_name: str
+) -> FaceCombo:
+    rows = await session.scalars(
+        select(AgentAvatar.face_combo).where(
+            AgentAvatar.tenant_id == tenant_id,
+            AgentAvatar.agent_name != normalize_agent_name(agent_name),
+            AgentAvatar.face_combo.is_not(None),
+        )
+    )
+    existing = [decode_combo(raw) for raw in rows if raw is not None]
+    return await asyncio.to_thread(choose, normalize_agent_name(agent_name), existing)
+
+
+async def _lock_tenant(session: AsyncSession, tenant_id: uuid.UUID) -> None:
+    await session.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
 
 
 async def get_or_create_avatar(
-    session: AsyncSession, *, tenant_id: uuid.UUID, agent_name: str
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    face_enabled: bool = False,
 ) -> AvatarRow:
     key = normalize_agent_name(agent_name)
     existing = await session.get(AgentAvatar, (tenant_id, key))
-    if existing is not None:
+    if existing is not None and (
+        not face_enabled or existing.source == "upload" or existing.face_combo is not None
+    ):
         return _row(existing)
-    png = generate_default_png(agent_name)
+    if face_enabled:
+        # Serialise assignments within a tenant, including across worker processes.
+        await _lock_tenant(session, tenant_id)
+        existing = await session.get(AgentAvatar, (tenant_id, key), populate_existing=True)
+        if existing is not None and (existing.source == "upload" or existing.face_combo):
+            return _row(existing)
+        combo = await _choose_face(session, tenant_id=tenant_id, agent_name=agent_name)
+        png = await asyncio.to_thread(render, combo, 512)
+    else:
+        combo = None
+        png = generate_default_png(agent_name)
+    token = secrets.token_urlsafe(24)
+    sha = hashlib.sha256(png).hexdigest()
     await session.execute(
         pg_insert(AgentAvatar)
         .values(
             tenant_id=tenant_id,
             agent_name=key,
-            token=secrets.token_urlsafe(24),
-            sha256=hashlib.sha256(png).hexdigest(),
+            token=token,
+            sha256=sha,
             png=png,
             source="default",
+            face_combo=encode_combo(combo) if combo else None,
         )
-        .on_conflict_do_nothing(index_elements=["tenant_id", "agent_name"])
+        .on_conflict_do_update(
+            index_elements=["tenant_id", "agent_name"],
+            set_={
+                "token": token,
+                "sha256": sha,
+                "png": png,
+                "source": "default",
+                "face_combo": encode_combo(combo) if combo else None,
+                "updated_at": datetime.now(UTC),
+            },
+            where=AgentAvatar.source == "default",
+        )
     )
     result = await session.get(AgentAvatar, (tenant_id, key), populate_existing=True)
     if result is None:
@@ -106,13 +163,20 @@ async def replace_avatar(
     png: bytes,
     source: str,
     updated_by_account_id: uuid.UUID | None = None,
+    face_combo: FaceCombo | None = None,
 ) -> AvatarRow:
-    if source not in ("default", "upload") or len(png) > _MAX_PNG_BYTES:
-        raise ValueError("avatar must be a PNG of at most 256 KB")
+    limit = 1024 * 1024 if face_combo is not None and source == "default" else _MAX_PNG_BYTES
+    if source not in ("default", "upload") or len(png) > limit:
+        raise ValueError(
+            "avatar must be a PNG of at most 1 MB"
+            if limit > _MAX_PNG_BYTES
+            else "avatar must be a PNG of at most 256 KB"
+        )
     try:
         with Image.open(io.BytesIO(png)) as image:
-            if image.format != "PNG" or image.size != (256, 256):
-                raise ValueError("avatar must be a 256×256 PNG")
+            expected_size = (512, 512) if face_combo is not None else (256, 256)
+            if image.format != "PNG" or image.size != expected_size:
+                raise ValueError("avatar has the wrong PNG size")
             image.verify()
     except (UnidentifiedImageError, OSError) as exc:
         raise ValueError("avatar must be a valid PNG") from exc
@@ -128,6 +192,7 @@ async def replace_avatar(
             sha256=sha,
             png=png,
             source=source,
+            face_combo=encode_combo(face_combo) if face_combo else None,
             updated_by_account_id=updated_by_account_id,
             updated_at=datetime.now(UTC),
         )
@@ -138,12 +203,18 @@ async def replace_avatar(
                 "sha256": sha,
                 "png": png,
                 "source": source,
+                "face_combo": AgentAvatar.face_combo
+                if source == "upload"
+                else (encode_combo(face_combo) if face_combo else None),
                 "updated_by_account_id": updated_by_account_id,
                 "updated_at": datetime.now(UTC),
             },
         )
     )
-    return AvatarRow(token=token, sha256=sha, png=png, source=source)
+    saved = await session.get(AgentAvatar, (tenant_id, key), populate_existing=True)
+    if saved is None:
+        raise RuntimeError("avatar replacement did not persist")
+    return _row(saved)
 
 
 async def reset_avatar(
@@ -152,14 +223,29 @@ async def reset_avatar(
     tenant_id: uuid.UUID,
     agent_name: str,
     updated_by_account_id: uuid.UUID | None = None,
+    face_enabled: bool = False,
 ) -> AvatarRow:
+    combo: FaceCombo | None = None
+    if face_enabled:
+        await _lock_tenant(session, tenant_id)
+        existing = await session.get(
+            AgentAvatar, (tenant_id, normalize_agent_name(agent_name)), populate_existing=True
+        )
+        combo = (
+            decode_combo(existing.face_combo)
+            if existing is not None and existing.face_combo
+            else await _choose_face(session, tenant_id=tenant_id, agent_name=agent_name)
+        )
     return await replace_avatar(
         session,
         tenant_id=tenant_id,
         agent_name=agent_name,
-        png=generate_default_png(agent_name),
+        png=await asyncio.to_thread(render, combo, 512)
+        if combo
+        else generate_default_png(agent_name),
         source="default",
         updated_by_account_id=updated_by_account_id,
+        face_combo=combo,
     )
 
 

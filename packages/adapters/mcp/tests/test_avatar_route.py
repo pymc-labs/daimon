@@ -31,7 +31,44 @@ async def test_avatar_route_is_public_immutable_and_revokes_old_token(
         assert response.headers["content-type"] == "image/png"
         assert "immutable" in response.headers["cache-control"]
         assert response.content == row.png
+        for size in (128, 512):
+            sized = await client.get(f"{path}?size={size}")
+            assert sized.status_code == 200
+            assert "immutable" in sized.headers["cache-control"]
+            from io import BytesIO
+
+            from PIL import Image
+
+            assert Image.open(BytesIO(sized.content)).size == (size, size)
+        assert (await client.get(f"{path}?size=1024")).status_code == 400
         assert (await client.get(f"/avatars/{row.token}/bad.png")).status_code == 404
         async with db_session_factory.begin() as session:
             await reset_avatar(session, tenant_id=tenant.id, agent_name="Ada")
         assert (await client.get(path)).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_face_avatar_route_serves_stored_512_and_resized_128(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        row = await get_or_create_avatar(
+            session, tenant_id=tenant.id, agent_name="Analyst", face_enabled=True
+        )
+    app = Starlette(
+        routes=[Route("/avatars/{token}/{sha12}.png", _build_avatar_route(db_session_factory))]
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://example.test"
+    ) as client:
+        path = f"/avatars/{row.token}/{row.sha256[:12]}.png"
+        original = await client.get(path)
+        small = await client.get(f"{path}?size=128")
+        assert original.content == row.png
+        assert Image.open(BytesIO(original.content)).size == (512, 512)
+        assert Image.open(BytesIO(small.content)).size == (128, 128)

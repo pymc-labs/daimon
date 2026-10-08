@@ -95,6 +95,7 @@ source_modules = [
     "daimon.core.agent_detail_lists",
     "daimon.core.agent_details",
     "daimon.core.agent_env_crypto",
+    "daimon.core.agent_faces",
     "daimon.core.agent_fork",
     "daimon.core.agent_guidance",
     "daimon.core.agent_identity",

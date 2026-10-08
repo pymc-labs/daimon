@@ -225,7 +225,7 @@ async def load_details_for(
             default_agent_name=runtime.deployment_default.agent_name,
         ):
             avatar = await get_or_create_avatar(
-                session, tenant_id=_tenant_id(state), agent_name=agent.name
+                session, tenant_id=_tenant_id(state), agent_name=agent.name, face_enabled=True
             )
             state.avatar_urls[agent.name] = avatar_public_url(runtime, avatar)
             await session.commit()

@@ -24,6 +24,7 @@ dependencies = [
     "PyJWT>=2.8",
     "google-auth>=2,<3",
     "pillow>=11,<13",
+    "numpy>=2,<3",
 ]
 
 [project.urls]
