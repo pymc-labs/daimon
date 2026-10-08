@@ -8,14 +8,16 @@ single structured exempt-billing log line at turn start and meters nothing.
 
 `_pump`'s reconnect machinery is two levels, for two distinct failure modes:
 
-- Outer `while True:` loop — an unbounded, status-gated reconnect for
+- Outer `while True:` loop — a status-gated reconnect for
   eventless cycles (the SSE stream ends or stalls with no terminal event).
   A stream ending or stalling is not itself meaningful: the server closes
   cleanly every ~600s by design, and a healthy long tool call produces
   multiple such cycles. The driver asks MA (`sessions.retrieve`) whether the
   session is still running before deciding anything, so silence alone can
   never finalize a turn as a quiet, truncated success (Class A). This loop
-  has no attempt cap by design — the per-turn ceiling
+  has no attempt cap while MA is running. An idle pause with an unechoed
+  confirmation has two extra reconnects before the existing failure. The
+  per-turn ceiling
   (`daimon.core.turn.ceiling`), enforced at `bind_session` and
   `run_prepared_turn` for the chat paths and, for callers that bypass those,
   `run_turn`'s own optional `deadline`, is the sole backstop.
@@ -100,6 +102,11 @@ InterruptPhase = Literal["pre-stream", "stream-open", "send-initial", "replay", 
 # the signature (ruff B008) — `RequireApproval()` is a frozen, field-less
 # dataclass, so one shared instance is safe across every call.
 _DEFAULT_TOOL_CONFIRMATION: ToolConfirmation = RequireApproval()
+
+# An idle MA session can still have an HTTP-accepted confirmation queued.
+# Give it two more stream generations to echo the event before treating the
+# quiet pause as a failure; never send the same decision again.
+_PENDING_CONFIRMATION_RECONNECTS = 2
 
 T = TypeVar("T")
 
@@ -558,6 +565,10 @@ async def _pump(
     # confirmed id MA has not taken yet is a stale duplicate, not a re-ask
     # (`_consume_with_reconnect`).
     accepted_tool_use_ids: set[str] = set()
+    seen_requires_action_event_ids: set[str] = set()
+    pending_confirmation_reconnects = 0
+    pending_confirmation_retry_ids: frozenset[str] = frozenset()
+    confirmation_echo_timed_out = False
     delivered_event_ids: set[str] = set()
     # Per-turn billing dedup, shared by the live consume loop and both replay
     # folds: a model call MA emitted while no stream was attached exists only
@@ -611,12 +622,13 @@ async def _pump(
 
     # Two-level reconnect structure:
     #
-    # - Outer `while True:` loop: an unbounded status-gated reconnect for
-    #   eventless cycles (`_EventlessCycle` — a clean close or read-timeout
-    #   with no terminal event). Unbounded on purpose: a healthy long tool
-    #   call produces multiple eventless close/reopen cycles while the
-    #   session is genuinely `running`/`rescheduling`, so silence alone is
-    #   never treated as suspicion. The per-turn ceiling
+    # - Outer `while True:` loop: a status-gated reconnect for eventless
+    #   cycles (`_EventlessCycle` — a clean close or read-timeout with no
+    #   terminal event). It is unbounded while MA is `running`/`rescheduling`:
+    #   a healthy long tool call can produce repeated quiet streams. An idle
+    #   `requires_action` with sent but unechoed confirmations gets at most
+    #   two extra stream generations before a requires-action failure. The
+    #   per-turn ceiling
     #   (`daimon.core.turn.ceiling`), enforced at `bind_session` and
     #   `run_prepared_turn` for the chat paths and, for callers that bypass
     #   those, `run_turn`'s own optional `deadline`, is the sole backstop
@@ -663,6 +675,7 @@ async def _pump(
                                 tool_confirmation=tool_confirmation,
                                 confirmed_tool_use_ids=confirmed_tool_use_ids,
                                 accepted_tool_use_ids=accepted_tool_use_ids,
+                                seen_requires_action_event_ids=seen_requires_action_event_ids,
                                 delivered_event_ids=delivered_event_ids,
                                 billed_event_ids=billed_event_ids,
                                 stream_read_timeout_s=stream_read_timeout_s,
@@ -679,15 +692,15 @@ async def _pump(
                         )
                         eventless_reconnect = True
                         eventless_reason = cycle.reason
+                        pending_confirmation_reconnects = 0
+                        pending_confirmation_retry_ids = frozenset()
                         continue
-                    # status in {"idle", "terminated"}: the terminal event
-                    # the driver missed lives in the replay history. Fold it
-                    # in and finalize — do NOT reopen the stream. UNLESS the
-                    # folded state is a `requires_action` idle and
-                    # AutoApprove has unconfirmed ids for it: then this
-                    # branch sends confirmations and reopens instead (below).
+                    # For idle or terminated, fold replay before deciding.
+                    # A fresh requires-action pause is answered once. An
+                    # already-confirmed pause may be stale while MA still has
+                    # the batch queued, so give it a bounded reconnect window.
                     log.info(
-                        "turn.eventless_cycle_finalizing",
+                        "turn.eventless_cycle_replaying",
                         session_id=session_id,
                         reason=cycle.reason,
                         status=session.status,
@@ -696,6 +709,8 @@ async def _pump(
                     current_turn_events = _events_since_last_turn_boundary(
                         replayed, tool_confirmation=tool_confirmation
                     )
+                    _note_accepted(current_turn_events, accepted_tool_use_ids)
+                    _note_requires_action_ids(current_turn_events, seen_requires_action_event_ids)
                     # Replay can add events the stream missed, but it must not
                     # discard events already folded and possibly rendered. A
                     # replay response is fetched through multiple pages and
@@ -726,6 +741,8 @@ async def _pump(
                                     confirmed=confirmed_tool_use_ids,
                                 )
                                 if fresh:
+                                    pending_confirmation_reconnects = 0
+                                    pending_confirmation_retry_ids = frozenset()
                                     confirmed_tool_use_ids.update(fresh)
                                     decisions = await _decide_or_refuse_on_cancel(
                                         tool_confirmation,
@@ -747,11 +764,10 @@ async def _pump(
                                     # is deliberately excluded from this branch
                                     # and keeps the unchanged finalize path.
                                     #
-                                    # The fresh-ids guard above is what prevents
-                                    # a confirm-reconnect-confirm spin: a
-                                    # re-delivered `requires_action` for ids
-                                    # already in `confirmed_tool_use_ids` yields
-                                    # no fresh ids and falls through to `break`.
+                                    # The fresh-ids guard prevents a
+                                    # confirm-reconnect-confirm spin. A later
+                                    # duplicate has no fresh ids and enters
+                                    # the bounded echo wait below.
                                     await anthropic.beta.sessions.events.send(
                                         session_id, events=decisions
                                     )
@@ -764,6 +780,36 @@ async def _pump(
                                     eventless_reconnect = True
                                     eventless_reason = cycle.reason
                                     continue
+                                stop_reason = state_cell[0].stop_reason
+                                if (
+                                    stop_reason is not None
+                                    and stop_reason.type == "requires_action"
+                                    and stop_reason.event_ids
+                                    and not _reasked_after_echo(
+                                        current_turn_events, set(stop_reason.event_ids)
+                                    )
+                                ):
+                                    retry_ids = frozenset(stop_reason.event_ids)
+                                    if retry_ids != pending_confirmation_retry_ids:
+                                        pending_confirmation_retry_ids = retry_ids
+                                        pending_confirmation_reconnects = 0
+                                    if (
+                                        pending_confirmation_reconnects
+                                        < _PENDING_CONFIRMATION_RECONNECTS
+                                    ):
+                                        pending_confirmation_reconnects += 1
+                                        log.info(
+                                            "turn.tool_confirmation.awaiting_echo",
+                                            session_id=session_id,
+                                            attempt=pending_confirmation_reconnects,
+                                            unaccepted=len(
+                                                set(stop_reason.event_ids) - accepted_tool_use_ids
+                                            ),
+                                        )
+                                        eventless_reconnect = True
+                                        eventless_reason = cycle.reason
+                                        continue
+                                    confirmation_echo_timed_out = True
                             case RequireApproval():
                                 pass  # fall through -- unchanged interactive behavior
                     break
@@ -836,6 +882,7 @@ async def _pump(
             renders_failed=renders_failed_cell[0],
             tool_confirmation=tool_confirmation,
             confirmed_tool_use_ids=confirmed_tool_use_ids,
+            confirmation_echo_timed_out=confirmation_echo_timed_out,
         )
     finally:
         if not render_task.done():
@@ -954,6 +1001,37 @@ def _note_accepted(events: Sequence[object], accepted: set[str]) -> None:
     )
 
 
+def _note_requires_action_ids(events: Sequence[object], seen: set[str]) -> None:
+    """Remember pause event IDs so a replayed old pause cannot become a re-ask."""
+    seen.update(
+        event.id
+        for event in events
+        if isinstance(event, BetaManagedAgentsSessionStatusIdleEvent)
+        and event.stop_reason.type == "requires_action"
+    )
+
+
+def _reasked_after_echo(events: Sequence[object], pending_ids: set[str]) -> bool:
+    """Only a replayed pause *after* its confirmation echoes proves a re-ask.
+
+    The reducer retains the last stop reason across confirmation events, so a
+    replay ending with an echo can otherwise make the older pause look fresh.
+    """
+    echoed: set[str] = set()
+    for event in events:
+        if isinstance(event, BetaManagedAgentsUserToolConfirmationEvent):
+            echoed.add(event.tool_use_id)
+        elif isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
+            reason = event.stop_reason
+            if (
+                reason.type == "requires_action"
+                and set(reason.event_ids) == pending_ids
+                and pending_ids <= echoed
+            ):
+                return True
+    return False
+
+
 async def _bill_once(billing: BillingPosture, event: object, billed_event_ids: set[str]) -> None:
     """Meter one `span.model_request_end` through the turn's recorder, once.
 
@@ -1009,6 +1087,7 @@ async def _consume_with_reconnect(
     tool_confirmation: ToolConfirmation,
     confirmed_tool_use_ids: set[str],
     accepted_tool_use_ids: set[str],
+    seen_requires_action_event_ids: set[str],
     delivered_event_ids: set[str],
     billed_event_ids: set[str],
     stream_read_timeout_s: float,
@@ -1060,6 +1139,7 @@ async def _consume_with_reconnect(
             # adapter's append-only render anchor if a page omits old history.
             await _bill_replayed(billing, current_turn_events, billed_event_ids)
             _note_accepted(replayed, accepted_tool_use_ids)
+            _note_requires_action_ids(current_turn_events, seen_requires_action_event_ids)
             state_cell[0] = functools.reduce(apply, current_turn_events, state_cell[0])
             log.info(
                 "turn.reconnect.completed",
@@ -1153,6 +1233,8 @@ async def _consume_with_reconnect(
                 return
             stop = terminal_stop_reason(event)
             if stop == "requires_action":
+                seen_before = event.id in seen_requires_action_event_ids
+                seen_requires_action_event_ids.add(event.id)
                 match tool_confirmation:
                     case AutoApprove() | PolicyApproval():
                         assert isinstance(event, BetaManagedAgentsSessionStatusIdleEvent)
@@ -1190,14 +1272,13 @@ async def _consume_with_reconnect(
                                 count=len(fresh),
                             )
                             continue
-                        if pending_confirmation_ids(
+                        if seen_before or pending_confirmation_ids(
                             event.stop_reason, confirmed=accepted_tool_use_ids
                         ):
                             # MA repeats a `requires_action` idle while the
-                            # paused batch's other tools run (idle, running,
-                            # idle again, same ids). A repeat read after our
-                            # send but before MA echoed the confirmation is
-                            # that duplicate, not a refusal: keep reading.
+                            # paused batch's other tools run. An unechoed
+                            # confirmation or an event ID already seen in
+                            # stream/replay is a duplicate: keep reading.
                             # If MA never takes it, the stream goes quiet and
                             # the eventless-cycle check ends the turn.
                             log.info(
@@ -1251,6 +1332,7 @@ async def _finalize_success_or_error(
     renders_failed: int,
     tool_confirmation: ToolConfirmation,
     confirmed_tool_use_ids: set[str],
+    confirmation_echo_timed_out: bool,
 ) -> TurnState:
     final_state = state_cell[0]
     if (
@@ -1258,7 +1340,7 @@ async def _finalize_success_or_error(
         and final_state.stop_reason is not None
         and final_state.stop_reason.type == "requires_action"
     ):
-        # Three distinct paths reach a requires_action idle here:
+        # Four distinct paths reach a requires_action idle here:
         # - RequireApproval (interactive, Discord/CLI): no approval/resume
         #   UX is wired -- the consume loop exits on ANY idle, including
         #   requires_action, so this surfaces it as an actionable failure
@@ -1272,6 +1354,8 @@ async def _finalize_success_or_error(
         #   events, so those ids are still unconfirmed here. The "already
         #   confirmed" wording would be a lie in this case; a second wording
         #   names what actually happened.
+        # - AutoApprove, echo timeout: the eventless branch retried twice but
+        #   still found no post-echo re-ask or terminal event.
         match tool_confirmation:
             case AutoApprove() | PolicyApproval():
                 unsent = pending_confirmation_ids(
@@ -1282,6 +1366,11 @@ async def _finalize_success_or_error(
                         "The agent requested tool approval but the session was "
                         "no longer accepting events, so the turn was abandoned "
                         "without sending confirmations."
+                    )
+                elif confirmation_echo_timed_out:
+                    message = (
+                        "The agent did not confirm the sent tool approval before the turn "
+                        "timed out, so the turn ended."
                     )
                 else:
                     message = (
