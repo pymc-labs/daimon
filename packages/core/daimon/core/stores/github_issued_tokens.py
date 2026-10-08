@@ -63,7 +63,6 @@ class LiveMcpAppSession(BaseModel):
     expires_at: datetime | None
     permissions_by_repo: dict[int, dict[str, str]]
     last_started_at: datetime
-    created_at: datetime
 
 
 class ClosedAppSession(BaseModel):
@@ -71,7 +70,6 @@ class ClosedAppSession(BaseModel):
     session_id: str
     vault_id: str | None
     is_mcp: bool = False
-    created_at: datetime | None = None
 
 
 async def erase_requester_identity(session: AsyncSession, *, account_id: uuid.UUID) -> None:
@@ -294,13 +292,15 @@ async def mark_session_tokens_superseded(
     MA updates resources during a turn, but a running tool keeps its old vault
     environment until that tool ends. The old token therefore remains usable
     through its natural expiry when the replacement grants the same access.
+    Tokens superseded by an earlier rotation are checked against this
+    replacement too, so a later narrowing (a baseline drop, or the requester
+    losing access) revokes them now rather than at expiry.
     """
     rows = list(
         await session.scalars(
             select(GitHubIssuedToken).where(
                 GitHubIssuedToken.session_id == session_id,
                 GitHubIssuedToken.status == "delivered",
-                GitHubIssuedToken.superseded_at.is_(None),
             )
         )
     )
@@ -319,6 +319,10 @@ async def mark_session_tokens_superseded(
             for repo_id in row.repo_ids
             for key, value in row.permissions.items()
         )
+        if row.superseded_at is not None:
+            if narrowed and (row.revoke_after is None or row.revoke_after > now):
+                row.revoke_after = now
+            continue
         row.superseded_at = now
         # Inventory expires five minutes early; GitHub tokens live for an hour.
         # Keep a minute of clock/HTTP margin before local cleanup.
@@ -560,7 +564,6 @@ async def list_live_mcp_app_sessions(
                 agent_id=vault.agent_id,
                 account_id=vault.account_id,
                 last_started_at=vault.last_started_at,
-                created_at=vault.created_at,
                 repo_urls=tuple(vault.repo_urls or ()),
                 repo_resource_ids=vault.repo_resource_ids or {},
                 expires_at=min((row.expires_at for row in token_rows), default=None),
@@ -579,11 +582,7 @@ async def closed_app_session_for_id(
     if row is None or row.closed_at is not None:
         return None
     if row.is_unmapped:
-        if (
-            row.finished_at is None
-            and row.last_started_at > now - timedelta(minutes=46)
-            and (not row.is_mcp or row.created_at > now - timedelta(hours=12))
-        ):
+        if row.finished_at is None and row.last_started_at > now - timedelta(minutes=46):
             return None
     else:
         mapping = await session.scalar(
@@ -596,12 +595,7 @@ async def closed_app_session_for_id(
             return None
         if mapping is None and row.created_at > now - timedelta(minutes=1):
             return None
-    return ClosedAppSession(
-        session_id=row.session_id,
-        vault_id=row.vault_id,
-        is_mcp=row.is_mcp,
-        created_at=row.created_at,
-    )
+    return ClosedAppSession(session_id=row.session_id, vault_id=row.vault_id, is_mcp=row.is_mcp)
 
 
 async def list_closed_app_sessions(

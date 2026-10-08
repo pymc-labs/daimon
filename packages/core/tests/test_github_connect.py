@@ -1406,6 +1406,80 @@ async def test_superseded_token_survives_version_bumps_but_not_hard_changes(
     assert await stale() == set(token_ids.values())
 
 
+async def test_later_narrowing_revokes_an_earlier_superseded_write_token_now(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    start = datetime.now(UTC)
+
+    async def deliver(label: str, contents: str) -> uuid.UUID:
+        row = await github_issued_tokens.create_pending(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            session_id="narrowing",
+            installation_id=101,
+            repo_ids=[11],
+            permissions={"contents": contents},
+            grant_versions={"grant:11": 1, "authorization:11": 1},
+            expires_at=start + timedelta(minutes=50),
+        )
+        await github_issued_tokens.store_token(
+            db_session, token_id=row.token_id, token=label, fernet=fernet
+        )
+        await github_issued_tokens.mark_delivered(db_session, token_id=row.token_id)
+        return row.token_id
+
+    first = await deliver("first", "write")
+    # Rotation at equal access: the first write token is left to expire.
+    second = await deliver("second", "write")
+    await github_issued_tokens.mark_session_tokens_superseded(
+        db_session, session_id="narrowing", except_ids=frozenset({second}), now=start
+    )
+    later = start + timedelta(minutes=20)
+    assert await github_issued_tokens.select_due_superseded_tokens(db_session, now=later) == []
+    # The baseline drops to read (ceiling still write): the next replacement is
+    # read-only, so both earlier write tokens are revoked now.
+    third = await deliver("third", "read")
+    await github_issued_tokens.mark_session_tokens_superseded(
+        db_session, session_id="narrowing", except_ids=frozenset({third}), now=later
+    )
+    due = await github_issued_tokens.select_due_superseded_tokens(db_session, now=later)
+    assert {row.token_id for row in due} == {first, second}
+
+
+async def test_active_turn_refresh_proceeds_without_a_rollback_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Prepared(Exception):
+        pass
+
+    monkeypatch.setattr(
+        github_app_session,
+        "_current_app_access",
+        AsyncMock(side_effect=ValueError("current App token cannot be restored")),
+    )
+    monkeypatch.setattr(github_app_session, "prepare_app_access", AsyncMock(side_effect=Prepared))
+    with pytest.raises(Prepared):
+        await github_app_session.rotate_live_app_tokens(
+            AsyncMock(),
+            AsyncMock(),
+            session_id="no-snapshot",
+            tenant_id=uuid.uuid4(),
+            agent_id=uuid.uuid4(),
+            account_id=None,
+            is_external=False,
+            vault_id="vault-1",
+            resource_ids={},
+            config=GithubAppSettings(app_id="1", private_key="dummy"),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            active_turn=True,
+        )
+
+
 async def test_app_rotation_keeps_old_session_when_first_resource_update_fails(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:

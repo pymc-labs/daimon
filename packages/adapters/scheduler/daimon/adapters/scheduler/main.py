@@ -677,9 +677,11 @@ _last_app_access_checks: dict[str, datetime] = {}
 _app_refresh_failures: dict[str, tuple[int, datetime]] = {}
 _REFRESH_BACKOFF_START = timedelta(minutes=1)
 _REFRESH_BACKOFF_MAX = timedelta(minutes=30)
-# Like MCP sessions, a mapped turn older than this is treated as abandoned and
-# stops renewing its tokens.
+# A turn running continuously for longer than this is treated as abandoned and
+# stops renewing its tokens. Mapped turns use active_turn_started_at; MCP
+# sessions use when the scheduler first saw MA report them running.
 _ACTIVE_TURN_REFRESH_CAP = timedelta(hours=12)
+_mcp_running_since: dict[str, datetime] = {}
 
 
 def _refresh_backing_off(session_id: str, now: datetime) -> bool:
@@ -778,6 +780,7 @@ async def _refresh_github_app_sessions(
                 )
                 if not due_for_expiry and not narrowed:
                     _last_app_access_checks[session_id] = now
+                    _app_refresh_failures.pop(session_id, None)
                     continue
                 await rotate_live_app_tokens(
                     anthropic_client,
@@ -836,16 +839,19 @@ async def _refresh_github_app_sessions(
                     async with sm.begin() as session:
                         await finish_headless_app_session(session, session_id=current.session_id)
                     continue
-                if current.created_at <= now - timedelta(hours=12):
-                    # An abandoned running turn cannot renew its tokens indefinitely.
-                    continue
-                if not active_turn and current.last_started_at <= now - timedelta(minutes=46):
-                    continue
-                if active_turn:
+                if not active_turn:
+                    _mcp_running_since.pop(current.session_id, None)
+                    if current.last_started_at <= now - timedelta(minutes=46):
+                        continue
+                else:
                     async with sm.begin() as session:
                         await touch_running_mcp_app_session(
                             session, session_id=current.session_id, now=datetime.now(UTC)
                         )
+                    running_since = _mcp_running_since.setdefault(current.session_id, now)
+                    if running_since <= now - _ACTIVE_TURN_REFRESH_CAP:
+                        # An abandoned running turn cannot renew its tokens indefinitely.
+                        continue
                 if current.account_id is None:
                     if active_turn:
                         continue
@@ -881,6 +887,7 @@ async def _refresh_github_app_sessions(
                 )
                 if not due_for_expiry and not narrowed:
                     _last_app_access_checks[current.session_id] = now
+                    _app_refresh_failures.pop(current.session_id, None)
                     continue
                 if current.expires_at is not None or current.repo_urls:
                     await rotate_live_app_tokens(
@@ -906,6 +913,16 @@ async def _refresh_github_app_sessions(
                 "scheduler.github_mcp_app_session_refresh.failed",
                 session_id=candidate.session_id,
             )
+    # Drop state for sessions that died or closed since the last sweep.
+    async with sm() as session:
+        tracked = {item.mapping.ma_session_id for item in await list_live_app_sessions(session)}
+        tracked.update(
+            item.session_id
+            for item in await list_live_mcp_app_sessions(session, now=now, include_expired=True)
+        )
+    for state in (_last_app_access_checks, _app_refresh_failures, _mcp_running_since):
+        for session_id in set(state) - tracked:
+            del state[session_id]
 
 
 async def _close_github_app_sessions(
@@ -936,14 +953,7 @@ async def _close_github_app_sessions(
                         except Exception:
                             # Unknown upstream state must not destroy a running turn.
                             continue
-                        if (
-                            observed is not None
-                            and observed.status in ("running", "rescheduling")
-                            and (
-                                current.created_at is None
-                                or current.created_at > datetime.now(UTC) - timedelta(hours=12)
-                            )
-                        ):
+                        if observed is not None and observed.status in ("running", "rescheduling"):
                             async with sm.begin() as session:
                                 await touch_running_mcp_app_session(
                                     session, session_id=item.session_id, now=datetime.now(UTC)

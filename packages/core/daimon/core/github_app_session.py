@@ -17,7 +17,7 @@ from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_r
 from anthropic.types.beta.vaults.beta_managed_agents_static_bearer_auth_response import (
     BetaManagedAgentsStaticBearerAuthResponse,
 )
-from cryptography.fernet import MultiFernet
+from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
     PERMISSION_PROFILES,
@@ -693,17 +693,20 @@ async def rotate_live_app_tokens(
         nonlocal swapped
         swapped = True
 
-    old_access = (
-        await _current_app_access(
-            sessionmaker,
-            session_id=session_id,
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            fernet=fernet,
-        )
-        if active_turn
-        else None
-    )
+    old_access: AppSessionAccess | None = None
+    if active_turn:
+        try:
+            old_access = await _current_app_access(
+                sessionmaker,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                fernet=fernet,
+            )
+        except (ValueError, InvalidToken):
+            # No rollback snapshot: refresh anyway; a failure after a swap then
+            # archives the session as it would outside a turn.
+            _log.warning("No App rollback snapshot for active session %s", session_id)
     async with httpx.AsyncClient() as client:
         access = await prepare_app_access(
             sessionmaker,
