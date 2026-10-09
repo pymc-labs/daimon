@@ -184,3 +184,37 @@ def test_the_stuck_notice_is_typed_not_any_matching_text() -> None:
     loose = TurnState(error=TurnError(kind="interrupted", message=_STUCK))
     notice = render_termination_notice(TerminationReason.INTERRUPTED, state=loose)
     assert notice is not None and "stuck" not in notice.headline.lower()
+
+
+async def test_a_failed_recovery_never_opens_another_stream() -> None:
+    """Re-review of #542: the failure is finalized before any stream opens, so a
+    stream-open error cannot send the turn down the replay path instead."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [[]]  # only the first attempt's stream
+    _refuse_messages(fa, times=1)
+    events = fa.beta.sessions.events
+    refusing_send = events.send
+
+    async def send(session_id: str, *, events: list[dict[str, Any]]) -> None:
+        if events and events[0]["type"] == "user.interrupt":
+            request = httpx.Request("POST", "https://api.anthropic.com/x")
+            raise anthropic.InternalServerError(
+                "boom", response=httpx.Response(500, request=request), body=None
+            )
+        await refusing_send(session_id, events=events)
+
+    events.send = send  # type: ignore[method-assign]
+
+    final = await run_turn(
+        anthropic=cast(AsyncAnthropic, fa),
+        session_id="sess_1",
+        user_message="are you there?",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert fa.beta.sessions.events.stream_calls == 1, "no second stream after a failed recovery"
+    assert final.error is not None and final.error.kind == "upstream"

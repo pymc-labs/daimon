@@ -568,8 +568,8 @@ async def run_turn(
     # turn interrupts the session and starts over. A second refusal is a
     # normal upstream failure.
     unwedge_attempts = [0]
-    # Set when recovery failed: the retried pump re-raises the original
-    # refusal from its send, so `_pump` finalizes it as any upstream error.
+    # Set when recovery failed: the next pump raises the original refusal
+    # before opening a stream, so `_pump` finalizes it as an upstream error.
     unwedge_failure: list[BaseException | None] = [None]
 
     async def _send_initial() -> None:
@@ -595,8 +595,6 @@ async def run_turn(
             if before_send is not None:
                 # A last check by the caller, after the stream is open (`run_prepared_turn`).
                 await before_send()
-            if unwedge_failure[0] is not None:
-                raise unwedge_failure[0]
             try:
                 await anthropic.beta.sessions.events.send(session_id, events=batch)
             except _anthropic.BadRequestError as err:
@@ -625,6 +623,7 @@ async def run_turn(
             entry="run",
             billing=billing,
             tool_confirmation=tool_confirmation,
+            preset_error=unwedge_failure[0],
         )
 
     async def _pump_unwedging() -> TurnState:
@@ -740,6 +739,7 @@ async def _pump(
     entry: Literal["run", "resume"],
     billing: BillingPosture,
     tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
+    preset_error: BaseException | None = None,
 ) -> TurnState:
     log.info("turn.started", session_id=session_id, entry=entry)
 
@@ -835,6 +835,10 @@ async def _pump(
     # entered after an eventless cycle), replay + reattach replace them.
     try:
         try:
+            if preset_error is not None:
+                # A failed stuck-session recovery: finalize its MA refusal
+                # through the handlers below without opening a stream.
+                raise preset_error
             eventless_reconnect = False
             eventless_reason: ReconnectReason = "connection_dropped"
             while True:
