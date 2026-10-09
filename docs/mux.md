@@ -191,3 +191,14 @@ Import-linter contracts in the root `pyproject.toml` hold the boundaries:
 | Only mux.drivers.gemini imports the google.genai SDK | `mux` → `google`, except from `mux.drivers.gemini` |
 
 The tests run in CI as the `pytest-mux` job (`uv run pytest packages/mux`).
+
+## Conformance
+
+`mux.conformance` provides an offline C01–C18 runner. Drivers explicitly
+register a fresh fake-transport adapter per fixture; the existing pytest-mux
+job collects the runner's regression tests. Results distinguish pass, fail
+and pending with evidence. State-store and host seams that have not landed
+remain pending and prevent certification. The in-memory reference driver is
+a test oracle, not a backend. See
+[`conformance/README.md`](../packages/mux/mux/conformance/README.md) for adapter
+requirements and the dependency matrix. No default runtime behavior changes.
