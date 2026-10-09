@@ -331,8 +331,9 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/testing/tests", "packages/mux/tests", "tests/integration", "tests/parity", "apps/notebook-host/tests", "apps/report-host/tests"]
-addopts = "--import-mode=importlib -m 'not contract and not slow'"
+addopts = "--import-mode=importlib -m 'not contract and not slow and not judge'"
 markers = [
+    "judge: manual Codex subscription transcript judge -- excluded by default",
     "contract: live MA API tests -- opt-in only, never gate CI",
     "slow: expensive image distributions or real marimo subprocesses (port 8100-8199) — opt-in",
     "no_cli_local_seed: CLI test manages its own tenant lifecycle -- skip the autouse cli:local seed",

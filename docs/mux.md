@@ -202,3 +202,8 @@ remain pending and prevent certification. The in-memory reference driver is
 a test oracle, not a backend. See
 `packages/mux/mux/conformance/README.md` for adapter
 requirements and the dependency matrix. No default runtime behavior changes.
+
+The manual `tests/judge` harness grades recorded
+transcripts separately from conformance, using a fixed 12-task rubric and
+structured `codex exec` output. Replay repetitions default to three. API-key
+authentication is refused; normal pytest never invokes the judge.
