@@ -13,7 +13,8 @@ These are finite abstractions of the code, not a proof of Discord or discord.py.
 
 | Model action | Production path |
 | --- | --- |
-| `CreateHook`, `Choose` | `DiscordPostTransport._webhook()` uses a per-parent, per-process asyncio lock, lists application-owned hooks, and creates up to three; `select_discord_webhook_id()` hashes thread ID modulo pool length. Direct parent posts use the first hook. MCP `_post_transport.own_webhook()` has its own per-parent process lock and shares the listed application hooks. |
+| `CreateHook`, `Choose` | These capacity configs retain the earlier one-to-three-hook abstraction. The live Discord and MCP transports now create one hook per parent in a deduplicated background task, wait at most two seconds, and use the bot route while creation is pending. Existing hooks remain available by ID for edits. |
+| `CreateHit429`, `ChooseAfterCreate` | A separate creation bucket can return a 66-second retry. `LoadCreateWaitUnsafe` waits for creation before the first post; `LoadCreateSafe` takes the bot fallback within the two-second budget. The staging identity-on stress run found that a 200-mention burst across 60 fresh parent channels blocked completions for over two minutes while inline `create_webhook` calls waited on 429 retries. |
 | `PostHook`, `Hit429`, `NextWindow` | `DiscordPostTransport.send()` uses `wait=True`. discord.py normally waits on `retry_after`; a 429 still escaping the library is raised by the adapter. MCP `send_agent_message()` does the same. Hook execute allowance is modeled as five calls per two-second window. |
 | `UnknownWebhook`, `PostBot` | Error 10015 evicts a cached hook and routes a send through the bot; missing permission, locked thread, unavailable parent, and disabled identity also use bot posting. The first answer chunk gets the agent name when identity is enabled and a webhook could not show the sender. MCP uses the same name-prefix rule. |
 | `CommitIntent`, `RemoteAccept`, `PersistResponse` | `post_initial_turn_card()` commits an intent before `DiscordTurnLifecycle.post_initial()`; it records the returned message ID before the turn proceeds. |
@@ -37,7 +38,7 @@ without a bot `Authorization` header. [Discord's rate-limit documentation](https
 says unauthenticated requests use an **IP-based** global limit, while bot-token
 requests use the bot's global limit; both are stated as 50 requests/s. Thus
 webhook posts do not spend the bot-token global bucket, but a webhook pool does
-not escape a global ceiling. The three hooks are per **parent channel**, not
+not escape a global ceiling. The hooks are per **parent channel**, not
 per thread. The stated five requests per webhook per two-second window is a
 planning assumption: Discord says route limits can change and response
 headers, including `retry_after`, are authoritative. The model conservatively
@@ -48,11 +49,11 @@ The model assumes one process owns the per-parent creation lock, Discord
 honors the stated quota, `retry_after` is finite, and each HTTP acceptance
 returns a response except for the separately modeled ambiguous initial card.
 It does **not** assume that a failed 429 automatically succeeds through bot
-posting: the adapter propagates a final 429. It also does not bound webhook
-creation, network latency, other traffic on the same egress IP or bot token,
+posting: the adapter propagates a final 429. The creation configs bound the wait
+before bot fallback, but do not bound network latency, other traffic on the same egress IP or bot token,
 answer overflow, or a permanent platform outage. Cross-process hook
 creation is not serialized; concurrent processes can create more than the
-intended three in one parent, though the Discord channel cap is 15. The
+intended one in one parent, though the Discord channel cap is 15. The
 Discord's process-wide `max_concurrent_turns` defaults to `None` (no cap);
 200 is a proposed deployment cap, not a live default. The per-tenant default
 is three, with a separate event-guild override proposed at 200. The
@@ -69,10 +70,11 @@ turn interleavings or prove a latency bound.
 | Config | Bound and result |
 | --- | --- |
 | `LoadSafe` | Two turns, one parent, one hook, three requests each, two hook requests per window: all delivered within three windows; no loss, duplicate answer, busy retry, or pool overflow. |
+| `LoadCreateSafe`, `LoadCreateWaitUnsafe` | A separate create bucket returns a 66-second 429 retry. Bot fallback posts within the two-second bound; waiting for a hook violates `BoundedPosting` at window 33. |
 | `LoadDiscordQuota` | Two turns with the stated five hook requests per two-second window and 100 bot requests per window; six requests on one hook finish within two windows. |
 | `LoadBotFallback` | Identity off, same two turns, bot allowance two per window: all delivered within three windows. This is capacity routing, not a promise that Discord accepts every bot request. |
 | `LoadTwoChannels` | Two turns in two parents; each has one hook and finishes within two windows. |
-| `LoadPoolThreeHooks` | Three turns select three hooks in one parent; creation stays at three, below the channel cap of 15. |
+| `LoadPoolThreeHooks` | Historical three-hook capacity comparison: three turns select three hooks in one parent, below the channel cap of 15. Current code creates one hook. |
 | `LoadUnsafe429` | Dropping a request at the first 429 violates `NoAnswerLost`. `test_exhausted_webhook_429_is_not_silently_reposted_by_bot` pins the real adapter's final-429 propagation; the library's finite retry is an assumption, not an end-to-end guarantee. |
 | `LoadUnsafeDuplicateAnswer` | Replaying a recorded final answer violates `NoDuplicateAnswer`. Production posts once and edits a known message; lifecycle and turn-card tests pin that path. |
 | `LoadUnsafeFallback` | Dropping the bot route with identity off violates `FallbackRoute`. Discord and MCP transport tests pin the bot route when identity is disabled or webhooks are unavailable. |

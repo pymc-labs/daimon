@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import io
 import time
+from collections.abc import Mapping
 from typing import Any, cast
 
 import discord
+import structlog
 from daimon.adapters.mcp.tools.discord._client import ensure_application_id
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.agent_post_identity import (
@@ -21,6 +23,42 @@ from daimon.core.agent_post_identity import (
 _locks: dict[int, asyncio.Lock] = {}
 _lookup_unavailable_until: dict[int, float] = {}
 _LOOKUP_UNAVAILABLE_SECONDS = 600
+_CREATE_WAIT_SECONDS = 2.0
+_creation_tasks: dict[int, asyncio.Task[discord.Webhook | None]] = {}
+_created_hooks: dict[int, discord.Webhook] = {}
+_create_unavailable_until: dict[int, float] = {}
+_deferred_channels: set[int] = set()
+_log = structlog.get_logger()
+
+
+def _finish_creation(channel_id: int, task: asyncio.Task[discord.Webhook | None]) -> None:
+    if _creation_tasks.get(channel_id) is task:
+        _creation_tasks.pop(channel_id)
+    _deferred_channels.discard(channel_id)
+    if not task.cancelled():
+        exc = task.exception()
+        if exc is not None:
+            _log.warning(
+                "discord.webhook_creation_failed",
+                channel_id=channel_id,
+                error_type=type(exc).__name__,
+            )
+
+
+def _retry_after(exc: discord.HTTPException) -> float:
+    value: object = getattr(exc, "retry_after", None)
+    if value is None:
+        headers: object = getattr(exc.response, "headers", None)
+        if isinstance(headers, Mapping):
+            value = cast(Mapping[str, object], headers).get("Retry-After")
+    try:
+        return (
+            max(0.0, float(value))
+            if isinstance(value, (int, float, str))
+            else _LOOKUP_UNAVAILABLE_SECONDS
+        )
+    except (TypeError, ValueError):
+        return _LOOKUP_UNAVAILABLE_SECONDS
 
 
 def _fresh_files(files: list[discord.File]) -> list[discord.File]:
@@ -74,6 +112,43 @@ def _snowflake(value: object) -> int | None:
 
 
 async def own_webhook(
+    client: discord.Client,
+    channel: discord.abc.GuildChannel | discord.Thread,
+    *,
+    create: bool,
+    webhook_id: int | None = None,
+) -> discord.Webhook | None:
+    if not create:
+        return await _resolve_own_webhook(client, channel, create=False, webhook_id=webhook_id)
+    parent = channel.parent if isinstance(channel, discord.Thread) else channel
+    if not isinstance(parent, (discord.TextChannel, discord.ForumChannel)):
+        return None
+    if isinstance(channel, discord.Thread) and channel.locked:
+        return None
+    if hook := _created_hooks.get(parent.id):
+        return hook
+    if _create_unavailable_until.get(parent.id, 0) > time.monotonic():
+        return None
+    task = _creation_tasks.get(parent.id)
+    if task is None:
+        task = asyncio.create_task(_resolve_own_webhook(client, channel, create=True))
+        _creation_tasks[parent.id] = task
+        task.add_done_callback(
+            lambda done, channel_id=parent.id: _finish_creation(channel_id, done)
+        )
+    try:
+        hook = await asyncio.wait_for(asyncio.shield(task), _CREATE_WAIT_SECONDS)
+    except TimeoutError:
+        if parent.id not in _deferred_channels:
+            _deferred_channels.add(parent.id)
+            _log.info("discord.webhook.create_deferred", channel_id=parent.id)
+        return None
+    except Exception:
+        return None
+    return hook
+
+
+async def _resolve_own_webhook(
     client: discord.Client,
     channel: discord.abc.GuildChannel | discord.Thread,
     *,
@@ -141,14 +216,30 @@ async def own_webhook(
                 hook = next(item for item in hooks if item.id == chosen)
             if hook is None and create:
                 hook = await parent.create_webhook(name=DISCORD_AGENT_WEBHOOK_NAME)
+                if hook.token is not None:
+                    _log.info("discord.webhook.created", channel_id=parent.id, webhook_id=hook.id)
             if hook is None and target_listed:
                 raise discord.ClientException("own webhook token unavailable")
+            if create and hook is not None and hook.token is not None:
+                _created_hooks[parent.id] = hook
             return hook if hook is not None and hook.token is not None else None
         except discord.HTTPException as exc:
+            if create and exc.status == 429:
+                retry_after = _retry_after(exc)
+                _create_unavailable_until[parent.id] = time.monotonic() + retry_after
+                _log.warning(
+                    "discord.webhook.create_rate_limited",
+                    channel_id=parent.id,
+                    retry_after=retry_after,
+                )
             if exc.status == 403:
                 _lookup_unavailable_until[parent.id] = (
                     time.monotonic() + _LOOKUP_UNAVAILABLE_SECONDS
                 )
+                if create:
+                    _create_unavailable_until[parent.id] = (
+                        time.monotonic() + _LOOKUP_UNAVAILABLE_SECONDS
+                    )
             if webhook_id is not None:
                 raise discord.ClientException("webhook lookup failed") from exc
             return None
@@ -194,6 +285,10 @@ async def send_agent_message(
         except discord.HTTPException as exc:
             if exc.status == 429:
                 raise
+            if exc.code == 10015:
+                parent = channel.parent if isinstance(channel, discord.Thread) else channel
+                if parent is not None:
+                    _created_hooks.pop(parent.id, None)
     if not isinstance(channel, discord.abc.Messageable):
         raise TypeError("channel does not support messages")
     fallback_content = (

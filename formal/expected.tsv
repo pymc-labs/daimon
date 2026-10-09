@@ -176,6 +176,8 @@ skill_sync	BindingIdentity	BindingIdentityTitleRace	violates:NoAmbiguousTitleWri
 skill_sync	RetryDeadline	RetryDeadline	clean	6	-	provider not-before time dominates ordinary queue backoff before a retry claim
 # ---- Discord webhook posting and card recovery ----
 discord_webhooks	WebhookLoad	LoadSafe	clean	1475	-	three requests per turn, one hook, two turns, retry-after and three-window bound
+discord_webhooks	WebhookLoad	LoadCreateSafe	clean	4	-	a creation 429 with 66-second retry uses bot fallback within the two-second posting bound
+discord_webhooks	WebhookLoad	LoadCreateWaitUnsafe	violates:BoundedPosting	38	-	waiting on a creation 429 delays the first post by 66 seconds
 discord_webhooks	WebhookLoad	LoadBotFallback	clean	33	-	identity off uses bot route with its own window quota
 discord_webhooks	WebhookLoad	LoadTwoChannels	clean	390	-	two parent channels drain independently
 discord_webhooks	WebhookLoad	LoadPoolThreeHooks	clean	156	-	three thread-selected hooks remain below the 15-per-channel cap

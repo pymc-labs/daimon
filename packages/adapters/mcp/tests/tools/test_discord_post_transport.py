@@ -1,5 +1,6 @@
 """REST-only Discord agent post transport."""
 
+import asyncio
 import io
 from unittest.mock import AsyncMock, MagicMock
 
@@ -7,6 +8,14 @@ import discord
 import pytest
 from daimon.adapters.mcp.tools.discord import _post_transport
 from daimon.core.agent_identity import AgentIdentity
+
+
+@pytest.fixture(autouse=True)
+def clear_creation_cache() -> None:
+    _post_transport._created_hooks.clear()  # pyright: ignore[reportPrivateUsage]
+    _post_transport._creation_tasks.clear()  # pyright: ignore[reportPrivateUsage]
+    _post_transport._create_unavailable_until.clear()  # pyright: ignore[reportPrivateUsage]
+    _post_transport._deferred_channels.clear()  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_webhook_lookup_matches_application_id_not_bot_user_id(
@@ -38,6 +47,100 @@ async def test_webhook_creation_requires_manage_webhooks() -> None:
     channel.create_webhook = AsyncMock()
     assert await _post_transport.own_webhook(client, channel, create=True) is None
     channel.create_webhook.assert_not_awaited()
+
+
+async def test_slow_creation_falls_back_then_uses_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock(spec=discord.Client)
+    client.application_id = 77
+    client.http = MagicMock()
+    client.http.channel_webhooks = AsyncMock(return_value=[])
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 120
+    channel.guild.me = MagicMock(spec=discord.Member)
+    channel.permissions_for.return_value.manage_webhooks = True
+    channel.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
+    hook = MagicMock(spec=discord.Webhook)
+    hook.id = 121
+    hook.token = "test"
+    hook.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
+    release = asyncio.Event()
+
+    async def create(*, name: str) -> MagicMock:
+        await release.wait()
+        return hook
+
+    channel.create_webhook = AsyncMock(side_effect=create)
+    monkeypatch.setattr(_post_transport, "_CREATE_WAIT_SECONDS", 0.01)
+    identity = AgentIdentity("Research", None, False)
+    await asyncio.gather(
+        *(
+            _post_transport.send_agent_message(
+                client, channel, identity, content="first", identity_enabled=True
+            )
+            for _ in range(3)
+        )
+    )
+    channel.create_webhook.assert_awaited_once()
+    assert channel.send.await_count == 3
+    assert channel.send.call_args.kwargs["content"] == "**Research**\n\nfirst"
+    release.set()
+    await _post_transport._creation_tasks[channel.id]  # pyright: ignore[reportPrivateUsage]
+    await _post_transport.send_agent_message(
+        client, channel, identity, content="later", identity_enabled=True
+    )
+    hook.send.assert_awaited_once()
+
+
+async def test_create_429_respects_cooldown_and_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock(spec=discord.Client)
+    client.application_id = 77
+    client.http = MagicMock()
+    client.http.channel_webhooks = AsyncMock(return_value=[])
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 122
+    channel.guild.me = MagicMock(spec=discord.Member)
+    channel.permissions_for.return_value.manage_webhooks = True
+    channel.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
+    limited = discord.HTTPException(MagicMock(status=429), {"message": "rate limited"})
+    limited.retry_after = 65.0  # pyright: ignore[reportAttributeAccessIssue]
+    hook = MagicMock(spec=discord.Webhook)
+    hook.id = 123
+    hook.token = "test"
+    hook.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
+    release = asyncio.Event()
+    calls = 0
+
+    async def create(*, name: str) -> MagicMock:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await release.wait()
+            raise limited
+        return hook
+
+    channel.create_webhook = AsyncMock(side_effect=create)
+    monkeypatch.setattr(_post_transport, "_CREATE_WAIT_SECONDS", 0.01)
+    identity = AgentIdentity("Research", None, False)
+    await _post_transport.send_agent_message(
+        client, channel, identity, content="first", identity_enabled=True
+    )
+    channel.send.assert_awaited_once_with(content="**Research**\n\nfirst", files=[])
+    release.set()
+    await _post_transport._creation_tasks[channel.id]  # pyright: ignore[reportPrivateUsage]
+    await _post_transport.send_agent_message(
+        client, channel, identity, content="second", identity_enabled=True
+    )
+    channel.create_webhook.assert_awaited_once()
+    _post_transport._create_unavailable_until[channel.id] = 0  # pyright: ignore[reportPrivateUsage]
+    await _post_transport.send_agent_message(
+        client, channel, identity, content="later", identity_enabled=True
+    )
+    assert channel.create_webhook.await_count == 2
+    hook.send.assert_awaited_once()
 
 
 async def test_agent_send_uses_webhook_identity_and_wait(

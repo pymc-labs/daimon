@@ -6,6 +6,7 @@ import asyncio
 import io
 import logging
 import time
+from collections.abc import Mapping
 from typing import Any, cast
 
 import structlog
@@ -20,13 +21,44 @@ from daimon.core.agent_post_identity import (
 
 import discord
 
-_POOL_SIZE = 3
+_POOL_SIZE = 1
+_CREATE_WAIT_SECONDS = 2.0
 _UNAVAILABLE_SECONDS = 600
 _locks: dict[int, asyncio.Lock] = {}
 _webhooks: dict[int, dict[int, discord.Webhook]] = {}
+_creation_tasks: dict[int, asyncio.Task[discord.Webhook | None]] = {}
+_deferred_channels: set[int] = set()
 _unavailable_until: dict[int, float] = {}
 _send_unavailable_until: dict[tuple[int, str, str | None], float] = {}
 _log = structlog.get_logger()
+
+
+def _finish_creation(channel_id: int, task: asyncio.Task[discord.Webhook | None]) -> None:
+    if _creation_tasks.get(channel_id) is task:
+        _creation_tasks.pop(channel_id)
+    _deferred_channels.discard(channel_id)
+    if not task.cancelled():
+        exc = task.exception()
+        if exc is not None:
+            _log.warning(
+                "discord.webhook_creation_failed",
+                channel_id=channel_id,
+                error_type=type(exc).__name__,
+            )
+
+
+def _retry_after(exc: discord.HTTPException) -> float:
+    value: object = getattr(exc, "retry_after", None)
+    if value is None:
+        headers: object = getattr(exc.response, "headers", None)
+        if isinstance(headers, Mapping):
+            value = cast(Mapping[str, object], headers).get("Retry-After")
+    try:
+        return (
+            max(0.0, float(value)) if isinstance(value, (int, float, str)) else _UNAVAILABLE_SECONDS
+        )
+    except (TypeError, ValueError):
+        return _UNAVAILABLE_SECONDS
 
 
 class _WebhookRateLimitCounter(logging.Filter):
@@ -115,6 +147,7 @@ class DiscordPostTransport:
             )
         self.identity_enabled = identity_enabled
         self.fallback_used = False
+        self._creation_fallback = False
         self._fallback_prefix_applied = False
 
     def _destination(
@@ -144,6 +177,48 @@ class DiscordPostTransport:
 
     async def _webhook(
         self, *, create: bool = True, webhook_id: int | None = None
+    ) -> discord.Webhook | None:
+        self._creation_fallback = False
+        if create:
+            destination = self._destination()
+            if destination is None or self.builtin or not self.identity_enabled:
+                return None
+            parent, thread = destination
+            if thread is not None and thread.locked:
+                return None
+            if (
+                _send_unavailable_until.get(self._send_cooldown_key(parent.id), 0)
+                > time.monotonic()
+            ):
+                return None
+            pool = _webhooks.get(parent.id, {})
+            if pool:
+                return self._pick(pool)
+            if _unavailable_until.get(parent.id, 0) > time.monotonic():
+                return None
+            task = _creation_tasks.get(parent.id)
+            if task is None:
+                task = asyncio.create_task(self._resolve_webhook(create=True))
+                _creation_tasks[parent.id] = task
+                task.add_done_callback(
+                    lambda done, channel_id=parent.id: _finish_creation(channel_id, done)
+                )
+            try:
+                hook = await asyncio.wait_for(asyncio.shield(task), _CREATE_WAIT_SECONDS)
+            except TimeoutError:
+                if parent.id not in _deferred_channels:
+                    _deferred_channels.add(parent.id)
+                    _log.info("discord.webhook.create_deferred", channel_id=parent.id)
+                hook = None
+            except Exception:
+                hook = None
+            if hook is None:
+                self._creation_fallback = True
+            return hook
+        return await self._resolve_webhook(create=False, webhook_id=webhook_id)
+
+    async def _resolve_webhook(
+        self, *, create: bool, webhook_id: int | None = None
     ) -> discord.Webhook | None:
         if create and (self.builtin or not self.identity_enabled):
             return None
@@ -212,7 +287,15 @@ class DiscordPostTransport:
                     try:
                         hook = await parent.create_webhook(name=DISCORD_AGENT_WEBHOOK_NAME)
                     except discord.HTTPException as exc:
-                        if _cooldown(exc):
+                        if exc.status == 429:
+                            retry_after = _retry_after(exc)
+                            _unavailable_until[parent.id] = time.monotonic() + retry_after
+                            _log.warning(
+                                "discord.webhook.create_rate_limited",
+                                channel_id=parent.id,
+                                retry_after=retry_after,
+                            )
+                        elif _cooldown(exc):
                             _unavailable_until[parent.id] = time.monotonic() + _UNAVAILABLE_SECONDS
                         return self._pick(pool)
                     except Exception as exc:
@@ -222,6 +305,9 @@ class DiscordPostTransport:
                         return self._pick(pool)
                     if hook.token is not None:
                         pool[hook.id] = hook
+                        _log.info(
+                            "discord.webhook.created", channel_id=parent.id, webhook_id=hook.id
+                        )
                     else:
                         return self._pick(pool)
                 return self._pick(pool)
@@ -255,6 +341,7 @@ class DiscordPostTransport:
         webhook_rejected = False
         retry_files = _snapshot_files(kwargs)
         hook = await self._webhook()
+        webhook_rejected = self._creation_fallback
         if hook is not None:
             destination = self._destination()
             assert destination is not None
