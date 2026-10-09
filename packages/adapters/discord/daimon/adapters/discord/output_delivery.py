@@ -9,10 +9,11 @@ or the edit fails) is posted on its own below it, as before.
 from __future__ import annotations
 
 import asyncio
+import functools
 import io
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -38,7 +39,8 @@ MAX_ATTACHMENTS_PER_MESSAGE = 10
 # files: indexed a median 5.0 s after the writing tool returned, and up to
 # 4.2 s after the session went idle (9.6 s for a 103 MiB archive, over the
 # delivery cap anyway). A file left listed with no next turn is never
-# delivered, which is worse than one landing on the previous answer.
+# delivered, which is worse than one landing on the previous answer. The next
+# turn's start on the same session bounds it (see _turn_cutoff).
 TURN_END_GRACE = timedelta(seconds=10)
 _ATTACH_NOTICE = (
     "I couldn't attach the generated file. This bot needs the Attach Files "
@@ -67,6 +69,7 @@ async def deliver_session_outputs(
     notice_thread_ids: set[int],
     turn_window: tuple[int, int] | None = None,
     answer: AnswerMessage | None = None,
+    next_turn_start: Callable[[], datetime | None] | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Attach session outputs to the turn's answer; leave failed uploads listed for retry.
@@ -74,8 +77,9 @@ async def deliver_session_outputs(
     ``turn_window`` bounds the turn by message id: after its card, before its
     end. A file the agent already attached itself inside it, same name and
     bytes, counts as delivered and is cleared without a second copy. Files the
-    session listed more than ``TURN_END_GRACE`` after the turn ended are left
-    for the next turn's sweep.
+    session listed more than ``TURN_END_GRACE`` after the turn ended, or after
+    the next turn on the session started (``next_turn_start``, read when each
+    file is checked), are left for the next turn's sweep.
     Without ``answer``, or when a file cannot be added to it, the file is
     posted on its own.
     """
@@ -129,7 +133,7 @@ async def deliver_session_outputs(
             sleep=sleep,
             max_bytes=max_bytes,
             created_before=(
-                discord.utils.snowflake_time(turn_window[1]) + TURN_END_GRACE
+                functools.partial(_turn_cutoff, turn_window[1], next_turn_start)
                 if turn_window is not None
                 else None
             ),
@@ -153,6 +157,23 @@ async def deliver_session_outputs(
         notice_thread_ids.add(thread.id)
 
 
+def _turn_cutoff(
+    ended_before: int, next_turn_start: Callable[[], datetime | None] | None
+) -> datetime:
+    """When files stop being this turn's: the grace after its end, or the next turn's start.
+
+    Inside the grace, a file can only be the next turn's once that turn has
+    started, so its start bounds the grace. A file of this turn indexed after
+    that goes to the next turn's answer instead, which still delivers it.
+    """
+    ended = discord.utils.snowflake_time(ended_before)
+    cutoff = ended + TURN_END_GRACE
+    started = next_turn_start() if next_turn_start is not None else None
+    if started is not None and started > ended:
+        cutoff = min(cutoff, started)
+    return cutoff
+
+
 class _AnswerTarget:
     """Adds files to the answer message, one edit per file.
 
@@ -161,8 +182,10 @@ class _AnswerTarget:
     not uploaded again. Discord replaces the attachment list on edit, so every
     edit passes the current attachments back. The message is fetched fresh,
     because the turn's own copy may predate its table images; after that each
-    edit's returned message is the current state. Any failure turns the target
-    off for the rest of the sweep, and the caller posts the file instead.
+    edit's returned message is the current state. An edit whose outcome is
+    unknown is checked against the refetched answer before anything else. Any
+    failure turns the target off for the rest of the sweep, and the caller posts
+    the file instead.
     """
 
     def __init__(
@@ -190,7 +213,7 @@ class _AnswerTarget:
         if self._message is None:
             try:
                 self._message = await self._thread.fetch_message(answer.message_id)
-            except discord.HTTPException as exc:
+            except Exception as exc:  # any fetch failure: post the file instead
                 self._give_up("fetch_failed", exc)
                 return False
         message = self._message
@@ -209,9 +232,11 @@ class _AnswerTarget:
             # No replacement post: a webhook answer that cannot be edited must
             # not be sent again as a second copy of the chunk.
             edited = await answer.edit(message, attachments=attachments, _allow_replacement=False)
-        except (discord.HTTPException, discord.ClientException) as exc:
-            self._give_up("edit_failed", exc)
-            return False
+        except Exception as exc:  # classified below; a post is the fallback either way
+            if _refused(exc):
+                self._give_up("edit_refused", exc)
+                return False
+            return await self._reconcile(message, content, filename, exc)
         # A same-id result is the message as it now stands; anything else means
         # refetching before the next file rather than trusting a stale list.
         self._message = (
@@ -224,6 +249,56 @@ class _AnswerTarget:
             filename=filename,
         )
         return True
+
+    async def _reconcile(
+        self, before: discord.Message, content: bytes, filename: str, exc: Exception
+    ) -> bool:
+        """After an edit whose outcome is unknown, whether the file landed on the answer.
+
+        A timeout or a 5xx can arrive after Discord applied the edit. Posting
+        then would deliver the file twice, and building the next edit from the
+        old attachment list would drop it again. So the answer is refetched,
+        the file counts as delivered when one more attachment with its name and
+        size is there than before, and the next edit starts from the refetched
+        message. If the answer cannot be read back, the file is posted: a
+        duplicate beats a lost file.
+        """
+        try:
+            after = await self._thread.fetch_message(before.id)
+        except Exception as fetch_exc:  # unreadable: post the file instead
+            self._message = None
+            self._give_up("edit_unknown_refetch_failed", fetch_exc)
+            return False
+        self._message = after
+        key = (_attachment_key(filename), len(content))
+        landed = _count(after.attachments, key) > _count(before.attachments, key)
+        log.warning(
+            "discord.output_delivery.answer_edit_uncertain",
+            session_id=self._session_id,
+            message_id=before.id,
+            filename=filename,
+            error_type=type(exc).__name__,
+            landed=landed,
+        )
+        if landed:
+            return True
+        self._give_up("edit_failed", exc)
+        return False
+
+
+def _refused(exc: Exception) -> bool:
+    """Whether Discord, or the transport before any request, clearly refused the edit.
+
+    A 4xx other than a timeout means the edit was not applied. Anything else
+    (a timeout, a dropped connection, a 5xx) may have been applied.
+    """
+    if isinstance(exc, discord.ClientException):
+        return True
+    return isinstance(exc, discord.HTTPException) and 400 <= exc.status < 500 and exc.status != 408
+
+
+def _count(attachments: list[discord.Attachment], key: tuple[str, int]) -> int:
+    return sum(1 for a in attachments if (_attachment_key(a.filename), a.size) == key)
 
 
 def _attachment_key(filename: str) -> str:

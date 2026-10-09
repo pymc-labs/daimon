@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
@@ -12,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import httpx
+import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import FileMetadata
 from daimon.adapters.discord.bot import DaimonBot
@@ -648,3 +650,163 @@ async def test_a_file_indexed_seconds_after_the_turn_ended_is_still_attached() -
     ]
     assert names == ["brief.pdf"], "a file indexed inside the grace is this turn's"
     assert deleted == ["file_last"], "one indexed past the grace waits for the next sweep"
+
+
+class _ServerAnswer:
+    """Discord's copy of the answer: an edit applies here even when its response fails."""
+
+    def __init__(self, fail_after_apply: list[BaseException], *, apply: bool = True) -> None:
+        self.attachments: list[object] = []
+        self._fail = fail_after_apply
+        self._apply = apply
+        self.edits = 0
+
+    def message(self) -> MagicMock:
+        return _answer_message(list(self.attachments))
+
+    async def fetch(self, message_id: int) -> MagicMock:
+        assert message_id == _ANSWER_ID
+        return self.message()
+
+    async def edit(self, message: object, **kwargs: object) -> discord.Message:
+        self.edits += 1
+        assert kwargs["_allow_replacement"] is False
+        if self._apply:
+            new: list[object] = []
+            for item in cast(list[object], kwargs["attachments"]):
+                if isinstance(item, discord.File):
+                    attachment = _attachment(item.filename)
+                    attachment.size = len(item.fp.read())
+                    new.append(attachment)
+                else:
+                    new.append(item)
+            self.attachments = new
+        if self._fail:
+            raise self._fail.pop(0)
+        return cast(discord.Message, self.message())
+
+
+def _server_error(status: int) -> discord.HTTPException:
+    return discord.DiscordServerError(MagicMock(status=status, reason="Gateway Timeout"), "")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError(), _server_error(504)],
+    ids=["timeout", "504"],
+)
+async def test_an_edit_that_applied_before_failing_counts_and_keeps_the_file(
+    failure: BaseException,
+) -> None:
+    """The response failed but Discord applied the edit: no second copy, and the
+    next edit starts from the answer as it now stands, so the file stays on it."""
+    client, deleted = _client_with_files(
+        ("file_a", "a.pdf", b"pdf-a", NOW), ("file_b", "b.pdf", b"pdf-bb", NOW)
+    )
+    server = _ServerAnswer([failure])
+    thread = _answer_thread(server.message())
+    thread.fetch_message = AsyncMock(side_effect=server.fetch)
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=_WINDOW,
+        answer=AnswerMessage(message_id=_ANSWER_ID, edit=server.edit),
+        sleep=_no_sleep,
+    )
+
+    assert sorted(a.filename for a in cast(list[MagicMock], server.attachments)) == [
+        "a.pdf",
+        "b.pdf",
+    ], "each file is on the answer exactly once"
+    thread.send.assert_not_awaited()
+    assert sorted(deleted) == ["file_a", "file_b"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError(), _server_error(504)],
+    ids=["timeout", "504"],
+)
+async def test_an_edit_that_never_applied_falls_back_to_one_post(failure: BaseException) -> None:
+    client, deleted = _client_with_files(("file_a", "a.pdf", b"pdf-a", NOW))
+    server = _ServerAnswer([failure], apply=False)
+    thread = _answer_thread(server.message())
+    thread.fetch_message = AsyncMock(side_effect=server.fetch)
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=_WINDOW,
+        answer=AnswerMessage(message_id=_ANSWER_ID, edit=server.edit),
+        sleep=_no_sleep,
+    )
+
+    assert server.attachments == [], "the answer never got it"
+    thread.send.assert_awaited_once()
+    assert thread.send.await_args.kwargs["file"].filename == "a.pdf"
+    assert deleted == ["file_a"]
+
+
+async def test_a_file_indexed_after_the_next_turn_started_waits_for_that_turn() -> None:
+    """The grace ends early once the next turn on the session has started: a file
+    indexed after that may be the next turn's, so its sweep delivers it."""
+    turn_end = NOW
+    client, deleted = _client_with_files(
+        ("file_mine", "brief.pdf", b"pdf-a", turn_end + timedelta(seconds=1)),
+        ("file_next", "next_turn.pdf", b"pdf-b", turn_end + timedelta(seconds=7)),
+    )
+    thread = _answer_thread(_answer_message([]))
+    answer, calls = _recording_edit(deleted)
+    next_start: list[datetime] = []
+
+    async def settle(delay: float) -> None:
+        # The next turn starts while this sweep is still settling.
+        next_start[:] = [turn_end + timedelta(seconds=2)]
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=(777, discord.utils.time_snowflake(turn_end, high=True)),
+        answer=answer,
+        next_turn_start=lambda: next_start[0] if next_start else None,
+        sleep=settle,
+    )
+
+    names = [
+        getattr(a, "filename", None)
+        for _m, kwargs in calls
+        for a in cast(list[object], kwargs["attachments"])
+    ]
+    assert names == ["brief.pdf"]
+    assert deleted == ["file_mine"], "the file indexed after the next turn started stays listed"
+
+
+async def test_the_sweep_reads_the_next_turns_start_when_it_runs() -> None:
+    runtime = MagicMock()
+    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+    thread = _thread()
+    captured: dict[str, object] = {}
+
+    async def sweep(*args: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    with patch("daimon.adapters.discord.bot.deliver_session_outputs", side_effect=sweep):
+        await bot._sweep_session_outputs(None, thread, uuid.uuid4(), "sesn_1")  # pyright: ignore[reportPrivateUsage]
+
+    read_start = cast(Callable[[], datetime | None], captured["next_turn_start"])
+    assert read_start() is None
+    bot._note_turn_start("sesn_1")  # pyright: ignore[reportPrivateUsage]
+    started = read_start()
+    assert started is not None, "a turn that starts after scheduling still bounds the sweep"
+    bot._note_turn_start("sesn_2")  # pyright: ignore[reportPrivateUsage]
+    assert read_start() == started, "another session's turn does not"

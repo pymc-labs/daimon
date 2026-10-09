@@ -901,7 +901,7 @@ async def test_sweep_leaves_a_later_turns_files_listed() -> None:
         posted.append(file.file_id)
 
     count = await sweep_session_outputs(
-        client, session_id="sesn_1", post=post, sleep=sleep, created_before=NOW
+        client, session_id="sesn_1", post=post, sleep=sleep, created_before=lambda: NOW
     )
 
     assert count == 1 and posted == ["mine"], "only this turn's file is delivered"
