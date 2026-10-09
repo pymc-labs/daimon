@@ -1,0 +1,358 @@
+{
+  "database": {
+    "task_continuations": [],
+    "tenant_ledger": [
+      {
+        "channel_id": null,
+        "delta_usd": "100.000000",
+        "id": "<id:4>",
+        "idempotency_key": "trial:c37ec648-e9bf-54b0-b578-173bc49f5c9b",
+        "occurred_at": "<time>",
+        "payment_event_id": null,
+        "payment_intent": null,
+        "reason": "trial",
+        "tenant_id": "c37ec648-e9bf-54b0-b578-173bc49f5c9b"
+      }
+    ],
+    "thread_sessions": [],
+    "turn_outcomes": [
+      {
+        "account_id": "00000000-0000-0000-0000-000000000007",
+        "agent_id": "<id:6>",
+        "billing_posture": "none",
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "channel_id": "100002",
+        "cost_usd": "0.0000000000",
+        "duration_ms": 0,
+        "ended_at": "<time>",
+        "error_class": "AdmissionDenied",
+        "id": "<id:5>",
+        "input_tokens": 0,
+        "model_calls": 0,
+        "model_ids": [],
+        "origin": "chat",
+        "output_tokens": 0,
+        "platform": "slack",
+        "reason": "admission_cap_exceeded",
+        "recovered": false,
+        "release": "0.2.0",
+        "session_id": null,
+        "started_at": "<time>",
+        "tenant_id": "c37ec648-e9bf-54b0-b578-173bc49f5c9b",
+        "thread_id": "1791504000.000000",
+        "unpriced_calls": 0,
+        "usage_refs": []
+      }
+    ],
+    "usage_events": [
+      {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "channel_id": null,
+        "event_id": "<id:3>",
+        "id": "<id:1>",
+        "input_tokens": 2000000,
+        "managed_session_id": "<id:2>",
+        "model": "claude-sonnet-4-6",
+        "occurred_at": "<time>",
+        "output_tokens": 0,
+        "platform_user_id": "555000113",
+        "tenant_id": "c37ec648-e9bf-54b0-b578-173bc49f5c9b"
+      }
+    ]
+  },
+  "effects": [
+    {
+      "operation": "request",
+      "payload": {
+        "data": null,
+        "json": null,
+        "method": "POST",
+        "url": "https://slack.com/api/auth.test"
+      },
+      "platform": "platform_http",
+      "result": {
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "data": null,
+        "json": null,
+        "method": "POST",
+        "url": "https://slack.com/api/reactions.add"
+      },
+      "platform": "platform_http",
+      "result": {
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "data": null,
+        "json": null,
+        "method": "GET",
+        "url": "https://slack.com/api/users.info"
+      },
+      "platform": "platform_http",
+      "result": {
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/agents",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ],
+          [
+            "include_archived",
+            "false"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": [
+            {
+              "archived_at": null,
+              "created_at": "<time>",
+              "description": null,
+              "id": "ag_parity_test",
+              "mcp_servers": [],
+              "metadata": {
+                "daimon_name": "test-agent",
+                "daimon_tenant": "c37ec648-e9bf-54b0-b578-173bc49f5c9b"
+              },
+              "model": {
+                "id": "claude-sonnet-4-6",
+                "speed": null
+              },
+              "multiagent": null,
+              "name": "test-agent",
+              "skills": [],
+              "system": null,
+              "tools": [],
+              "type": "agent",
+              "updated_at": "<time>",
+              "version": 1
+            }
+          ],
+          "next_page": null
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/environments",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ],
+          [
+            "include_archived",
+            "false"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": [
+            {
+              "archived_at": null,
+              "config": {
+                "networking": {
+                  "type": "unrestricted"
+                },
+                "packages": {
+                  "apt": [],
+                  "cargo": [],
+                  "gem": [],
+                  "go": [],
+                  "npm": [],
+                  "pip": [],
+                  "type": null
+                },
+                "type": "cloud"
+              },
+              "created_at": "<time>",
+              "description": "",
+              "id": "env_parity_test",
+              "metadata": {
+                "daimon_name": "test-env",
+                "daimon_tenant": "c37ec648-e9bf-54b0-b578-173bc49f5c9b"
+              },
+              "name": "test-env",
+              "scope": null,
+              "type": "environment",
+              "updated_at": "<time>"
+            }
+          ],
+          "next_page": null
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/agents/ag_parity_test",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "archived_at": null,
+          "created_at": "<time>",
+          "description": null,
+          "id": "ag_parity_test",
+          "mcp_servers": [],
+          "metadata": {
+            "daimon_name": "test-agent",
+            "daimon_tenant": "c37ec648-e9bf-54b0-b578-173bc49f5c9b"
+          },
+          "model": {
+            "id": "claude-sonnet-4-6",
+            "speed": null
+          },
+          "multiagent": null,
+          "name": "test-agent",
+          "skills": [],
+          "system": null,
+          "tools": [],
+          "type": "agent",
+          "updated_at": "<time>",
+          "version": 1
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/environments/env_parity_test",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "archived_at": null,
+          "config": {
+            "networking": {
+              "type": "unrestricted"
+            },
+            "packages": {
+              "apt": [],
+              "cargo": [],
+              "gem": [],
+              "go": [],
+              "npm": [],
+              "pip": [],
+              "type": null
+            },
+            "type": "cloud"
+          },
+          "created_at": "<time>",
+          "description": "",
+          "id": "env_parity_test",
+          "metadata": {
+            "daimon_name": "test-env",
+            "daimon_tenant": "c37ec648-e9bf-54b0-b578-173bc49f5c9b"
+          },
+          "name": "test-env",
+          "scope": null,
+          "type": "environment",
+          "updated_at": "<time>"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "data": null,
+        "json": {
+          "channel": "100002",
+          "text": "You've reached your monthly usage cap. An operator can raise it.",
+          "thread_ts": "1791504000.000000"
+        },
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage"
+      },
+      "platform": "platform_http",
+      "result": {
+        "status": 200
+      }
+    }
+  ],
+  "requests": null
+}

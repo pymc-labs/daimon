@@ -1,0 +1,288 @@
+{
+  "database": {
+    "task_continuations": [],
+    "tenant_ledger": [],
+    "thread_sessions": [],
+    "turn_outcomes": [
+      {
+        "account_id": "00000000-0000-0000-0000-000000000002",
+        "agent_id": "<id:3>",
+        "billing_posture": "none",
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "channel_id": "100000",
+        "cost_usd": "0.0000000000",
+        "duration_ms": 0,
+        "ended_at": "<time>",
+        "error_class": "AdmissionDenied",
+        "id": "<id:2>",
+        "input_tokens": 0,
+        "model_calls": 0,
+        "model_ids": [],
+        "origin": "chat",
+        "output_tokens": 0,
+        "platform": "discord",
+        "reason": "admission_balance_depleted",
+        "recovered": false,
+        "release": "0.2.0",
+        "session_id": null,
+        "started_at": "<time>",
+        "tenant_id": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157",
+        "thread_id": "100001",
+        "unpriced_calls": 0,
+        "usage_refs": []
+      }
+    ],
+    "usage_events": []
+  },
+  "effects": [
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/agents",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ],
+          [
+            "include_archived",
+            "false"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": [
+            {
+              "archived_at": null,
+              "created_at": "<time>",
+              "description": null,
+              "id": "ag_parity_test",
+              "mcp_servers": [],
+              "metadata": {
+                "daimon_name": "test-agent",
+                "daimon_tenant": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157"
+              },
+              "model": {
+                "id": "claude-sonnet-4-6",
+                "speed": null
+              },
+              "multiagent": null,
+              "name": "test-agent",
+              "skills": [],
+              "system": null,
+              "tools": [],
+              "type": "agent",
+              "updated_at": "<time>",
+              "version": 1
+            }
+          ],
+          "next_page": null
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/environments",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ],
+          [
+            "include_archived",
+            "false"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": [
+            {
+              "archived_at": null,
+              "config": {
+                "networking": {
+                  "type": "unrestricted"
+                },
+                "packages": {
+                  "apt": [],
+                  "cargo": [],
+                  "gem": [],
+                  "go": [],
+                  "npm": [],
+                  "pip": [],
+                  "type": null
+                },
+                "type": "cloud"
+              },
+              "created_at": "<time>",
+              "description": "",
+              "id": "env_parity_test",
+              "metadata": {
+                "daimon_name": "test-env",
+                "daimon_tenant": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157"
+              },
+              "name": "test-env",
+              "scope": null,
+              "type": "environment",
+              "updated_at": "<time>"
+            }
+          ],
+          "next_page": null
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/agents/ag_parity_test",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "archived_at": null,
+          "created_at": "<time>",
+          "description": null,
+          "id": "ag_parity_test",
+          "mcp_servers": [],
+          "metadata": {
+            "daimon_name": "test-agent",
+            "daimon_tenant": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157"
+          },
+          "model": {
+            "id": "claude-sonnet-4-6",
+            "speed": null
+          },
+          "multiagent": null,
+          "name": "test-agent",
+          "skills": [],
+          "system": null,
+          "tools": [],
+          "type": "agent",
+          "updated_at": "<time>",
+          "version": 1
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/environments/env_parity_test",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "archived_at": null,
+          "config": {
+            "networking": {
+              "type": "unrestricted"
+            },
+            "packages": {
+              "apt": [],
+              "cargo": [],
+              "gem": [],
+              "go": [],
+              "npm": [],
+              "pip": [],
+              "type": null
+            },
+            "type": "cloud"
+          },
+          "created_at": "<time>",
+          "description": "",
+          "id": "env_parity_test",
+          "metadata": {
+            "daimon_name": "test-env",
+            "daimon_tenant": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157"
+          },
+          "name": "test-env",
+          "scope": null,
+          "type": "environment",
+          "updated_at": "<time>"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "send",
+      "payload": {
+        "args": [
+          "This server's daimon credit is depleted. A server admin can top up with `/billing`."
+        ],
+        "kwargs": {}
+      },
+      "platform": "platform_client",
+      "result": {
+        "message_id": "<id:1>"
+      }
+    }
+  ],
+  "requests": null
+}

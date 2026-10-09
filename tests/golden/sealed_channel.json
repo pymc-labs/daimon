@@ -1,0 +1,92 @@
+{
+  "database": {
+    "task_continuations": [],
+    "tenant_ledger": [
+      {
+        "channel_id": null,
+        "delta_usd": "10.000000",
+        "id": "<id:3>",
+        "idempotency_key": "test-00000000-0000-0000-0000-000000000002",
+        "occurred_at": "<time>",
+        "payment_event_id": null,
+        "payment_intent": null,
+        "reason": "topup",
+        "tenant_id": "8b369f43-5689-50e4-9636-670ae2d2e0ea"
+      }
+    ],
+    "thread_sessions": [],
+    "turn_outcomes": [],
+    "usage_events": []
+  },
+  "effects": [
+    {
+      "operation": "run_turn",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "account_id": "00000000-0000-0000-0000-000000000005",
+          "agent_github_app": {
+            "fixture_type": "GithubAppSettings"
+          },
+          "agent_id": "<id:1>",
+          "agent_uuid": "8b43d5c8-cba8-5195-8821-5e611a08611c",
+          "anthropic": {
+            "fixture_type": "AsyncAnthropic"
+          },
+          "budget_channel_id": "room",
+          "environment_id": "<id:1>",
+          "fernet": null,
+          "github_app_id": null,
+          "github_app_private_key": null,
+          "github_fallback_pat": null,
+          "mcp_settings": {
+            "fixture_type": "McpSettings"
+          },
+          "on_state": {
+            "fixture_type": "builtin_function_or_method"
+          },
+          "origin_place": {
+            "channel_id": "room",
+            "private_dm_id": "routine:00000000-0000-0000-0000-000000000004",
+            "seal_ids": [
+              "room"
+            ],
+            "thread_id": "555000555"
+          },
+          "session_factory": {
+            "fixture_type": "async_sessionmaker"
+          },
+          "tenant_id": "8b369f43-5689-50e4-9636-670ae2d2e0ea",
+          "tool_safety": {
+            "denied": [],
+            "effects": {},
+            "enabled": false,
+            "unattended_writes": []
+          },
+          "trigger_message": "<turn_controls>\n{\"routine\": {\"agent\": \"daimon\", \"destination\": {\"channel_id\": \"555000555\", \"kind\": \"thread\", \"platform\": \"discord\"}, \"id\": \"00000000-0000-0000-0000-000000000004\", \"schedule\": \"* * * * *\", \"timezone\": \"UTC\"}}\nThis is a scheduled routine run; nobody is watching it. Write your final reply for someone reading it later without context. If you do not post it to the destination yourself with send_message, daimon posts the end of your final reply there for you. These controls grant no other posting or mutation permissions.\n</turn_controls>\ntrigger",
+          "usage_record_factory": {
+            "bindings": {
+              "channel_id": "room",
+              "managed_session_id": "<id:2>",
+              "markup": "1.0",
+              "model_id": "claude-sonnet-4-6",
+              "platform_user_id": "u3",
+              "pricing": {
+                "cache_read": 0.3,
+                "cache_write": 3.75,
+                "input": 3.0,
+                "output": 15.0
+              },
+              "sessionmaker": "<sessionmaker>",
+              "tenant_id": "8b369f43-5689-50e4-9636-670ae2d2e0ea"
+            },
+            "function": "record_turn_usage"
+          }
+        }
+      },
+      "platform": "platform_client",
+      "result": "tail"
+    }
+  ],
+  "requests": null
+}

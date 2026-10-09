@@ -1,0 +1,373 @@
+{
+  "database": {
+    "task_continuations": [],
+    "tenant_ledger": [],
+    "thread_sessions": [],
+    "turn_outcomes": [],
+    "usage_events": []
+  },
+  "effects": [
+    {
+      "operation": "request",
+      "payload": {
+        "body": [
+          {
+            "content": "T0xEPTEK",
+            "filename": ".env",
+            "headers": {
+              "Content-Disposition": "form-data; name=\"file\"; filename=\".env\"",
+              "Content-Type": "text/plain"
+            },
+            "name": "file"
+          }
+        ],
+        "method": "POST",
+        "path": "/v1/files",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "files-api-2025-04-14"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "multipart/form-data; boundary=<multipart-boundary>"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "created_at": "<time>",
+          "downloadable": false,
+          "filename": ".env",
+          "id": "file_PvrJGuPK6AZ6sxv7WuqDlzwy",
+          "mime_type": "text/plain",
+          "scope": null,
+          "size_bytes": 6,
+          "type": "file"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "agent": "ag_update_ops",
+          "environment_id": "<id:1>",
+          "resources": [
+            {
+              "file_id": "<id:2>",
+              "mount_path": ".env",
+              "type": "file"
+            }
+          ]
+        },
+        "method": "POST",
+        "path": "/v1/sessions",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "agent": {
+            "description": null,
+            "id": "ag_update_ops",
+            "mcp_servers": [],
+            "model": {
+              "id": "claude-sonnet-4-6",
+              "speed": null
+            },
+            "multiagent": null,
+            "name": "daimon",
+            "skills": [],
+            "system": null,
+            "tools": [],
+            "type": "agent",
+            "version": 1
+          },
+          "archived_at": null,
+          "created_at": "<time>",
+          "deployment_id": null,
+          "environment_id": "<id:1>",
+          "id": "session_jRwAW92TRBN4t1j30cJgPhf",
+          "metadata": {},
+          "outcome_evaluations": [],
+          "resources": [
+            {
+              "created_at": "<time>",
+              "file_id": "<id:2>",
+              "id": "res_OCqS44qSzS4etL1p82X8Pu",
+              "mount_path": "/mnt/session/uploads/.env",
+              "type": "file",
+              "updated_at": "<time>"
+            }
+          ],
+          "stats": {
+            "active_seconds": null,
+            "duration_seconds": null
+          },
+          "status": "idle",
+          "title": null,
+          "type": "session",
+          "updated_at": "<time>",
+          "usage": {
+            "cache_creation": null,
+            "cache_read_input_tokens": null,
+            "input_tokens": null,
+            "output_tokens": null
+          },
+          "vault_ids": []
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": [
+          {
+            "content": "S0VZPXYK",
+            "filename": ".env",
+            "headers": {
+              "Content-Disposition": "form-data; name=\"file\"; filename=\".env\"",
+              "Content-Type": "text/plain"
+            },
+            "name": "file"
+          }
+        ],
+        "method": "POST",
+        "path": "/v1/files",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "files-api-2025-04-14"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "multipart/form-data; boundary=<multipart-boundary>"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "created_at": "<time>",
+          "downloadable": false,
+          "filename": ".env",
+          "id": "file_YPTfwwDTnAqowa4HG6S37AWe",
+          "mime_type": "text/plain",
+          "scope": null,
+          "size_bytes": 6,
+          "type": "file"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "DELETE",
+        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/resources/res_OCqS44qSzS4etL1p82X8Pu",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "id": "res_OCqS44qSzS4etL1p82X8Pu",
+          "type": "session_resource_deleted"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "file_id": "<id:3>",
+          "mount_path": ".env",
+          "type": "file"
+        },
+        "method": "POST",
+        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/resources",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "error": {
+            "message": "boom",
+            "type": "api_error"
+          },
+          "type": "error"
+        },
+        "status": 500
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "file_id": "<id:3>",
+          "mount_path": ".env",
+          "type": "file"
+        },
+        "method": "POST",
+        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/resources",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "error": {
+            "message": "boom",
+            "type": "api_error"
+          },
+          "type": "error"
+        },
+        "status": 500
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "file_id": "<id:3>",
+          "mount_path": ".env",
+          "type": "file"
+        },
+        "method": "POST",
+        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/resources",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "error": {
+            "message": "boom",
+            "type": "api_error"
+          },
+          "type": "error"
+        },
+        "status": 500
+      }
+    }
+  ],
+  "requests": null
+}

@@ -1,0 +1,214 @@
+{
+  "database": {
+    "task_continuations": [],
+    "tenant_ledger": [],
+    "thread_sessions": [],
+    "turn_outcomes": [],
+    "usage_events": []
+  },
+  "effects": [
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "model": "claude-sonnet-5",
+          "name": "analysis-bot"
+        },
+        "method": "POST",
+        "path": "/v1/agents",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "archived_at": null,
+          "created_at": "<time>",
+          "description": null,
+          "id": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
+          "mcp_servers": [],
+          "metadata": {},
+          "model": {
+            "id": "claude-sonnet-5",
+            "speed": "standard"
+          },
+          "multiagent": null,
+          "name": "analysis-bot",
+          "skills": [],
+          "system": null,
+          "tools": [],
+          "type": "agent",
+          "updated_at": "<time>",
+          "version": 1
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "agent": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
+          "environment_id": "<id:1>"
+        },
+        "method": "POST",
+        "path": "/v1/sessions",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "agent": {
+            "description": null,
+            "id": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
+            "mcp_servers": [],
+            "model": {
+              "id": "claude-sonnet-5",
+              "speed": "standard"
+            },
+            "multiagent": null,
+            "name": "analysis-bot",
+            "skills": [],
+            "system": null,
+            "tools": [],
+            "type": "agent",
+            "version": 1
+          },
+          "archived_at": null,
+          "created_at": "<time>",
+          "deployment_id": null,
+          "environment_id": "<id:1>",
+          "id": "session_jRwAW92TRBN4t1j30cJgPhf",
+          "metadata": {},
+          "outcome_evaluations": [],
+          "resources": [],
+          "stats": {
+            "active_seconds": null,
+            "duration_seconds": null
+          },
+          "status": "idle",
+          "title": null,
+          "type": "session",
+          "updated_at": "<time>",
+          "usage": {
+            "cache_creation": null,
+            "cache_read_input_tokens": null,
+            "input_tokens": null,
+            "output_tokens": null
+          },
+          "vault_ids": []
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "DELETE",
+        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "id": "session_jRwAW92TRBN4t1j30cJgPhf",
+          "type": "session_deleted"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/events",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "error": {
+            "message": "no such session: session_jRwAW92TRBN4t1j30cJgPhf",
+            "type": "not_found_error"
+          },
+          "type": "error"
+        },
+        "status": 404
+      }
+    }
+  ],
+  "requests": null
+}

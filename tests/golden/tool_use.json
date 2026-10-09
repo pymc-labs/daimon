@@ -1,0 +1,255 @@
+{
+  "database": null,
+  "effects": [
+    {
+      "operation": "stream",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "session_id": "<id:1>",
+          "timeout": {
+            "connect": 5.0,
+            "pool": 120.0,
+            "read": 120.0,
+            "write": 120.0
+          }
+        }
+      },
+      "platform": "FakeEventsResource",
+      "result": null
+    },
+    {
+      "operation": "send",
+      "payload": {
+        "args": [
+          "sess_1"
+        ],
+        "kwargs": {
+          "events": [
+            {
+              "content": [
+                {
+                  "text": "which teams?",
+                  "type": "text"
+                }
+              ],
+              "type": "user.message"
+            }
+          ]
+        }
+      },
+      "platform": "FakeEventsResource",
+      "result": null
+    },
+    {
+      "operation": "on_sse_event",
+      "payload": {
+        "args": [
+          {
+            "evaluated_permission": null,
+            "id": "tu_read",
+            "input": {
+              "title": "Bug"
+            },
+            "mcp_server_name": "linear",
+            "name": "list_teams",
+            "processed_at": "<time>",
+            "session_thread_id": null,
+            "type": "agent.mcp_tool_use"
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_sse_event",
+      "payload": {
+        "args": [
+          {
+            "id": "sevt_pause",
+            "processed_at": "<time>",
+            "stop_reason": {
+              "event_ids": [
+                "<id:2>"
+              ],
+              "type": "requires_action"
+            },
+            "type": "session.status_idle"
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "send",
+      "payload": {
+        "args": [
+          "sess_1"
+        ],
+        "kwargs": {
+          "events": [
+            {
+              "result": "allow",
+              "tool_use_id": "<id:2>",
+              "type": "user.tool_confirmation"
+            }
+          ]
+        }
+      },
+      "platform": "FakeEventsResource",
+      "result": null
+    },
+    {
+      "operation": "on_sse_event",
+      "payload": {
+        "args": [
+          {
+            "content": [
+              {
+                "text": "done",
+                "type": "text"
+              }
+            ],
+            "id": "sevt_msg",
+            "processed_at": "<time>",
+            "type": "agent.message"
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_sse_event",
+      "payload": {
+        "args": [
+          {
+            "id": "sevt_end",
+            "processed_at": "<time>",
+            "stop_reason": {
+              "type": "end_turn"
+            },
+            "type": "session.status_idle"
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_render",
+      "payload": {
+        "args": [
+          {
+            "content": [
+              {
+                "evaluated_permission": null,
+                "id": "tu_read",
+                "input": {
+                  "title": "Bug"
+                },
+                "is_error": false,
+                "kind": "tool_use",
+                "mcp_server_name": "linear",
+                "name": "list_teams",
+                "result_content": null,
+                "status": "pending",
+                "type": "agent.mcp_tool_use"
+              },
+              {
+                "kind": "text",
+                "text": "done"
+              }
+            ],
+            "error": null,
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": null,
+            "retrying_error": null,
+            "seen_event_ids": [
+              "<id:3>",
+              "<id:4>",
+              "<id:5>",
+              "<id:2>"
+            ],
+            "stop_reason": {
+              "type": "end_turn"
+            },
+            "tasks": [],
+            "termination": "completed",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_terminal_success",
+      "payload": {
+        "args": [
+          {
+            "content": [
+              {
+                "evaluated_permission": null,
+                "id": "tu_read",
+                "input": {
+                  "title": "Bug"
+                },
+                "is_error": false,
+                "kind": "tool_use",
+                "mcp_server_name": "linear",
+                "name": "list_teams",
+                "result_content": null,
+                "status": "pending",
+                "type": "agent.mcp_tool_use"
+              },
+              {
+                "kind": "text",
+                "text": "done"
+              }
+            ],
+            "error": null,
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": null,
+            "retrying_error": null,
+            "seen_event_ids": [
+              "<id:3>",
+              "<id:4>",
+              "<id:5>",
+              "<id:2>"
+            ],
+            "stop_reason": {
+              "type": "end_turn"
+            },
+            "tasks": [],
+            "termination": "completed",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    }
+  ],
+  "requests": null
+}

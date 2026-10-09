@@ -1,0 +1,128 @@
+{
+  "database": null,
+  "effects": [
+    {
+      "operation": "chat_postMessage",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "attachments": [
+            {
+              "blocks": [
+                {
+                  "text": {
+                    "text": "Approve a write?",
+                    "type": "plain_text"
+                  },
+                  "type": "header"
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "elements": [
+                    {
+                      "action_id": "dcf:tok_abcdefgh:approve",
+                      "style": "primary",
+                      "text": {
+                        "text": "Approve",
+                        "type": "plain_text"
+                      },
+                      "type": "button",
+                      "value": "tok_abcdefgh"
+                    },
+                    {
+                      "action_id": "dcf:tok_abcdefgh:deny",
+                      "style": "danger",
+                      "text": {
+                        "text": "Deny",
+                        "type": "plain_text"
+                      },
+                      "type": "button",
+                      "value": "tok_abcdefgh"
+                    },
+                    {
+                      "action_id": "dcf:tok_abcdefgh:details",
+                      "text": {
+                        "text": "Details",
+                        "type": "plain_text"
+                      },
+                      "type": "button",
+                      "value": "tok_abcdefgh"
+                    }
+                  ],
+                  "type": "actions"
+                },
+                {
+                  "elements": [
+                    {
+                      "text": "Only <@11111111-1111-1111-1111-111111111111> can approve or deny\nExpires at <!date^1790986200^{time}|00:10 UTC>",
+                      "type": "mrkdwn"
+                    }
+                  ],
+                  "type": "context"
+                }
+              ],
+              "color": "#FEE75C"
+            }
+          ],
+          "channel": "C1",
+          "mrkdwn": false,
+          "parse": "none",
+          "text": "Approve a write?",
+          "thread_ts": "1699.9"
+        }
+      },
+      "platform": "slack_card",
+      "result": {
+        "ts": "1700.1"
+      }
+    },
+    {
+      "operation": "chat_update",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "attachments": [
+            {
+              "blocks": [
+                {
+                  "text": {
+                    "text": "Approved",
+                    "type": "plain_text"
+                  },
+                  "type": "header"
+                },
+                {
+                  "text": {
+                    "text": "Approve a write",
+                    "type": "plain_text"
+                  },
+                  "type": "section"
+                },
+                {
+                  "elements": [
+                    {
+                      "text": "by <@11111111-1111-1111-1111-111111111111>",
+                      "type": "mrkdwn"
+                    }
+                  ],
+                  "type": "context"
+                }
+              ],
+              "color": "#57F287"
+            }
+          ],
+          "channel": "C1",
+          "mrkdwn": false,
+          "parse": "none",
+          "text": "Approved\nApprove a write",
+          "ts": "1700.1"
+        }
+      },
+      "platform": "slack_card",
+      "result": null
+    }
+  ],
+  "requests": null
+}

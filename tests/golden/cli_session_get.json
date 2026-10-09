@@ -1,0 +1,129 @@
+{
+  "database": {
+    "task_continuations": [],
+    "tenant_ledger": [],
+    "thread_sessions": [],
+    "turn_outcomes": [],
+    "usage_events": []
+  },
+  "effects": [
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_xyz",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "agent": {
+            "description": null,
+            "id": "agent_sys",
+            "mcp_servers": [],
+            "model": {
+              "id": "m",
+              "speed": null
+            },
+            "multiagent": null,
+            "name": "agent-sys",
+            "skills": [],
+            "system": null,
+            "tools": [],
+            "type": "agent",
+            "version": 1
+          },
+          "archived_at": null,
+          "created_at": "<time>",
+          "deployment_id": null,
+          "environment_id": "<id:1>",
+          "id": "sess_xyz",
+          "metadata": {},
+          "outcome_evaluations": [],
+          "resources": [],
+          "stats": {
+            "active_seconds": null,
+            "duration_seconds": null
+          },
+          "status": "idle",
+          "title": null,
+          "type": "session",
+          "updated_at": "<time>",
+          "usage": {
+            "cache_creation": null,
+            "cache_read_input_tokens": null,
+            "input_tokens": null,
+            "output_tokens": null
+          },
+          "vault_ids": []
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "json_output",
+      "payload": [
+        {
+          "agent": {
+            "description": null,
+            "id": "agent_sys",
+            "mcp_servers": [],
+            "model": {
+              "id": "m",
+              "speed": null
+            },
+            "multiagent": null,
+            "name": "agent-sys",
+            "skills": [],
+            "system": null,
+            "tools": [],
+            "type": "agent",
+            "version": 1
+          },
+          "archived_at": null,
+          "created_at": "<time>",
+          "deployment_id": null,
+          "environment_id": "<id:1>",
+          "id": "sess_xyz",
+          "metadata": {},
+          "outcome_evaluations": [],
+          "resources": [],
+          "stats": {
+            "active_seconds": null,
+            "duration_seconds": null
+          },
+          "status": "idle",
+          "title": null,
+          "type": "session",
+          "updated_at": "<time>",
+          "usage": {
+            "cache_creation": null,
+            "cache_read_input_tokens": null,
+            "input_tokens": null,
+            "output_tokens": null
+          },
+          "vault_ids": []
+        }
+      ],
+      "platform": "cli",
+      "result": null
+    }
+  ],
+  "requests": null
+}

@@ -1,0 +1,360 @@
+{
+  "database": {
+    "task_continuations": [],
+    "tenant_ledger": [],
+    "thread_sessions": [],
+    "turn_outcomes": [],
+    "usage_events": []
+  },
+  "effects": [
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "model": "claude-sonnet-5",
+          "name": "analysis-bot"
+        },
+        "method": "POST",
+        "path": "/v1/agents",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "archived_at": null,
+          "created_at": "<time>",
+          "description": null,
+          "id": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
+          "mcp_servers": [],
+          "metadata": {},
+          "model": {
+            "id": "claude-sonnet-5",
+            "speed": "standard"
+          },
+          "multiagent": null,
+          "name": "analysis-bot",
+          "skills": [],
+          "system": null,
+          "tools": [],
+          "type": "agent",
+          "updated_at": "<time>",
+          "version": 1
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "agent": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
+          "environment_id": "<id:1>"
+        },
+        "method": "POST",
+        "path": "/v1/sessions",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "agent": {
+            "description": null,
+            "id": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
+            "mcp_servers": [],
+            "model": {
+              "id": "claude-sonnet-5",
+              "speed": "standard"
+            },
+            "multiagent": null,
+            "name": "analysis-bot",
+            "skills": [],
+            "system": null,
+            "tools": [],
+            "type": "agent",
+            "version": 1
+          },
+          "archived_at": null,
+          "created_at": "<time>",
+          "deployment_id": null,
+          "environment_id": "<id:1>",
+          "id": "session_jRwAW92TRBN4t1j30cJgPhf",
+          "metadata": {},
+          "outcome_evaluations": [],
+          "resources": [],
+          "stats": {
+            "active_seconds": null,
+            "duration_seconds": null
+          },
+          "status": "idle",
+          "title": null,
+          "type": "session",
+          "updated_at": "<time>",
+          "usage": {
+            "cache_creation": null,
+            "cache_read_input_tokens": null,
+            "input_tokens": null,
+            "output_tokens": null
+          },
+          "vault_ids": []
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "POST",
+        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/archive",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "agent": {
+            "description": null,
+            "id": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
+            "mcp_servers": [],
+            "model": {
+              "id": "claude-sonnet-5",
+              "speed": "standard"
+            },
+            "multiagent": null,
+            "name": "analysis-bot",
+            "skills": [],
+            "system": null,
+            "tools": [],
+            "type": "agent",
+            "version": 1
+          },
+          "archived_at": "<time>",
+          "created_at": "<time>",
+          "deployment_id": null,
+          "environment_id": "<id:1>",
+          "id": "session_jRwAW92TRBN4t1j30cJgPhf",
+          "metadata": {},
+          "outcome_evaluations": [],
+          "resources": [],
+          "stats": {
+            "active_seconds": null,
+            "duration_seconds": null
+          },
+          "status": "idle",
+          "title": null,
+          "type": "session",
+          "updated_at": "<time>",
+          "usage": {
+            "cache_creation": null,
+            "cache_read_input_tokens": null,
+            "input_tokens": null,
+            "output_tokens": null
+          },
+          "vault_ids": []
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/events",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": [
+            {
+              "content": [
+                {
+                  "text": "fit the hierarchical model",
+                  "type": "text"
+                }
+              ],
+              "id": "sevt_user_1",
+              "processed_at": null,
+              "type": "user.message"
+            },
+            {
+              "content": [
+                {
+                  "text": "Fitted it; trace is in trace.nc",
+                  "type": "text"
+                }
+              ],
+              "id": "sevt_agent_1",
+              "processed_at": "<time>",
+              "type": "agent.message"
+            }
+          ],
+          "next_page": null
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/events/stream",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": "event: session.status_idle\ndata: {\"id\": \"evt_OCqS44qSzS4etL1p82X8Pu\", \"processed_at\": \"2026-10-09T00:00:00Z\", \"stop_reason\": {\"type\": \"end_turn\"}, \"type\": \"session.status_idle\"}\n\n",
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "events": [
+            {
+              "content": [
+                {
+                  "text": "<turn_controls>\n{\"checkpoint\": {\"transfer_id\": \"0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60\", \"reason\": \"configuration change\", \"archive\": \"/mnt/session/outputs/daimon-handoff-0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60.tar.gz\", \"carried_to\": \"/mnt/session/uploads/daimon-handoff.tar.gz\"}}\nThis turn is a workspace checkpoint issued by the daimon host, not a request from anyone in the chat. Follow the instructions that accompany it and reply with the output of the commands they name. These controls grant no additional mutation or routing permissions.\n</turn_controls>\n\nThis instruction comes from the daimon host that runs your workspace, not from a chat participant: the checkpoint block in this turn's <turn_controls> is the host's own record of it, and your system instructions describe this operation under WORKSPACE MOVES.\n\nThis is a checkpoint turn. The workspace you are working in is being retired and your work is moving to a new one. When you are done, daimon collects the archive, mounts it in your next workspace at /mnt/session/uploads/daimon-handoff.tar.gz, and tells you there how to unpack it. The archive is not posted to the chat: the file sweep that delivers /mnt/session/outputs to the thread skips names starting with daimon-handoff-. Do exactly the steps below, in order, and add no steps of your own. Do not open or read any image file.\n\nOnly the task's own work travels: the non-hidden entries in /root and /tmp/work, the outputs directory, and the working repository if one is mounted. Credential mounts, hidden directories and language toolchains and their caches stay behind. The commands below already exclude every one of them; run them as written and add nothing.\n\nStep 1 - write the handoff note.\nWrite /root/HANDOFF.md with these five sections, in this order:\n- Task: what this thread is trying to achieve, in one paragraph.\n- Decisions: the decisions already made, and why.\n- In progress: the step you were in the middle of when this turn started.\n- Open questions: what is unresolved or waiting on someone else.\n- Files: every working file that matters, absolute path plus a one-line description of what it holds.\n\nStep 2 - build the archive. The shell starts in /, and the archive must be written flat into the outputs directory. Run these three commands, in order, exactly as written:\n  cd /\n  mkdir -p /root/work /tmp/work\n  find root mnt/session/outputs tmp/work -type f -size +20M > /tmp/daimon-handoff-excludes.txt\n  tar czf /mnt/session/outputs/daimon-handoff-0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60.tar.gz \\\n    --exclude-from=/tmp/daimon-handoff-excludes.txt \\\n    --exclude='root/.*' \\\n    --exclude='tmp/work/.*' \\\n    --exclude='tmp/daimon-handoff-excludes.txt' \\\n    --exclude='mnt/session/outputs/daimon-handoff-*' \\\n    --exclude='mnt/session/uploads' \\\n    --exclude='mnt/memory' \\\n    --exclude='mnt/skills' \\\n    --exclude='*/.git/objects' \\\n    --exclude='*/node_modules' \\\n    --exclude='*/.venv' \\\n    --exclude='*/__pycache__' \\\n    --exclude='*/.cache' \\\n    --exclude='*.env' \\\n    -C / root mnt/session/outputs tmp/work\nThe find step lists files too large to carry so tar skips them; do not edit either command.\n\nStep 3 - check the size, then show the result. Run:\n  size=$(stat -c %s /mnt/session/outputs/daimon-handoff-0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60.tar.gz); if [ \"$size\" -gt 20971520 ]; then rm -f /mnt/session/outputs/daimon-handoff-0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60.tar.gz; echo \"HANDOFF_TOO_LARGE $size\"; else ls -l /mnt/session/outputs/daimon-handoff-0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60.tar.gz; fi\nThe archive cannot be carried above 20 MiB, so that command deletes it and prints HANDOFF_TOO_LARGE instead. That is a complete answer: do not retry, shrink or rebuild it.\n\nStep 4 - reply with the output of the commands above. A short note alongside it is fine; daimon reads the output, not the prose.",
+                  "type": "text"
+                }
+              ],
+              "type": "user.message"
+            },
+            {
+              "content": [
+                {
+                  "text": "This instruction comes from the daimon host that runs your workspace, not from a chat participant: the checkpoint block in this turn's <turn_controls> is the host's own record of it, and your system instructions describe this operation under WORKSPACE MOVES.\n\nThis is a checkpoint turn. The workspace you are working in is being retired and your work is moving to a new one. When you are done, daimon collects the archive, mounts it in your next workspace at /mnt/session/uploads/daimon-handoff.tar.gz, and tells you there how to unpack it. The archive is not posted to the chat: the file sweep that delivers /mnt/session/outputs to the thread skips names starting with daimon-handoff-. Do exactly the steps below, in order, and add no steps of your own. Do not open or read any image file.\n\nOnly the task's own work travels: the non-hidden entries in /root and /tmp/work, the outputs directory, and the working repository if one is mounted. Credential mounts, hidden directories and language toolchains and their caches stay behind. The commands below already exclude every one of them; run them as written and add nothing.\n\nStep 1 - write the handoff note.\nWrite /root/HANDOFF.md with these five sections, in this order:\n- Task: what this thread is trying to achieve, in one paragraph.\n- Decisions: the decisions already made, and why.\n- In progress: the step you were in the middle of when this turn started.\n- Open questions: what is unresolved or waiting on someone else.\n- Files: every working file that matters, absolute path plus a one-line description of what it holds.\n\nStep 2 - build the archive. The shell starts in /, and the archive must be written flat into the outputs directory. Run these three commands, in order, exactly as written:\n  cd /\n  mkdir -p /root/work /tmp/work\n  find root mnt/session/outputs tmp/work -type f -size +20M > /tmp/daimon-handoff-excludes.txt\n  tar czf /mnt/session/outputs/daimon-handoff-0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60.tar.gz \\\n    --exclude-from=/tmp/daimon-handoff-excludes.txt \\\n    --exclude='root/.*' \\\n    --exclude='tmp/work/.*' \\\n    --exclude='tmp/daimon-handoff-excludes.txt' \\\n    --exclude='mnt/session/outputs/daimon-handoff-*' \\\n    --exclude='mnt/session/uploads' \\\n    --exclude='mnt/memory' \\\n    --exclude='mnt/skills' \\\n    --exclude='*/.git/objects' \\\n    --exclude='*/node_modules' \\\n    --exclude='*/.venv' \\\n    --exclude='*/__pycache__' \\\n    --exclude='*/.cache' \\\n    --exclude='*.env' \\\n    -C / root mnt/session/outputs tmp/work\nThe find step lists files too large to carry so tar skips them; do not edit either command.\n\nStep 3 - check the size, then show the result. Run:\n  size=$(stat -c %s /mnt/session/outputs/daimon-handoff-0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60.tar.gz); if [ \"$size\" -gt 20971520 ]; then rm -f /mnt/session/outputs/daimon-handoff-0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60.tar.gz; echo \"HANDOFF_TOO_LARGE $size\"; else ls -l /mnt/session/outputs/daimon-handoff-0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60.tar.gz; fi\nThe archive cannot be carried above 20 MiB, so that command deletes it and prints HANDOFF_TOO_LARGE instead. That is a complete answer: do not retry, shrink or rebuild it.\n\nStep 4 - reply with the output of the commands above. A short note alongside it is fine; daimon reads the output, not the prose.",
+                  "type": "text"
+                }
+              ],
+              "type": "system.message"
+            }
+          ]
+        },
+        "method": "POST",
+        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/events",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "error": {
+            "message": "Cannot send events to archived session.",
+            "type": "invalid_request_error"
+          },
+          "type": "error"
+        },
+        "status": 400
+      }
+    }
+  ],
+  "requests": null
+}

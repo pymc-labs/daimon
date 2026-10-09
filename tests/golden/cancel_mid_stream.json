@@ -1,0 +1,176 @@
+{
+  "database": null,
+  "effects": [
+    {
+      "operation": "stream",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "session_id": "<id:1>",
+          "timeout": {
+            "connect": 5.0,
+            "pool": 120.0,
+            "read": 120.0,
+            "write": 120.0
+          }
+        }
+      },
+      "platform": "FakeEventsResource",
+      "result": null
+    },
+    {
+      "operation": "send",
+      "payload": {
+        "args": [
+          "sess_1"
+        ],
+        "kwargs": {
+          "events": [
+            {
+              "content": [
+                {
+                  "text": "hi",
+                  "type": "text"
+                }
+              ],
+              "type": "user.message"
+            }
+          ]
+        }
+      },
+      "platform": "FakeEventsResource",
+      "result": null
+    },
+    {
+      "operation": "on_sse_event",
+      "payload": {
+        "args": [
+          {
+            "content": [
+              {
+                "text": "partial",
+                "type": "text"
+              }
+            ],
+            "id": "sevt_1",
+            "processed_at": "<time>",
+            "type": "agent.message"
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "send",
+      "payload": {
+        "args": [
+          "sess_1"
+        ],
+        "kwargs": {
+          "events": [
+            {
+              "type": "user.interrupt"
+            }
+          ]
+        }
+      },
+      "platform": "FakeEventsResource",
+      "result": null
+    },
+    {
+      "operation": "stream",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "session_id": "<id:1>"
+        }
+      },
+      "platform": "FakeEventsResource",
+      "result": null
+    },
+    {
+      "operation": "on_interrupt_sent",
+      "payload": {
+        "args": [
+          "cancel_event"
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_render",
+      "payload": {
+        "args": [
+          {
+            "content": [
+              {
+                "kind": "text",
+                "text": "partial"
+              }
+            ],
+            "error": null,
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": null,
+            "retrying_error": null,
+            "seen_event_ids": [
+              "<id:2>"
+            ],
+            "stop_reason": null,
+            "tasks": [],
+            "termination": "interrupted",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_terminal_success",
+      "payload": {
+        "args": [
+          {
+            "content": [
+              {
+                "kind": "text",
+                "text": "partial"
+              }
+            ],
+            "error": null,
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": null,
+            "retrying_error": null,
+            "seen_event_ids": [
+              "<id:2>"
+            ],
+            "stop_reason": null,
+            "tasks": [],
+            "termination": "interrupted",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    }
+  ],
+  "requests": null
+}

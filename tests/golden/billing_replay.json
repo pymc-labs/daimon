@@ -1,0 +1,196 @@
+{
+  "database": {
+    "task_continuations": [],
+    "tenant_ledger": [
+      {
+        "channel_id": null,
+        "delta_usd": "-0.017500",
+        "id": "<id:8>",
+        "idempotency_key": "turn:sess_1:sevt_mre_1",
+        "occurred_at": "<time>",
+        "payment_event_id": null,
+        "payment_intent": null,
+        "reason": "checkpoint_debit",
+        "tenant_id": "8b369f43-5689-50e4-9636-670ae2d2e0ea"
+      },
+      {
+        "channel_id": null,
+        "delta_usd": "-0.017500",
+        "id": "<id:9>",
+        "idempotency_key": "turn:sess_1:sevt_mre_2",
+        "occurred_at": "<time>",
+        "payment_event_id": null,
+        "payment_intent": null,
+        "reason": "checkpoint_debit",
+        "tenant_id": "8b369f43-5689-50e4-9636-670ae2d2e0ea"
+      }
+    ],
+    "thread_sessions": [],
+    "turn_outcomes": [],
+    "usage_events": [
+      {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "channel_id": null,
+        "event_id": "<id:4>",
+        "id": "<id:6>",
+        "input_tokens": 1000,
+        "managed_session_id": "<id:1>",
+        "model": "claude-opus-4-7",
+        "occurred_at": "<time>",
+        "output_tokens": 500,
+        "platform_user_id": "U_AUTHOR",
+        "tenant_id": "8b369f43-5689-50e4-9636-670ae2d2e0ea"
+      },
+      {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "channel_id": null,
+        "event_id": "<id:5>",
+        "id": "<id:7>",
+        "input_tokens": 1000,
+        "managed_session_id": "<id:1>",
+        "model": "claude-opus-4-7",
+        "occurred_at": "<time>",
+        "output_tokens": 500,
+        "platform_user_id": "U_AUTHOR",
+        "tenant_id": "8b369f43-5689-50e4-9636-670ae2d2e0ea"
+      }
+    ]
+  },
+  "effects": [
+    {
+      "operation": "stream",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "session_id": "<id:1>",
+          "timeout": {
+            "connect": 5.0,
+            "pool": 120.0,
+            "read": 120.0,
+            "write": 120.0
+          }
+        }
+      },
+      "platform": "FakeEventsResource",
+      "result": null
+    },
+    {
+      "operation": "send",
+      "payload": {
+        "args": [
+          "sess_1"
+        ],
+        "kwargs": {
+          "events": [
+            {
+              "content": [
+                {
+                  "text": "hi",
+                  "type": "text"
+                }
+              ],
+              "type": "user.message"
+            }
+          ]
+        }
+      },
+      "platform": "FakeEventsResource",
+      "result": null
+    },
+    {
+      "operation": "on_sse_event",
+      "payload": {
+        "args": [
+          {
+            "id": "sevt_mre_1",
+            "is_error": false,
+            "model_request_start_id": "<id:2>",
+            "model_usage": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 1000,
+              "output_tokens": 500,
+              "speed": null
+            },
+            "processed_at": "<time>",
+            "type": "span.model_request_end"
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_render",
+      "payload": {
+        "args": [
+          {
+            "content": [],
+            "error": null,
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": null,
+            "retrying_error": null,
+            "seen_event_ids": [
+              "<id:3>",
+              "<id:4>",
+              "<id:5>"
+            ],
+            "stop_reason": {
+              "type": "end_turn"
+            },
+            "tasks": [],
+            "termination": "completed",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 2000,
+              "output_tokens": 1000
+            }
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_terminal_success",
+      "payload": {
+        "args": [
+          {
+            "content": [],
+            "error": null,
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": null,
+            "retrying_error": null,
+            "seen_event_ids": [
+              "<id:3>",
+              "<id:4>",
+              "<id:5>"
+            ],
+            "stop_reason": {
+              "type": "end_turn"
+            },
+            "tasks": [],
+            "termination": "completed",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 2000,
+              "output_tokens": 1000
+            }
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    }
+  ],
+  "requests": null
+}

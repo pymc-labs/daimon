@@ -1,0 +1,83 @@
+{
+  "database": null,
+  "effects": [
+    {
+      "operation": "stream",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "session_id": "<id:1>",
+          "timeout": {
+            "connect": 5.0,
+            "pool": 120.0,
+            "read": 120.0,
+            "write": 120.0
+          }
+        }
+      },
+      "platform": "FakeEventsResource",
+      "result": null
+    },
+    {
+      "operation": "send",
+      "payload": {
+        "args": [
+          "sess_1"
+        ],
+        "kwargs": {
+          "events": [
+            {
+              "content": [
+                {
+                  "text": "hi",
+                  "type": "text"
+                }
+              ],
+              "type": "user.message"
+            }
+          ]
+        }
+      },
+      "platform": "FakeEventsResource",
+      "result": null
+    },
+    {
+      "operation": "on_terminal_failure",
+      "payload": {
+        "args": [
+          {
+            "content": [],
+            "error": {
+              "error_kind": "TurnError",
+              "kind": "ceiling",
+              "message": "ceiling: this turn stopped responding and was abandoned \u2014 start fresh with a new message"
+            },
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": null,
+            "retrying_error": null,
+            "seen_event_ids": [],
+            "stop_reason": null,
+            "tasks": [],
+            "termination": "ceiling",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          {
+            "error_kind": "TurnError",
+            "kind": "ceiling",
+            "message": "ceiling: this turn stopped responding and was abandoned \u2014 start fresh with a new message"
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    }
+  ],
+  "requests": null
+}

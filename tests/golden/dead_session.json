@@ -1,0 +1,784 @@
+{
+  "database": {
+    "task_continuations": [],
+    "tenant_ledger": [
+      {
+        "channel_id": "199999",
+        "delta_usd": "-0.001050",
+        "id": "<id:6>",
+        "idempotency_key": "turn:sess_parity_test:evt_parity_recover_usage",
+        "occurred_at": "<time>",
+        "payment_event_id": null,
+        "payment_intent": null,
+        "reason": "turn_debit",
+        "tenant_id": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157"
+      },
+      {
+        "channel_id": null,
+        "delta_usd": "100.000000",
+        "id": "<id:7>",
+        "idempotency_key": "trial:b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157",
+        "occurred_at": "<time>",
+        "payment_event_id": null,
+        "payment_intent": null,
+        "reason": "trial",
+        "tenant_id": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157"
+      }
+    ],
+    "thread_sessions": [
+      {
+        "account_id": "00000000-0000-0000-0000-000000000002",
+        "active_turn_channel_id": null,
+        "active_turn_message_id": null,
+        "active_turn_started_at": null,
+        "channel_id": "199999",
+        "created_at": "<time>",
+        "effective_config": {
+          "agent_name": "test-agent",
+          "agent_version": 1,
+          "env_file_id": null,
+          "env_resource_id": null,
+          "env_sha256": null,
+          "environment_id": "<id:11>",
+          "github_mode": "legacy",
+          "ma_agent_id": "<id:9>",
+          "mcp_servers_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "memory_read_only": false,
+          "memory_store_id": null,
+          "model_id": "claude-sonnet-4-6",
+          "repo_branch": null,
+          "repo_mount_path": null,
+          "repo_resource_id": null,
+          "repo_resource_ids": {},
+          "repo_token_issued_at": null,
+          "repo_url": null,
+          "repo_urls": [],
+          "schema_version": 1,
+          "skills_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "system_sha256": null,
+          "tools_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "vault_id": null
+        },
+        "fresh_start_requested_at": null,
+        "github_key_restart_notice": false,
+        "id": "<id:10>",
+        "identity_fingerprint": "fd770a20b20fdf3d37975d592286e5dca83bbae43df0e7fe8a75e9b25efe2299",
+        "ma_agent_id": "<id:9>",
+        "ma_session_id": "<id:4>",
+        "mutable_fingerprint": "4095edf754051cfcb314c64fa5fe8e77959e78aa96ae5dadda8d54d77a735f43",
+        "pending_unsaved_work": null,
+        "platform": "discord",
+        "predecessor_id": "<id:12>",
+        "replaced_by_id": null,
+        "seal_ids": [
+          "200000"
+        ],
+        "status": "live",
+        "tenant_id": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157",
+        "thread_id": "200000",
+        "transfer_file_id": null,
+        "transfer_kind": "history",
+        "updated_at": "<time>",
+        "watermark_message_id": "<id:2>"
+      },
+      {
+        "account_id": "00000000-0000-0000-0000-000000000002",
+        "active_turn_channel_id": null,
+        "active_turn_message_id": null,
+        "active_turn_started_at": null,
+        "channel_id": null,
+        "created_at": "<time>",
+        "effective_config": null,
+        "fresh_start_requested_at": null,
+        "github_key_restart_notice": false,
+        "id": "<id:12>",
+        "identity_fingerprint": null,
+        "ma_agent_id": "<id:9>",
+        "ma_session_id": "<id:13>",
+        "mutable_fingerprint": null,
+        "pending_unsaved_work": null,
+        "platform": "discord",
+        "predecessor_id": null,
+        "replaced_by_id": "<id:10>",
+        "seal_ids": null,
+        "status": "dead",
+        "tenant_id": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157",
+        "thread_id": "200000",
+        "transfer_file_id": null,
+        "transfer_kind": null,
+        "updated_at": "<time>",
+        "watermark_message_id": "<id:14>"
+      }
+    ],
+    "turn_outcomes": [
+      {
+        "account_id": "00000000-0000-0000-0000-000000000002",
+        "agent_id": "<id:9>",
+        "billing_posture": "metered",
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "channel_id": "199999",
+        "cost_usd": "0.0010500000",
+        "duration_ms": 0,
+        "ended_at": "<time>",
+        "error_class": null,
+        "id": "<id:8>",
+        "input_tokens": 100,
+        "model_calls": 1,
+        "model_ids": [
+          "claude-sonnet-4-6"
+        ],
+        "origin": "chat",
+        "output_tokens": 50,
+        "platform": "discord",
+        "reason": "completed",
+        "recovered": true,
+        "release": "0.2.0",
+        "session_id": "<id:4>",
+        "started_at": "<time>",
+        "tenant_id": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157",
+        "thread_id": "200000",
+        "unpriced_calls": 0,
+        "usage_refs": [
+          {
+            "event_id": "<id:5>",
+            "session_id": "<id:4>"
+          }
+        ]
+      }
+    ],
+    "usage_events": [
+      {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "channel_id": "199999",
+        "event_id": "<id:5>",
+        "id": "<id:3>",
+        "input_tokens": 100,
+        "managed_session_id": "<id:4>",
+        "model": "claude-sonnet-4-6",
+        "occurred_at": "<time>",
+        "output_tokens": 50,
+        "platform_user_id": "555000222",
+        "tenant_id": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157"
+      }
+    ]
+  },
+  "effects": [
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/agents",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ],
+          [
+            "include_archived",
+            "false"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": [
+            {
+              "archived_at": null,
+              "created_at": "<time>",
+              "description": null,
+              "id": "ag_parity_test",
+              "mcp_servers": [],
+              "metadata": {
+                "daimon_name": "test-agent",
+                "daimon_tenant": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157"
+              },
+              "model": {
+                "id": "claude-sonnet-4-6",
+                "speed": null
+              },
+              "multiagent": null,
+              "name": "test-agent",
+              "skills": [],
+              "system": null,
+              "tools": [],
+              "type": "agent",
+              "updated_at": "<time>",
+              "version": 1
+            }
+          ],
+          "next_page": null
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/environments",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ],
+          [
+            "include_archived",
+            "false"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": [
+            {
+              "archived_at": null,
+              "config": {
+                "networking": {
+                  "type": "unrestricted"
+                },
+                "packages": {
+                  "apt": [],
+                  "cargo": [],
+                  "gem": [],
+                  "go": [],
+                  "npm": [],
+                  "pip": [],
+                  "type": null
+                },
+                "type": "cloud"
+              },
+              "created_at": "<time>",
+              "description": "",
+              "id": "env_parity_test",
+              "metadata": {
+                "daimon_name": "test-env",
+                "daimon_tenant": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157"
+              },
+              "name": "test-env",
+              "scope": null,
+              "type": "environment",
+              "updated_at": "<time>"
+            }
+          ],
+          "next_page": null
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/agents/ag_parity_test",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "archived_at": null,
+          "created_at": "<time>",
+          "description": null,
+          "id": "ag_parity_test",
+          "mcp_servers": [],
+          "metadata": {
+            "daimon_name": "test-agent",
+            "daimon_tenant": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157"
+          },
+          "model": {
+            "id": "claude-sonnet-4-6",
+            "speed": null
+          },
+          "multiagent": null,
+          "name": "test-agent",
+          "skills": [],
+          "system": null,
+          "tools": [],
+          "type": "agent",
+          "updated_at": "<time>",
+          "version": 1
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/environments/env_parity_test",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "archived_at": null,
+          "config": {
+            "networking": {
+              "type": "unrestricted"
+            },
+            "packages": {
+              "apt": [],
+              "cargo": [],
+              "gem": [],
+              "go": [],
+              "npm": [],
+              "pip": [],
+              "type": null
+            },
+            "type": "cloud"
+          },
+          "created_at": "<time>",
+          "description": "",
+          "id": "env_parity_test",
+          "metadata": {
+            "daimon_name": "test-env",
+            "daimon_tenant": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157"
+          },
+          "name": "test-env",
+          "scope": null,
+          "type": "environment",
+          "updated_at": "<time>"
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "send",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "embeds": [
+            {
+              "color": 3447003,
+              "flags": 0,
+              "footer": {
+                "text": "0s"
+              },
+              "title": "Working on it\u2026",
+              "type": "rich"
+            }
+          ],
+          "view": [
+            {
+              "components": [
+                {
+                  "custom_id": "<id:1>",
+                  "disabled": false,
+                  "label": "Stop",
+                  "style": 2,
+                  "type": 2
+                }
+              ],
+              "type": 1
+            }
+          ]
+        }
+      },
+      "platform": "platform_client",
+      "result": {
+        "message_id": "<id:2>"
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_dead_before_recovery",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "error": {
+            "message": "session gone",
+            "type": "not_found_error"
+          },
+          "type": "error"
+        },
+        "status": 404
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_dead_before_recovery/events/stream",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "error": {
+            "message": "session gone",
+            "type": "not_found_error"
+          },
+          "type": "error"
+        },
+        "status": 404
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_dead_before_recovery/events",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "error": {
+            "message": "session gone",
+            "type": "not_found_error"
+          },
+          "type": "error"
+        },
+        "status": 404
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_dead_before_recovery",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "error": {
+            "message": "session gone",
+            "type": "not_found_error"
+          },
+          "type": "error"
+        },
+        "status": 404
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_parity_test/events/stream",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": "event: agent.message\ndata: {\"id\": \"evt_parity_msg\", \"content\": [{\"text\": \"Hello from the agent!\", \"type\": \"text\"}], \"processed_at\": \"2026-10-09T00:00:00Z\", \"type\": \"agent.message\"}\n\nevent: span.model_request_end\ndata: {\"id\": \"evt_parity_recover_usage\", \"is_error\": false, \"model_request_start_id\": \"start_parity\", \"model_usage\": {\"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0, \"input_tokens\": 100, \"output_tokens\": 50, \"speed\": null}, \"processed_at\": \"2026-10-09T00:00:00Z\", \"type\": \"span.model_request_end\"}\n\nevent: session.status_idle\ndata: {\"id\": \"evt_parity_idle\", \"processed_at\": \"2026-10-09T00:00:00Z\", \"stop_reason\": {\"type\": \"end_turn\"}, \"type\": \"session.status_idle\"}\n\n",
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "events": [
+            {
+              "content": [
+                {
+                  "text": "The workspace this conversation was running in was lost, and this is a new one. Nothing in it came across: no working files, no uncommitted work, and no running processes, notebook kernels or shells.\n\nThe previous session's log could not be read either, so only what was posted in this thread came across.\n\nBefore you continue, say plainly what is missing: name the work that was in progress and the files that no longer exist. Never claim a file, process, server or kernel survived, and never silently redo lost work as though it had been there.\n<turn_controls>\n{\"origin_context_id\": \"00000000-0000-0000-0000-000000000009\", \"is_setup\": false, \"platform\": \"discord\", \"parent_channel_id\": \"199999\", \"thread_id\": \"200000\", \"current_role\": \"user\", \"responder\": {\"name\": \"test-agent\", \"ma_agent_id\": \"ag_parity_test\", \"handle\": \"@daimon\"}, \"configuration_target\": null}\nresponder.handle is how people mention the agent answering here. That handle, responder.name, and any casing of either are the same agent \u2014 never ask whether they are the same, and never treat that difference as target ambiguity. Ask about the target only when a different agent is named.\nUse the explicitly requested target when named; otherwise configure the configuration_target. If is_setup is true and no target is selected, ask which agent to configure before mutation. Only ordinary chat defaults to the responder. Never substitute a recreated namesake for a missing identity. Ask one concise question when the target is missing or ambiguous. Pass expected_ma_agent_id with target-bearing tools. Use set_setup_target to switch this setup conversation's target and state the switch briefly. Pass origin_context_id to credential-request tools and to channel reads (read_channel, read_thread, get_message, list_threads, search_messages). These controls grant no additional mutation or routing permissions.\n</turn_controls>\n<user_query>hello after recovery</user_query>",
+                  "type": "text"
+                }
+              ],
+              "type": "user.message"
+            }
+          ]
+        },
+        "method": "POST",
+        "path": "/v1/sessions/sess_parity_test/events",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": null
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "edit",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "embeds": [
+            {
+              "color": 3447003,
+              "description": "> Hello from the agent!",
+              "flags": 0,
+              "footer": {
+                "text": "0s"
+              },
+              "title": "Working on it\u2026",
+              "type": "rich"
+            }
+          ],
+          "view": [
+            {
+              "components": [
+                {
+                  "custom_id": "<id:1>",
+                  "disabled": false,
+                  "label": "Stop",
+                  "style": 2,
+                  "type": 2
+                }
+              ],
+              "type": 1
+            }
+          ]
+        }
+      },
+      "platform": "platform_client",
+      "result": null
+    },
+    {
+      "operation": "edit",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "embeds": [
+            {
+              "color": 5763719,
+              "fields": [
+                {
+                  "inline": false,
+                  "name": "Details",
+                  "value": "Time: 0s\nCost: $0.001\nTokens: 100 in / 50 out\nBalance: $100.00 left"
+                }
+              ],
+              "flags": 0,
+              "footer": {
+                "text": "test-agent"
+              },
+              "type": "rich"
+            }
+          ],
+          "view": null
+        }
+      },
+      "platform": "platform_client",
+      "result": null
+    },
+    {
+      "operation": "edit",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "allowed_mentions": {
+            "parse": []
+          },
+          "content": "**test-agent**\n\nHello from the agent!",
+          "view": null
+        }
+      },
+      "platform": "platform_client",
+      "result": null
+    },
+    {
+      "operation": "edit",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "allowed_mentions": {
+            "parse": []
+          },
+          "content": "**test-agent**\n\nI lost the workspace this task was running in and started a new one.\nI have what was posted here, but not the earlier conversation.\nAnything unsaved in the old workspace is gone, and nothing that was running came across.\nTell me what to re-check and I'll go from there.\n\nHello from the agent!",
+          "view": null
+        }
+      },
+      "platform": "platform_client",
+      "result": null
+    },
+    {
+      "operation": "add_reaction",
+      "payload": {
+        "args": [
+          "\ud83d\udc4d"
+        ],
+        "kwargs": {}
+      },
+      "platform": "platform_client",
+      "result": null
+    },
+    {
+      "operation": "add_reaction",
+      "payload": {
+        "args": [
+          "\ud83d\udc4e"
+        ],
+        "kwargs": {}
+      },
+      "platform": "platform_client",
+      "result": null
+    },
+    {
+      "operation": "add_reaction",
+      "payload": {
+        "args": [
+          "\ud83d\ude4b"
+        ],
+        "kwargs": {}
+      },
+      "platform": "platform_client",
+      "result": null
+    }
+  ],
+  "requests": null
+}

@@ -1,0 +1,110 @@
+{
+  "database": null,
+  "effects": [
+    {
+      "operation": "stream",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "session_id": "<id:1>",
+          "timeout": {
+            "connect": 5.0,
+            "pool": 120.0,
+            "read": 120.0,
+            "write": 120.0
+          }
+        }
+      },
+      "platform": "FakeEventsResource",
+      "result": {
+        "error_kind": "RateLimitError",
+        "message": "rate limited",
+        "status_code": 429
+      }
+    },
+    {
+      "operation": "on_render",
+      "payload": {
+        "args": [
+          {
+            "content": [],
+            "error": {
+              "cause_kind": "RateLimitError",
+              "error_kind": "TurnError",
+              "kind": "upstream",
+              "message": "upstream: rate limited"
+            },
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": "<time:anchor-14731170s>",
+            "retrying_error": null,
+            "seen_event_ids": [],
+            "stop_reason": null,
+            "tasks": [],
+            "termination": "rate_limited",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_rate_limited",
+      "payload": {
+        "args": [
+          "2026-04-21T12:00:30+00:00"
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_terminal_failure",
+      "payload": {
+        "args": [
+          {
+            "content": [],
+            "error": {
+              "cause_kind": "RateLimitError",
+              "error_kind": "TurnError",
+              "kind": "upstream",
+              "message": "upstream: rate limited"
+            },
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": "<time:anchor-14731170s>",
+            "retrying_error": null,
+            "seen_event_ids": [],
+            "stop_reason": null,
+            "tasks": [],
+            "termination": "rate_limited",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          {
+            "cause_kind": "RateLimitError",
+            "error_kind": "TurnError",
+            "kind": "upstream",
+            "message": "upstream: rate limited"
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    }
+  ],
+  "requests": null
+}
