@@ -124,7 +124,7 @@ Gemini skills are host-stored, immutable text bundle versions, deployed as inlin
 `.agents/skills/<id>/` files when an interaction first creates its workspace.
 Existing pins do not follow later publications. Uploaded artifact bytes remain
 in the injected host storage; UTF-8 uploads can seed inline workspace files.
-Binary output discovery uses the documented Files API workspace tar snapshot.
+Workspace artifact discovery uses the documented Files API workspace tar snapshot.
 Downloads verify the discovered content digest; unavailable or changed files
 produce typed errors. Unsafe, oversized or malformed archives are refused without
 extracting files to disk. Native vaults and workspace-file deletion are unsupported.

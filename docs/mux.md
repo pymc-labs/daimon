@@ -610,7 +610,8 @@ as inline environment sources. Binary uploads are downloadable from host storage
 but binary inline mounts are refused. Conflicting source targets are rejected.
 
 Workspace artifact discovery downloads the current environment's binary tar
-snapshot through the Files API. Pagination keeps a stable discovered roster;
+snapshot through the Files API. Its roster includes workspace files and inputs;
+the host selects which files to deliver. Pagination keeps a stable discovered roster;
 downloads fetch a fresh snapshot and require the original file digest. Missing
 workspace snapshots expose `ContinuityLost`; changed or missing files fail visibly.
 Historical per-turn snapshots, native vaults and workspace-file deletion are
