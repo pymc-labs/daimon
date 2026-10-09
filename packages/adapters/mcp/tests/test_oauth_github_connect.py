@@ -70,6 +70,37 @@ def test_routes_not_mounted_when_unconfigured(
     assert "/oauth/github/confirm" not in paths
 
 
+def test_picker_names_owner_type_for_screen_readers() -> None:
+    installations = [
+        oauth_github._Installation(
+            id=index,
+            owner_id=index,
+            owner_login=login,
+            repository_selection="selected",
+            repos=(oauth_github._Repo(index, index, index, f"{login}/repo", True),),
+            owner_type=owner_type,
+        )
+        for index, login, owner_type in (
+            (1, "company", "Organization"),
+            (2, "person", "User"),
+        )
+    ]
+    page = oauth_github._confirmation_page(
+        root="https://mcp.test",
+        state="state",
+        invitation_hash="invitation",
+        secret="secret",
+        cancel_url="https://discord.com",
+        installations=installations,
+        clients_present=False,
+        platform="discord",
+        workspace="Test Server",
+        agent_name="Test Agent",
+    )
+    assert '<span class="web-sr-only">Organization</span>company' in page.body.decode()
+    assert '<span class="web-sr-only">Personal account</span>person' in page.body.decode()
+
+
 @pytest.mark.asyncio
 async def test_pending_installation_request_matches_signed_in_person(
     monkeypatch: pytest.MonkeyPatch,

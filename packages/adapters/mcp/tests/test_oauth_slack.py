@@ -820,17 +820,51 @@ async def test_shared_web_assets_are_served(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         css = await client.get("/web/web.css")
+        versioned_css = await client.get(f"/web/web.css?v={CSS_SHA256}")
+        stale_css = await client.get("/web/web.css?v=old")
+        duplicate_version = await client.get(f"/web/web.css?v={CSS_SHA256}&v=old")
         face = await client.get("/web/daimon-face.png")
         font = await client.get("/web/Inter-Regular.ttf")
-    assert css.status_code == face.status_code == font.status_code == 200
+        icon = await client.get("/web/lucide/search.svg")
+        license_file = await client.get("/web/Lucide-LICENSE.txt")
+        missing = await client.get("/web/missing.css")
+    assert all(
+        response.status_code == 200
+        for response in (
+            css,
+            versioned_css,
+            stale_css,
+            duplicate_version,
+            face,
+            font,
+            icon,
+            license_file,
+        )
+    )
     assert "text/css" in css.headers["content-type"]
     assert b"--primary" in css.content
     assert face.content.startswith(b"\x89PNG")
     assert hashlib.sha256(face.content).hexdigest() == (
         "a3a3305a7d9d3ec4420cdb420d4d27bc0d2f029b618a4a6dc7fb781556a7d73e"
     )
-    for response in (css, face, font):
-        assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert versioned_css.headers["cache-control"] == "public, max-age=31536000, immutable"
+    for response in (css, stale_css, duplicate_version):
+        assert response.headers["cache-control"] == "no-cache"
+    for response in (face, font, icon, license_file):
+        assert response.headers["cache-control"] == "public, max-age=86400"
+    assert missing.status_code == 404
+    assert missing.headers["cache-control"] == "no-cache"
+    for response in (
+        css,
+        versioned_css,
+        stale_css,
+        duplicate_version,
+        face,
+        font,
+        icon,
+        license_file,
+        missing,
+    ):
         assert response.headers["x-content-type-options"] == "nosniff"
 
 

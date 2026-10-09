@@ -442,8 +442,10 @@ def _confirmation_page(
             continue
         parts.append('<div class="gh-repo-owner">')
         owner_icon = "user" if installation.owner_type.lower() == "user" else "building"
+        owner_label = "Personal account" if owner_icon == "user" else "Organization"
         parts.append(
             f'<div class="gh-repo-group">{icon(owner_icon)}'
+            f'<span class="web-sr-only">{owner_label}</span>'
             f"{html.escape(installation.owner_login)}</div>"
         )
         for repo in owned:

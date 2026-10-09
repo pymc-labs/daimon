@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from datetime import timedelta
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs
 
 import httpx
 import structlog
@@ -87,7 +88,7 @@ from daimon.adapters.mcp.tools.tidy import register_tidy_tools
 from daimon.adapters.mcp.tools.timers import register_timer_tools
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_upload_route
-from daimon.adapters.mcp.web_shell import STATIC_DIR
+from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings, load_settings
@@ -113,6 +114,7 @@ from sentry_sdk.integrations.starlette import StarletteIntegration
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
+from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, PlainTextResponse, Response
@@ -196,19 +198,33 @@ async def _web_face(_req: Request) -> FileResponse:
         STATIC_DIR / "daimon-face.png",
         media_type="image/png",
         headers={
-            "Cache-Control": "public, max-age=31536000, immutable",
+            "Cache-Control": "public, max-age=86400",
             "X-Content-Type-Options": "nosniff",
         },
     )
 
 
 class _WebStaticFiles(StaticFiles):
-    """Give bundled, versioned web assets long-lived browser caching."""
+    """Cache CSS by its content hash; refresh unversioned assets daily."""
 
     async def get_response(self, path: str, scope: Scope) -> Response:
-        response = await super().get_response(path, scope)
+        try:
+            response = await super().get_response(path, scope)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            return Response(
+                status_code=404,
+                headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
+            )
         if response.status_code in (200, 304):
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            versions = parse_qs(scope.get("query_string", b""))
+            if path == "web.css" and versions.get(b"v") == [CSS_SHA256.encode()]:
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            elif path == "web.css":
+                response.headers["Cache-Control"] = "no-cache"
+            else:
+                response.headers["Cache-Control"] = "public, max-age=86400"
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
