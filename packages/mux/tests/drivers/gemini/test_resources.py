@@ -389,13 +389,13 @@ def test_snapshot_enforces_compressed_and_expanded_limits(monkeypatch: pytest.Mo
     monkeypatch.setattr("mux.drivers.gemini.resources.MAX_SNAPSHOT_BYTES", len(archive) - 1)
     with pytest.raises(ProviderError, match="snapshot_too_large"):
         parse_snapshot(archive)
-    monkeypatch.setattr("mux.drivers.gemini.resources.MAX_SNAPSHOT_BYTES", 2000)
+    monkeypatch.setattr("mux.drivers.gemini.resources.MAX_SNAPSHOT_BYTES", 20000)
     monkeypatch.setattr("mux.drivers.gemini.resources.MAX_ARTIFACT_BYTES", 999)
     with pytest.raises(ProviderError, match="invalid_snapshot"):
         parse_snapshot(archive)
     monkeypatch.setattr("mux.drivers.gemini.resources.MAX_ARTIFACT_BYTES", 1000)
     monkeypatch.setattr("mux.drivers.gemini.resources.MAX_SNAPSHOT_BYTES", 1999)
-    with pytest.raises(ProviderError, match="invalid_snapshot"):
+    with pytest.raises(ProviderError, match="snapshot_too_large"):
         parse_snapshot(snapshot({"a": b"a" * 1000, "b": b"b" * 1000}))
 
 
@@ -499,3 +499,13 @@ async def test_snapshot_network_failure_returns_typed_error_without_partial_byte
         async for part in ma.artifacts.download(SCOPE, found.data[0].ref):
             emitted.append(part)
     assert exc.value.category == "transient_network" and not emitted
+
+
+def test_snapshot_refuses_directory_payload_before_skipping_it() -> None:
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w") as archive:
+        info = tarfile.TarInfo("directory")
+        info.type, info.size = tarfile.DIRTYPE, 10
+        archive.addfile(info, io.BytesIO(b"1234567890"))
+    with pytest.raises(ProviderError, match="invalid_snapshot"):
+        parse_snapshot(out.getvalue())

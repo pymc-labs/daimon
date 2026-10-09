@@ -614,7 +614,8 @@ snapshot through the Files API. Pagination keeps a stable discovered roster;
 downloads fetch a fresh snapshot and require the original file digest. Missing
 workspace snapshots expose `ContinuityLost`; changed or missing files fail visibly.
 Historical per-turn snapshots, native vaults and workspace-file deletion are
-unsupported. Snapshot parsing limits archive/expanded data to 64 MiB, each file
+unsupported. Snapshot parsing accepts plain tar or gzip-compressed tar, bounds decompression
+before parsing metadata, and limits archive/expanded data to 64 MiB, each file
 to 16 MiB and members to 2048, and rejects traversal, links and duplicate paths.
 The SDK buffers network bytes before these parser limits apply. Host uploads
 also have a 16 MiB limit. This resource support requires injected transactional

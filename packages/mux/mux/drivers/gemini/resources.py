@@ -1,5 +1,6 @@
 """Inline host catalogues and binary workspace snapshots; no fictional native resources."""
 
+import gzip
 import hashlib
 import io
 import tarfile
@@ -26,14 +27,21 @@ def parse_snapshot(body: bytes) -> dict[str, bytes]:
     if len(body) > MAX_SNAPSHOT_BYTES:
         raise ProviderError("upstream", retryable=False, native_code="snapshot_too_large")
     try:
+        if body.startswith(b"\x1f\x8b"):
+            with gzip.GzipFile(fileobj=io.BytesIO(body)) as compressed:
+                body = compressed.read(MAX_SNAPSHOT_BYTES + 1)
+            if len(body) > MAX_SNAPSHOT_BYTES:
+                raise ProviderError("upstream", retryable=False, native_code="snapshot_too_large")
         files: dict[str, bytes] = {}
         total, members = 0, 0
-        with tarfile.open(fileobj=io.BytesIO(body), mode="r:*") as archive:
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r:") as archive:
             for member in archive:
                 members += 1
                 if members > 2048:
                     raise ValueError("too many archive members")
                 if member.isdir():
+                    if member.size != 0:
+                        raise ValueError("directory member carries data")
                     if member.name not in (".", "./"):
                         relative_path(member.name)
                     continue
