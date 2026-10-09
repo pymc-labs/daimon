@@ -113,7 +113,7 @@ async def test_vault_bootstrap_keeps_discovery_then_tenant_writes(case, monkeypa
         "list_vaults",
         "list_credentials",
         "create_vault",
-        "create_credential",
+        "store_credential",
         "update_credential",
     ):
         original = getattr(host, operation)

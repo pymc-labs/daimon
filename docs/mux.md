@@ -414,6 +414,9 @@ snapshots retain public SDK fields and exclude write-only values, including
 nested OAuth refresh and client authentication values. Credential and secret
 file upload failures preserve SDK error classes and status while dropping request
 bodies and authorization headers and redacting echoed secret values.
+This includes escaped multiline values in SDK error messages. Helpers that
+discarded credential-create responses continue to discard them; vault creation
+preserves the original native response fields when the caller uses only its ID.
 
 Files preserve the existing multipart filename, media type and bytes. The
 `anthropic.session_resources@1` driver lists, adds and removes mounts and rotates

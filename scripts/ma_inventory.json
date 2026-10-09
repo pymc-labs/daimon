@@ -5830,8 +5830,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 147,
-      "end": 147,
+      "line": 154,
+      "end": 154,
       "scope": "walk",
       "category": "production",
       "resource": "vaults.list",
@@ -5841,8 +5841,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 194,
-      "end": 194,
+      "line": 203,
+      "end": 203,
       "scope": "credential_walk",
       "category": "production",
       "resource": "vaults.credentials.list",
@@ -5852,8 +5852,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 177,
-      "end": 177,
+      "line": 186,
+      "end": 186,
       "scope": "list",
       "category": "production",
       "resource": "vaults.list",
@@ -5863,8 +5863,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 274,
-      "end": 274,
+      "line": 294,
+      "end": 294,
       "scope": "remove",
       "category": "production",
       "resource": "vaults.credentials.delete",
@@ -5874,8 +5874,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 281,
-      "end": 281,
+      "line": 301,
+      "end": 301,
       "scope": "archive",
       "category": "production",
       "resource": "vaults.archive",
@@ -5885,8 +5885,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 154,
-      "end": 154,
+      "line": 162,
+      "end": 162,
       "scope": "create",
       "category": "production",
       "resource": "vaults.create",
@@ -5896,9 +5896,9 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 210,
-      "end": 212,
-      "scope": "create_credential",
+      "line": 231,
+      "end": 233,
+      "scope": "_send_credential",
       "category": "production",
       "resource": "vaults.credentials.create",
       "call": "self._client.beta.vaults.credentials.create(vault_id=vault.id, **cast(CredentialCreateParams, kwargs))",
@@ -5907,8 +5907,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 231,
-      "end": 233,
+      "line": 251,
+      "end": 253,
       "scope": "update_credential",
       "category": "production",
       "resource": "vaults.credentials.update",
@@ -11917,7 +11917,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 597,
+      "line": 618,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"

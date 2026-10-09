@@ -248,3 +248,38 @@ async def test_same_key_sends_twice_and_sdk_debug_logs_never_keep_material(caplo
     from mux.drivers.anthropic.resources._secrets import _active_materials
 
     assert _active_materials.get() is None
+
+
+async def test_sdk_error_repr_redacts_escaped_multiline_credential():
+    material = "dummy-escaped-secret\nsecond-line"
+    body = {"type": "error", "error": {"type": "invalid_request_error", "message": material}}
+    sdk = ScriptedTransport(
+        deque(
+            [ScriptedReply("POST", "/v1/vaults/vault/credentials", httpx.Response(400, json=body))]
+        )
+    )
+    async with sdk.client() as client:
+        with pytest.raises(APIStatusError) as failure:
+            await compat.create_credential(
+                client,
+                "vault",
+                {
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": "https://example.test/mcp",
+                        "token": material,
+                    }
+                },
+                scope=SCOPE,
+            )
+    displayed = "\n".join(
+        [
+            str(failure.value),
+            repr(failure.value),
+            repr(failure.value.body),
+            "".join(traceback.format_exception(failure.value)),
+        ]
+    )
+    assert "dummy-escaped-secret" not in displayed
+    assert "[redacted]" in displayed
+    sdk.assert_consumed()

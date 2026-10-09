@@ -25,14 +25,22 @@ _active_materials: ContextVar[list[str] | None] = ContextVar(
 )
 
 
+def _material_variants(materials: list[str]) -> list[str]:
+    # SDK messages/logs format JSON bodies with repr; their escaped form must
+    # be removed alongside the original text, including multiline env values.
+    return [
+        variant
+        for material in materials
+        for variant in (material, repr(material)[1:-1], json.dumps(material)[1:-1])
+    ]
+
+
 class _CredentialLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         materials = _active_materials.get()
         if not materials:
             return True
-        variants = list(materials)
-        for material in materials:
-            variants.extend((repr(material)[1:-1], json.dumps(material)[1:-1]))
+        variants = _material_variants(materials)
         record.msg = _redact(record.getMessage(), variants)
         record.args = ()
         if record.exc_info:
@@ -76,6 +84,7 @@ def _redact(value: object, secrets: list[str]) -> object:
 
 
 def _safe_error(error: AnthropicError, secrets: list[str]) -> AnthropicError:
+    secrets = _material_variants(secrets)
     # SDK request objects hold credential bodies and authorization headers.
     # Retain method/path/status/request-id and today's message unless it echoes
     # a credential, but never retain that request's values in the cause.

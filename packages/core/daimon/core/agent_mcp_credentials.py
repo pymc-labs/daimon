@@ -47,7 +47,7 @@ from daimon.core.mcp_vault import (
     hold_agent_vault_lock,
 )
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import create_credential, list_credentials, update_credential
+from daimon.core.mux_compat import list_credentials, store_credential, update_credential
 from daimon.core.stores import agent_mcp_credentials as cred_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from mux.contracts.ids import Scope
@@ -319,7 +319,7 @@ async def _mirror_one(
         return
     if found is None:
         try:
-            await create_credential(
+            await store_credential(
                 client,
                 vault_id,
                 {

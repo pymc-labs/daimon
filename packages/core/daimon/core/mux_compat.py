@@ -586,6 +586,27 @@ async def create_credential(
         secrets.clear()
 
 
+async def store_credential(
+    client: AsyncAnthropic, vault_id: str, payload: Mapping[str, object], *, scope: Scope
+) -> None:
+    """Keep the original write paths that discarded the SDK create response."""
+    from mux.drivers.anthropic.credential_schemas import CredentialCreate
+
+    refs, secrets = _credential_refs(payload)
+    try:
+        backend, port = _vault_port(client, scope=scope, vault_id=vault_id, secrets=secrets)
+        await legacy_call(
+            port.store_credential(
+                scope,
+                resource_ref(backend, "vault", vault_id, scope=scope),
+                CredentialCreate.model_validate(refs),
+                key=str(uuid4()),
+            )
+        )
+    finally:
+        secrets.clear()
+
+
 async def update_credential(
     client: AsyncAnthropic,
     vault_id: str,

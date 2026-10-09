@@ -30,11 +30,11 @@ from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_r
 from daimon.core.mcp_auth import mint_jwt
 from daimon.core.mcp_server_url import same_mcp_url
 from daimon.core.mux_compat import (
-    create_credential,
     create_vault,
     delete_credential,
     list_credentials,
     list_vaults,
+    store_credential,
     update_credential,
 )
 from mux.contracts.ids import Scope
@@ -209,7 +209,7 @@ async def _ensure_agent_mcp_vault_locked(
         url_mismatch = not has_matching_url
         if url_mismatch:
             # No credential for the current URL yet — create fresh.
-            await create_credential(
+            await store_credential(
                 client,
                 oldest.id,
                 {
@@ -238,7 +238,7 @@ async def _ensure_agent_mcp_vault_locked(
         secret=jwt_secret,
         now=now,
     )
-    await create_credential(
+    await store_credential(
         client,
         vault.id,
         {
@@ -388,7 +388,7 @@ async def add_github_copilot_credential(
         for duplicate_id in existing[1:]:
             await delete_credential(client, vault_id, duplicate_id, scope=scope)
     else:
-        await create_credential(
+        await store_credential(
             client,
             vault_id,
             {
@@ -471,7 +471,7 @@ async def add_external_mcp_credential(
         for credential_id in stale:
             await delete_credential(client, vault_id, credential_id, scope=scope)
 
-        await create_credential(
+        await store_credential(
             client,
             vault_id,
             {

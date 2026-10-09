@@ -53,6 +53,9 @@ class Vaults(CoreVaults, Protocol):
     async def create_credential(
         self, scope: Scope, vault: ResourceRef, config: CredentialCreate, *, key: str
     ) -> CredentialRecord: ...
+    async def store_credential(
+        self, scope: Scope, vault: ResourceRef, config: CredentialCreate, *, key: str
+    ) -> None: ...
     async def update_credential(
         self,
         scope: Scope,
@@ -93,7 +96,11 @@ class AnthropicVaults:
         self._secrets = secrets or unavailable_secret
         self._authorization = authorization
 
-    def _vault(self, scope: Scope, item: BetaManagedAgentsVault) -> VaultRecord:
+    def _vault(self, scope: Scope, item: object, *, display_name: str = "") -> VaultRecord:
+        if not isinstance(item, BetaManagedAgentsVault):
+            # Existing callers can consume only the id of a create response.
+            # Keep its original fields in native; neutral metadata is optional.
+            item = BetaManagedAgentsVault.model_construct(**vars(item))
         check_record(scope, item.id, item.metadata)
         return VaultRecord(
             ref=ResourceRef(
@@ -104,9 +111,9 @@ class AnthropicVaults:
                 tenant_id=scope.tenant_id,
                 account_id=scope.account_id,
             ),
-            name=item.display_name,
+            name=getattr(item, "display_name", None) or display_name,
             revision=Revision(local=0),
-            created_at=item.created_at,
+            created_at=getattr(item, "created_at", None) or datetime(1970, 1, 1, tzinfo=UTC),
             native=cast(
                 JsonValue,
                 item.model_dump(
@@ -151,7 +158,9 @@ class AnthropicVaults:
     async def create(self, scope: Scope, display_name: str, *, key: str) -> VaultRecord:
         authorize(self._authorization, scope, "vault")
         return self._vault(
-            scope, await provider_call(self._client.beta.vaults.create(display_name=display_name))
+            scope,
+            await provider_call(self._client.beta.vaults.create(display_name=display_name)),
+            display_name=display_name,
         )
 
     async def ensure(self, scope: Scope, name: str, *, key: str) -> Vault:
@@ -201,9 +210,21 @@ class AnthropicVaults:
     async def create_credential(
         self, scope: Scope, vault: ResourceRef, config: CredentialCreate, *, key: str
     ) -> CredentialRecord:
+        return self._credential(await self._send_credential(scope, vault, config))
+
+    async def store_credential(
+        self, scope: Scope, vault: ResourceRef, config: CredentialCreate, *, key: str
+    ) -> None:
+        # These host paths discarded the SDK create response before M0.
+        # Preserve that consumption rather than requiring unused metadata.
+        await self._send_credential(scope, vault, config)
+
+    async def _send_credential(
+        self, scope: Scope, vault: ResourceRef, config: CredentialCreate
+    ) -> BetaManagedAgentsCredential:
         authorize(self._authorization, scope, "vault", vault.id)
         check_ref(scope, vault, self._account_scope_id, "vault")
-        item = await credential_request(
+        return await credential_request(
             scope,
             config,
             self._secrets,
@@ -211,7 +232,6 @@ class AnthropicVaults:
                 vault_id=vault.id, **cast(CredentialCreateParams, kwargs)
             ),
         )
-        return self._credential(item)
 
     async def update_credential(
         self,

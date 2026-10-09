@@ -38,11 +38,11 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import (
     archive_session,
     archive_vault,
-    create_credential,
     create_vault,
     delete_credential,
     list_credentials,
     rotate_session_repo_token,
+    store_credential,
     update_credential,
 )
 from daimon.core.stores.github_access import (
@@ -169,7 +169,7 @@ async def create_session_vault(
     vault = await create_vault(anthropic, f"github-session:{uuid.uuid4()}", scope=scope)
     try:
         if public_url is not None and jwt_secret is not None and account_id is not None:
-            await create_credential(
+            await store_credential(
                 anthropic,
                 vault.id,
                 {
@@ -468,7 +468,7 @@ async def add_app_credentials(
                 scope=scope,
             )
         else:
-            await create_credential(
+            await store_credential(
                 anthropic,
                 vault_id,
                 {
