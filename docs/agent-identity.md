@@ -239,7 +239,7 @@ Named-agent routing is tracked separately from this identity work.
    recording + manifest.
 2. Discord webhook sender, fallback, reply gating.
 3. Panel avatar controls on Slack and Discord; Teams prefix.
-4. Authored reply routing (after #409).
+4. Authored reply routing through named-agent admission.
 
 Each PR merges to main and is checked on staging; screenshots come from a
 human click-through, since no bot can see the rendering. Staging cases beyond

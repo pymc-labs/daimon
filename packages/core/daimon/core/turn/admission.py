@@ -57,6 +57,7 @@ from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
     MAResolverMissError,
     resolve_agent,
@@ -225,6 +226,7 @@ async def admit(
     requested_agent_name: str | None = None,
     requested_agent_id: str | None = None,
     requested_agent_ids: Sequence[str] = (),
+    authored_agent_id: uuid.UUID | None = None,
 ) -> Admission:
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
@@ -251,6 +253,7 @@ async def admit(
                 requested_agent_name=requested_agent_name,
                 requested_agent_id=requested_agent_id,
                 requested_agent_ids=requested_agent_ids,
+                authored_agent_id=authored_agent_id,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -279,6 +282,7 @@ async def admit_impl(
     requested_agent_name: str | None = None,
     requested_agent_id: str | None = None,
     requested_agent_ids: Sequence[str] = (),
+    authored_agent_id: uuid.UUID | None = None,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool.
 
@@ -389,8 +393,11 @@ async def admit_impl(
             and thread_id is not None
             else config
         )
+    explicit_selection = bool(
+        requested_agent_name is not None or requested_agent_id is not None or requested_agent_ids
+    )
     named_agent = None
-    if requested_agent_name is not None or requested_agent_id is not None or requested_agent_ids:
+    if explicit_selection or authored_agent_id is not None:
         here = channel_permissions(
             policy,
             channel_id=thread_id or channel_id,
@@ -428,22 +435,47 @@ async def admit_impl(
             is None
             or agent_home == here.home
         ]
-        requested_ids = tuple(
-            dict.fromkeys(
-                (*requested_agent_ids, *((requested_agent_id,) if requested_agent_id else ()))
-            )
-        )
         by_id = {agent.id: agent for agent in visible}
-        if any(agent_id not in by_id for agent_id in requested_ids):
-            raise NamedAgentRefused(kind="unavailable")
-        by_name = matching_agent(visible, requested_agent_name) if requested_agent_name else None
-        selected = {agent_id: by_id[agent_id] for agent_id in requested_ids}
-        if by_name is not None:
-            selected[by_name.id] = by_name
-        if len(selected) > 1:
-            raise NamedAgentRefused(kind="two")
-        named_agent = next(iter(selected.values()), None)
-        if named_agent is not None:
+        selected_agent = None
+        if explicit_selection:
+            requested_ids = tuple(
+                dict.fromkeys(
+                    (*requested_agent_ids, *((requested_agent_id,) if requested_agent_id else ()))
+                )
+            )
+            if any(agent_id not in by_id for agent_id in requested_ids):
+                raise NamedAgentRefused(kind="unavailable")
+            by_name = (
+                matching_agent(visible, requested_agent_name) if requested_agent_name else None
+            )
+            selected = {agent_id: by_id[agent_id] for agent_id in requested_ids}
+            if by_name is not None:
+                selected[by_name.id] = by_name
+            if len(selected) > 1:
+                raise NamedAgentRefused(kind="two")
+            named_agent = selected_agent = next(iter(selected.values()), None)
+        elif authored_agent_id is not None:
+            selected_agent = next(
+                (
+                    agent
+                    for agent in visible
+                    if derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
+                    == authored_agent_id
+                ),
+                None,
+            )
+            if selected_agent is None:
+                reason = (
+                    "hidden"
+                    if any(
+                        derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
+                        == authored_agent_id
+                        for agent in roster
+                    )
+                    else "unavailable"
+                )
+                _log.info("routing.authored_candidate_dropped", reason=reason)
+        if selected_agent is not None:
             async with deps.sessionmaker() as session:
                 live_sessions = (
                     await list_live_thread_sessions(
@@ -452,10 +484,18 @@ async def admit_impl(
                     if thread_id is not None
                     else []
                 )
-            if (
+            bound_elsewhere = (
                 config.thread_binding_id is not None
-                and config.responder_ma_agent_id != named_agent.id
-            ) or any(row.ma_agent_id != named_agent.id for row in live_sessions):
+                and config.responder_ma_agent_id != selected_agent.id
+            )
+            other_session = any(row.ma_agent_id != selected_agent.id for row in live_sessions)
+            if (bound_elsewhere or other_session) and not explicit_selection:
+                _log.info(
+                    "routing.authored_candidate_dropped",
+                    reason="bound_thread" if bound_elsewhere else "other_session",
+                )
+                selected_agent = None
+            if selected_agent is not None and (bound_elsewhere or other_session):
                 current_id = (
                     config.responder_ma_agent_id
                     if config.thread_binding_id
@@ -463,7 +503,7 @@ async def admit_impl(
                         (
                             row.ma_agent_id
                             for row in live_sessions
-                            if row.ma_agent_id != named_agent.id
+                            if row.ma_agent_id != selected_agent.id
                         ),
                         None,
                     )
@@ -472,30 +512,52 @@ async def admit_impl(
                 current_name = current.name if current is not None else "an agent"
                 if config.thread_binding_kind == "setup":
                     raise NamedAgentRefused(
-                        kind="setup", current_name=current_name, named_name=named_agent.name
+                        kind="setup", current_name=current_name, named_name=selected_agent.name
                     )
                 raise NamedAgentRefused(
                     kind="thread",
                     current_name=current_name,
-                    named_name=named_agent.name,
-                    hand_over_agent_id=named_agent.id,
-                    hand_over_agent_name=named_agent.name,
+                    named_name=selected_agent.name,
+                    hand_over_agent_id=selected_agent.id,
+                    hand_over_agent_name=selected_agent.name,
                 )
-            named_permissions = agent_permissions(
-                policy, agent_names(named_agent.name, named_agent.metadata)
-            )
-            if here.home is not None and run_refusal(named_permissions, here) is not None:
-                own = matching_agent(visible, parent_config.agent_name or "")
-                raise NamedAgentRefused(
-                    kind="own", current_name=own.name if own is not None else "this channel's agent"
+            if selected_agent is not None:
+                selected_names = agent_names(selected_agent.name, selected_agent.metadata)
+                named_permissions = agent_permissions(policy, selected_names)
+                if not explicit_selection:
+                    decision = authorize(
+                        policy,
+                        subject=subject,
+                        action=Action.RUN_AGENT,
+                        surface=Surface.DM if is_dm else Surface.CHANNEL,
+                        agent=build_agent_ref(
+                            selected_agent.name, selected_agent.metadata, selected_agent.name
+                        ),
+                        place=Place()
+                        if is_dm
+                        else replace(
+                            build_turn_place(channel_id=channel_id, thread_id=thread_id),
+                            setup_thread=config.thread_binding_kind == "setup",
+                        ),
+                    )
+                    if not decision:
+                        _log.info("routing.authored_candidate_dropped", reason="unavailable")
+                        selected_agent = None
+                elif here.home is not None and run_refusal(named_permissions, here) is not None:
+                    own = matching_agent(visible, parent_config.agent_name or "")
+                    raise NamedAgentRefused(
+                        kind="own",
+                        current_name=own.name if own is not None else "this channel's agent",
+                    )
+            if selected_agent is not None:
+                config = config.model_copy(
+                    update={
+                        "agent_name": selected_agent.metadata.get("daimon_name")
+                        or selected_agent.name,
+                        "agent_name_tier": "named" if explicit_selection else "authored",
+                        "responder_ma_agent_id": selected_agent.id,
+                    }
                 )
-            config = config.model_copy(
-                update={
-                    "agent_name": named_agent.metadata.get("daimon_name") or named_agent.name,
-                    "agent_name_tier": "named",
-                    "responder_ma_agent_id": named_agent.id,
-                }
-            )
     mark("config")
 
     # --- An external caller is never answered in a setup conversation, even

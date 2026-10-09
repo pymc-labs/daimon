@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -20,6 +21,7 @@ from daimon.core.channel_budget_notice import BudgetNotice, drain_budget_notices
 from daimon.core.config import McpSettings
 from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.named_agent import bind_named_thread
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
@@ -662,6 +664,158 @@ async def test_named_agent_uses_the_normal_admission_and_refuses_a_thread_switch
     assert (
         termination_reason(unavailable.value) == TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE
     )
+
+
+async def test_authored_candidate_uses_named_admission_but_explicit_name_wins(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await db_session.commit()
+    default = ma_agent(id="ag_default", name="daimon", tenant_id=tenant.id)
+    planner = ma_agent(id="ag_planner", name="Planner", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", name="default", tenant_id=tenant.id)
+    router = MARouter()
+    router.add_agent_list(default, planner)
+    router.add_agent(default)
+    router.add_agent(planner)
+    router.add_environment_list(env)
+    router.add_environment(env)
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+    args = dict(
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="channel",
+        now=_NOW,
+    )
+    authored_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=planner.id)
+
+    selected = await admit(deps, **args, thread_id="new-thread", authored_agent_id=authored_id)
+    assert selected.agent.id == planner.id
+    assert selected.config.agent_name_tier == "authored"
+    assert await bind_named_thread(
+        db_session_factory,
+        config=selected.config,
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id="channel",
+        thread_id="new-thread",
+        responder_ma_agent_id=selected.agent.id,
+        responder_name=selected.agent.name,
+        creator_account_id=selected.account_id,
+    )
+    assert (await admit(deps, **args, thread_id="new-thread")).agent.id == planner.id
+    explicit = await admit(
+        deps, **args, authored_agent_id=authored_id, requested_agent_name="daimon"
+    )
+    assert explicit.agent.id == default.id
+    assert explicit.config.agent_name_tier == "named"
+    unknown = await admit(
+        deps, **args, authored_agent_id=authored_id, requested_agent_name="unknown"
+    )
+    assert unknown.agent.id == default.id
+
+
+async def test_authored_candidate_drops_silently_when_hidden_unavailable_or_thread_owned(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await db_session.commit()
+    default = ma_agent(id="ag_default", name="daimon", tenant_id=tenant.id)
+    planner = ma_agent(id="ag_planner", name="Planner", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", name="default", tenant_id=tenant.id)
+    router = MARouter()
+    router.add_agent_list(default, planner)
+    router.add_agent(default)
+    router.add_agent(planner)
+    router.add_environment_list(env)
+    router.add_environment(env)
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+    args = dict(
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="channel",
+        now=_NOW,
+    )
+    authored_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=planner.id)
+
+    async with db_session_factory.begin() as session:
+        await make_thread_session(
+            session,
+            tenant=tenant,
+            platform="discord",
+            thread_id="other-session",
+            ma_agent_id=default.id,
+            channel_id="channel",
+        )
+        await create_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="channel",
+            thread_id="bound",
+            responder_ma_agent_id=default.id,
+            responder_name=default.name,
+            kind="handoff",
+        )
+    with patch("daimon.core.turn.admission._log.info") as log:
+        assert (
+            await admit(deps, **args, thread_id="other-session", authored_agent_id=authored_id)
+        ).agent.id == default.id
+        assert (
+            await admit(deps, **args, thread_id="bound", authored_agent_id=authored_id)
+        ).agent.id == default.id
+        drops = [
+            call.kwargs["reason"]
+            for call in log.call_args_list
+            if call.args == ("routing.authored_candidate_dropped",)
+        ]
+        assert drops == ["other_session", "bound_thread"]
+
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                agent_rules={"Planner": AgentRule(runs_in=("another-channel",))}
+            ),
+        )
+    with patch("daimon.core.turn.admission._log.info") as log:
+        assert (await admit(deps, **args, authored_agent_id=authored_id)).agent.id == default.id
+        assert any(
+            call.args == ("routing.authored_candidate_dropped",)
+            and call.kwargs["reason"] == "unavailable"
+            for call in log.call_args_list
+        )
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                channel_rules={"home": ChannelRule(readers="own", writers="own")},
+                agent_rules={"Planner": AgentRule(runs_in=("home",))},
+            ),
+        )
+    with patch("daimon.core.turn.admission._log.info") as log:
+        assert (await admit(deps, **args, authored_agent_id=authored_id)).agent.id == default.id
+        assert any(
+            call.args == ("routing.authored_candidate_dropped",)
+            and call.kwargs["reason"] == "hidden"
+            for call in log.call_args_list
+        )
 
 
 async def test_named_agent_in_an_own_readers_channel_names_its_own_agent(

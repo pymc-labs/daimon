@@ -220,6 +220,7 @@ from daimon.core.named_agent import bind_named_thread, name_after_mention
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.slack_oauth import build_slack_connect_url
+from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role, TaskContinuationRow
 from daimon.core.stores.github_access_requests import AccessRequest
@@ -1978,6 +1979,21 @@ class SlackApp:
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- D-01 admit(). ---
+        authored_agent_id: uuid.UUID | None = None
+        if event.get("thread_ts") and identity_enabled_for(self.runtime.settings, "slack", team_id):
+            try:
+                async with self.runtime.sessionmaker() as session:
+                    root = await get_post(
+                        session,
+                        tenant_id=tenant_id,
+                        platform="slack",
+                        channel_id=channel,
+                        message_id=thread_id,
+                    )
+                    if root is not None:
+                        authored_agent_id = root.agent_id
+            except Exception as exc:
+                log.warning("routing.authored_lookup_failed", error_type=type(exc).__name__)
         try:
             bot_user_id = self._bot_user_ids.get(team_id)
             admission = await admit(
@@ -1996,6 +2012,7 @@ class SlackApp:
                     )
                 ),
                 now=datetime.now(UTC),
+                authored_agent_id=authored_agent_id,
                 requested_agent_name=name_after_mention(
                     str(event.get("text") or ""), f"<@{bot_user_id}>"
                 )

@@ -168,7 +168,14 @@ config). The order is load-bearing and documented as such in the module:
    choices get a request to use one name. A channel with `readers: own` accepts
    only its own agent and names that agent in the refusal. The five refusal
    cases share one copy source: Discord renders a notice card, Slack renders
-   Block Kit and Teams renders an Adaptive Card. On processes running the wake
+   Block Kit and Teams renders an Adaptive Card. With agent identity enabled,
+   a reply to a recorded Discord agent post, or a reply in a thread whose
+   root was posted by an agent, supplies an authored candidate. Slack uses
+   a recorded thread root. An explicit name takes precedence. Admission
+   applies the same visibility and `RUN_AGENT` checks; a candidate that fails
+   them or conflicts with the thread is dropped silently and logged. An
+   admitted candidate gets the same binding when it opens a thread.
+   On processes running the wake
    poller, Discord reconciles
    roles after ready, every ten minutes, within a minute of a policy change,
    after its agent-create and channel-rule panel actions, and when a used role

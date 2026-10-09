@@ -48,8 +48,8 @@ async def bind_named_thread(
     responder_name: str,
     creator_account_id: uuid.UUID,
 ) -> bool:
-    """Keep the first named responder for later turns through the handoff binding path."""
-    if config.agent_name_tier != "named" or config.thread_binding_id is not None:
+    """Keep the first selected responder for later turns through the handoff binding path."""
+    if config.agent_name_tier not in ("named", "authored") or config.thread_binding_id is not None:
         return False
     async with sessionmaker.begin() as session:
         return await create_named_binding_if_absent(

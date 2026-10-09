@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 
 ConfigField = Literal["agent_name", "environment_name"]
 
-ConfigTier = Literal["named", "thread", "channel", "tenant", "deployment"]
+ConfigTier = Literal["named", "authored", "thread", "channel", "tenant", "deployment"]
 
 
 class DeploymentDefault(BaseModel):

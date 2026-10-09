@@ -2905,6 +2905,37 @@ class DaimonBot(commands.Bot):
         role_mentions = (
             message.role_mentions if isinstance(cast(object, message.role_mentions), list) else []
         )
+        authored_agent_id: uuid.UUID | None = None
+        if identity_enabled_for(self.runtime.settings, "discord", guild_id):
+            try:
+                async with self.runtime.sessionmaker() as session:
+                    reference = message.reference
+                    if (
+                        isinstance(reference, discord.MessageReference)
+                        and reference.type is discord.MessageReferenceType.reply
+                        and reference.message_id is not None
+                    ):
+                        post = await get_post(
+                            session,
+                            tenant_id=tenant_id,
+                            platform="discord",
+                            channel_id=str(message.channel.id),
+                            message_id=str(reference.message_id),
+                        )
+                        if post is not None and post.source != "auto_thread":
+                            authored_agent_id = post.agent_id
+                    if authored_agent_id is None and thread is not None:
+                        root = await get_post(
+                            session,
+                            tenant_id=tenant_id,
+                            platform="discord",
+                            channel_id=parent_channel_id,
+                            message_id=str(thread.id),
+                        )
+                        if root is not None and root.source == "auto_thread":
+                            authored_agent_id = root.agent_id
+            except Exception as exc:
+                log.warning("routing.authored_lookup_failed", error_type=type(exc).__name__)
         try:
             if role_mentions:
                 try:
@@ -2935,6 +2966,7 @@ class DaimonBot(commands.Bot):
                 category_id=category_id,
                 category_unresolved=category_unresolved,
                 requested_agent_ids=[row.ma_agent_id for row in selected_roles],
+                authored_agent_id=authored_agent_id,
                 requested_agent_name=name_after_mention(message.content, direct_mention.group(0))
                 if direct_mention is not None
                 else None,

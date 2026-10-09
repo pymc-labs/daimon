@@ -2547,6 +2547,55 @@ class TestUnpromptedAdmission:
         admission.assert_awaited_once()
         assert admission.await_args.kwargs["requested_agent_name"] is None
 
+    async def test_reply_to_recorded_agent_post_passes_authored_candidate(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_thread_message(content="<@999> continue")
+        reference = MagicMock(spec=discord.MessageReference)
+        reference.type = discord.MessageReferenceType.reply
+        reference.message_id = 222
+        message.reference = reference
+        authored_id = uuid.uuid4()
+        with (
+            patch("daimon.adapters.discord.bot.identity_enabled_for", return_value=True),
+            patch("daimon.adapters.discord.bot.get_post", new_callable=AsyncMock) as get_post,
+            patch("daimon.adapters.discord.bot.admit", new_callable=AsyncMock) as admission,
+            pytest.raises(RuntimeError, match="admission reached"),
+        ):
+            get_post.return_value = types.SimpleNamespace(agent_id=authored_id, source="turn")
+            admission.side_effect = RuntimeError("admission reached")
+            await bot._orchestrate(message, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
+        assert admission.await_args.kwargs["authored_agent_id"] == authored_id
+
+    async def test_recorded_thread_root_supplies_authored_candidate(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_thread_message(content="<@999> continue")
+        message.reference = None
+        authored_id = uuid.uuid4()
+        with (
+            patch("daimon.adapters.discord.bot.identity_enabled_for", return_value=True),
+            patch("daimon.adapters.discord.bot.get_post", new_callable=AsyncMock) as get_post,
+            patch("daimon.adapters.discord.bot.admit", new_callable=AsyncMock) as admission,
+            pytest.raises(RuntimeError, match="admission reached"),
+        ):
+            get_post.return_value = types.SimpleNamespace(
+                agent_id=authored_id, source="auto_thread"
+            )
+            admission.side_effect = RuntimeError("admission reached")
+            await bot._orchestrate(message, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
+        assert get_post.await_args.kwargs["channel_id"] == str(message.channel.parent_id)
+        assert get_post.await_args.kwargs["message_id"] == str(message.channel.id)
+        assert admission.await_args.kwargs["authored_agent_id"] == authored_id
+
     async def test_named_notice_disables_mentions_and_keeps_switch_action(
         self,
         db_session: AsyncSession,
