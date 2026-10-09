@@ -563,6 +563,15 @@ The host accounting bridge must establish coverage before summing overlapping
 grains. Production metadata storage is still injected: its transaction mechanism
 must avoid retaining database connections during provider I/O.
 
+The explicit offline Gemini conformance adapter currently executes C03, C06,
+C07, C13, C15 and C16 against the actual driver and injected test store. C13
+proves that store's binding CAS, rather than production host registration.
+Other provider scenarios carry concrete draft reasons; until the runner's
+typed adapter-PENDING seam lands, those scenarios fail rather than certify.
+Host-owned probes retain their existing pending results. No real transport is
+discovered or invoked by registering this adapter. Broken-driver checks reject
+public raw handles and null usage incorrectly converted to zero.
+
 ## OpenAI driver core
 
 The unwired `mux.drivers.openai` implementation uses OpenAI Agents API sessions
