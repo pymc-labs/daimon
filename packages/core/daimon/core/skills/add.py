@@ -47,6 +47,8 @@ from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_dis
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import create_skill, publish_skill_version, retrieve_agent, update_agent
 from daimon.core.skill_zip import MAX_FILES, MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.fetch import fetch_repo
 from daimon.core.skills.ingest import (
@@ -296,7 +298,9 @@ async def add_agent_skill(
             name=preview.name,
             own_skill_id=skill_id,
         )
-        fresh = await client.beta.agents.retrieve(agent.id)
+        fresh = await retrieve_agent(
+            client, agent.id, scope=resource_scope(tenant_id=str(tenant_id))
+        )
         await recheck(fresh)
         if skill_id is not None:
             # After the fresh read, right before the version push: another
@@ -310,17 +314,25 @@ async def add_agent_skill(
                 skill_id=skill_id,
             )
         if skill_id is None:
-            created = await client.beta.skills.create(
+            created = await create_skill(
+                client,
                 display_title=tenant_scoped_display_title(
                     tenant_id=tenant_id, name=preview.name, agent_name=agent_name
                 ),
-                files=[("SKILL.zip", io.BytesIO(bundle.zip_bytes), "application/zip")],
+                data=bundle.zip_bytes,
+                filename="SKILL.zip",
+                media_type="application/zip",
+                scope=resource_scope(tenant_id=str(tenant_id)),
             )
             skill_id, version, action = created.id, created.latest_version, "created"
         else:
-            pushed = await client.beta.skills.versions.create(
-                skill_id=skill_id,
-                files=[("SKILL.zip", io.BytesIO(bundle.zip_bytes), "application/zip")],
+            pushed = await publish_skill_version(
+                client,
+                skill_id,
+                data=bundle.zip_bytes,
+                filename="SKILL.zip",
+                media_type="application/zip",
+                scope=resource_scope(tenant_id=str(tenant_id)),
             )
             version, action = pushed.version, "updated"
 
@@ -467,17 +479,26 @@ async def _attach(
             raise SkillIngestError(f"Uploaded, but not attached: {collision}")
         attached = True
         if any(tool.type == "agent_toolset_20260401" for tool in fresh.tools):
-            return await client.beta.agents.update(fresh.id, version=fresh.version, skills=merged)
+            return await update_agent(
+                client,
+                fresh.id,
+                version=fresh.version,
+                payload={"skills": merged},
+                scope=resource_scope(tenant_id=str(tenant_id)),
+            )
         # A skill needs the base toolset's read tool, or sessions fail to start.
         tools = merge_default_agent_toolset(
             [tool.model_dump(mode="json", exclude_none=True) for tool in fresh.tools]  # type: ignore[arg-type]  # dumped dicts satisfy the Tool TypedDict shape
         )
-        return await client.beta.agents.update(
+        return await update_agent(
+            client,
             fresh.id,
             version=fresh.version,
-            skills=merged,
-            tools=tools,  # type: ignore[arg-type]  # list[dict] satisfies list[Tool] at runtime
+            payload={"skills": merged, "tools": tools},
+            scope=resource_scope(tenant_id=str(tenant_id)),
         )
 
-    await update_agent_with_version_retry(client, agent_id, _apply)
+    await update_agent_with_version_retry(
+        client, agent_id, _apply, scope=resource_scope(tenant_id=str(tenant_id))
+    )
     return attached

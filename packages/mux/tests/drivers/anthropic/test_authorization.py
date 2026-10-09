@@ -27,7 +27,7 @@ def ref(kind, *, tenant="A", account="account-A"):
     )
 
 
-def sdk_client(requests, *, tenant="A", mixed=False):
+def sdk_client(requests, *, tenant="A", mixed=False, next_page=None):
     def respond(request):
         requests.append(request)
         kind = "agent" if "/agents" in request.url.path else "environment"
@@ -36,7 +36,7 @@ def sdk_client(requests, *, tenant="A", mixed=False):
         if request.url.path in {"/v1/agents", "/v1/environments"}:
             other = factory(id="foreign", metadata={"daimon_tenant": "B"}).model_dump(mode="json")
             return httpx.Response(
-                200, json={"data": [row, other] if mixed else [row], "next_page": None}
+                200, json={"data": [row, other] if mixed else [row], "next_page": next_page}
             )
         return httpx.Response(200, json=row)
 
@@ -206,3 +206,16 @@ async def test_bound_authorization_rejects_foreign_create_list_and_walk_before_i
             with pytest.raises(ScopeViolation):
                 await operation
     assert requests == []
+
+
+@pytest.mark.parametrize("kind", ["agent", "environment"])
+async def test_generic_resource_pages_normalize_sdk_empty_cursor(kind):
+    requests = []
+    async with sdk_client(requests, next_page="") as client:
+        driver = backend(client)
+        port = driver.agents if kind == "agent" else driver.environments
+        filters = AgentFilter() if kind == "agent" else EnvironmentFilter()
+        page = await port.list(A, filters=filters, page=PageRequest())
+    assert page.next_cursor is None
+    assert not page.has_more
+    assert len(requests) == 1

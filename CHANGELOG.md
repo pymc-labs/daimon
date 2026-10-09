@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An offline driver-agnostic C01–C18 conformance runner reports explicit pending
   dependencies and includes a test-only reference driver.
 
+- Skill sync, agent forks and channel copies now use the Anthropic resource
+  ports, preserving resource requests and existing authorization and cleanup.
+
 - The defaults resource pipeline now uses Anthropic resource ports in `mux`,
   with offline request-equivalence checks. Existing resource requests,
   reconcile policy, recovery exports and SDK error handling are preserved.

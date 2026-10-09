@@ -145,3 +145,15 @@ class AgentModelConfig(NativeConfig):
     """Payload for anthropic.model_config@1; keep string versus object syntax."""
 
     model: str | ModelConfig
+
+
+class AgentCreateNulls(NativeConfig):
+    """Explicit nulls in a legacy native create, versus neutral spec omission."""
+
+    fields: list[
+        Literal["description", "system", "tools", "mcp_servers", "skills", "metadata", "multiagent"]
+    ]
+
+
+class ClearMultiagent(NativeConfig):
+    clear: Literal[True]

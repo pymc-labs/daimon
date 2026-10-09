@@ -24,7 +24,13 @@ from mux.drivers.anthropic.resources._authorization import (
     visible,
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
-from mux.drivers.anthropic.schemas import AgentModelConfig, agent_tools, multiagent
+from mux.drivers.anthropic.schemas import (
+    AgentCreateNulls,
+    AgentModelConfig,
+    ClearMultiagent,
+    agent_tools,
+    multiagent,
+)
 from mux.errors import ScopeViolation, UnsupportedCapability
 
 
@@ -42,13 +48,13 @@ def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
         payload["model"] = spec.model.id
         if spec.model.options:
             payload["model"] = {"id": spec.model.id, **dict(spec.model.options)}
-    if "mcp_servers" in fields:
+    if "mcp_servers" in fields and (spec.mcp_servers is not None or isinstance(spec, AgentPatch)):
         payload["mcp_servers"] = (
             [{"type": "url", "name": s.name, "url": s.url} for s in spec.mcp_servers]
             if spec.mcp_servers is not None
             else None
         )
-    if "skills" in fields:
+    if "skills" in fields and (spec.skills is not None or isinstance(spec, AgentPatch)):
         payload["skills"] = (
             [
                 {
@@ -61,7 +67,7 @@ def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
             if spec.skills is not None
             else None
         )
-    if "tools" in fields:
+    if "tools" in fields and (spec.tools is not None or isinstance(spec, AgentPatch)):
         payload["tools"] = (
             [tool_payload(tool) for tool in spec.tools] if spec.tools is not None else None
         )
@@ -69,7 +75,11 @@ def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
         extensions = tuple((spec.extensions or {}).values())
     else:
         extensions = spec.extensions or ()
+    seen: set[str] = set()
     for extension in extensions:
+        if extension.namespace in seen:
+            raise ValueError(f"duplicate agent extension {extension.namespace!r}")
+        seen.add(extension.namespace)
         if extension.namespace == "anthropic.agent_tools":
             payload["tools"] = agent_tools(extension).model_dump(mode="json", exclude_unset=True)[
                 "tools"
@@ -83,9 +93,20 @@ def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
                 )
             )
         elif extension.namespace == "anthropic.multiagent":
-            payload["multiagent"] = multiagent(extension).model_dump(
-                mode="json", exclude_unset=True
-            )
+            if extension.version != 1:
+                raise ValueError("expected anthropic.multiagent@1")
+            if "clear" in extension.value:
+                ClearMultiagent.model_validate(dict(extension.value))
+                payload["multiagent"] = None
+            else:
+                payload["multiagent"] = multiagent(extension).model_dump(
+                    mode="json", exclude_unset=True
+                )
+        elif extension.namespace == "anthropic.agent_create_nulls":
+            if extension.version != 1 or not isinstance(spec, AgentSpec):
+                raise ValueError("expected anthropic.agent_create_nulls@1 on a create")
+            nulls = AgentCreateNulls.model_validate(dict(extension.value))
+            payload.update({name: None for name in nulls.fields})
         else:
             raise ValueError(f"unsupported agent extension {extension.namespace!r}")
     return payload
@@ -208,7 +229,7 @@ class AnthropicAgents:
                 if visible(scope, item.metadata)
                 and (filters.name is None or item.name == filters.name)
             ),
-            next_cursor=result.next_page,
+            next_cursor=result.next_page or None,
             has_more=bool(result.next_page),
         )
 

@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import tempfile
 import time
 import uuid
@@ -67,6 +66,14 @@ from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import InstallationLookup, resolve_skill_sync_token
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import (
+    create_skill,
+    delete_skill,
+    publish_skill_version,
+    retrieve_agent,
+    update_agent,
+)
 from daimon.core.skill_sync.bundler import (
     DEFAULT_MAX_TARBALL_DECOMPRESSED_BYTES,
     MAX_TARBALL_MEMBERS,
@@ -93,6 +100,7 @@ from daimon.core.stores.user_skills import (
     load_user_skill,
     upsert_user_skill,
 )
+from mux.errors import ScopeViolation
 from pydantic import BaseModel, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -115,7 +123,15 @@ async def _get_sync_target_agent(
             anthropic_client, tenant_id=tenant_id, name=agent_name
         )
 
-    agent = await anthropic_client.beta.agents.retrieve(target_ma_agent_id)
+    try:
+        agent = await retrieve_agent(
+            anthropic_client, target_ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id))
+        )
+    except ScopeViolation:
+        raise DaimonError(
+            f"bound skill sync target {target_ma_agent_id} is archived or outside "
+            f"tenant {tenant_id}"
+        ) from None
     if agent.archived_at is not None or (agent.metadata or {}).get(MA_METADATA_KEY_TENANT) != str(
         tenant_id
     ):
@@ -357,9 +373,13 @@ async def _process_one(
                 f"on this agent. Rename the skill (e.g. {pending.name}-2) and re-sync."
             )
         try:
-            created = await anthropic_client.beta.skills.create(
+            created = await create_skill(
+                anthropic_client,
                 display_title=display_title,
-                files=[("SKILL.zip", io.BytesIO(zip_bytes), "application/zip")],
+                data=zip_bytes,
+                filename="SKILL.zip",
+                media_type="application/zip",
+                scope=resource_scope(tenant_id=str(tenant_id)),
             )
             anthropic_id = created.id
             latest_version = created.latest_version
@@ -391,9 +411,13 @@ async def _process_one(
                     f"namespace (tenant={str(tenant_id)[:8]}, recovered.display_title="
                     f"{recovered.display_title!r}); push refused (#138)"
                 ) from err
-            resp = await anthropic_client.beta.skills.versions.create(
-                skill_id=recovered.id,
-                files=[("SKILL.zip", io.BytesIO(zip_bytes), "application/zip")],
+            resp = await publish_skill_version(
+                anthropic_client,
+                recovered.id,
+                data=zip_bytes,
+                filename="SKILL.zip",
+                media_type="application/zip",
+                scope=resource_scope(tenant_id=str(tenant_id)),
             )
             anthropic_id = recovered.id
             latest_version = resp.version
@@ -401,9 +425,13 @@ async def _process_one(
                 report.updated += 1
     else:
         # Version-create path.
-        resp = await anthropic_client.beta.skills.versions.create(
-            skill_id=existing.anthropic_id,
-            files=[("SKILL.zip", io.BytesIO(zip_bytes), "application/zip")],
+        resp = await publish_skill_version(
+            anthropic_client,
+            existing.anthropic_id,
+            data=zip_bytes,
+            filename="SKILL.zip",
+            media_type="application/zip",
+            scope=resource_scope(tenant_id=str(tenant_id)),
         )
         anthropic_id = existing.anthropic_id
         latest_version = resp.version
@@ -779,7 +807,11 @@ async def sync_agent_skills(
         # an orphan on the next sync (convergent retry, no new state).
         if row.anthropic_id is not None:
             try:
-                await anthropic_client.beta.skills.delete(row.anthropic_id)
+                await delete_skill(
+                    anthropic_client,
+                    row.anthropic_id,
+                    scope=resource_scope(tenant_id=str(tenant_id)),
+                )
             except anthropic.APIStatusError as err:
                 if err.status_code == 404:
                     # Already gone upstream — converges exactly like a
@@ -902,20 +934,25 @@ async def sync_agent_skills(
             tools_arg = merge_default_agent_toolset(
                 [t.model_dump(mode="json", exclude_none=True) for t in fresh.tools]  # type: ignore[arg-type]  # dumped dicts satisfy Tool TypedDict shape
             )
-            return await anthropic_client.beta.agents.update(
+            return await update_agent(
+                anthropic_client,
                 fresh.id,
                 version=fresh.version,
-                skills=union_list,
-                tools=tools_arg,  # type: ignore[arg-type]  # list[dict] satisfies list[Tool] at runtime
+                payload={"skills": union_list, "tools": tools_arg},
+                scope=resource_scope(tenant_id=str(tenant_id)),
             )
-        return await anthropic_client.beta.agents.update(
+        return await update_agent(
+            anthropic_client,
             fresh.id,
             version=fresh.version,
-            skills=union_list,
+            payload={"skills": union_list},
+            scope=resource_scope(tenant_id=str(tenant_id)),
         )
 
     try:
-        updated = await update_agent_with_version_retry(anthropic_client, agent.id, _apply)
+        updated = await update_agent_with_version_retry(
+            anthropic_client, agent.id, _apply, scope=resource_scope(tenant_id=str(tenant_id))
+        )
     except DefaultsError as err:
         # Mount-name collision (or truncated skills view) — uploads landed;
         # only the attach binding is refused. Same partial-failure surface as

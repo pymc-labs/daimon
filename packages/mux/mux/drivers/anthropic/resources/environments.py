@@ -147,7 +147,7 @@ class AnthropicEnvironments:
                 if visible(scope, item.metadata)
                 and (filters.name is None or item.name == filters.name)
             ),
-            next_cursor=result.next_page,
+            next_cursor=result.next_page or None,
             has_more=bool(result.next_page),
         )
 

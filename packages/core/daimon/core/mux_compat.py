@@ -99,12 +99,11 @@ def _agent_values(payload: Mapping[str, object]) -> dict[str, object]:
         }
     if "multiagent" in result:
         value = result.pop("multiagent")
-        if value is not None:
-            extensions["anthropic.multiagent"] = {
-                "namespace": "anthropic.multiagent",
-                "version": 1,
-                "value": value,
-            }
+        extensions["anthropic.multiagent"] = {
+            "namespace": "anthropic.multiagent",
+            "version": 1,
+            "value": value if value is not None else {"clear": True},
+        }
     if "mcp_servers" in result and result["mcp_servers"] is not None:
         result["mcp_servers"] = [
             {"name": _mapping(s)["name"], "url": _mapping(s)["url"]}
@@ -126,8 +125,18 @@ def _agent_values(payload: Mapping[str, object]) -> dict[str, object]:
 
 def agent_spec(payload: Mapping[str, object]) -> AgentSpec:
     values = _agent_values(payload)
-    if "extensions" in values:
-        values["extensions"] = tuple(_mapping(values["extensions"]).values())
+    extensions = list(_mapping(values.pop("extensions", {})).values())
+    nulls = [
+        name
+        for name in ("description", "system", "tools", "mcp_servers", "skills", "metadata")
+        if name in payload and payload[name] is None
+    ]
+    if nulls:
+        extensions.append(
+            {"namespace": "anthropic.agent_create_nulls", "version": 1, "value": {"fields": nulls}}
+        )
+    if extensions:
+        values["extensions"] = tuple(extensions)
     return AgentSpec.model_validate(values)
 
 
