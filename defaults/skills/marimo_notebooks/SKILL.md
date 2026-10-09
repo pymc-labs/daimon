@@ -19,6 +19,12 @@ on the first cell, is worse than no notebook — it looks authoritative while
 being hollow. The three rules below exist to prevent exactly that. Read them
 before you build anything.
 
+**Build every notebook in PyMC Labs style.** Write only your content cells and
+assemble the notebook with the `pymc-artifact-style` notebook builder (its
+"Marimo notebooks" section): `python <pymc-artifact-style>/notebook/build_notebook.py
+content.py -o nb.py`. Styling only the charts leaves the page in marimo's
+defaults.
+
 ## Scratch notebook or permanent blog
 
 One tool publishes both. `create_notebook_upload_url(slug=..., permanent=..., ttl_days=...)`:

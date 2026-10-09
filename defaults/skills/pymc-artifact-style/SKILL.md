@@ -260,6 +260,66 @@ do not recolor or regenerate them.
 The report defaults to the dark logo and a plain cover. The older logo files
 and cover artwork are no longer part of the style and are not bundled.
 
+## Marimo notebooks — build with the bundled style cell
+
+A notebook gets the same identity as a report, implemented for marimo:
+Inter and JetBrains Mono embedded as `@font-face`, navy text, aqua rules,
+the dark wordmark header, key-number cards, callouts, rules-only tables and
+charts in this palette. Marimo's theme variables (`--heading-font`,
+`--text-font`, `--monospace-font`, `--primary`) are overridden, so headings
+do not fall back to marimo's serif and sliders are teal. Follow
+`marimo_notebooks` for everything else: alignment, real data, cell dataflow,
+publishing and attachments.
+
+The style cell is ~200 KiB with fonts and logo embedded. **Never paste it or
+read it into the conversation.** Write only your content cells and let the
+build script assemble the notebook:
+
+```bash
+S=<this skill's directory>/notebook
+cp $S/example_content.py content.py                 # a working example to start from
+mkdir -p data && cp $S/mmm_example.csv data/        # only to run the example itself
+# edit content.py: keep the @app.cell structure, replace the content
+python $S/build_notebook.py content.py -o nb.py --title "Tab title" [--width medium]
+marimo export html nb.py -o /tmp/check.html         # every cell must execute
+```
+
+Then publish `nb.py` with `marimo_notebooks`. The build needs only the
+standard library; the notebook needs marimo, matplotlib, numpy and pandas,
+which the notebook host ships. Do not add a PEP 723 header for the style.
+
+`content.py` holds `@app.cell` functions only (no `import marimo`, no
+`app = ...`, no `__main__` block; the build adds them). The style cell
+defines `mo np pd plt C CYCLE SEQ DIV badge callout figure header kpis table`:
+declare the ones a cell uses in its signature, e.g.
+`def _(mo, C, figure, plt, df):`, and never redefine them.
+
+Layout, top to bottom:
+
+1. `header(title, subtitle, badges=[...], accent="Word")` as the first cell.
+   It also injects the page CSS, so it must render first. `accent` sets one
+   word in the italic accent. Badges: teal for status, orange for caveats
+   such as "Example data", indigo for neutral tags.
+2. `callout(...)` for data provenance or the main caveat; `kind="warn"`
+   (peach) for anything the reader must not miss, such as example data.
+3. `kpis([(value, label), ...])`: 3 to 4 key numbers.
+4. Sections as `mo.md("## Heading\n\ntext")`, unnumbered: prose, then the
+   controls in an `mo.hstack`, then the chart they drive.
+5. Charts through `figure(fig, caption)`: an inline 200 dpi PNG with the
+   fonts baked in. The chart rules above apply unchanged; `CYCLE` is the
+   series order, `SEQ` and `DIV` the sequential and diverging colormaps.
+6. Tables through `table(df, fmt="{:,.2f}")`: heavy top and bottom rules, a
+   light header rule, no verticals, as wide as their columns.
+
+Keep it light: no dark theme and no `theme="dark"`. Example data is labelled
+in a warn callout and a badge, and never stated as a finding. If the build
+script is unavailable, apply the palette and type by hand and say the
+notebook is an unbranded fallback.
+
+Marimo widgets live in shadow DOM, so only CSS variables reach them; that is
+why the style sets variables rather than selectors. A headless browser
+rendering a check needs `locale="en-US"`.
+
 ## When the bundled template cannot be used
 
 Match the palette and typography by hand: navy body and headings, aqua rules,
