@@ -229,3 +229,41 @@ async def test_create_rejects_foreign_tenant_stamp_before_io() -> None:
         with pytest.raises(ScopeViolation):
             await port.create(SCOPE, spec(metadata={"daimon_tenant": "foreign"}), key="create")
     assert not transport.requests
+
+
+async def test_list_filters_foreign_tags_and_ungranted_untagged_sessions() -> None:
+    from mux.contracts.ids import PageRequest
+    from mux.contracts.resources import SessionFilter
+
+    transport = ScriptedTransport()
+    transport.queue(
+        ScriptedReply(
+            "GET",
+            "/v1/sessions",
+            httpx.Response(
+                200,
+                json={
+                    "data": [
+                        ma_session(id="allowed").model_dump(mode="json"),
+                        ma_session(id="ungranted").model_dump(mode="json"),
+                        ma_session(id="foreign", metadata={"daimon_tenant": "other"}).model_dump(
+                            mode="json"
+                        ),
+                    ],
+                    "next_page": None,
+                    "prev_page": None,
+                },
+            ),
+        )
+    )
+    async with transport.client() as client:
+        port = AnthropicSessions(
+            client,
+            "org",
+            ResourceAuthorization(
+                SCOPE, frozenset({("session", "allowed"), ("session", "foreign")})
+            ),
+        )
+        page = await port.list(SCOPE, filters=SessionFilter(), page=PageRequest())
+    transport.assert_consumed()
+    assert [session.ref.id for session in page.data] == ["allowed"]

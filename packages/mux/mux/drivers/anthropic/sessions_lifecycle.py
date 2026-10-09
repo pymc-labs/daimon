@@ -32,6 +32,7 @@ from mux.drivers.anthropic.resources._authorization import (
     check_record,
     check_ref,
     visible,
+    visible_grant,
 )
 from mux.drivers.anthropic.resources._errors import provider_call
 from mux.drivers.anthropic.schemas import AgentTool, NativeConfig
@@ -330,7 +331,10 @@ class AnthropicSessions:
         result = await provider_call(self._client.beta.sessions.list(**kwargs))
         return Page(
             data=tuple(
-                self._session(scope, item) for item in result.data if visible(scope, item.metadata)
+                self._session(scope, item)
+                for item in result.data
+                if visible(scope, item.metadata)
+                and visible_grant(self._authorization, scope, "session", item.id)
             ),
             has_more=result.has_next_page(),
             next_cursor=result.next_page if result.has_next_page() else None,
