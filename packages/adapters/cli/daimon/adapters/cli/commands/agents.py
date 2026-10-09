@@ -12,7 +12,7 @@ from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import GUILD_OPTION, JSON_OPTION, TENANT_OPTION, YES_OPTION
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.prompt import confirm_or_abort
-from daimon.adapters.cli.runtime import CliRuntime, build_runtime
+from daimon.adapters.cli.runtime import FACE_WAIT_S, CliRuntime, build_runtime
 from daimon.adapters.cli.tenant import (
     TenantSelector,
     discover_tenant,
@@ -20,6 +20,7 @@ from daimon.adapters.cli.tenant import (
     resolve_tenant_override,
 )
 from daimon.core.agent_fork import copy_agent
+from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort
 from daimon.core.authz import Subject
 from daimon.core.config import load_settings
@@ -304,6 +305,14 @@ async def agents_create(
         public_url=public_url,
         managed=False,
     )
+    await ensure_agent_face(
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        agent_name=spec.name,
+        metadata=None,  # managed=False above: only the default name can make it built-in
+        default_agent_name=rt.deployment_default.agent_name,
+        timeout_s=FACE_WAIT_S,
+    )
     console.print(f"[green]✓ created agent {spec.name!r}[/green]")
 
 
@@ -497,6 +506,15 @@ async def agents_fork(
         public_url=public_url,
         # The CLI is the deployment operator.
         subject=Subject(is_admin=True),
+        default_agent_name=rt.deployment_default.agent_name,
+    )
+    await ensure_agent_face(
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        agent_name=dst,
+        metadata=copy.agent.metadata,
+        default_agent_name=rt.deployment_default.agent_name,
+        timeout_s=FACE_WAIT_S,
     )
     console.print(f"[green]✓ forked agent {src!r} → {dst!r}[/green]")
     if copy.copied_skills:

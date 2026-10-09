@@ -128,6 +128,9 @@ class PanelState:
     # holds the PARENT channel in that case, so both are needed to resolve who
     # answers for the caller exactly as a mention would.
     thread_id: str | None = None
+    # Re-authorize link shown to an admin when identity is on but the bot lacks
+    # Manage Webhooks, so agents answer as Daimon. None hides the line.
+    webhook_fix_url: str | None = None
 
     def select_agent(self, agent: RosterAgent) -> None:
         """Point Details and setup at `agent`, keeping the legacy selection in step.

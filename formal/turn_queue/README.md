@@ -25,7 +25,7 @@ run.
 | `Stop`, `Withdraw` | the card's Stop button sets the turn's cancel event; `TurnTicket.wait` (`turn_queue.py:122`) wakes and calls `leave` |
 | `Expire` | `TurnTicket.wait` after `max_wait_s`; the adapter ends the card with its ordinary error |
 | `Finish` | `release_turn_slot` (`slots.py:89`) at the end of every turn (Discord `_handle_mention`, Slack `_run_thread_turn`, Teams `_run_turn`), and `holding`'s exit, after an answer, a failure, the turn ceiling or Stop |
-| `Restart`, `Recover` | process exit drops the queue; the boot sweep (`turn_card_recovery`, `turn.orphans_found`) retires each card left "working" as "Stopped: Daimon restarted." |
+| `Restart`, `Recover` | process exit drops the queue; the boot sweep (`turn_card_recovery`, `turn.orphans_found`) retires each card left "working" as "Daimon restarted before this request finished." |
 | `Pop` (unsafe only) | a dispatcher that starts the head and pops it after an await |
 | `ChainFollowUp` (unsafe only) | the pre-review drain: a follow-up ran on the slot its thread's first turn claimed |
 | `Arrive` with `FollowUpReusesTicket` (unsafe only) | the pre-review drain: a follow-up reused a ticket that Stop or the max wait had already taken out of the queue |

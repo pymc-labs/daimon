@@ -22,7 +22,7 @@ from daimon.core.agent_post_identity import (
 
 _locks: dict[int, asyncio.Lock] = {}
 _lookup_unavailable_until: dict[int, float] = {}
-_LOOKUP_UNAVAILABLE_SECONDS = 600
+_LOOKUP_UNAVAILABLE_SECONDS = 60
 _CREATE_WAIT_SECONDS = 2.0
 _creation_tasks: dict[int, asyncio.Task[discord.Webhook | None]] = {}
 _created_hooks: dict[int, tuple[int, str]] = {}
@@ -78,6 +78,10 @@ def _fresh_files(files: list[discord.File]) -> list[discord.File]:
             )
         )
     return rebuilt
+
+
+def split_message_content(content: str) -> list[str]:
+    return [content[i : i + 2000] for i in range(0, len(content), 2000)] or [""]
 
 
 async def own_webhooks(
@@ -302,7 +306,7 @@ async def send_agent_message(
         if identity.builtin or not identity_enabled
         else fallback_name_prefix(identity.name, content)
     )
-    chunks = [fallback_content[i : i + 2000] for i in range(0, len(fallback_content), 2000)] or [""]
+    chunks = split_message_content(fallback_content)
     sent = await channel.send(content=chunks[0], files=fallback_files)
     for chunk in chunks[1:]:
         additional = await channel.send(content=chunk, files=[])

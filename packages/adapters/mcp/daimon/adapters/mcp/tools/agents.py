@@ -44,6 +44,7 @@ from daimon.adapters.mcp.tools.setup_target import (
 from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_guidance import apply_credential_guidance
+from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
@@ -491,6 +492,13 @@ async def _create_agent_impl(
     )
     if outcome.anthropic_id is None:
         raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
+    queue_agent_face(
+        runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        agent_name=spec.name,
+        metadata=None,  # managed=False above: only the default name can make it built-in
+        default_agent_name=runtime.deployment_default.agent_name,
+    )
     await _record_creation_channel(runtime, auth, outcome.anthropic_id, origin)
     ma_agent = await retrieve_agent(
         runtime.client,
@@ -927,6 +935,7 @@ async def _fork_agent_impl(
             new_name=new_name,
             public_url=str(public_url) if public_url is not None else None,
             subject=mcp_subject(auth, is_admin=auth.is_admin),
+            default_agent_name=runtime.deployment_default.agent_name,
         )
     except DaimonError as exc:
         raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc

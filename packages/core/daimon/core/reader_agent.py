@@ -209,6 +209,7 @@ async def ensure_reader_variant(
     match = matches[0] if matches else None
 
     if match is None:
+        # No `queue_agent_face`: a reader answers a published report and never posts in chat.
         return await anthropic.beta.agents.create(
             **dump_agent_spec(reader_spec),
             skills=resolved_skills,

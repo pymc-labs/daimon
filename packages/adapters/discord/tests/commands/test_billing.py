@@ -11,7 +11,7 @@ survived the handler's transaction.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 from daimon.adapters.discord.billing_panel.panel import BillingPanelView
@@ -24,6 +24,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.accounts import account_exists
 from daimon.core.stores.identity import find_platform_principal
 from daimon.testing.factories import make_tenant
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -134,3 +135,25 @@ async def test_billing_command_panel_account_id_matches_the_persisted_account(
         "the account id the panel carries into the checkout JWT must be the "
         "persisted principal's account, not a uuid that only ever existed in memory"
     )
+
+
+async def test_billing_command_answers_after_a_database_read_error(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    guild_id = 710000003
+    async with db_session_factory() as session:
+        await make_tenant(session, platform="discord", workspace_id=str(guild_id))
+        await session.commit()
+    interaction = _make_interaction(
+        _make_runtime(db_session_factory), guild_id=guild_id, user_id=44
+    )
+    cog = BillingCog(MagicMock())
+    with patch(
+        "daimon.adapters.discord.commands.billing.load_billing_snapshot",
+        new=AsyncMock(side_effect=SQLAlchemyError("database unavailable")),
+    ):
+        await cog.billing.callback(cog, interaction)  # pyright: ignore[reportArgumentType]
+    interaction.response.defer.assert_awaited_once()
+    # The deferred "thinking" reply gets an answer instead of hanging.
+    interaction.followup.send.assert_awaited_once()
+    assert "Database error" in interaction.followup.send.await_args.args[0]

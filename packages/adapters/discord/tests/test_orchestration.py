@@ -283,17 +283,58 @@ class TestNewThreadCreation:
         message.add_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
         message.remove_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
         message.create_thread = AsyncMock(side_effect=RuntimeError("Discord unavailable"))  # pyright: ignore[reportAttributeAccessIssue]
+        # Typing is best effort: a dropped connection must not stop the open.
+        message.channel.typing = MagicMock(side_effect=ConnectionResetError("reset"))
 
         await bot.on_message(message)
 
-        # The failure is answered with exactly one visible error, never a
-        # channel-level "opening your chat" notice.
-        message.reply.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        error_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
-        assert "rid:" in error_text
+        # The failure is answered with exactly one plain reply, never a
+        # channel-level "opening your chat" notice or a second error.
+        message.create_thread.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        message.reply.assert_awaited_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+            "Couldn't open a thread. @mention Daimon again.", mention_author=False
+        )
+        message.channel.send.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         assert bot.turn_queue.in_flight() == 0
         assert bot.turn_queue.depth() == 0
+        assert bot._processing == set()  # pyright: ignore[reportPrivateUsage]
+
+    @patch(
+        "daimon.adapters.discord.bot.TurnPostRecorder.opened_thread",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("recording failed"),
+    )
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_failure_after_the_thread_exists_is_not_called_a_failed_open(
+        self,
+        mock_resolve: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        _mock_opened: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        runtime = _make_runtime(tenant.id, db_session_factory)
+        bot = make_bot(runtime)
+        message = _make_channel_message()
+        message.reply = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        message.add_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        message.remove_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        opened = MagicMock(spec=discord.Thread)
+        opened.id = 4242
+        message.create_thread = AsyncMock(return_value=opened)  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        message.create_thread.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        message.reply.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         assert bot._processing == set()  # pyright: ignore[reportPrivateUsage]
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -359,6 +400,11 @@ class TestNewThreadCreation:
         deliver.assert_awaited_once()
         assert deliver.await_args.args[1] is thread
         assert deliver.await_args.kwargs["session_id"] == "sess-output"
+        answer = deliver.await_args.kwargs["answer"]
+        assert answer is not None and answer.message_id == 1000, (
+            "the files go onto the answer that carries the summary"
+        )
+        assert "posted" not in deliver.await_args.kwargs
 
     # TODO: migrate to MARouter transport-level fake
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -2802,7 +2848,7 @@ class TestOverCapQueue:
             for call in card.edit.await_args_list
             if call.kwargs.get("embed") is not None
         ]
-        assert "Stopped: Daimon restarted." in titles
+        assert "Daimon restarted before this request finished." in titles
         turn.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await turn

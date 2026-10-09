@@ -280,13 +280,20 @@ def _channel_message(*, guild_id: int, content: str) -> Any:
 
 
 @pytest.mark.parametrize(
-    ("enabled", "content", "expects_naming"),
+    ("enabled", "content", "files", "expected_text"),
     [
-        (True, "<@999> my PyMC model diverges", True),
-        (False, "<@999> my PyMC model diverges", False),
-        (True, "<@999>", False),
+        (True, "<@999> my PyMC model diverges", [], "my PyMC model diverges"),
+        (False, "<@999> my PyMC model diverges", [], None),
+        (True, "<@999>", [], None),
+        (True, "<@999>", ["q3_sales.csv"], "Attached: q3_sales.csv"),
+        (
+            True,
+            "<@999> shorten this",
+            ["brief.pdf"],
+            "Attached: brief.pdf\nshorten this",
+        ),
     ],
-    ids=["enabled", "disabled", "attachment_only"],
+    ids=["enabled", "disabled", "bare_mention", "attachment_only", "text_and_attachment"],
 )
 @patch("daimon.adapters.discord.bot.generate_thread_name", new_callable=AsyncMock)
 @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -305,23 +312,21 @@ async def test_on_message_creates_thread_under_generated_title_only_when_there_i
     db_session_factory: async_sessionmaker[AsyncSession],
     enabled: bool,
     content: str,
-    expects_naming: bool,
+    files: list[str],
+    expected_text: str | None,
 ) -> None:
     """The title is generated with the turn's tenant, author and settings and
     the thread is created under it — no rename, so no "renamed the thread"
     notice. With ``DAIMON_THREAD_NAMING__ENABLED`` off, or a mention that
     carries no text (attachment-only), the metered call is skipped and the
-    static title is used.
+    static title is used. Attached file names are titled too, so a mention
+    with only a file still gets a name.
 
     ``generate_thread_name`` itself is covered above against a real DB; here
     it is patched so this test asserts only what ``on_message`` hands it and
     does with the answer.
     """
-    guild_id = {
-        (True, True): "801000777",
-        (False, False): "801000778",
-        (True, False): "801000779",
-    }[(enabled, expects_naming)]
+    guild_id = str(801000777 + len(content) * 10 + len(files) + (0 if enabled else 5))
     await provision_tenant(
         db_session_factory,
         platform="discord",
@@ -350,6 +355,7 @@ async def test_on_message_creates_thread_under_generated_title_only_when_there_i
     bot = _bot(runtime)
     message = _channel_message(guild_id=int(guild_id), content=content)
     message.id = 8001
+    message.attachments = [SimpleNamespace(filename=name) for name in files]
     message.create_thread.return_value = _thread(thread_id=8001)
 
     await bot.on_message(message)
@@ -357,7 +363,7 @@ async def test_on_message_creates_thread_under_generated_title_only_when_there_i
 
     message.create_thread.assert_awaited_once()
     created_name = message.create_thread.await_args.kwargs["name"]
-    if not expects_naming:
+    if expected_text is None:
         mock_generate_name.assert_not_awaited()
         assert created_name == "Chat with test-agent", (
             "naming off or nothing to title keeps the static title without a model call"
@@ -370,8 +376,8 @@ async def test_on_message_creates_thread_under_generated_title_only_when_there_i
     assert mock_generate_name.await_args is not None, "asserted awaited above"
     handed = mock_generate_name.await_args.kwargs
     assert handed["fallback"] == "Chat with test-agent", "the static title is the fallback"
-    assert handed["message_text"] == "my PyMC model diverges", (
-        "the opening message, minus the bot mention, is what gets titled"
+    assert handed["message_text"] == expected_text, (
+        "the opening message minus the bot mention, after any attached file names, is titled"
     )
     assert handed["message_id"] == 8001, "metering is keyed on the opening message"
     assert (handed["tenant_id"], handed["platform_user_id"]) == (tenant_id, "555"), (

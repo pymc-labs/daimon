@@ -741,3 +741,38 @@ def test_rule_commands_parse_their_flags(
 
     assert run.exit_code == 0, run.output
     assert len(calls) == 1 and expected.items() <= calls[0].items(), calls
+
+
+async def test_rule_set_waits_for_the_copys_face(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hackathon layout copies team agents with this command; the copy's first
+    answer must not race its face, and a background render dies with the process."""
+    tenant_id = await _isolatable(db_session_factory, "discord", GUILD)
+    rt = build_cli_runtime(
+        db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_isolate_settings()
+    )
+    awaited: list[tuple[uuid.UUID, str, float]] = []
+
+    async def ensure(
+        _factory: object,
+        *,
+        tenant_id: uuid.UUID,
+        agent_name: str,
+        timeout_s: float,
+        **_: object,
+    ) -> bool:
+        awaited.append((tenant_id, agent_name, timeout_s))
+        return True
+
+    monkeypatch.setattr(channels_mod, "ensure_agent_face", ensure)
+    named = _discord_channels({CHANNEL: {"guild_id": GUILD, "name": "Team Alpha", "type": 0}})
+    where = {"rt": rt, "console": _console(), "platform": "discord", "workspace_id": GUILD}
+
+    await channels_rule_set(**where, channel_id=CHANNEL, readers="inside")
+    assert awaited == [], "no copy, nothing to wait for"
+    await channels_rule_set(
+        **where, channel_id=CHANNEL, readers="own", copy_from="shared", discord_transport=named
+    )
+
+    assert awaited == [(tenant_id, "team-alpha", channels_mod.FACE_WAIT_S)]

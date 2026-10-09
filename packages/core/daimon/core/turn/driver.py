@@ -104,6 +104,7 @@ from daimon.core.turn.termination import (
 )
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
+from mux.drivers.anthropic.transport import LegacyTurnTransport
 from mux.errors import ProviderError, ScopeViolation
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 
@@ -591,6 +592,17 @@ async def run_turn(
     if isinstance(billing, BillingExempt):
         log.info("turn.billing_exempt", session_id=session_id, reason=billing.reason)
 
+    # A session can be left waiting on tool confirmations no turn will answer:
+    # a restart cancelled the turn that owned them before its denials went
+    # out (staging, 2026-10-09). MA then refuses every user.message with a
+    # 400 and the thread is stuck. The first send detects that once; the
+    # turn interrupts the session and starts over. A second refusal is a
+    # normal upstream failure.
+    unwedge_attempts = [0]
+    # Set when recovery failed: the next pump raises the original refusal
+    # before opening a stream, so `_pump` finalizes it as an upstream error.
+    unwedge_failure: list[BaseException | None] = [None]
+
     async def _send_initial() -> None:
         content: list[BetaManagedAgentsImageBlockParam | BetaManagedAgentsTextBlockParam] = [
             *(image_blocks or []),
@@ -614,28 +626,66 @@ async def run_turn(
             if before_send is not None:
                 # A last check by the caller, after the stream is open (`run_prepared_turn`).
                 await before_send()
-            await io.send(batch)
+            try:
+                await io.send(batch)
+            except _anthropic.BadRequestError as err:
+                if _AWAITING_CONFIRMATIONS in str(err) and unwedge_attempts[0] == 0:
+                    unwedge_attempts[0] += 1
+                    raise _SessionAwaitingConfirmations() from err
+                raise
         await acknowledge(lifecycle, "accepted")
 
     if (observation := current_outcome.get()) is not None:
         observation.session_id = session_id
-    pump_coro = _pump(
-        io=io,
-        anthropic=anthropic,
-        session_id=session_id,
-        send_initial=_send_initial,
-        render_anchor=TurnState(),
-        seed_state=TurnState(),
-        lifecycle=lifecycle,
-        cancel=cancel,
-        render_interval_s=render_interval_s,
-        interrupt_timeout_s=interrupt_timeout_s,
-        stream_read_timeout_s=stream_read_timeout_s,
-        now=now,
-        entry="run",
-        billing=billing,
-        tool_confirmation=tool_confirmation,
-    )
+
+    def _new_pump() -> Coroutine[Any, Any, TurnState]:
+        return _pump(
+            io=io,
+            anthropic=anthropic,
+            session_id=session_id,
+            send_initial=_send_initial,
+            render_anchor=TurnState(),
+            seed_state=TurnState(),
+            lifecycle=lifecycle,
+            cancel=cancel,
+            render_interval_s=render_interval_s,
+            interrupt_timeout_s=interrupt_timeout_s,
+            stream_read_timeout_s=stream_read_timeout_s,
+            now=now,
+            entry="run",
+            billing=billing,
+            tool_confirmation=tool_confirmation,
+            preset_error=unwedge_failure[0],
+        )
+
+    async def _pump_unwedging() -> TurnState:
+        nonlocal io
+        try:
+            return await _new_pump()
+        except _SessionAwaitingConfirmations as stuck:
+            log.warning("turn.session_awaiting_confirmations", session_id=session_id)
+            if selected_path == "mux":
+                if backend is not None:
+                    # No SDK authorization for an arbitrary injected backend.
+                    # Finalize the original refusal without opening more I/O.
+                    unwedge_failure[0] = stuck.__cause__
+                    return await _new_pump()
+                # Recovery needs the provider's filtered native idle history.
+                # Keep main's proof/retry semantics on the existing SDK client;
+                # the rejected batch was never accepted. Only this turn falls
+                # back, and the closed first stream cannot end the retry.
+                io = LegacyTurnIO(anthropic, session_id)
+                log.info("turn.confirmation_recovery_legacy", session_id=session_id)
+            settled = await _interrupt_and_settle(
+                anthropic, session_id=session_id, cancel=cancel, io=io
+            )
+            if settled == "failed":
+                unwedge_failure[0] = stuck.__cause__
+            # "cancelled" leaves `cancel` set: the retried pump ends as a Stop.
+            # "idle": the retried pump runs the turn normally.
+            return await _new_pump()
+
+    pump_coro = _pump_unwedging()
     if deadline is None:
         return await pump_coro
 
@@ -659,6 +709,86 @@ async def run_turn(
         return ceiling_state
 
 
+#: MA's refusal of a user.message while confirmations are pending.
+_AWAITING_CONFIRMATIONS = "waiting on responses to events"
+
+#: Most a stuck session gets to settle after the interrupt.
+_UNWEDGE_SETTLE_S = 15.0
+
+
+class _SessionAwaitingConfirmations(Exception):
+    """MA refused the turn's user.message: the session waits on confirmations."""
+
+
+async def _interrupt_and_settle(
+    anthropic: AsyncAnthropic,
+    *,
+    session_id: str,
+    cancel: asyncio.Event,
+    io: TurnIO | None = None,
+) -> Literal["idle", "cancelled", "failed"]:
+    """Interrupt a session stuck on confirmations and wait until it is idle.
+
+    An interrupt answers the pending calls and ends MA's turn (verified on
+    staging, 2026-10-09). No stream is open here, so the interrupt's own
+    events cannot end the retried turn early. The whole recovery is bounded
+    by `_UNWEDGE_SETTLE_S` and raced against Stop; only a confirmed `idle`
+    counts as settled, since MA ignores a message sent while it runs.
+
+    A stuck session is already `idle`, paused on `requires_action`, so the
+    status alone settles before MA has taken the interrupt (staging,
+    2026-10-09). Settled means idle with a latest pause that no longer
+    waits on confirmations.
+    """
+
+    recovery_io = io if io is not None else LegacyTurnIO(anthropic, session_id)
+
+    async def _recover() -> bool:
+        await recovery_io.send([{"type": "user.interrupt"}])
+        while True:
+            status = await recovery_io.status()
+            if status == "terminated":
+                return False
+            if status == "idle" and await _latest_idle_is_settled(anthropic, session_id=session_id):
+                return True
+            await asyncio.sleep(0.5)
+
+    recovery = asyncio.ensure_future(_recover())
+    stop = asyncio.ensure_future(cancel.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {recovery, stop}, timeout=_UNWEDGE_SETTLE_S, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        for task in (recovery, stop):
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
+    if stop in done:
+        log.info("turn.session_unwedge_cancelled", session_id=session_id)
+        return "cancelled"
+    if recovery not in done:
+        log.warning("turn.session_unwedge_timeout", session_id=session_id)
+        return "failed"
+    if (error := recovery.exception()) is not None:
+        log.warning("turn.session_unwedge_failed", session_id=session_id, error=str(error))
+        return "failed"
+    if not recovery.result():
+        log.warning("turn.session_unwedge_failed", session_id=session_id, error="terminated")
+        return "failed"
+    log.info("turn.session_unwedged", session_id=session_id)
+    return "idle"
+
+
+async def _latest_idle_is_settled(anthropic: AsyncAnthropic, *, session_id: str) -> bool:
+    """Whether the session's most recent idle exists and is not a `requires_action` pause.
+
+    No idle in the history is no evidence MA took the interrupt, so it does not count.
+    """
+    return await LegacyTurnTransport(anthropic, session_id).latest_idle_is_settled()
+
+
 async def _pump(
     *,
     io: TurnIO,
@@ -676,6 +806,7 @@ async def _pump(
     entry: Literal["run", "resume"],
     billing: BillingPosture,
     tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
+    preset_error: BaseException | None = None,
 ) -> TurnState:
     log.info("turn.started", session_id=session_id, entry=entry)
 
@@ -772,6 +903,10 @@ async def _pump(
     # entered after an eventless cycle), replay + reattach replace them.
     try:
         try:
+            if preset_error is not None:
+                # A failed stuck-session recovery: finalize its MA refusal
+                # through the handlers below without opening a stream.
+                raise preset_error
             eventless_reconnect = False
             eventless_reason: ReconnectReason = "connection_dropped"
             while True:

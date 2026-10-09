@@ -35,7 +35,11 @@ from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.names import remember_guild_user
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
-from daimon.adapters.discord.post_transport import DiscordPostTransport, known_webhook_ids
+from daimon.adapters.discord.post_transport import (
+    DiscordPostTransport,
+    clear_webhook_backoff,
+    known_webhook_ids,
+)
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
@@ -88,7 +92,7 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
-from daimon.core.routine_delivery import run_delivery_poller
+from daimon.core.routine_delivery import resolve_routine_identity, run_delivery_poller
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.github_access_requests import AccessRequest
@@ -115,7 +119,7 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_recovery_failure,
 )
 from daimon.core.stores.turn_origins import get_active_origin, thread_archive_requested
-from daimon.core.thread_naming import strip_mentions
+from daimon.core.thread_naming import naming_text, strip_mentions
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.bookkeeping import recover_orphan_marker
@@ -190,6 +194,7 @@ def log_anthropic_overload(
 _EMBED_COLOR = theme.COLOR_BLURPLE  # Blurple — repo standard (help.py D-FORMAT-01).
 GLOBAL_CAP_NOTICE = "Daimon is at capacity right now — try again in a minute."
 TENANT_CAP_NOTICE = "This server has too many chats in flight right now — try again in a moment."
+THREAD_OPEN_FAILED_NOTICE = "Couldn't open a thread. @mention Daimon again."
 
 # Grace window for graceful shutdown drain. Must match the deployment's
 # container kill/stop timeout of 60s. The drain polls _processing up to this
@@ -221,8 +226,8 @@ async def _open_thread_with_notice(
 
     The acknowledgment is a reaction on the mention, never a channel message: a
     channel-level "your chat is ready" post outlives the wait and reads as a stray
-    reply. A failed opening propagates to `_handle_mention`, which renders the error
-    as a visible reply, so the mention is never left without an answer."""
+    reply. A failed creation is answered with one plain reply before it propagates
+    here, so the mention is never left without an answer."""
     task = asyncio.create_task(opening)
     reacted = False
     try:
@@ -245,8 +250,35 @@ async def _open_thread_with_notice(
         if reacted and message.guild is not None:
             try:
                 await message.remove_reaction(THREAD_OPENING_REACTION, message.guild.me)
-            except discord.HTTPException as exc:
+            except Exception as exc:  # best effort: a stuck ⌛ never fails an opened thread
                 log.warning("discord.thread_open_notice_clear_failed", error=str(exc))
+
+
+def _capture_turn_error(
+    exc: BaseException, *, rid: str, tenant_id: uuid.UUID, guild_id: str
+) -> None:
+    """Report a failed mention turn to Sentry with the tags that find it again."""
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("rid", rid)
+        scope.set_tag("tenant_id", str(tenant_id))
+        scope.set_tag("guild_id", guild_id)
+        sentry_sdk.capture_exception(exc)
+
+
+class _ThreadOpenFailed(Exception):
+    """The opening mention's thread could not be created; the person was told.
+
+    Raised from the creation error, so the turn boundary logs it without
+    posting a second error message.
+    """
+
+
+async def _explain_thread_open_failure(message: discord.Message) -> None:
+    """The one reply a mention gets when its thread could not be created."""
+    try:
+        await message.reply(THREAD_OPEN_FAILED_NOTICE, mention_author=False)
+    except discord.HTTPException as exc:
+        log.warning("discord.thread_open_failed_notice_failed", error=str(exc))
 
 
 def _resolve_bot_display_name(settings: Settings) -> str:
@@ -585,7 +617,6 @@ class DaimonBot(commands.Bot):
         if previous is not None:
             with contextlib.suppress(Exception):
                 await previous
-        posted: list[int] = []
         try:
             await deliver_session_outputs(
                 self.runtime.turn_deps.anthropic,
@@ -594,7 +625,7 @@ class DaimonBot(commands.Bot):
                 may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
                 notice_thread_ids=self._delivery_notice_thread_ids,
                 turn_window=lifecycle.turn_window if lifecycle is not None else None,
-                posted=posted,
+                answer=lifecycle.answer_message if lifecycle is not None else None,
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
             log.warning(
@@ -603,8 +634,6 @@ class DaimonBot(commands.Bot):
                 thread_id=thread.id,
                 error=str(exc)[:300],
             )
-        if lifecycle is not None:
-            await lifecycle.move_summary_last(thread, swept=posted)
 
     async def _archive_requested(self, origin_id: uuid.UUID) -> bool:
         """Whether the agent asked, during this turn, to archive its own thread.
@@ -671,10 +700,15 @@ class DaimonBot(commands.Bot):
         tenant_id: uuid.UUID,
         lifecycle: DiscordTurnLifecycle | None = None,
     ) -> None:
-        """Sweep the session's files, then seat the summary under the turn's last post."""
+        """Sweep the session's files onto the turn's answer, detached from the turn.
+
+        The sweep takes whatever the session's listing holds once it settles.
+        Accepted trade-off: a file the next turn writes while this sweep is
+        still settling can land on this turn's answer. It is still delivered
+        once and never stranded, which a per-turn cutoff could not promise.
+        Sweeps stay serialized per session.
+        """
         if not any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
-            if lifecycle is not None:
-                self._spawn(lifecycle.move_summary_last(thread))
             return
         session_id = outcome.ma_session_id
         previous = self._output_sweeps.get(session_id)
@@ -750,6 +784,16 @@ class DaimonBot(commands.Bot):
                         open_dm=self.open_member_dm,
                         dm_policy=lambda row: self.runtime.settings.direct_message_policies.get(
                             row.tenant_id, DirectMessagePolicy()
+                        ),
+                        client=self,
+                        resolve_identity=lambda row, guild_id: resolve_routine_identity(
+                            self.runtime.sessionmaker,
+                            self.runtime.anthropic,
+                            self.runtime.settings,
+                            row=row,
+                            platform="discord",
+                            workspace_id=guild_id,
+                            default_agent_name=self.runtime.deployment_default.agent_name,
                         ),
                     ),
                     should_stop=lambda: self.draining or self.is_closed(),
@@ -1128,8 +1172,8 @@ class DaimonBot(commands.Bot):
                     )
                     embed = discord.Embed(
                         color=theme.COLOR_RED,
-                        title="Stopped: Daimon restarted.",
-                        description="Mention me to try again.",
+                        title="Daimon restarted before this request finished.",
+                        description="@mention Daimon with your request to try again.",
                     )
                     if transport._destination() is not None:  # pyright: ignore[reportPrivateUsage]
                         await transport.edit(
@@ -2107,6 +2151,14 @@ class DaimonBot(commands.Bot):
                 attachments_override=attachments_override,
                 unprompted=unprompted,
             )
+        except _ThreadOpenFailed as exc:
+            # Already answered in the channel; only record it.
+            log.warning(
+                "turn.thread_open_failed", error=str(exc), channel_id=str(message.channel.id)
+            )
+            _capture_turn_error(
+                exc.__cause__ or exc, rid=rid, tenant_id=tenant_id, guild_id=guild_id
+            )
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             log_anthropic_overload(
                 exc,
@@ -2136,11 +2188,7 @@ class DaimonBot(commands.Bot):
         exc: Exception,
     ) -> None:
         """Sentry-tag + post a rendered error for a turn failure caught in _handle_mention."""
-        with sentry_sdk.new_scope() as scope:
-            scope.set_tag("rid", rid)
-            scope.set_tag("tenant_id", str(tenant_id))
-            scope.set_tag("guild_id", guild_id)
-            sentry_sdk.capture_exception(exc)
+        _capture_turn_error(exc, rid=rid, tenant_id=tenant_id, guild_id=guild_id)
         error_text = render_error(exc, request_id=rid)
         target = message.channel
         transport = DiscordPostTransport(
@@ -2757,6 +2805,20 @@ class DaimonBot(commands.Bot):
         if archive_after:
             await self._archive_after_outputs(outcome, thread)
 
+    async def on_guild_role_update(self, before: discord.Role, after: discord.Role) -> None:
+        if before.permissions != after.permissions:
+            clear_webhook_backoff(after.guild)
+
+    async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
+        if self.user is not None and after.id == self.user.id and before.roles != after.roles:
+            clear_webhook_backoff(after.guild)
+
+    async def on_guild_channel_update(
+        self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel
+    ) -> None:
+        if before.overwrites != after.overwrites:
+            clear_webhook_backoff(after.guild)
+
     async def on_raw_thread_update(self, payload: discord.RawThreadUpdateEvent) -> None:
         metadata = payload.data["thread_metadata"]
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
@@ -3003,23 +3065,36 @@ class DaimonBot(commands.Bot):
                 # Name before creation to avoid a Discord rename system message.
                 thread_name = f"Chat with {agent.name}"
                 naming = self.runtime.settings.thread_naming
-                opening_text = strip_mentions(message.content)
-                if naming.enabled and opening_text:
-                    async with message.channel.typing():
-                        thread_name = await generate_thread_name(
-                            fallback=thread_name,
-                            message_text=opening_text,
-                            message_id=message.id,
-                            anthropic=self.runtime.anthropic,
-                            sessionmaker=self.runtime.sessionmaker,
-                            tenant_id=tenant_id,
-                            platform_user_id=str(message.author.id),
-                            markup=self.runtime.settings.billing.markup,
-                            max_input_chars=naming.max_input_chars,
-                            timeout_seconds=naming.timeout_seconds,
-                            channel_id=admission.budget_channel_id,
-                        )
-                opened = await message.create_thread(name=thread_name, auto_archive_duration=10080)
+                opening_text = naming_text(
+                    strip_mentions(message.content), [a.filename for a in message.attachments]
+                )
+                try:
+                    if naming.enabled and opening_text:
+                        async with contextlib.AsyncExitStack() as typing:
+                            try:
+                                await typing.enter_async_context(message.channel.typing())
+                            except Exception as exc:  # best effort: typing never stops the open
+                                log.warning("discord.thread_open_typing_failed", error=str(exc))
+                            thread_name = await generate_thread_name(
+                                fallback=thread_name,
+                                message_text=opening_text,
+                                message_id=message.id,
+                                anthropic=self.runtime.anthropic,
+                                sessionmaker=self.runtime.sessionmaker,
+                                tenant_id=tenant_id,
+                                platform_user_id=str(message.author.id),
+                                markup=self.runtime.settings.billing.markup,
+                                max_input_chars=naming.max_input_chars,
+                                timeout_seconds=naming.timeout_seconds,
+                                channel_id=admission.budget_channel_id,
+                            )
+                    opened = await message.create_thread(
+                        name=thread_name, auto_archive_duration=10080
+                    )
+                except Exception as exc:
+                    # Only a failure before the thread exists is "couldn't open".
+                    await _explain_thread_open_failure(message)
+                    raise _ThreadOpenFailed(str(exc)) from exc
                 # No await between creation and registration: follow-ups must queue
                 # behind this turn. The channel branch owns the eventual cleanup.
                 self._processing.add(opened.id)

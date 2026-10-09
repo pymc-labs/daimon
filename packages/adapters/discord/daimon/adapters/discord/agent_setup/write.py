@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_identity import queue_agent_face
 from daimon.core.constants import ALLOWED_MODEL_IDS
 from daimon.core.defaults.ma_index import (
     find_agents_by_daimon_tag,
@@ -85,7 +86,7 @@ async def create_blank_agent(
     model: str,
     account_id: uuid.UUID,
 ) -> ResourceOutcome:
-    """Build a blank AgentSpec from modal fields and reconcile.
+    """Build a blank AgentSpec from modal fields, reconcile, and start its face.
 
     Tenant-scoped name uniqueness: rejects if `name` already exists anywhere in
     this tenant, regardless of owner. Agent names are tenant-wide identity —
@@ -105,7 +106,7 @@ async def create_blank_agent(
         if runtime.settings.mcp.public_url is not None
         else None
     )
-    return await reconcile_agent(
+    outcome = await reconcile_agent(
         runtime.anthropic,
         spec,
         tenant_id=tenant_id,
@@ -118,6 +119,15 @@ async def create_blank_agent(
         # archives them because they aren't in the seeded spec list.
         managed=False,
     )
+    if outcome.anthropic_id is not None:
+        queue_agent_face(
+            runtime.sessionmaker,
+            tenant_id=tenant_id,
+            agent_name=name,
+            metadata=None,  # managed=False above: only the default name can make it built-in
+            default_agent_name=runtime.deployment_default.agent_name,
+        )
+    return outcome
 
 
 def _build_runtime_fernet(runtime: DiscordRuntime) -> MultiFernet:

@@ -49,6 +49,39 @@ import discord
 # mention prefix separates an attribution worth showing from noise.
 _MENTION_PREFIX = "<@"
 
+# The bot permissions Daimon asks for at install, Manage Webhooks included.
+# Re-authorizing with this set restores webhooks without dropping anything else.
+BOT_INSTALL_PERMISSIONS = 326954503232
+
+
+def reauthorize_url(*, application_id: int, guild_id: int) -> str:
+    """The OAuth link that re-adds the bot to one server with its full permission set."""
+    return (
+        "https://discord.com/oauth2/authorize"
+        f"?client_id={application_id}&permissions={BOT_INSTALL_PERMISSIONS}"
+        f"&scope=bot+applications.commands&guild_id={guild_id}&disable_guild_select=true"
+    )
+
+
+def webhook_fix_url(
+    runtime: DiscordRuntime, interaction: discord.Interaction, *, is_admin: bool
+) -> str | None:
+    """The re-authorize link for an admin whose server withholds Manage Webhooks.
+
+    Agent identity posts through a channel webhook; without Manage Webhooks every
+    answer falls back to the bot account. Only an admin can fix that, so nobody
+    else is shown the link, and a server with identity off has nothing to fix.
+    """
+    guild = interaction.guild
+    if not is_admin or guild is None:
+        return None
+    if not identity_enabled_for(runtime.settings, "discord", guild.id):
+        return None
+    permissions = guild.me.guild_permissions
+    if permissions.manage_webhooks or permissions.administrator:
+        return None
+    return reauthorize_url(application_id=interaction.application_id, guild_id=guild.id)
+
 
 def github_facts(runtime: DiscordRuntime) -> GitHubDeploymentFacts:
     """The two GitHub facts a repo's access state is derived from.
@@ -204,6 +237,7 @@ async def load_roster_state(
         selected_agent=selected,
         thread_context=thread_context,
         thread_id=thread_id,
+        webhook_fix_url=webhook_fix_url(runtime, interaction, is_admin=is_admin),
     )
     state.attributions = await resolve_attributions(runtime, state=state, agents=roster.rows)
     return state

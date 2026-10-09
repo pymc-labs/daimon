@@ -19,6 +19,7 @@ from daimon.adapters.discord.routines_panel.read import load_guild_routines
 from daimon.adapters.discord.routines_panel.state import RoutinesPanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
+from sqlalchemy.exc import SQLAlchemyError
 
 import discord
 from discord import Interaction, app_commands
@@ -76,7 +77,7 @@ class RoutinesCog(commands.Cog):
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-        except (DaimonError, anthropic.APIError, discord.HTTPException) as exc:
+        except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await interaction.followup.send(
                 render_error(exc, request_id=rid),
                 ephemeral=True,

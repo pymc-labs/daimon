@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -23,10 +25,14 @@ from daimon.adapters.teams import lifecycle as lifecycle_module
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsTurnLifecycle, TimedSender
 from daimon.core.errors import TurnError
 from daimon.core.message_split import split_fenced
+from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.notices import render_termination_notice
-from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
+from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import TerminationReason
 from microsoft_teams.api import Account, MentionEntity, MessageActivityInput, SentActivity
+from sqlalchemy.exc import OperationalError
 
 from .conftest import CONVERSATION_ID, SERVICE_URL, FakeSender
 
@@ -118,20 +124,131 @@ async def test_renders_draw_the_turns_tool_lines_and_the_latest_draft() -> None:
     assert _card_body(sender, -1)[0]["text"] == "**Working on it…**"
 
 
-async def test_answer_replaces_the_card_with_feedback_and_no_usage_footer() -> None:
+async def test_answer_replaces_the_card_and_the_controls_follow_it() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
     lifecycle.answer_prefix = "Picked up where we left off."
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
-    final = sender.activities[-1]
-    assert final.id == "m-1"
-    assert final.text == "Picked up where we left off.\n\nThe posterior mean is 3.", (
+    answer, controls = sender.activities[1:]
+    assert answer.id == "m-1" and not answer.attachments and not _rated(answer)
+    assert answer.text == "Picked up where we left off.\n\nThe posterior mean is 3.", (
         "the answer alone, as on Discord and Slack"
     )
-    assert final.channel_data is not None and final.channel_data.feedback_loop is not None
+    assert controls.id is None and _rated(controls), "the 👍/👎 sit on the card below"
+    assert _card_text(sender, -1) == "0s", "with nothing priced the summary line is the time"
     assert lifecycle.answer_prefix_applied
     assert lifecycle.card_closed and lifecycle.final_message_id == "m-1"
+
+
+class _Sessions:
+    """A sessionmaker stand-in: `balance_footer` is patched, so no query runs."""
+
+    def __call__(self) -> contextlib.AbstractAsyncContextManager[object]:
+        @contextlib.asynccontextmanager
+        async def session() -> AsyncIterator[object]:
+            yield object()
+
+        return session()
+
+
+_USAGE = UsageTotals(
+    input_tokens=1000,
+    cache_creation_input_tokens=500,
+    cache_read_input_tokens=2000,
+    output_tokens=300,
+)
+
+
+def _debited(model_id: str, markup: Decimal) -> str | None:
+    t = _USAGE
+    usage = lifecycle_module.BetaManagedAgentsSpanModelUsage(
+        input_tokens=t.input_tokens,
+        cache_creation_input_tokens=t.cache_creation_input_tokens,
+        cache_read_input_tokens=t.cache_read_input_tokens,
+        output_tokens=t.output_tokens,
+        speed="standard",
+    )
+    cost = cost_of(usage, MODEL_PRICING[model_id])
+    assert cost is not None
+    return format_cost(float(debit_amount(cost, markup=markup)))
+
+
+async def test_the_summary_line_names_the_agent_time_debit_and_money_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slack's line: `used` is the debit, markup included, so it agrees with `left`."""
+    asked: list[dict[str, Any]] = []
+
+    async def footer(session: object, **kw: Any) -> str:
+        asked.append(kw)
+        return "$41.20 left"
+
+    monkeypatch.setattr(lifecycle_module, "balance_footer", footer)
+    sender, clock, tenant_id = FakeSender(), Clock(), uuid.uuid4()
+    lifecycle = await _posted(
+        sender,
+        clock,
+        tenant_id=tenant_id,
+        agent_name="Ada",
+        model_id="claude-opus-5-5",
+        markup=Decimal("1.1"),
+        sessionmaker=_Sessions(),
+        budget_channel_id="19:budget",
+    )
+    clock.now += 12
+    state = dataclasses.replace(_answer("Done."), usage_totals=_USAGE)
+    await lifecycle.on_terminal_success(state)
+
+    expected = format_summary(
+        agent_name="Ada",
+        elapsed_seconds=12,
+        cost=_debited("claude-opus-5-5", Decimal("1.1")),
+        left="$41.20 left",
+    )
+    assert _card_text(sender, -1) == expected
+    assert asked[0]["tenant_id"] == tenant_id and asked[0]["platform"] == "teams"
+    assert asked[0]["budget_channel_id"] == "19:budget", "a channel budget's remainder wins"
+
+
+@pytest.mark.parametrize(
+    "error", [OperationalError("select", {}, OSError("refused")), RuntimeError("anything")]
+)
+async def test_the_summary_line_leaves_out_a_name_shown_above_and_money_it_cannot_read(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    async def unreadable(session: object, **kw: Any) -> str:
+        raise error
+
+    monkeypatch.setattr(lifecycle_module, "balance_footer", unreadable)
+    kw: dict[str, Any] = {
+        "tenant_id": uuid.uuid4(),
+        "agent_name": "Ada",
+        "agent_name_prefix": "Ada",
+        "sessionmaker": _Sessions(),
+    }
+    sender = FakeSender()
+    await (await _posted(sender, **kw)).on_terminal_success(_answer("Done."))
+    assert _card_text(sender, -1) == "0s", "identity named the agent; the balance read failed"
+    assert _rated(sender.activities[-1]), "the controls still land"
+
+    sender = FakeSender()
+    tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
+    await (await _posted(sender, **kw)).on_terminal_success(TurnState(content=[tool]))
+    _done, summary, _votes = _card_body(sender, -1)
+    assert summary["text"] == "Ada\u2003\u20030s", "no answer above names the agent here"
+
+
+async def test_a_failed_turn_card_carries_the_summary_line() -> None:
+    sender, clock = FakeSender(), Clock()
+    lifecycle = await _posted(sender, clock, agent_name="Ada")
+    clock.now += 12
+    error = TurnError(kind="upstream", message="overloaded")
+    await lifecycle.on_terminal_failure(TurnState(error=error), error)
+
+    _notice, summary = _card_body(sender, -1)
+    assert summary["text"] == "Ada\u2003\u200312s" and summary["isSubtle"], "as on Slack"
+    assert not _rated(sender.activities[-1]), "a failure is not an answer to rate"
 
 
 async def test_agent_name_prefix_is_only_on_first_answer_chunk() -> None:
@@ -148,7 +265,7 @@ async def test_builtin_answer_has_no_name_prefix() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(_answer("Done."))
-    assert sender.activities[-1].text == "Done."
+    assert sender.activities[1].text == "Done."
 
 
 async def test_a_spend_limit_alerts_the_operators(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -178,18 +295,18 @@ async def test_a_spend_limit_alerts_the_operators(monkeypatch: pytest.MonkeyPatc
     } in logs
 
 
-async def test_a_long_answer_overflows_into_new_messages_with_feedback_last() -> None:
+async def test_a_long_answer_overflows_into_new_messages_then_the_controls() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
     paragraph = "word " * 1000
     await lifecycle.on_terminal_success(_answer("\n\n".join([paragraph] * 4)))
 
-    chunks = sender.activities[1:]
+    *chunks, controls = sender.activities[1:]
     assert len(chunks) >= 2
     assert chunks[0].id == "m-1" and all(c.id is None for c in chunks[1:])
-    assert all(c.channel_data is None or c.channel_data.feedback_loop is None for c in chunks[:-1])
-    assert chunks[-1].channel_data is not None and chunks[-1].channel_data.feedback_loop
-    assert lifecycle.final_message_id == f"m-{len(sender.sent)}"
+    assert not any(_rated(c) or c.attachments for c in chunks), "the answer is text alone"
+    assert _rated(controls), "the 👍/👎 follow the last part"
+    assert lifecycle.final_message_id == f"m-{len(sender.sent) - 1}", "the answer's last part"
 
 
 async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark() -> None:
@@ -228,8 +345,8 @@ async def test_a_timed_out_answer_edit_is_sent_again_not_collapsed() -> None:
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
-    assert [a.id for a in sender.activities[1:]] == ["m-1", "m-1"], "the edit is resent"
-    assert "The posterior mean is 3." in _card_json(sender, -1)
+    assert [a.id for a in sender.activities[1:]] == ["m-1", "m-1", None], "the edit is resent"
+    assert "The posterior mean is 3." in _card_json(sender, -2)
     assert lifecycle.final_message_id == "m-1"
 
 
@@ -278,8 +395,9 @@ async def test_a_completion_ping_posts_the_answer_mentioning_the_asker_then_clos
     lifecycle = await _posted(sender, completion_ping=True, requester=asker)
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
-    answer, closed = sender.activities[1:]
+    answer, closed, controls = sender.activities[1:]
     assert closed.id == "m-1" and card.ANSWERED_BELOW in closed.model_dump_json()
+    assert controls.id is None and _rated(controls), "the controls follow the answer"
     assert answer.id is None and answer.text == "<at>Ada</at>\n\nThe posterior mean is 3."
     assert [e.mentioned.id for e in answer.entities or [] if isinstance(e, MentionEntity)] == [
         "aad-1"
@@ -296,7 +414,7 @@ async def test_without_a_requester_a_ping_still_posts_fresh() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender, completion_ping=True)
     await lifecycle.on_terminal_success(_answer("Done."))
-    assert [a.id for a in sender.activities] == [None, None, "m-1"], "the 1:1 chat gets no @"
+    assert [a.id for a in sender.activities] == [None, None, "m-1", None], "the 1:1 chat gets no @"
     assert sender.activities[1].text == "Done."
 
 
@@ -325,19 +443,17 @@ async def test_a_late_notice_is_edited_in_above_the_answer() -> None:
     final = sender.activities[-1]
     assert final.id == "m-1" and final.text is not None
     assert final.text == "I lost the workspace.\n\nThe posterior mean is 3."
-    assert final.channel_data is not None and final.channel_data.feedback_loop is not None, (
-        "the feedback buttons stay on a single-message answer"
-    )
+    assert not _rated(final) and not final.attachments, "the edit stays text, as Teams needs"
 
 
 async def test_a_late_notice_whose_edit_timed_out_counts_as_shown() -> None:
     """A timed-out edit may have landed; sending the notice as well could show it twice."""
-    sender = FakeSender(timeout_on={2, 3})
+    sender = FakeSender(timeout_on={3, 4})
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
     assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
-    assert [a.id for a in sender.activities[2:]] == ["m-1", "m-1"], "edited, then retried once"
+    assert [a.id for a in sender.activities[3:]] == ["m-1", "m-1"], "edited, then retried once"
 
 
 async def test_a_late_notice_on_a_turn_without_an_answer_is_edited_into_its_card() -> None:
@@ -366,7 +482,7 @@ async def test_file_links_are_edited_in_below_a_prefixed_single_message_answer()
     assert final.text == (
         "I lost the workspace.\n\nThe posterior mean is 3.\n\nSaved to this channel's files:\n- [a](u)"
     )
-    assert final.channel_data is not None and final.channel_data.feedback_loop is not None
+    assert not _rated(final) and not final.attachments
 
 
 async def test_file_links_that_would_overflow_the_last_message_are_refused() -> None:
@@ -376,7 +492,7 @@ async def test_file_links_that_would_overflow_the_last_message_are_refused() -> 
     await lifecycle.on_terminal_success(_answer("x" * (card.TEAMS_LIMIT - 5)))
 
     assert not await lifecycle.append_to_answer("Saved to this channel's files:")
-    assert len(sender.sent) == 2, "no edit was tried"
+    assert len(sender.sent) == 3, "no edit was tried"
 
 
 async def test_no_answer_reads_as_cancelled_or_done() -> None:
@@ -397,10 +513,11 @@ def _card_text(sender: FakeSender, index: int) -> str:
 
 
 def _rated(activity: MessageActivityInput) -> bool:
+    """The 👍/👎 buttons, never Teams' own feedback loop."""
     data = activity.channel_data
-    return (
-        data is not None and data.feedback_loop is not None and data.feedback_loop.type == "custom"
-    )
+    assert data is None or data.feedback_loop is None
+    rendered = activity.model_dump_json(by_alias=True)
+    return card.VOTE_UP_DIALOG in rendered and card.VOTE_DOWN_DIALOG in rendered
 
 
 def _asks(sender: FakeSender, index: int) -> bool:
@@ -408,21 +525,57 @@ def _asks(sender: FakeSender, index: int) -> bool:
 
 
 @pytest.mark.parametrize("ask_human", [True, False])
-async def test_the_last_answer_part_carries_feedback_and_ask_a_human_when_support_is_on(
-    ask_human: bool,
-) -> None:
-    """As on Slack: Ask a human sits on the final answer, beside the 👍/👎."""
+async def test_the_answer_stays_text_and_its_controls_follow_in_a_card(ask_human: bool) -> None:
+    """As on Slack, the summary, Ask a human and 👍/👎 sit under the final answer. In a card
+    of their own: Teams refuses an edit carrying both text and a card, so every answer failed."""
     sender = FakeSender()
     lifecycle = await _posted(sender, ask_human=ask_human)
     await lifecycle.on_terminal_success(_answer("x" * (card.TEAMS_LIMIT + 10)))
 
-    first, last = sender.activities[-2:]
-    assert not _rated(first) and not _asks(sender, -2), "earlier parts carry no controls"
-    assert _rated(last), "the 👍/👎 open daimon's own form"
-    assert _asks(sender, -1) is ask_human, "the button only when support is on"
+    first, last = [activity for activity in sender.activities if activity.text]
+    assert not any(_rated(a) or a.attachments for a in (first, last)), "the answer is text alone"
     assert last.text and last.text.startswith("x"), "the answer stays markdown text"
+    assert _rated(sender.activities[-1]), "the 👍/👎 open daimon's own form"
+    assert _asks(sender, -1) is ask_human, "Ask a human only when support is on"
     assert await lifecycle.append_to_answer("Saved to this channel's files:")
-    assert _asks(sender, -1) is ask_human and _rated(sender.activities[-1]), "edits keep both"
+    edit = sender.activities[-1]
+    assert edit.text and not _rated(edit) and not edit.attachments, "an edit stays text"
+
+
+async def test_a_lost_controls_card_leaves_the_answer_as_delivered() -> None:
+    """The answer landed: controls that fail to post are no cut-short answer."""
+    sender = FakeSender(fail_on={2})
+    lifecycle = await _posted(sender, ask_human=True)
+    await lifecycle.on_terminal_success(_answer("hello"))
+
+    assert len(sender.activities) == 3, "no notice follows the lost card"
+    assert _asks(sender, -1), "the third send was the controls"
+    assert lifecycle.final_message_id == sender.activities[1].id, "the answer counts as seen"
+
+
+async def test_with_support_on_a_one_part_answer_and_its_edits_are_ones_teams_takes() -> None:
+    """Production's shape: one part, edited in place, then amended by later notices."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender, ask_human=True)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+
+    answer, controls = sender.activities[1:]
+    assert answer.id == "m-1" and answer.text == "The posterior mean is 3.", "the card became it"
+    assert controls.id is None and _asks(sender, -1), "the button follows in a post of its own"
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace."), "a notice fits above"
+    assert await lifecycle.append_to_answer("Saved to this channel's files:"), "links fit below"
+    assert all(not a.attachments for a in sender.activities[-2:]), "both edits stay text"
+
+
+async def test_a_completion_ping_with_support_on_posts_the_button_below_the_answer() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender, completion_ping=True, ask_human=True)
+    await lifecycle.on_terminal_success(_answer("Done."))
+
+    answer, closed, button = sender.activities[1:]
+    assert answer.id is None and answer.text == "Done." and not answer.attachments
+    assert closed.id == "m-1" and card.ANSWERED_BELOW in closed.model_dump_json(), "card retired"
+    assert button.id is None and _asks(sender, 3), "then the button follows the answer"
 
 
 async def test_a_tool_only_turn_carries_the_controls_and_a_cancelled_one_none() -> None:
@@ -432,13 +585,16 @@ async def test_a_tool_only_turn_carries_the_controls_and_a_cancelled_one_none() 
     tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
     await lifecycle.on_terminal_success(TurnState(content=[tool]))
     assert _rated(sender.activities[-1]) and _asks(sender, -1), "✅ Done can be rated"
+    assert len(sender.activities) == 2, "the Done card carries them itself"
+    assert _card_body(sender, -1)[1]["text"] == "0s", "and the summary line"
     assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
     assert _rated(sender.activities[-1]) and _asks(sender, -1), "an edit keeps the controls"
 
     sender = FakeSender()
     lifecycle = await _posted(sender, ask_human=True)
     await lifecycle.on_terminal_success(TurnState())
-    assert not _rated(sender.activities[-1]) and not _asks(sender, -1), "cancelled: nothing"
+    assert not _rated(sender.activities[-1]) and not _asks(sender, -1), "cancelled: no controls"
+    assert _card_body(sender, -1)[1]["text"] == "0s", "but the summary line, as on Slack"
 
 
 async def test_failure_closes_the_card_with_the_termination_notice_once() -> None:
@@ -518,8 +674,9 @@ async def test_an_unprompted_turn_posts_only_its_answer() -> None:
     assert sender.sent == [], "no card and no render before there is an answer"
 
     await lifecycle.on_terminal_success(_answer("Thursdays."))
-    [answer] = sender.activities
+    answer, controls = sender.activities
     assert answer.id is None and answer.text == "Thursdays.", "posted, not an edit"
+    assert _rated(controls), "its controls follow, as on any answer"
     assert lifecycle.final_message_id == "m-1", "the watermark can move past it"
 
 

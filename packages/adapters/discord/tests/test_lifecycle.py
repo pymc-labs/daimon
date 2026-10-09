@@ -13,8 +13,7 @@ import types
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, NoReturn, cast
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any, NoReturn
 
 import daimon.adapters.discord.lifecycle as lifecycle_module
 import discord
@@ -699,8 +698,10 @@ class TestSealedResponsePersistence:
         await lc.on_render(_sealed_state("x" * 2100))
         chunks = [sent["content"] for sent in sends if "content" in sent]
         assert len(chunks) > 1
-        assert chunks[0].startswith("**test-agent**\n\n")
-        assert all(not chunk.startswith("**test-agent**\n\n") for chunk in chunks[1:])
+        assert chunks[0].startswith("-# test-agent\nx")
+        assert all(not chunk.startswith("-# test-agent\n") for chunk in chunks[1:])
+        assert all(len(chunk) <= 2000 for chunk in chunks)
+        assert "".join(chunks).removeprefix("-# test-agent\n") == "x" * 2100
 
     async def test_on_render_posts_sealed_answer_once(self) -> None:
         """A >=500-char text block sealed by a tool use posts as a permanent
@@ -1121,64 +1122,85 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     assert "left" not in _terminal_footer(edits)
 
 
-def _move_fixture(
-    last: Any,
-) -> tuple[DiscordTurnLifecycle, list[tuple[Any, dict[str, Any]]], discord.Thread]:
-    """A lifecycle whose card is message 100, in a thread whose newest message is `last`."""
+def _window_fixture() -> tuple[DiscordTurnLifecycle, list[tuple[Any, dict[str, Any]]]]:
+    """A lifecycle whose card is message 100 and whose sends post messages 101, 102, ..."""
     edits: list[tuple[Any, dict[str, Any]]] = []
-    card = MagicMock()
-    card.id = 100
-    card.remove_reaction = AsyncMock()
+    next_id = 100
 
     async def send(**kwargs: Any) -> object:
-        return card
+        nonlocal next_id
+        message = types.SimpleNamespace(id=next_id, kwargs=kwargs)
+        next_id += 1
+        return message
 
     async def edit(ref: Any, **kwargs: Any) -> object:
         edits.append((ref, kwargs))
         return types.SimpleNamespace(id=ref.id, edited_at=datetime.now(UTC))
 
     lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
-
-    async def history(**kwargs: Any) -> Any:
-        assert kwargs == {"limit": 1}
-        if last is not None:
-            yield last
-
-    thread = MagicMock(spec=discord.Thread)
-    thread.guild.me.id = 42
-    thread.history = MagicMock(side_effect=history)
-    thread.get_partial_message.return_value.add_reaction = AsyncMock()
-    return lc, edits, cast(discord.Thread, thread)
-
-
-def _bot_post(message_id: int, *, author_id: int = 42, embeds: list[Any] | None = None) -> Any:
-    post = MagicMock()
-    post.id = message_id
-    post.author.id = author_id
-    post.embeds = embeds or []
-    post.edit = AsyncMock()
-    return post
+    return lc, edits
 
 
 @pytest.mark.asyncio
-async def test_summary_moves_under_a_file_posted_after_the_answer() -> None:
-    """Files and the agent's own posts land below the answer; the summary follows them."""
-    file_post = _bot_post(200)
-    lc, edits, thread = _move_fixture(file_post)
+async def test_the_answer_keeps_its_summary_and_takes_the_files() -> None:
+    """The summary, the vote emoji and the turn's files all sit on the answer."""
+    lc, edits = _window_fixture()
     await lc.on_sse_event(_thinking_event())
     await lc.on_terminal_success(_make_success_state())
 
-    await lc.move_summary_last(thread)
+    answer = lc.answer_message
+    assert answer is not None
+    assert answer.message_id == 100, "a one-chunk answer is the card, edited in place"
+    assert lc.feedback_message_id == "100", "the vote emoji go on the same message"
+    assert all(kwargs.get("embeds") != [] for _ref, kwargs in edits), (
+        "nothing takes the summary off the answer"
+    )
 
-    summary = file_post.edit.await_args.kwargs["embeds"][0]
-    assert summary.footer.text.startswith("test-agent"), "the file post gains the summary"
-    assert edits[-1][1] == {"embeds": []}, "the answer gives it up"
+    await answer.edit(types.SimpleNamespace(id=100), attachments=[])
+    assert edits[-1][1] == {"attachments": []}, "the sweep edits through the turn's own edit"
+
+
+@pytest.mark.asyncio
+async def test_a_long_answers_files_go_on_its_last_chunk() -> None:
+    lc, _edits = _window_fixture()
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(_make_success_state("x" * 4000))
+
+    answer = lc.answer_message
+    assert answer is not None
+    assert answer.message_id > 100, "the summary moved to the last chunk at delivery"
+    assert lc.feedback_message_id == str(answer.message_id)
+
+
+@pytest.mark.asyncio
+async def test_a_tool_only_turn_takes_its_files_on_the_done_card() -> None:
+    lc, edits = _window_fixture()
+    await lc.on_sse_event(_thinking_event())
+    tool = ToolUseBlock(
+        kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}, status="complete"
+    )
+    await lc.on_terminal_success(TurnState(content=[tool]))
+
+    answer = lc.answer_message
+    assert answer is not None and answer.message_id == 100
+    card = edits[-1][1]["embed"]
+    assert card.description == "Done.", "the card stays as Done."
+    assert card.footer.text.startswith("test-agent"), "and keeps its summary line"
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_turn_has_no_answer_for_files() -> None:
+    lc, _edits = _window_fixture()
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(TurnState(content=[]))
+
+    assert lc.answer_message is None, "the sweep posts files on their own"
 
 
 @pytest.mark.asyncio
 async def test_the_turn_window_closes_on_discords_clock() -> None:
     """The bound comes from Discord's own stamps, so a fast host clock cannot widen it."""
-    lc, _edits, _thread = _move_fixture(None)
+    lc, _edits = _window_fixture()
     await lc.on_sse_event(_thinking_event())
     await lc.on_terminal_success(_make_success_state())
 
@@ -1215,7 +1237,7 @@ async def test_an_unstamped_terminal_falls_back_to_the_host_clock() -> None:
 @pytest.mark.asyncio
 async def test_a_tool_only_turn_still_closes_its_window() -> None:
     """A tool-only turn posts files too; its sweep needs the window for the dedup."""
-    lc, _edits, _thread = _move_fixture(None)
+    lc, _edits = _window_fixture()
     await lc.on_sse_event(_thinking_event())
     tool = ToolUseBlock(
         kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}, status="complete"
@@ -1223,83 +1245,6 @@ async def test_a_tool_only_turn_still_closes_its_window() -> None:
     await lc.on_terminal_success(TurnState(content=[tool]))
 
     assert lc.turn_window is not None
-
-
-@pytest.mark.asyncio
-async def test_a_tool_only_card_keeps_done_and_its_summary_moves_under_the_files() -> None:
-    file_post = _bot_post(2**62)
-    lc, edits, thread = _move_fixture(file_post)
-    await lc.on_sse_event(_thinking_event())
-    tool = ToolUseBlock(
-        kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}, status="complete"
-    )
-    await lc.on_terminal_success(TurnState(content=[tool]))
-
-    await lc.move_summary_last(thread, swept=[2**62])
-
-    moved = file_post.edit.await_args.kwargs["embeds"][0]
-    assert moved.footer.text.startswith("test-agent") and moved.description is None
-    kept = edits[-1][1]["embeds"][0]
-    assert kept.description == "Done." and kept.footer.text is None, "the card stays as Done."
-
-
-@pytest.mark.asyncio
-async def test_summary_moves_under_a_file_its_own_sweep_posted_after_the_turn() -> None:
-    file_post = _bot_post(2**62)
-    lc, edits, thread = _move_fixture(file_post)
-    await lc.on_sse_event(_thinking_event())
-    await lc.on_terminal_success(_make_success_state())
-
-    await lc.move_summary_last(thread, swept=[2**62])
-
-    assert file_post.edit.await_count == 1
-    assert edits[-1][1] == {"embeds": []}
-
-
-@pytest.mark.asyncio
-async def test_the_vote_emoji_follow_the_summary_to_the_last_post() -> None:
-    """👍 👎 🙋 sit on the same message as the summary line."""
-    file_post = _bot_post(200)
-    lc, _edits, thread = _move_fixture(file_post)
-    await lc.on_sse_event(_thinking_event())
-    await lc.on_terminal_success(_make_success_state())
-    assert lc.feedback_message_id == "100", "first seeded where the summary is: the answer"
-
-    await lc.move_summary_last(thread)
-
-    card = lc.message_ref
-    assert card is not None
-    removed = [call.args[0] for call in cast(AsyncMock, card.remove_reaction).await_args_list]
-    assert removed == ["👍", "👎", "🙋"], "the answer gives up the bot's own seeds"
-    get_partial = cast(MagicMock, thread.get_partial_message)
-    get_partial.assert_called_with(200)
-    added = [call.args[0] for call in get_partial.return_value.add_reaction.await_args_list]
-    assert added == ["👍", "👎", "🙋"], "the last post gets them"
-
-
-@pytest.mark.parametrize(
-    "last",
-    [
-        None,
-        _bot_post(200, author_id=7),
-        _bot_post(200, embeds=[object()]),
-        _bot_post(50),
-        _bot_post(2**62),
-    ],
-    ids=["empty", "a-person", "a-newer-card", "older", "a-later-turns-post"],
-)
-@pytest.mark.asyncio
-async def test_summary_stays_put_unless_the_bot_posted_plainly_after_it(last: Any) -> None:
-    lc, edits, thread = _move_fixture(last)
-    await lc.on_sse_event(_thinking_event())
-    await lc.on_terminal_success(_make_success_state())
-    edits_before = len(edits)
-
-    await lc.move_summary_last(thread)
-
-    assert len(edits) == edits_before
-    if last is not None:
-        assert last.edit.await_count == 0
 
 
 class TestWasAnswered:
