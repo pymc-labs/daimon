@@ -58,6 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preserving full native records and pagination stop rules for billing sweeps.
 - Route session output polling, download and deletion through scoped native ports,
   preserving Files API beta headers, settle timing and post-before-delete delivery.
+- Route handoff session reads and bundle reuploads through scoped ports, preserving
+  conservative seals, uploaded bytes and the cleanup queue.
 
 - Plan native session tool/MCP changes before one in-place apply call, preserving
   busy deferral, mount deletion, repository-token rotation and inherited seals.

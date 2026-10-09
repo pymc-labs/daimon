@@ -193,3 +193,6 @@ unused paths, identifiers, configuration or timestamps. Prefix and unknown list
 rows retain their original discriminator and pagination behavior. Tenant and
 account checks still run before requests, and environment metadata checks still
 run after the existing response. Neutral resource records remain validated.
+Thread handoff uses lifecycle reads with its tenant/account context. Workspace
+bundle reuploads use Artifacts with the existing Files API headers and bytes;
+the host retains checkpoint billing and transfer fallback policy.

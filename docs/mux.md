@@ -789,3 +789,7 @@ unused paths, identifiers, configuration or timestamps. Prefix and unknown list
 rows retain their original discriminator and pagination behavior. Tenant and
 account checks still run before requests, and environment metadata checks still
 run after the existing response. Neutral resource records remain validated.
+Thread handoff collects session seals through scoped lifecycle reads before its
+policy transaction. Bundle reuploads use the scoped Artifacts port with the same
+Files API request, archive bytes and retention queue. Checkpoint billing,
+access rechecks and the full/transcript/history fallback ladder remain host policy.

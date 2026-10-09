@@ -39,12 +39,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
-import io
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from secrets import token_hex
 from typing import Literal
 
 import anthropic
@@ -76,7 +76,10 @@ from daimon.core.handoff_context import (
     supports_system_message,
 )
 from daimon.core.ma import replay_events
+from daimon.core.mux_backend import managed_agents
+from daimon.core.mux_compat import legacy_call
 from daimon.core.pricing import MODEL_PRICING
+from daimon.core.session_ports_compat import session_scope
 from daimon.core.session_preparation_stages import PreparedReplacement
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.domain import UnsavedWorkChoice
@@ -86,6 +89,7 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.posture import AutoApprove, Billed, UsageRecorder
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.usage_recording import record_turn_usage
+from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -319,6 +323,7 @@ async def _rehost_bundle(
     *,
     bundle: FileMetadata,
     now: Callable[[], datetime],
+    scope: Scope,
 ) -> tuple[str, int] | GapReason:
     """Download the session output, drop it from the listing, re-upload it.
 
@@ -342,8 +347,18 @@ async def _rehost_bundle(
         await client.beta.files.delete(bundle.id, betas=[_MA_BETA])
 
     try:
-        uploaded = await client.beta.files.upload(
-            file=(bundle.filename, io.BytesIO(content), "application/gzip"),
+
+        async def body() -> AsyncIterator[bytes]:
+            yield content
+
+        uploaded = await legacy_call(
+            managed_agents(client, scope=scope).artifacts.upload(
+                scope,
+                body(),
+                filename=bundle.filename,
+                media_type="application/gzip",
+                key=token_hex(16),
+            )
         )
     except anthropic.APIStatusError as err:
         log.warning("workspace_transfer.upload_failed", error=str(err)[:300])
@@ -351,9 +366,9 @@ async def _rehost_bundle(
 
     async with sessionmaker() as session, session.begin():
         await enqueue_pending_file_delete(
-            session, file_id=uploaded.id, delete_after=now() + BUNDLE_RETENTION
+            session, file_id=uploaded.ref.id, delete_after=now() + BUNDLE_RETENTION
         )
-    return (uploaded.id, len(content))
+    return (uploaded.ref.id, len(content))
 
 
 async def transfer_workspace(
@@ -527,7 +542,17 @@ async def transfer_workspace(
         )
         unpreserved = (*unpreserved, _COMMITTED_DURING_CHECKPOINT)
 
-    rehosted = await _rehost_bundle(client, sessionmaker, bundle=bundle, now=now)
+    rehosted = await _rehost_bundle(
+        client,
+        sessionmaker,
+        bundle=bundle,
+        now=now,
+        scope=session_scope(
+            tenant_id=tenant_id,
+            account_id=None,
+            call_site="workspace_transfer:transfer_workspace",
+        ),
+    )
     if isinstance(rehosted, str):
         return TranscriptOnly(transcript=transcript or "", gap_reason=rehosted)
 
