@@ -70,6 +70,7 @@ from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.tenants import set_funding_mode
+from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import (
@@ -745,6 +746,36 @@ async def test_apply_usage_folds_usage_totals(fake_slack_web_client: Any) -> Non
     assert lc._state.cost_str == expected_cost, (  # pyright: ignore[reportPrivateUsage]
         "cost_str must match the billing-ledger cost to the cent"
     )
+
+
+async def test_apply_usage_shows_the_debit_with_markup(fake_slack_web_client: Any) -> None:
+    """`used` is what the tenant is debited, markup included, so it agrees with `left`."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client, model_id="claude-sonnet-4-6")
+    lc._markup = Decimal("1.1")  # pyright: ignore[reportPrivateUsage]
+    state = dataclasses.replace(
+        TurnState(),
+        usage_totals=UsageTotals(
+            input_tokens=10000,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            output_tokens=3000,
+        ),
+    )
+
+    lc._apply_usage(state)  # pyright: ignore[reportPrivateUsage]
+
+    raw = cost_of(
+        ma_model_usage(
+            input_tokens=10000,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            output_tokens=3000,
+        ),
+        MODEL_PRICING["claude-sonnet-4-6"],
+    )
+    expected = format_cost(float(debit_amount(raw, markup=Decimal("1.1"))))
+    assert lc._state.cost_str == expected  # pyright: ignore[reportPrivateUsage]
+    assert lc._state.cost_str != format_cost(raw), "the raw model cost understates the debit"
 
 
 # ---------------------------------------------------------------------------
