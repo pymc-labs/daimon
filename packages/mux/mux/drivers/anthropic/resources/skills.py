@@ -12,7 +12,11 @@ from anthropic.types.beta.skills.version_list_params import VersionListParams
 from mux.contracts.ids import Page, PageRequest, Scope, SkillRef
 from mux.contracts.receipts import DeletionReceipt
 from mux.contracts.resources import Skill, SkillUpload, SkillVersion
-from mux.drivers.anthropic.resources._authorization import ResourceAuthorization, authorize
+from mux.drivers.anthropic.resources._authorization import (
+    ResourceAuthorization,
+    authorize,
+    visible_skill,
+)
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.errors import UnsupportedCapability
 
@@ -97,7 +101,11 @@ class AnthropicSkills:
             raise UnsupportedCapability(("skill_list_order",), "anthropic.managed_agents")
         result = await provider_call(self._client.beta.skills.list(**cast(SkillListParams, kwargs)))
         return Page(
-            data=tuple(skill_record(item) for item in (result.data or ())),
+            data=tuple(
+                skill_record(item)
+                for item in (result.data or ())
+                if visible_skill(self._authorization, scope, item.id, item.source)
+            ),
             next_cursor=result.next_page or None,
             has_more=bool(result.next_page),
         )
@@ -113,7 +121,11 @@ class AnthropicSkills:
         page = await provider_call(self._client.beta.skills.list(limit=limit))
         async for current in provider_iter(page.iter_pages()):
             yield Page(
-                data=tuple(skill_record(item) for item in (current.data or ())),
+                data=tuple(
+                    skill_record(item)
+                    for item in (current.data or ())
+                    if visible_skill(self._authorization, scope, item.id, item.source)
+                ),
                 next_cursor=current.next_page or None,
                 has_more=bool(current.next_page),
             )

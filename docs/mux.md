@@ -320,3 +320,12 @@ Those callers are enumerated in sprint FOLLOWUPS.md for their owning lanes.
 Skill collection and version walks use the SDK paginator inside the driver,
 including its stop behavior for empty data and empty-string cursors. They preserve
 page truncation detection and version deletion during iteration.
+
+
+For tenant skill lists and page walks, custom records must appear in the host's
+ResourceAuthorization skill-ID grant. Anthropic catalog records remain shared.
+Filtering runs after each existing SDK request and leaves its cursor and page
+iterator untouched, so a page containing only foreign custom records still
+advances to later authorized records. Platform and approved legacy inventories
+retain the entire workspace view. CLI/MCP keep their existing tenant-title and
+channel-isolation output filters.

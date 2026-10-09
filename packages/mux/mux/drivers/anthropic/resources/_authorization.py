@@ -61,3 +61,16 @@ def visible(scope: Scope, metadata: Mapping[str, object] | None) -> bool:
 def check_record(scope: Scope, resource_id: str, metadata: Mapping[str, object] | None) -> None:
     if not visible(scope, metadata):
         raise ScopeViolation(resource_id, "provider record belongs to another tenant")
+
+
+def visible_skill(
+    authorization: ResourceAuthorization | None, scope: Scope, skill_id: str, source: str | None
+) -> bool:
+    """Catalog skills are shared; custom skill visibility follows the host grant."""
+    if scope.is_platform or scope.is_legacy_host_authorized:
+        return True
+    return source == "anthropic" or (
+        source == "custom"
+        and authorization is not None
+        and ("skill", skill_id) in authorization.resources
+    )
