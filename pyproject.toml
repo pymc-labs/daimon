@@ -73,11 +73,10 @@ source_modules = ["mux"]
 forbidden_modules = ["daimon"]
 
 # The provider-neutral layer: no SDK, and no driver that could bring one in.
-# Lane N2's mux.state joins source_modules when it lands.
 [[tool.importlinter.contracts]]
 name = "Mux contracts and profiles import no provider SDK or driver"
 type = "forbidden"
-source_modules = ["mux.contracts", "mux.profiles", "mux.errors"]
+source_modules = ["mux.contracts", "mux.profiles", "mux.errors", "mux.state"]
 forbidden_modules = ["anthropic", "openai", "google", "mux.drivers"]
 
 # Each SDK is imported by its own driver and nowhere else in mux. The ignores

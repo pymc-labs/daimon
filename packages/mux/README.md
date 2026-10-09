@@ -1,7 +1,8 @@
 # mux
 
 The provider-neutral managed-agent contract: types, port protocols, errors,
-profiles and admission, with one driver package per provider under
+profiles and admission, the `StateStore` protocol and its in-memory test
+store (`mux.state`), with one driver package per provider under
 `mux/drivers/`. Daimon does not call it yet.
 
 The import name is the top-level `mux`, not `daimon.mux`, so it can be split

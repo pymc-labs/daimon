@@ -25,6 +25,7 @@ are written against.
 | `mux.contracts.extensions` | `ExtensionRef`, `ExtensionConfig` and the declared namespaces |
 | `mux.contracts.ports` | the port protocols |
 | `mux.errors` | the error taxonomy |
+| `mux.state` | the `StateStore` protocol, the pure operation, lease, journal and usage rules, and a restartable in-memory store |
 | `mux.profiles` | the declared profiles and `get_profile` |
 | `mux.drivers` | one subpackage per provider (empty so far) |
 
@@ -136,6 +137,60 @@ Asking for a namespace the profile does not offer raises
 `UnsupportedCapability`, and asking for another version raises
 `ExtensionVersionError`. There is no raw client attribute on any port.
 
+## State
+
+`mux.state.store.StateStore` is the durable state a host keeps for the
+library. Each method is one atomic transaction, and every decision it makes
+comes from a pure function in `mux.state`, so every store implementation
+decides the same way. Records a store returns are copies: changing one never
+changes what was committed.
+
+A binding lives in a slot: a thread plus the caller account that owns it.
+Per-caller threads (the default) have one private slot per account, keyed by
+the binding's `legacy_account_id`; a thread opted into sharing has one slot
+with no account. Leases are per slot.
+
+| Record | Unique on | Rule |
+| --- | --- | --- |
+| config revision | (channel, local) | Immutable. The same number with different content raises `ConfigRevisionConflict`. |
+| binding | (slot, generation) | Compare-and-swap on generation (0 = unbound); the loser raises `BindingConflict`. A rebind keeps the binding `id`, and an `id` names one slot only. `bind_new_slot` returns the winner of a race. |
+| operation | (tenant, account, key) | Owned by the principal that began it; another principal gets `ScopeViolation`. Persisted as `pending` before any I/O. The same key and request digest returns the existing record; a different digest raises `OperationConflict`. Only `claim_send`, a compare-and-swap from `pending`, moves it to `sent`, so exactly one caller sends. It goes back to `pending` only when reconciling proves the provider never got it. |
+| lease | slot | One active root turn per slot. Each acquisition gets a higher fence. Taking over an expired lease sets `took_over`. |
+| journal | (session, sequence) and (session, source key, revision, preview) | An append, its projection and the stream cursor commit together; an entry already journaled is dropped. Previews are kept in their own namespace and never change the projection, so they can neither complete a turn nor block the record that does. |
+| usage | (binding, observation, revision) | Recorded only under the binding that names the observation's session. A higher revision writes one outbox row of signed deltas; a lower one is ignored, and the same revision with different counts raises `UsageRevisionConflict`. |
+| accounting outbox | (binding, observation, revision) | Each row carries `prior_applied_revision`, the revision its deltas are measured against. `mark_outbox_applied` is true once per row. |
+
+Fencing: `claim_send` and `advance_operation` on an operation begun with a
+slot, and every `append_events`, need the active lease of the record's own
+slot. A journal belongs to the slot of the binding whose
+`native_refs["session"]` names its session, registered when the binding is
+written and kept across rebinds; an append never claims a journal, and a
+session no binding names takes no appends. A missing or
+foreign lease raises `ScopeViolation`, and a superseded one raises
+`StaleFence`. The other writes are safe without a lease: beginning an
+operation is idempotent, `put_binding` is its own compare-and-swap,
+usage is ordered by revision, and an outbox row flips once. Time is passed
+in, but a database store checks lease expiry against its own transaction
+clock.
+
+After a crash, `operations.recovery` says what a successor does with an
+operation it finds: claim and send a `pending` one, reconcile a `sent` or
+`outcome_unknown` one, observe an `accepted` one. A lost lease never means
+the request was not sent. Only conclude absence once the claimer's lease has expired and its send
+deadline has passed, or a request still in flight lands after the resend.
+So a driver keeps its send timeout below the lease TTL and never starts
+I/O on a lease past its expiry.
+
+Usage revisions follow the null-is-not-zero rule: a count the provider did
+not report leaves the accounted value alone and its delta is `None`. An
+observation of 100, then 120, then 110 output tokens yields deltas of 100,
++20 and -10, and replaying any of them yields nothing.
+
+`mux.state.memory.MemoryStateStore` keeps its committed state in a
+`MemoryStateData` that outlives the store, so `restart()` simulates a
+process restart, and a `crash` plan raises `SimulatedCrash` just before or
+just after a named method commits.
+
 ## Events
 
 `Event` is one journal entry: an id, the session, a local `sequence`, a
@@ -185,7 +240,7 @@ Import-linter contracts in the root `pyproject.toml` hold the boundaries:
 | Contract | Forbids |
 | --- | --- |
 | Mux must not import daimon | `mux` → `daimon` |
-| Mux contracts and profiles import no provider SDK or driver | `mux.contracts`, `mux.profiles`, `mux.errors` → `anthropic`, `openai`, `google`, `mux.drivers` |
+| Mux contracts and profiles import no provider SDK or driver | `mux.contracts`, `mux.profiles`, `mux.errors`, `mux.state` → `anthropic`, `openai`, `google`, `mux.drivers` |
 | Only mux.drivers.anthropic imports the anthropic SDK | `mux` → `anthropic`, except from `mux.drivers.anthropic` |
 | Only mux.drivers.openai imports the openai SDK | `mux` → `openai`, except from `mux.drivers.openai` |
 | Only mux.drivers.gemini imports the google.genai SDK | `mux` → `google`, except from `mux.drivers.gemini` |
