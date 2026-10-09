@@ -25,6 +25,11 @@ Install a driver's SDK with its extra: `daimon-mux[anthropic]`,
 The full description is [docs/mux.md](../../docs/mux.md). Tests:
 `uv run pytest packages/mux`.
 
+The Anthropic skills version extension also supports workspace-key downloads by
+native version ID, omitting the skills beta header on that request. The ordinary
+pinned-version port and generic recovery download keep their existing SDK requests. Both paths enforce the same
+host-provided scope and skill grant before I/O.
+
 ### Anthropic turn event translation
 
 `AnthropicManagedAgents` registers an unwired `AnthropicEvents` port over the

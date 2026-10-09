@@ -458,6 +458,29 @@ async def download_skill_version(
     )
 
 
+async def list_native_skill_versions(
+    client: AsyncAnthropic, skill_id: str, *, scope: Scope
+) -> AsyncIterator[VersionListResponse]:
+    from mux.drivers.anthropic.resources.skills import NativeSkillVersions
+
+    backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
+    port = backend.extension(NativeSkillVersions, namespace="anthropic.skills_versions", version=1)
+    async for row in legacy_iter(port.walk_native(scope, skill_id)):
+        yield VersionListResponse.model_construct(_fields_set=None, **row)
+
+
+async def download_skill_version_id(
+    client: AsyncAnthropic, skill_id: str, version_id: str, *, scope: Scope
+) -> bytes:
+    from mux.drivers.anthropic.resources.skills import NativeSkillVersions
+
+    backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
+    port = backend.extension(NativeSkillVersions, namespace="anthropic.skills_versions", version=1)
+    return b"".join(
+        [chunk async for chunk in legacy_iter(port.download_by_id(scope, skill_id, version_id))]
+    )
+
+
 async def delete_skill_version(
     client: AsyncAnthropic, skill_id: str, version: str, *, scope: Scope
 ) -> None:

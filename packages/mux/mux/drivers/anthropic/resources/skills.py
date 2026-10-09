@@ -1,15 +1,17 @@
 """Skills and version history, preserving direct multipart upload requests."""
 
 from collections.abc import AsyncIterator
-from typing import cast
+from typing import Protocol, cast
 
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, omit
 from anthropic.types.beta import SkillCreateResponse, SkillListResponse, SkillRetrieveResponse
 from anthropic.types.beta.skill_list_params import SkillListParams
 from anthropic.types.beta.skills import VersionCreateResponse, VersionListResponse
 from anthropic.types.beta.skills.version_list_params import VersionListParams
+from pydantic import JsonValue
 
 from mux.contracts.ids import Page, PageRequest, Scope, SkillRef
+from mux.contracts.ports import SkillVersions
 from mux.contracts.receipts import DeletionReceipt
 from mux.contracts.resources import Skill, SkillUpload, SkillVersion
 from mux.drivers.anthropic.resources._authorization import (
@@ -19,6 +21,16 @@ from mux.drivers.anthropic.resources._authorization import (
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.errors import UnsupportedCapability
+
+
+class NativeSkillVersions(SkillVersions, Protocol):
+    """anthropic.skills_versions@1 workspace-key download by native version ID."""
+
+    def walk_native(self, scope: Scope, skill_id: str) -> AsyncIterator[dict[str, JsonValue]]: ...
+
+    def download_by_id(
+        self, scope: Scope, skill_id: str, version_id: str
+    ) -> AsyncIterator[bytes]: ...
 
 
 def skill_record(item: SkillCreateResponse | SkillListResponse | SkillRetrieveResponse) -> Skill:
@@ -164,6 +176,26 @@ class AnthropicSkillVersions:
             raise ValueError("a version must be pinned before downloading")
         content = await provider_call(
             self._client.beta.skills.versions.download(ref.version, skill_id=ref.id)
+        )
+        try:
+            yield await provider_call(content.read())
+        finally:
+            await provider_call(content.close())
+
+    async def walk_native(self, scope: Scope, skill_id: str) -> AsyncIterator[dict[str, JsonValue]]:
+        """Preserve main's lazy list and partial native version rows."""
+        authorize(self._authorization, scope, "skill", skill_id)
+        async for item in provider_iter(self._client.beta.skills.versions.list(skill_id=skill_id)):
+            yield cast(dict[str, JsonValue], item.model_dump(mode="json", exclude_unset=True))
+
+    async def download_by_id(
+        self, scope: Scope, skill_id: str, version_id: str
+    ) -> AsyncIterator[bytes]:
+        authorize(self._authorization, scope, "skill", skill_id)
+        content = await provider_call(
+            self._client.beta.skills.versions.download(
+                version_id, skill_id=skill_id, extra_headers={"anthropic-beta": omit}
+            )
         )
         try:
             yield await provider_call(content.read())

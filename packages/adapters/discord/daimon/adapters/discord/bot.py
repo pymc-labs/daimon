@@ -2410,6 +2410,7 @@ class DaimonBot(commands.Bot):
                     public_base_url=self.runtime.settings.mcp.app_root_url,
                     enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
                     background_sessionmaker=self.runtime.sessionmaker,
+                    wait_for_face=True,
                 )
         except Exception as exc:
             log.warning("discord.identity_resolution_failed", error_type=type(exc).__name__)
@@ -2991,6 +2992,7 @@ class DaimonBot(commands.Bot):
                     public_base_url=self.runtime.settings.mcp.app_root_url,
                     enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
                     background_sessionmaker=self.runtime.sessionmaker,
+                    wait_for_face=True,
                 )
         except Exception as exc:
             log.warning("discord.identity_resolution_failed", error_type=type(exc).__name__)
@@ -3486,6 +3488,7 @@ class DaimonBot(commands.Bot):
                 configuration_target_name=admission.config.configuration_target_name,
                 role=role,
                 is_setup=admission.config.thread_binding_kind == "setup",
+                message_text=message.content,
             ) as origin:
                 outcome = await run_prepared_turn(
                     self.runtime.turn_deps,

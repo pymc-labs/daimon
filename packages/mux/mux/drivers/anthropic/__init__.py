@@ -32,7 +32,11 @@ from mux.drivers.anthropic.resources.sessions_admin import AnthropicSessionAdmin
 from mux.drivers.anthropic.resources.sessions_admin import (
     SessionResources as NativeSessionResources,
 )
-from mux.drivers.anthropic.resources.skills import AnthropicSkills, AnthropicSkillVersions
+from mux.drivers.anthropic.resources.skills import (
+    AnthropicSkills,
+    AnthropicSkillVersions,
+    NativeSkillVersions,
+)
 from mux.drivers.anthropic.resources.vaults import AnthropicVaults, Vaults
 from mux.drivers.anthropic.resources.walk import AnthropicResourceWalk, ResourceWalk
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
@@ -104,6 +108,7 @@ class AnthropicManagedAgents:
             (PlatformExport, "anthropic.platform_export", 1): native_export,
             (CorePlatformExport, "anthropic.platform_export", 1): native_export,
             (SkillVersions, "anthropic.skills_versions", 1): native_versions,
+            (NativeSkillVersions, "anthropic.skills_versions", 1): native_versions,
         }
 
     @property
