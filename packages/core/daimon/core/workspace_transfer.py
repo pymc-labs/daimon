@@ -292,7 +292,7 @@ async def _poll_for_bundle(
     *,
     session_id: str,
     sleep: Callable[[float], Awaitable[None]],
-    scope: Scope | None = None,
+    scope: Scope,
 ) -> FileMetadata | None:
     """The session's handoff bundle once its size stops changing, or None.
 
@@ -308,12 +308,7 @@ async def _poll_for_bundle(
         if delay > 0:
             await sleep(delay)
         elapsed += delay
-        records = await list_output_records(
-            client,
-            session_id,
-            scope=scope
-            or Scope.legacy_host_authorized(call_site="workspace_transfer:_poll_for_bundle"),
-        )
+        records = await list_output_records(client, session_id, scope=scope)
         latest = next(
             (
                 meta
