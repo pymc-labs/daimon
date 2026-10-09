@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Discord agent tools now check a caller's thread access and posting rights before sending, and split long messages when agent identity is unavailable.
 - A Discord thread that can't be opened gets one plain reply under the mention: "Couldn't open a thread. @mention Daimon again." It used to be the generic error with a request id. A failed typing indicator no longer stops the thread from opening.
 - Discord thread names are short and plain, like "Shorten the competitive brief" instead of "Simplify Text By Removing Jargon While Keeping Key Points": sentence case, at most 50 characters. Attached file names count, so a mention with only a file gets a name too.
 - Discord's `/billing`, `/agent-setup`, `/routines`, `/privacy` and `/memory` answer with an error when a database read fails, instead of staying on "thinking" forever.
