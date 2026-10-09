@@ -2282,11 +2282,12 @@ class TurnOrigin(Base):
 
 
 class PendingSkillAdd(Base):
-    """One previewed `add_skill` its person may confirm in their next message.
+    """One previewed `add_skill` its person may confirm with a yes as their next message.
 
     Written only where no approval card can show because the deployment turned
     them off. Bound to the previewing turn's caller, thread and target agent
-    and to the previewed content; consumed once, by that person's next turn.
+    and to the previewed content. Their next message approves it for that turn
+    (`approved_origin_id`) or cancels it (`consumed_at`); an upload consumes it.
     """
 
     __tablename__ = "pending_skill_adds"
@@ -2311,6 +2312,8 @@ class PendingSkillAdd(Base):
     preview_origin_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # The turn whose person's explicit yes approved it; set at that turn's start.
+    approved_origin_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

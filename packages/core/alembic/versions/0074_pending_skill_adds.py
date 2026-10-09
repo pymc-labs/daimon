@@ -1,4 +1,4 @@
-"""Previewed add_skill calls a person may confirm in their next chat message.
+"""Previewed add_skill calls a person confirms with a yes as their next chat message.
 
 downgrade: destructive
 """
@@ -32,6 +32,7 @@ def upgrade() -> None:
         sa.Column("preview_origin_id", sa.UUID(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("approved_origin_id", sa.UUID()),
         sa.Column("consumed_at", sa.DateTime(timezone=True)),
         sa.PrimaryKeyConstraint("id"),
     )

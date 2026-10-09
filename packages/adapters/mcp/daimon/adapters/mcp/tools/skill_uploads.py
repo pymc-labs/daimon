@@ -10,13 +10,13 @@ preview returned, bound to this agent, and it never lands on the model's word
 alone: the server confirms only from a chat turn's verified origin whose live
 session itself makes ``add_skill`` wait for the person's Approve on the card
 (`has_confirmation_gate`). Where the deployment turned cards off, a chat
-preview is recorded instead (`daimon.core.stores.pending_skill_adds`) and the
-person confirms it with their next message in that thread: the confirm must
-come from that later turn of theirs, for the same agent and content, once,
-within the TTL. Anything else (an ``agent_chat`` or unattended run, a session
-whose tools have not caught up with tool safety yet) adds nothing, says which
-it was, and points to Add skill in ``/agent-setup``, which previews and adds
-on the person's own click. The pin
+preview is recorded instead (`daimon.core.stores.pending_skill_adds`): the
+person's next message in that thread confirms it only if the adapter saw an
+explicit yes, and only for the turn that message started, for the same agent
+and content, once, within the TTL; any other reply cancels it. Anything else
+(an ``agent_chat`` or unattended run, a session whose tools have not caught up
+with tool safety yet) adds nothing, says which it was, and points to Add skill
+in ``/agent-setup``, which previews and adds on the person's own click. The pin
 and sharing gates run again on the fresh agent right before the upload and the
 attach.
 """
@@ -82,7 +82,6 @@ from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.pending_skill_adds import (
     PENDING_SKILL_ADD_TTL,
-    ConfirmRefusal,
     consume_pending_skill_add,
     record_pending_skill_add,
 )
@@ -189,16 +188,6 @@ def _no_card_text(reason: NoCardReason) -> tuple[str, str | None]:
             f"one: {why}"
         )
     return why, fix
-
-
-_CONFIRM_REFUSALS: dict[ConfirmRefusal, str] = {
-    "no_preview": (
-        "there is no open preview of this content for this agent from this person in this "
-        "thread (it was never previewed here, already used, or expired)"
-    ),
-    "same_turn": "the person has not replied since the preview; they confirm in a new message",
-    "not_next_message": "the person sent another message since the preview without confirming",
-}
 
 
 def _chat_confirms(
@@ -497,10 +486,11 @@ async def _add_skill_impl(
                     )
                 minutes = int(PENDING_SKILL_ADD_TTL.total_seconds() // 60)
                 then = (
-                    "Ask them to reply in this thread to add it. Only in the turn their next "
-                    "message starts, and only if it says yes, call add_skill again with the "
-                    f"same arguments, content_hash='{bound}' and that turn's "
-                    f"origin_context_id. It works once, within {minutes} minutes, for them only."
+                    "To add it, they reply with just `yes` as their next message in this "
+                    f"thread, within {minutes} minutes; any other reply cancels it. In the turn "
+                    "that reply starts, call add_skill again with the same arguments, "
+                    f"content_hash='{bound}' and that turn's origin_context_id. Daimon checks "
+                    "their reply itself."
                 )
             elif no_card is None:
                 then = (
@@ -526,17 +516,19 @@ async def _add_skill_impl(
         if chat_confirms:
             assert origin is not None
             async with runtime.session_factory.begin() as session:
-                refusal = await consume_pending_skill_add(
+                confirmed = await consume_pending_skill_add(
                     session,
                     origin=origin,
                     ma_agent_id=agent.id,
                     content_hash=bound,
                     now=datetime.now(UTC),
                 )
-            if refusal is not None:
+            if not confirmed:
                 raise ToolError(
-                    f"Nothing was added: {_CONFIRM_REFUSALS[refusal]}. Call add_skill without "
-                    "content_hash to preview it again, then wait for the person's reply."
+                    "Nothing was added: this turn did not start with the person replying "
+                    "`yes` to this preview (they have not replied yet, replied something "
+                    "else, it expired, or it was already used). Do not retry; preview it "
+                    "again only if they ask."
                 )
         added = await add_agent_skill(
             runtime.client,
@@ -604,8 +596,9 @@ def register_skill_upload_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         agent could run. Show that to the person; only when they confirm, call again
         with the same arguments plus the preview's ``content_hash``, and the person
         approves the upload on a confirmation card. Where this deployment turned cards
-        off, the person confirms by replying in this thread instead: call again only in
-        the turn their reply starts, with that turn's ``origin_context_id``. Where
+        off, the person confirms by replying just ``yes`` in this thread instead: call
+        again only in the turn their reply starts, with that turn's
+        ``origin_context_id``; Daimon checks the reply itself. Where
         neither can happen, the preview's summary says why and points to Add skill in
         /agent-setup. The
         skill belongs to this agent alone; ``sync_skills`` fills the shared library
