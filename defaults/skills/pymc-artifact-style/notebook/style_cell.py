@@ -2,22 +2,22 @@
 def _():
     # PyMC Labs house style for marimo — generated cell, do not edit.
     # Source of truth: pymc-artifact-style skill (notebook/style_cell.py).
-    import base64
-    import io
-    import json
-    import tempfile
-    import zlib
-    from pathlib import Path
+    import base64 as _base64
+    import io as _io
+    import json as _json
+    import tempfile as _tempfile
+    import zlib as _zlib
+    from pathlib import Path as _Path
 
     import marimo as mo
-    import matplotlib as mpl
+    import matplotlib as _mpl
     import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
-    from matplotlib import font_manager as fm
-    from matplotlib.colors import LinearSegmentedColormap
+    from matplotlib import font_manager as _fm
+    from matplotlib.colors import LinearSegmentedColormap as _LSC
 
-    ASSETS = json.loads(r'''__ASSETS_JSON__''')
+    _ASSETS = _json.loads(r'''__ASSETS_JSON__''')
 
     # ---- palette: the exact pymc-labs.com hexes ------------------------------
     C = dict(
@@ -28,28 +28,28 @@ def _():
     # fixed series order: strong first, pale last. Never reorder by rank.
     CYCLE = [C["navy"], C["teal"], C["peach"], C["indigo"], C["periwinkle"],
              C["orange"], C["violet"], C["aqua"]]
-    SEQ = LinearSegmentedColormap.from_list("pymc_seq", ["#FFFFFF", C["aqua"], C["teal"], C["navy"]])
-    DIV = LinearSegmentedColormap.from_list("pymc_div", [C["indigo"], "#FFFFFF", C["orange"]])
+    SEQ = _LSC.from_list("pymc_seq", ["#FFFFFF", C["aqua"], C["teal"], C["navy"]])
+    DIV = _LSC.from_list("pymc_div", [C["indigo"], "#FFFFFF", C["orange"]])
 
     # ---- fonts: embedded (Inter 400/500/600, JetBrains Mono 400) -------------
-    _fonts = {k: zlib.decompress(base64.b64decode(ASSETS[k]))
+    _fonts = {k: _zlib.decompress(_base64.b64decode(_ASSETS[k]))
               for k in ("inter_400", "inter_500", "inter_600", "mono_400")}
-    _dir = Path(tempfile.mkdtemp(prefix="pymc_fonts_"))
+    _dir = _Path(_tempfile.mkdtemp(prefix="pymc_fonts_"))
     for _k, _v in _fonts.items():
         (_dir / f"{_k}.ttf").write_bytes(_v)
-        fm.fontManager.addfont(str(_dir / f"{_k}.ttf"))
+        _fm.fontManager.addfont(str(_dir / f"{_k}.ttf"))
 
     def _face(family, weight, key):
-        b64 = base64.b64encode(_fonts[key]).decode()
+        b64 = _base64.b64encode(_fonts[key]).decode()
         return (f"@font-face{{font-family:'{family}';font-weight:{weight};font-style:normal;"
                 f"font-display:swap;src:url(data:font/ttf;base64,{b64}) format('truetype');}}")
 
-    FONT_CSS = (_face("Inter", 400, "inter_400") + _face("Inter", 500, "inter_500")
+    _FONT_CSS = (_face("Inter", 400, "inter_400") + _face("Inter", 500, "inter_500")
                 + _face("Inter", 600, "inter_600") + _face("JetBrains Mono", 400, "mono_400"))
 
-    mpl.rcParams.update({
+    _mpl.rcParams.update({
         "font.family": "sans-serif", "font.sans-serif": ["Inter", "DejaVu Sans"],
-        "font.size": 9.5, "axes.prop_cycle": mpl.cycler(color=CYCLE),
+        "font.size": 9.5, "axes.prop_cycle": _mpl.cycler(color=CYCLE),
         "text.color": C["navy"], "axes.edgecolor": C["navy"], "axes.labelcolor": C["navy"],
         "xtick.color": C["navy"], "ytick.color": C["navy"], "axes.linewidth": 0.8,
         "axes.titlecolor": C["navy"], "axes.titleweight": "medium",
@@ -64,8 +64,8 @@ def _():
     })
 
     # ---- page CSS ------------------------------------------------------------
-    LOGO = "data:image/png;base64," + ASSETS["logo_dark_png"]
-    CSS = FONT_CSS + """
+    _LOGO = "data:image/png;base64," + _ASSETS["logo_dark_png"]
+    _CSS = _FONT_CSS + """
     :root{--pm-navy:#0C1F40;--pm-aqua:#B4E7DD;--pm-peri:#9FAAE2;--pm-peach:#F6AE72;
       --pm-soft:#F7F7F7;--pm-teal:#0C9E82;--pm-indigo:#5462C4;--pm-orange:#C4720A;
       --pm-line:#0c1f4014;color-scheme:light;
@@ -137,7 +137,7 @@ def _():
         t = title.replace(accent, f"<em>{accent}</em>", 1) if accent else title
         bs = "".join(badge(b, c) for b, c in badges)
         return mo.Html(
-            f"<style>{CSS}</style><div class='pm-head'><img src='{LOGO}' alt='PyMC Labs'/>"
+            f"<style>{_CSS}</style><div class='pm-head'><img src='{_LOGO}' alt='PyMC Labs'/>"
             f"<h1>{t}</h1>" + (f"<p>{subtitle}</p>" if subtitle else "")
             + (f"<div class='pm-meta'>{bs}</div>" if bs else "") + "</div>"
         )
@@ -154,10 +154,10 @@ def _():
 
     def figure(fig, caption="", dpi=200):
         """Matplotlib figure -> inline PNG (fonts baked in) with a caption; closes the figure."""
-        buf = io.BytesIO()
+        buf = _io.BytesIO()
         fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
         plt.close(fig)
-        b64 = base64.b64encode(buf.getvalue()).decode()
+        b64 = _base64.b64encode(buf.getvalue()).decode()
         cap = f"<figcaption>{caption}</figcaption>" if caption else ""
         return mo.Html(f"<figure class='pm-fig'><img src='data:image/png;base64,{b64}'/>{cap}</figure>")
 

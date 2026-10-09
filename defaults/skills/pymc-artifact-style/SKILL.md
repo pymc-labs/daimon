@@ -280,13 +280,17 @@ S=<this skill's directory>/notebook
 cp $S/example_content.py content.py                 # a working example to start from
 mkdir -p data && cp $S/mmm_example.csv data/        # only to run the example itself
 # edit content.py: keep the @app.cell structure, replace the content
-python $S/build_notebook.py content.py -o nb.py --title "Tab title" [--width medium]
+python $S/build_notebook.py content.py -o nb.py --title "Tab title"   # --width compact|medium|full, default medium
 marimo export html nb.py -o /tmp/check.html         # every cell must execute
 ```
 
 Then publish `nb.py` with `marimo_notebooks`. The build needs only the
 standard library; the notebook needs marimo, matplotlib, numpy and pandas,
-which the notebook host ships. Do not add a PEP 723 header for the style.
+which the notebook host ships, so the style needs no PEP 723 header. If the
+notebook needs a library outside that set, add the header to the top of the
+built `nb.py`, before `import marimo`, and list `marimo`, `matplotlib`,
+`numpy` and `pandas` with your extras: the isolated environment replaces the
+baked one.
 
 `content.py` holds `@app.cell` functions only (no `import marimo`, no
 `app = ...`, no `__main__` block; the build adds them). The style cell
