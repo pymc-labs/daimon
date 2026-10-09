@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2056,
+  "files_scanned": 2062,
   "parse_errors": [],
   "calls": [
     {
@@ -1799,54 +1799,6 @@
         "event.id",
         "event.type"
       ]
-    },
-    {
-      "file": "packages/core/daimon/core/workspace_transfer.py",
-      "line": 302,
-      "end": 302,
-      "scope": "_poll_for_bundle",
-      "category": "production",
-      "resource": "files.list",
-      "call": "client.beta.files.list(scope_id=session_id, betas=[_MA_BETA], limit=1000)",
-      "request_keys": [],
-      "response_access": [
-        "page.data"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/workspace_transfer.py",
-      "line": 339,
-      "end": 339,
-      "scope": "_rehost_bundle",
-      "category": "production",
-      "resource": "files.download",
-      "call": "client.beta.files.download(bundle.id, betas=[_MA_BETA])",
-      "request_keys": [],
-      "response_access": [
-        "response.read"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/workspace_transfer.py",
-      "line": 347,
-      "end": 347,
-      "scope": "_rehost_bundle",
-      "category": "production",
-      "resource": "files.delete",
-      "call": "client.beta.files.delete(bundle.id, betas=[_MA_BETA])",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/workspace_transfer.py",
-      "line": 522,
-      "end": 522,
-      "scope": "transfer_workspace",
-      "category": "production",
-      "resource": "files.delete",
-      "call": "client.beta.files.delete(bundle.id, betas=[_MA_BETA])",
-      "request_keys": [],
-      "response_access": []
     },
     {
       "file": "packages/core/tests/contracts/test_agents.py",
@@ -6195,8 +6147,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 398,
-      "end": 398,
+      "line": 399,
+      "end": 399,
       "scope": "walk",
       "category": "production",
       "resource": "sessions.list",
@@ -6206,8 +6158,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 383,
-      "end": 383,
+      "line": 384,
+      "end": 384,
       "scope": "list",
       "category": "production",
       "resource": "sessions.list",
@@ -6217,8 +6169,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 346,
-      "end": 346,
+      "line": 347,
+      "end": 347,
       "scope": "send",
       "category": "production",
       "resource": "sessions.create",
@@ -6228,8 +6180,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 353,
-      "end": 353,
+      "line": 354,
+      "end": 354,
       "scope": "create",
       "category": "production",
       "resource": "sessions.create",
@@ -6239,8 +6191,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 361,
-      "end": 361,
+      "line": 362,
+      "end": 362,
       "scope": "retrieve",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -6250,8 +6202,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 492,
-      "end": 494,
+      "line": 493,
+      "end": 495,
       "scope": "apply_update",
       "category": "production",
       "resource": "sessions.update",
@@ -13349,6 +13301,24 @@
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsSession"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/workspace_ports_compat.py",
+      "line": 5,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/workspace_ports_compat.py",
+      "line": 6,
+      "module": "anthropic.types.beta.beta_managed_agents_file_resource_params",
+      "names": [
+        "BetaManagedAgentsFileResourceParams"
       ],
       "category": "production"
     },

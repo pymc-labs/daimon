@@ -793,3 +793,13 @@ Thread handoff collects session seals through scoped lifecycle reads before its
 policy transaction. Bundle reuploads use the scoped Artifacts port with the same
 Files API request, archive bytes and retention queue. Checkpoint billing,
 access rechecks and the full/transcript/history fallback ladder remain host policy.
+
+Workspace transfer uses `anthropic.workspace_transfer@1` to carry the inline
+full/transcript/history rung. The closed schema stays in the driver. Pure native
+export declares its archive, digest, transcript presence and losses with
+`best_effort` consistency; restore verifies the payload, source authorization
+and accepted losses, then returns neutral mounts for the existing create call.
+No manifest upload, provider lookup, second session create or first send is added.
+The host retains the one billed checkpoint, its access fence, fallback notices,
+quoted transcript and system-message policy. Generic lifecycle export/restore
+stay unsupported; this explicit native extension handles the existing MA ladder.

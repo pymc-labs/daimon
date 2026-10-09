@@ -21,6 +21,7 @@ from mux.contracts.resources import (
     Continuity,
     ExportRequirements,
     ProviderBinding,
+    ResourceBinding,
     Session,
     SessionExport,
     SessionFilter,
@@ -522,3 +523,153 @@ class AnthropicSessions:
         self, scope: Scope, ref: ResourceRef, target: ConfigRevision, *, expected: int, key: str
     ) -> Session:
         raise MigrationUnsupported(ref.id)
+
+
+class FullWorkspaceTransfer(NativeConfig):
+    type: Literal["full"]
+    file_id: str = Field(min_length=1)
+    mount_path: str = Field(min_length=1)
+    bytes_transferred: int = Field(ge=0)
+    transcript: str | None
+    unpreserved: list[str]
+
+
+class TranscriptWorkspaceTransfer(NativeConfig):
+    type: Literal["transcript"]
+    transcript: str
+    gap_reason: Literal[
+        "session_dead",
+        "checkpoint_failed",
+        "checkpoint_timeout",
+        "bundle_oversize",
+        "upload_failed",
+        "not_worth_checkpointing",
+        "archive_missing",
+    ]
+
+
+class HistoryWorkspaceTransfer(NativeConfig):
+    type: Literal["history"]
+    gap_reason: Literal["events_unavailable"]
+
+
+class WorkspaceTransferConfig(NativeConfig):
+    """Inline anthropic.workspace_transfer@1 data; no manifest upload is needed."""
+
+    outcome: Annotated[
+        FullWorkspaceTransfer | TranscriptWorkspaceTransfer | HistoryWorkspaceTransfer,
+        Field(discriminator="type"),
+    ]
+
+
+class WorkspaceTransfer(Protocol):
+    """Pure export declaration and restore mounts for the host checkpoint ladder.
+
+    The host runs the billed checkpoint and transfers its one archive first.
+    Restore prepares mounts for the existing create call; it does not create
+    or send on another session itself. Transcript delivery remains host policy.
+    """
+
+    def export(
+        self, scope: Scope, source: ResourceRef, *, inline: ExtensionConfig, key: str
+    ) -> SessionExport: ...
+
+    def restore(
+        self,
+        scope: Scope,
+        export: SessionExport,
+        *,
+        inline: ExtensionConfig,
+        accept_losses: frozenset[str],
+        key: str,
+    ) -> tuple[ResourceBinding, ...]: ...
+
+
+class AnthropicWorkspaceTransfer:
+    def __init__(
+        self, account_scope_id: str, authorization: ResourceAuthorization | None = None
+    ) -> None:
+        self._account_scope_id = account_scope_id
+        self._authorization = authorization
+
+    def export(
+        self, scope: Scope, source: ResourceRef, *, inline: ExtensionConfig, key: str
+    ) -> SessionExport:
+        import hashlib
+        import json
+
+        authorize(self._authorization, scope, "session", source.id)
+        check_ref(scope, source, self._account_scope_id, "session")
+        config = _config(inline, "anthropic.workspace_transfer", WorkspaceTransferConfig)
+        outcome = config.outcome
+        included: set[str] = set()
+        losses = ["runtime"]
+        artifacts: tuple[ResourceRef, ...] = ()
+        if isinstance(outcome, FullWorkspaceTransfer):
+            authorize(self._authorization, scope, "file", outcome.file_id)
+            artifacts = (
+                ResourceRef(
+                    id=outcome.file_id,
+                    kind="file",
+                    provider="anthropic",
+                    account_scope_id=self._account_scope_id,
+                    tenant_id=scope.tenant_id,
+                    account_id=scope.account_id,
+                ),
+            )
+            included.add("workspace")
+            if outcome.transcript:
+                included.add("transcript")
+            losses.extend(outcome.unpreserved)
+        else:
+            losses.append(f"workspace:{outcome.gap_reason}")
+            if isinstance(outcome, TranscriptWorkspaceTransfer) and outcome.transcript:
+                included.add("transcript")
+        if "transcript" not in included:
+            losses.append("transcript")
+        digest = hashlib.sha256(
+            json.dumps(
+                config.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return SessionExport(
+            source=source,
+            config_revision=0,
+            journal_cursor="",
+            artifacts=artifacts,
+            manifest_digest=digest,
+            included=frozenset(included),
+            excluded=frozenset({"workspace", "transcript", "runtime"} - included),
+            consistency="best_effort",
+            losses=tuple(losses),
+        )
+
+    def restore(
+        self,
+        scope: Scope,
+        export: SessionExport,
+        *,
+        inline: ExtensionConfig,
+        accept_losses: frozenset[str],
+        key: str,
+    ) -> tuple[ResourceBinding, ...]:
+        # Recheck all declarations, digest and authorization without a lookup.
+        expected = self.export(scope, export.source, inline=inline, key=key)
+        if export != expected:
+            raise ValueError("workspace transfer payload differs from its export declaration")
+        if set(export.losses) - accept_losses:
+            raise ValueError("workspace transfer losses have not been accepted")
+        config = _config(inline, "anthropic.workspace_transfer", WorkspaceTransferConfig)
+        if not isinstance(config.outcome, FullWorkspaceTransfer):
+            return ()
+        outcome = config.outcome
+        return (
+            ResourceBinding(
+                id=f"workspace-transfer:{outcome.file_id}",
+                kind="artifact",
+                resource=export.artifacts[0],
+                target_path=outcome.mount_path,
+            ),
+        )

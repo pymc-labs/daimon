@@ -298,6 +298,7 @@ source_modules = [
     "daimon.core.wizard",
     "daimon.core.wizard_sweep",
     "daimon.core.workspace_transfer",
+    "daimon.core.workspace_ports_compat",
 ]
 forbidden_modules = ["daimon.core._models"]
 # Stores are the sanctioned abstraction layer between adapters and the ORM.

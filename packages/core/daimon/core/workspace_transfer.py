@@ -41,7 +41,7 @@ import contextlib
 import functools
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from secrets import token_hex
@@ -78,6 +78,11 @@ from daimon.core.handoff_context import (
 from daimon.core.ma import replay_events
 from daimon.core.mux_backend import managed_agents
 from daimon.core.mux_compat import legacy_call
+from daimon.core.output_ports_compat import (
+    delete_output_record,
+    list_output_records,
+    read_output_record,
+)
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_ports_compat import session_scope
 from daimon.core.session_preparation_stages import PreparedReplacement
@@ -89,7 +94,10 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.posture import AutoApprove, Billed, UsageRecorder
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.usage_recording import record_turn_usage
+from daimon.core.workspace_ports_compat import restore_transfer_records
+from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import Scope
+from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -284,6 +292,7 @@ async def _poll_for_bundle(
     *,
     session_id: str,
     sleep: Callable[[float], Awaitable[None]],
+    scope: Scope | None = None,
 ) -> FileMetadata | None:
     """The session's handoff bundle once its size stops changing, or None.
 
@@ -299,11 +308,16 @@ async def _poll_for_bundle(
         if delay > 0:
             await sleep(delay)
         elapsed += delay
-        page = await client.beta.files.list(scope_id=session_id, betas=[_MA_BETA], limit=1000)
+        records = await list_output_records(
+            client,
+            session_id,
+            scope=scope
+            or Scope.legacy_host_authorized(call_site="workspace_transfer:_poll_for_bundle"),
+        )
         latest = next(
             (
                 meta
-                for meta in page.data
+                for meta in records
                 if meta.downloadable is True and is_handoff_filename(meta.filename)
             ),
             None,
@@ -336,15 +350,14 @@ async def _rehost_bundle(
     Returns `(file_id, bytes)` or the gap reason to degrade with.
     """
     try:
-        response = await client.beta.files.download(bundle.id, betas=[_MA_BETA])
-        content = await response.read()
+        content = await read_output_record(client, bundle.id, scope=scope)
     except anthropic.APIStatusError as err:
         log.warning("workspace_transfer.download_failed", file_id=bundle.id, error=str(err)[:300])
         return "archive_missing"
 
     # Already gone (a concurrent sweep, a retried transfer) is not an error.
     with contextlib.suppress(anthropic.NotFoundError):
-        await client.beta.files.delete(bundle.id, betas=[_MA_BETA])
+        await delete_output_record(client, bundle.id, scope=scope)
 
     try:
 
@@ -412,6 +425,9 @@ async def transfer_workspace(
     on `events.list`, a DB error), because those are bugs or outages the
     caller's boundary should see, not states to paper over.
     """
+    scope = session_scope(
+        tenant_id=tenant_id, account_id=None, call_site="workspace_transfer:transfer_workspace"
+    )
     try:
         events = await replay_events(client, session_id=old_session_id)
     except anthropic.APIStatusError as err:
@@ -502,7 +518,7 @@ async def transfer_workspace(
         )
         return TranscriptOnly(transcript=transcript or "", gap_reason="bundle_oversize")
 
-    bundle = await _poll_for_bundle(client, session_id=old_session_id, sleep=sleep)
+    bundle = await _poll_for_bundle(client, session_id=old_session_id, sleep=sleep, scope=scope)
     if bundle is None:
         log.warning("workspace_transfer.no_bundle", session_id=old_session_id)
         return TranscriptOnly(transcript=transcript or "", gap_reason="checkpoint_failed")
@@ -519,7 +535,7 @@ async def transfer_workspace(
         # successful upload, so without this the rejected bundle sits in the
         # old session's outputs until the session itself is reclaimed.
         with contextlib.suppress(anthropic.NotFoundError):
-            await client.beta.files.delete(bundle.id, betas=[_MA_BETA])
+            await delete_output_record(client, bundle.id, scope=scope)
         return TranscriptOnly(transcript=transcript or "", gap_reason="bundle_oversize")
 
     # The prompt asks for `rev-parse HEAD` before and after the archive step.
@@ -547,11 +563,7 @@ async def transfer_workspace(
         sessionmaker,
         bundle=bundle,
         now=now,
-        scope=session_scope(
-            tenant_id=tenant_id,
-            account_id=None,
-            call_site="workspace_transfer:transfer_workspace",
-        ),
+        scope=scope,
     )
     if isinstance(rehosted, str):
         return TranscriptOnly(transcript=transcript or "", gap_reason=rehosted)
@@ -716,10 +728,49 @@ class WorkspaceTransferRunner:
             channel_id=self.channel_id,
             before_send=before_send,
         )
-        return as_prepared_replacement(
+        prepared = as_prepared_replacement(
             outcome,
             destination_model_id=destination_model_id,
             from_agent_name=from_agent_name,
             to_agent_name=destination_agent_name,
             requested_work=requested_work,
         )
+        return replace(
+            prepared,
+            extra_resources=restore_transfer_records(
+                self.anthropic,
+                old_session_id,
+                scope=session_scope(
+                    tenant_id=self.tenant_id,
+                    account_id=None,
+                    call_site="workspace_transfer:WorkspaceTransferRunner",
+                ),
+                inline=_inline_transfer(outcome),
+            ),
+        )
+
+
+def _inline_transfer(outcome: TransferOutcome) -> ExtensionConfig:
+    data: dict[str, JsonValue]
+    if isinstance(outcome, FullHandoff):
+        data = {
+            "type": "full",
+            "file_id": outcome.transfer_file_id,
+            "mount_path": outcome.mount_path,
+            "bytes_transferred": outcome.bytes_transferred,
+            "transcript": outcome.transcript,
+            "unpreserved": list(outcome.unpreserved),
+        }
+    elif isinstance(outcome, TranscriptOnly):
+        data = {
+            "type": "transcript",
+            "transcript": outcome.transcript,
+            "gap_reason": outcome.gap_reason,
+        }
+    else:
+        data = {"type": "history", "gap_reason": outcome.gap_reason}
+    return ExtensionConfig(
+        namespace="anthropic.workspace_transfer",
+        version=1,
+        value={"outcome": data},
+    )
