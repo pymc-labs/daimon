@@ -26,6 +26,7 @@ nav:
   - Agent identity: agent-identity.md
   - Teams: teams.md
   - Claude Code plugin: plugin.md
+  - Mux: mux.md
 
 # Every page in docs/ is published, listed or not, so a page left out of the
 # nav fails the strict build instead of shipping unreachable.

@@ -1,16 +1,37 @@
-"""Mux errors. Failures propagate as exceptions, never sentinel returns."""
+"""Mux errors. Failures propagate as exceptions, never sentinel returns.
+
+The taxonomy lives in `mux.contracts.errors`; this module is its stable
+import path.
+"""
 
 from __future__ import annotations
 
+from mux.contracts.errors import (
+    PROVIDER_ERROR_CATEGORIES,
+    BindingConflict,
+    ContinuityLost,
+    ExtensionVersionError,
+    InvalidConfig,
+    MigrationUnsupported,
+    MuxError,
+    OperationConflict,
+    ProviderError,
+    ProviderErrorCategory,
+    ScopeViolation,
+    UnsupportedCapability,
+)
 
-class MuxError(Exception):
-    """Base for everything mux raises."""
-
-
-class CapabilityUnavailableError(MuxError):
-    """A caller asked for a capability the backend does not declare."""
-
-    def __init__(self, backend: str, capability: str) -> None:
-        super().__init__(f"backend {backend!r} does not provide {capability!r}")
-        self.backend = backend
-        self.capability = capability
+__all__ = [
+    "PROVIDER_ERROR_CATEGORIES",
+    "BindingConflict",
+    "ContinuityLost",
+    "ExtensionVersionError",
+    "InvalidConfig",
+    "MigrationUnsupported",
+    "MuxError",
+    "OperationConflict",
+    "ProviderError",
+    "ProviderErrorCategory",
+    "ScopeViolation",
+    "UnsupportedCapability",
+]

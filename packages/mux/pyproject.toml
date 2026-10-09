@@ -10,6 +10,12 @@ dependencies = [
     "pydantic>=2.8",
 ]
 
+# One extra per provider driver. Only `mux.drivers.<provider>` imports its SDK.
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.117"]
+openai = ["openai>=2.54.0,<3"]
+gemini = ["google-genai>=2.7.0,<3"]
+
 [project.urls]
 Repository = "https://github.com/pymc-labs/daimon"
 

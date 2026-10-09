@@ -32,6 +32,8 @@ pieces fit together.
   platform limits and reply-routing design.
 - [teams.md](teams.md) — the Teams adapter: where it answers, admins,
   channel history and files, agent tools, restarts and current limits.
+- [mux.md](mux.md) — the provider-neutral managed-agent contract in
+  `packages/mux`: configuration defaults, profiles, admission, ports, events.
 - [plugin.md](plugin.md) — the Claude Code plugin: what the hub login mounts
   are and what has to be configured before installing it.
 - [slack-app-manifest.yaml](slack-app-manifest.yaml) — paste-in manifest for
