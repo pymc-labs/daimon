@@ -18,6 +18,10 @@ compare-and-swap on generation; `record_usage` is ordered by revision, so a
 stale writer can only report true usage or be ignored; `mark_outbox_applied`
 flips once.
 
+Trust. A store sits below the host's authorization boundary: reads and
+leases take a slot, not a `Scope`, so it is never exposed as a port.
+Ports check scope before they reach it.
+
 Time. `now` is passed in so the rules stay pure. A database store checks
 lease expiry against its own transaction clock, not the argument: a caller
 with a slow or stale clock must not keep an expired lease alive.
@@ -182,7 +186,12 @@ class StateStore(Protocol):
     async def record_usage(
         self, binding_id: str, observation: UsageObservation
     ) -> OutboxRow | None:
-        """Apply a revision and enqueue its outbox row; None if stale."""
+        """Apply a revision and enqueue its outbox row; None if stale.
+
+        `binding_id` must be the stable `ProviderBinding.id` of the binding
+        that names `observation.session`, else `ScopeViolation`: one
+        observation can only ever be charged under one binding.
+        """
         ...
 
     async def pending_outbox(self, *, limit: int = 100) -> Sequence[OutboxRow]: ...

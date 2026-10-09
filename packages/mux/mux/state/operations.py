@@ -11,7 +11,10 @@ the existing record; with a different digest (or slot) it raises
 
 If reconciling a `sent` or `outcome_unknown` operation proves the provider
 never received it, the operation goes back to `pending` and may be claimed
-again under the same key.
+again under the same key. Only conclude absence once the claimer's lease has expired and its send
+deadline has passed, or a request still in flight lands after the resend.
+So a driver keeps its send timeout below the lease TTL and never starts
+I/O on a lease past its expiry.
 """
 
 from __future__ import annotations

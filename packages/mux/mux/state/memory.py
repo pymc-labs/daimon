@@ -356,6 +356,10 @@ class MemoryStateStore:
     ) -> OutboxRow | None:
         async with self.data.lock:
             staged = self.data.snapshot()
+            owner = staged.binding_ids.get(binding_id)
+            session_slot = staged.session_slots.get(observation.session.id)
+            if owner is None or session_slot is None or _slot_key(session_slot) != owner:
+                raise ScopeViolation(binding_id, "binding does not own the observed session")
             key = (binding_id, observation.id)
             applied = usage_ledger.apply_observation(
                 staged.usage.get(key), binding_id, _detach(observation)

@@ -157,7 +157,7 @@ with no account. Leases are per slot.
 | operation | (tenant, account, key) | Owned by the principal that began it; another principal gets `ScopeViolation`. Persisted as `pending` before any I/O. The same key and request digest returns the existing record; a different digest raises `OperationConflict`. Only `claim_send`, a compare-and-swap from `pending`, moves it to `sent`, so exactly one caller sends. It goes back to `pending` only when reconciling proves the provider never got it. |
 | lease | slot | One active root turn per slot. Each acquisition gets a higher fence. Taking over an expired lease sets `took_over`. |
 | journal | (session, sequence) and (session, source key, revision, preview) | An append, its projection and the stream cursor commit together; an entry already journaled is dropped. Previews are kept in their own namespace and never change the projection, so they can neither complete a turn nor block the record that does. |
-| usage | (binding, observation, revision) | A higher revision writes one outbox row of signed deltas; a lower one is ignored, and the same revision with different counts raises `UsageRevisionConflict`. |
+| usage | (binding, observation, revision) | Recorded only under the binding that names the observation's session. A higher revision writes one outbox row of signed deltas; a lower one is ignored, and the same revision with different counts raises `UsageRevisionConflict`. |
 | accounting outbox | (binding, observation, revision) | Each row carries `prior_applied_revision`, the revision its deltas are measured against. `mark_outbox_applied` is true once per row. |
 
 Fencing: `claim_send` and `advance_operation` on an operation begun with a
@@ -176,7 +176,10 @@ clock.
 After a crash, `operations.recovery` says what a successor does with an
 operation it finds: claim and send a `pending` one, reconcile a `sent` or
 `outcome_unknown` one, observe an `accepted` one. A lost lease never means
-the request was not sent.
+the request was not sent. Only conclude absence once the claimer's lease has expired and its send
+deadline has passed, or a request still in flight lands after the resend.
+So a driver keeps its send timeout below the lease TTL and never starts
+I/O on a lease past its expiry.
 
 Usage revisions follow the null-is-not-zero rule: a count the provider did
 not report leaves the accounted value alone and its delta is `None`. An

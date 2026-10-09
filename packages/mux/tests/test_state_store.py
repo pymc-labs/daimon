@@ -447,15 +447,16 @@ async def test_committed_state_cannot_be_changed_through_values() -> None:
 
 
 async def test_c07_usage_revisions_apply_signed_deltas_once(store: StateStore) -> None:
+    await _own_session(store)
     rows = [
-        await store.record_usage("b1", _usage(r, out))
+        await store.record_usage("b_s1", _usage(r, out))
         for r, out in [(1, None), (2, 100), (3, 120), (4, 110)]
     ]
     deltas = [row.deltas["output_tokens"] for row in rows if row is not None]
     assert deltas == [None, 100, 20, -10]
     # Every revision replayed, and the stale 100 again: nothing new.
     for r, out in [(1, None), (2, 100), (3, 120), (4, 110), (2, 100)]:
-        assert await store.record_usage("b1", _usage(r, out)) is None
+        assert await store.record_usage("b_s1", _usage(r, out)) is None
     pending = await store.pending_outbox()
     assert [row.prior_applied_revision for row in pending] == [None, 1, 2, 3]
     total = 0
@@ -468,16 +469,18 @@ async def test_c07_usage_revisions_apply_signed_deltas_once(store: StateStore) -
 
 
 async def test_a_changed_replay_of_the_current_revision_is_refused(store: StateStore) -> None:
-    await store.record_usage("b1", _usage(1, 110))
+    await _own_session(store)
+    await store.record_usage("b_s1", _usage(1, 110))
     with pytest.raises(UsageRevisionConflict):
-        await store.record_usage("b1", _usage(1, 999))
+        await store.record_usage("b_s1", _usage(1, 999))
 
 
 async def test_usage_null_after_known_keeps_the_accounted_value(store: StateStore) -> None:
-    await store.record_usage("b1", _usage(1, 100))
-    row = await store.record_usage("b1", _usage(2, None))
+    await _own_session(store)
+    await store.record_usage("b_s1", _usage(1, 100))
+    row = await store.record_usage("b_s1", _usage(2, None))
     assert row is not None and row.is_noop
-    later = await store.record_usage("b1", _usage(3, 130))
+    later = await store.record_usage("b_s1", _usage(3, 130))
     assert later is not None and later.deltas["output_tokens"] == 30
 
 
@@ -518,3 +521,13 @@ async def test_a_rebind_keeps_the_old_session_journal_with_its_slot(store: State
     other = _binding(session=SESSION.id, id_="b_other", account="a2")
     with pytest.raises(ValueError, match="another slot"):
         await store.put_binding(other, expected_generation=0)
+
+
+async def test_usage_is_charged_only_under_the_binding_of_its_session(store: StateStore) -> None:
+    await _own_session(store)
+    other = _binding(session="s9", id_="b_s9", account="a2")
+    await store.put_binding(other, expected_generation=0)
+    for binding_id in ("b_unknown", "b_s9"):
+        with pytest.raises(ScopeViolation):
+            await store.record_usage(binding_id, _usage(1, 100))
+    assert await store.record_usage("b_s1", _usage(1, 100)) is not None
