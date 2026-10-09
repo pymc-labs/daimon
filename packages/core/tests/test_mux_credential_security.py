@@ -288,6 +288,60 @@ async def test_sdk_error_repr_redacts_escaped_multiline_credential():
     sdk.assert_consumed()
 
 
+@pytest.mark.parametrize(
+    ("material", "quote"),
+    [
+        pytest.param('dummy-it\'s "quoted" \\ material', "'", id="mixed-single-escape"),
+        pytest.param('dummy-it\'s "quoted" \\ material', '"', id="mixed-double-escape"),
+        pytest.param("dummy-it's \\ material", "'", id="single-quote-only"),
+    ],
+)
+async def test_secret_redacts_alternate_quote_escaping(
+    material: str, quote: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    escaped = material.replace("\\", "\\\\").replace(quote, "\\" + quote)
+    body = {
+        "type": "error",
+        "error": {"type": "invalid_request_error", "message": "echo " + escaped},
+    }
+    sdk = ScriptedTransport(
+        deque(
+            [ScriptedReply("POST", "/v1/vaults/vault/credentials", httpx.Response(400, json=body))]
+        )
+    )
+    with caplog.at_level(logging.DEBUG, logger="anthropic._base_client"):
+        async with sdk.client() as client:
+            with pytest.raises(APIStatusError) as failure:
+                await compat.create_credential(
+                    client,
+                    "vault",
+                    {
+                        "auth": {
+                            "type": "static_bearer",
+                            "mcp_server_url": "https://example.test/mcp",
+                            "token": material,
+                        }
+                    },
+                    scope=SCOPE,
+                )
+    error = failure.value
+    displayed = "\n".join(
+        [
+            str(error),
+            repr(error),
+            repr(error.body),
+            "".join(traceback.format_exception(error)),
+            caplog.text,
+        ]
+    )
+    assert material not in displayed
+    assert escaped not in displayed
+    assert "dummy-it" not in displayed
+    assert "[redacted]" in str(error)
+    assert error.request.content == b""
+    sdk.assert_consumed()
+
+
 async def test_two_repo_resource_tokens_are_resolved_and_redacted_together_on_first_failure(caplog):
     from typing import Literal
 

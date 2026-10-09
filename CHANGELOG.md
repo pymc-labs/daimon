@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route CLI agent, environment and skill operations through tenant-scoped neutral resource ports, preserving requests, output and SDK error handling.
 - MCP agent, environment and skill operations now consume tenant-scoped neutral resource ports.
 - Discord, Slack, Teams and scheduler agent operations now consume tenant-scoped neutral resource ports.
+- Preserve original credential JSON key order and redact alternate quote-escaped secret echoes; verify `.env` upload filename, media type and bytes at the host call site.
+
 - Advertise closed session create, resource-mount and update configuration namespaces for backend admission.
 
 - Preserve explicit null environment descriptions on native create requests and

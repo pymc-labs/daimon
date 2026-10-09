@@ -4430,8 +4430,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_credential_security.py",
-      "line": 347,
-      "end": 349,
+      "line": 401,
+      "end": 403,
       "scope": "send",
       "category": "test",
       "resource": "sessions.create",
@@ -4710,8 +4710,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 319,
-      "end": 331,
+      "line": 332,
+      "end": 344,
       "scope": "test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callbacks",
       "category": "test",
       "resource": "vaults.credentials.create",
@@ -4730,8 +4730,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 332,
-      "end": 332,
+      "line": 345,
+      "end": 345,
       "scope": "test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callbacks",
       "category": "test",
       "resource": "vaults.credentials.delete",
@@ -4741,8 +4741,19 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 129,
-      "end": 129,
+      "line": 408,
+      "end": 408,
+      "scope": "test_env_upload_call_site_keeps_multipart_filename_type_bytes_and_ttl",
+      "category": "test",
+      "resource": "files.upload",
+      "call": "before.beta.files.upload(file=('.env', io.BytesIO(content), 'text/plain'))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 133,
+      "end": 133,
       "scope": "test_vault_bootstrap_keeps_discovery_then_tenant_writes",
       "category": "test",
       "resource": "vaults.list",
@@ -4752,8 +4763,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 131,
-      "end": 131,
+      "line": 135,
+      "end": 135,
       "scope": "test_vault_bootstrap_keeps_discovery_then_tenant_writes",
       "category": "test",
       "resource": "vaults.create",
@@ -4763,8 +4774,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 135,
-      "end": 139,
+      "line": 139,
+      "end": 143,
       "scope": "test_vault_bootstrap_keeps_discovery_then_tenant_writes",
       "category": "test",
       "resource": "vaults.credentials.create",
@@ -4779,8 +4790,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 182,
-      "end": 182,
+      "line": 186,
+      "end": 186,
       "scope": "test_copilot_replacement_keeps_duplicate_order_and_token_only_update",
       "category": "test",
       "resource": "vaults.credentials.list",
@@ -4790,8 +4801,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 184,
-      "end": 186,
+      "line": 188,
+      "end": 190,
       "scope": "test_copilot_replacement_keeps_duplicate_order_and_token_only_update",
       "category": "test",
       "resource": "vaults.credentials.update",
@@ -4804,8 +4815,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 187,
-      "end": 187,
+      "line": 191,
+      "end": 191,
       "scope": "test_copilot_replacement_keeps_duplicate_order_and_token_only_update",
       "category": "test",
       "resource": "vaults.credentials.delete",
@@ -4815,8 +4826,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 191,
-      "end": 198,
+      "line": 195,
+      "end": 202,
       "scope": "test_copilot_replacement_keeps_duplicate_order_and_token_only_update",
       "category": "test",
       "resource": "vaults.credentials.create",
@@ -4830,8 +4841,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 220,
-      "end": 220,
+      "line": 224,
+      "end": 224,
       "scope": "test_mirror_404_rechecks_once_and_preserves_a_persons_oauth_grant",
       "category": "test",
       "resource": "vaults.credentials.list",
@@ -4841,8 +4852,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 224,
-      "end": 229,
+      "line": 228,
+      "end": 233,
       "scope": "test_mirror_404_rechecks_once_and_preserves_a_persons_oauth_grant",
       "category": "test",
       "resource": "vaults.credentials.update",
@@ -4855,8 +4866,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 230,
-      "end": 230,
+      "line": 234,
+      "end": 234,
       "scope": "test_mirror_404_rechecks_once_and_preserves_a_persons_oauth_grant",
       "category": "test",
       "resource": "vaults.credentials.list",
@@ -4866,8 +4877,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 318,
-      "end": 318,
+      "line": 331,
+      "end": 331,
       "scope": "test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callbacks",
       "category": "test",
       "resource": "vaults.credentials.list",
@@ -4877,8 +4888,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 333,
-      "end": 333,
+      "line": 346,
+      "end": 346,
       "scope": "test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callbacks",
       "category": "test",
       "resource": "vaults.credentials.list",
@@ -4888,8 +4899,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 133,
-      "end": 133,
+      "line": 137,
+      "end": 137,
       "scope": "test_vault_bootstrap_keeps_discovery_then_tenant_writes",
       "category": "test",
       "resource": "vaults.credentials.list",
@@ -4899,8 +4910,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 141,
-      "end": 146,
+      "line": 145,
+      "end": 150,
       "scope": "test_vault_bootstrap_keeps_discovery_then_tenant_writes",
       "category": "test",
       "resource": "vaults.credentials.update",
@@ -4915,8 +4926,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 190,
-      "end": 190,
+      "line": 194,
+      "end": 194,
       "scope": "test_copilot_replacement_keeps_duplicate_order_and_token_only_update",
       "category": "test",
       "resource": "vaults.credentials.delete",
@@ -4926,8 +4937,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 275,
-      "end": 275,
+      "line": 284,
+      "end": 284,
       "scope": "test_oauth_conflict_retries_the_same_requests_and_access_checks",
       "category": "test",
       "resource": "vaults.credentials.list",
@@ -4937,8 +4948,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 277,
-      "end": 279,
+      "line": 286,
+      "end": 288,
       "scope": "test_oauth_conflict_retries_the_same_requests_and_access_checks",
       "category": "test",
       "resource": "vaults.credentials.create",
@@ -14274,7 +14285,7 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 221,
+      "line": 225,
       "module": "anthropic",
       "names": [
         "NotFoundError"
@@ -14283,7 +14294,7 @@
     },
     {
       "file": "packages/core/tests/test_mux_vault_call_sites.py",
-      "line": 272,
+      "line": 281,
       "module": "anthropic",
       "names": [
         "ConflictError"

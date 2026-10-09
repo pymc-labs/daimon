@@ -459,3 +459,9 @@ The factory advertises the session lane's closed configuration namespaces
 `anthropic.session_create@1`, `anthropic.session_resource_create@1` and
 `anthropic.session_update@1` for admission. The session lifecycle driver owns
 their payload validation and execution.
+
+Credential request codecs retain the established JSON key order, including
+header/body injection flags and OAuth scope/resource fields. Error redaction
+covers both quote-escaping styles and their nested SDK repr/JSON forms. The
+`.env` upload retains its `.env` filename, `text/plain` media type and exact
+assembled bytes.

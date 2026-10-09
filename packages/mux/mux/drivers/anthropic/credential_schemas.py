@@ -22,8 +22,8 @@ class OAuthRefresh(NativeConfig):
     refresh_token_ref: str
     token_endpoint: str
     token_endpoint_auth: Annotated[NoTokenAuth | ClientTokenAuth, Field(discriminator="type")]
-    resource: str | None = None
     scope: str | None = None
+    resource: str | None = None
 
 
 class BearerCreate(NativeConfig):
@@ -55,8 +55,8 @@ type CredentialNetwork = Annotated[
 
 
 class InjectionLocation(NativeConfig):
-    body: bool | None = None
     header: bool | None = None
+    body: bool | None = None
 
 
 class EnvironmentCreate(NativeConfig):

@@ -28,10 +28,23 @@ _active_materials: ContextVar[list[str] | None] = ContextVar(
 def _material_variants(materials: list[str]) -> list[str]:
     # SDK messages/logs format JSON bodies with repr; their escaped form must
     # be removed alongside the original text, including multiline env values.
-    return [
+    variants = [
         variant
         for material in materials
-        for variant in (material, repr(material)[1:-1], json.dumps(material)[1:-1])
+        for variant in (
+            material,
+            repr(material)[1:-1],
+            json.dumps(material)[1:-1],
+            material.replace("\\", "\\\\").replace("'", "\\'"),
+            material.replace("\\", "\\\\").replace('"', '\\"'),
+        )
+    ]
+    # An upstream message can already contain an escaped value, then the SDK
+    # includes that message in a repr/JSON-formatted error or request log.
+    return [
+        encoded
+        for variant in variants
+        for encoded in (variant, repr(variant)[1:-1], json.dumps(variant)[1:-1])
     ]
 
 

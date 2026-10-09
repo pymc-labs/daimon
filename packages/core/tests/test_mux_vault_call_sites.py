@@ -1,8 +1,12 @@
 """Compare migrated host decisions with their original requests at the SDK boundary."""
 
 import datetime as dt
+import io
 import uuid
 from collections import deque
+from email.parser import BytesParser
+from email.policy import default
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -237,7 +241,8 @@ async def test_mirror_404_rechecks_once_and_preserves_a_persons_oauth_grant():
     equal_requests(old, new)
 
 
-async def test_oauth_conflict_retries_the_same_requests_and_access_checks():
+@pytest.mark.parametrize("resource,token_scope", [(None, None), (SERVER, "read write")])
+async def test_oauth_conflict_retries_the_same_requests_and_access_checks(resource, token_scope):
     record = credential("grant", {"type": "mcp_oauth", "mcp_server_url": SERVER})
     replies = [
         ("GET", "/v1/vaults/vault/credentials", 200, page([])),
@@ -262,12 +267,16 @@ async def test_oauth_conflict_retries_the_same_requests_and_access_checks():
         "access_token": "dummy-access",
         "expires_at": NOW + dt.timedelta(seconds=600),
         "refresh": {
-            "refresh_token": "dummy-refresh",
             "client_id": "client",
+            "refresh_token": "dummy-refresh",
             "token_endpoint": "https://example.test/token",
             "token_endpoint_auth": {"type": "none"},
         },
     }
+    if token_scope:
+        auth["refresh"]["scope"] = token_scope
+    if resource:
+        auth["refresh"]["resource"] = resource
     async with old.client() as before, new.client() as after:
         from anthropic import ConflictError
 
@@ -285,11 +294,14 @@ async def test_oauth_conflict_retries_the_same_requests_and_access_checks():
                 vault_id="vault",
                 mcp_server_url=SERVER,
                 tokens=TokenResponse(
-                    access_token="dummy-access", refresh_token="dummy-refresh", expires_in=600
+                    access_token="dummy-access",
+                    refresh_token="dummy-refresh",
+                    expires_in=600,
+                    scope=token_scope,
                 ),
                 client=ClientRegistration(client_id="client"),
                 token_endpoint="https://example.test/token",
-                resource=None,
+                resource=resource,
                 now=NOW,
                 before_write=allowed,
                 scope=SCOPE,
@@ -297,6 +309,7 @@ async def test_oauth_conflict_retries_the_same_requests_and_access_checks():
             == "grant"
         )
     equal_requests(old, new)
+    assert [request.body for request in new.requests] == [request.body for request in old.requests]
     assert checks == [True] * 4
 
 
@@ -340,5 +353,89 @@ async def test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callb
             on_delivered=delivered.append,
         )
     equal_requests(old, new)
+    assert [request.body for request in new.requests] == [request.body for request in old.requests]
     assert mutations == [True, True]
     assert delivered == ["dummy-app"]
+
+
+async def test_env_upload_call_site_keeps_multipart_filename_type_bytes_and_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core import credential_env as host
+    from daimon.core.stores.domain import AgentFileRow
+
+    tenant = uuid.UUID(int=4)
+    row = AgentFileRow(
+        tenant_id=tenant,
+        agent_id=AGENT,
+        key="KEY",
+        content="dummy-env-secret",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    content = b"KEY=dummy-env-secret\n"
+    record = {
+        "id": "file",
+        "type": "file",
+        "filename": ".env",
+        "mime_type": "text/plain",
+        "size_bytes": len(content),
+        "created_at": STAMP,
+        "downloadable": True,
+    }
+    old, new = (
+        script([("POST", "/v1/files", 200, record)]),
+        script([("POST", "/v1/files", 200, record)]),
+    )
+    queued: list[str] = []
+
+    class Session:
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        def begin(self) -> "Session":
+            return self
+
+    async def enqueue(session: object, *, file_id: str, delete_after: dt.datetime) -> None:
+        assert delete_after.tzinfo is not None
+        queued.append(file_id)
+
+    monkeypatch.setattr(host, "enqueue_pending_file_delete", enqueue)
+    async with old.client() as before, new.client() as after:
+        await before.beta.files.upload(file=(".env", io.BytesIO(content), "text/plain"))
+        assert (
+            await host.upload_env_file(
+                after,
+                cast(Any, Session),
+                rows=[row],
+                scope=resource_scope(tenant_id=str(tenant)),
+            )
+            == "file"
+        )
+    for transport in (old, new):
+        transport.assert_consumed()
+        assert len(transport.requests) == 1
+        request = transport.requests[0]
+        message = BytesParser(policy=default).parsebytes(
+            (
+                "Content-Type: " + dict(request.protocol_headers)["content-type"] + "\r\n\r\n"
+            ).encode()
+            + request.body
+        )
+        parts = list(message.iter_parts())
+        assert len(parts) == 1
+        assert parts[0].get_param("name", header="content-disposition") == "file"
+        assert parts[0].get_filename() == ".env"
+        assert parts[0].get_content_type() == "text/plain"
+        assert parts[0].get_payload(decode=True) == content
+    assert old.requests[0].method == new.requests[0].method == "POST"
+    assert old.requests[0].path == new.requests[0].path == "/v1/files"
+    assert old.requests[0].query == new.requests[0].query
+    assert (
+        dict(old.requests[0].protocol_headers)["anthropic-beta"]
+        == dict(new.requests[0].protocol_headers)["anthropic-beta"]
+    )
+    assert queued == ["file"]
