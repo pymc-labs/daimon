@@ -204,6 +204,8 @@ class DiscordTurnLifecycle:
         self._summary_ref: discord.Message | None = None
         # A snowflake just past the turn's end: posts before it belong to the turn.
         self._ended_before: int | None = None
+        # The newest Discord-side moment this turn's own sends and edits carried.
+        self._discord_mark: int | None = None
         self._card_discard_failed = False
         self._last_flush: float = 0.0
         self._terminal: bool = False
@@ -280,7 +282,9 @@ class DiscordTurnLifecycle:
         """
         if self._unprompted:
             kwargs["silent"] = True
-        return await self._send(**kwargs)
+        sent = await self._send(**kwargs)
+        self._note_discord_time(getattr(sent, "id", None))
+        return sent
 
     async def _edit_message(
         self,
@@ -289,6 +293,9 @@ class DiscordTurnLifecycle:
     ) -> None:
         assert message is not None
         replacement = await self._edit(message, **kwargs)
+        edited_at = getattr(replacement, "edited_at", None)
+        if isinstance(edited_at, datetime):
+            self._note_discord_time(discord.utils.time_snowflake(edited_at, high=True))
         if isinstance(replacement, discord.Message) and replacement.id != message.id:
             self._message_ref = replacement
             if self._on_replacement is not None:
@@ -408,7 +415,26 @@ class DiscordTurnLifecycle:
                 )
             log.info("turn.sealed_response_posted", block_index=index, chars=len(text))
 
+    def _note_discord_time(self, snowflake: object) -> None:
+        if isinstance(snowflake, int) and (
+            self._discord_mark is None or snowflake > self._discord_mark
+        ):
+            self._discord_mark = snowflake
+
+    def _mark_ended(self) -> None:
+        """Close the turn's window on Discord's clock; the host's only if Discord gave none."""
+        if self._discord_mark is not None:
+            self._ended_before = self._discord_mark + 1
+        else:
+            self._ended_before = discord.utils.time_snowflake(datetime.now(UTC), high=True)
+
     async def on_terminal_success(self, state: TurnState) -> None:
+        try:
+            await self._deliver_success(state)
+        finally:
+            self._mark_ended()
+
+    async def _deliver_success(self, state: TurnState) -> None:
         await self._persist_sealed_responses(state)
         if self._unprompted and not extract_final_response(state.content):
             # No final answer on a turn nobody asked for: leave the thread as
@@ -556,7 +582,6 @@ class DiscordTurnLifecycle:
         if notify:
             # The ping posted the answer below the card, so the card goes.
             await self._delete_card()
-        self._ended_before = discord.utils.time_snowflake(datetime.now(UTC), high=True)
 
         log.info("turn.terminal_success")
 
@@ -636,6 +661,12 @@ class DiscordTurnLifecycle:
         return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
+        try:
+            await self._deliver_failure(state, err)
+        finally:
+            self._mark_ended()
+
+    async def _deliver_failure(self, state: TurnState, err: Exception) -> None:
         if (limit := spend_limit_error(err)) is not None:
             log.error(
                 "anthropic.spend_limit_reached",

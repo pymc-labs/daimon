@@ -1113,8 +1113,9 @@ def _move_fixture(
     async def send(**kwargs: Any) -> object:
         return card
 
-    async def edit(ref: Any, **kwargs: Any) -> None:
+    async def edit(ref: Any, **kwargs: Any) -> object:
         edits.append((ref, kwargs))
+        return types.SimpleNamespace(id=ref.id, edited_at=datetime.now(UTC))
 
     lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
 
@@ -1151,6 +1152,33 @@ async def test_summary_moves_under_a_file_posted_after_the_answer() -> None:
     summary = file_post.edit.await_args.kwargs["embeds"][0]
     assert summary.footer.text.startswith("test-agent"), "the file post gains the summary"
     assert edits[-1][1] == {"embeds": []}, "the answer gives it up"
+
+
+@pytest.mark.asyncio
+async def test_the_turn_window_closes_on_discords_clock() -> None:
+    """The bound comes from Discord's own stamps, so a fast host clock cannot widen it."""
+    lc, _edits, _thread = _move_fixture(None)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(_make_success_state())
+
+    window = lc.turn_window
+    assert window is not None
+    assert window[0] == 100, "the window opens at the card"
+    host_now = discord.utils.time_snowflake(datetime.now(UTC), high=True)
+    assert window[1] <= host_now + 1, "it closes at the last Discord stamp the turn saw"
+
+
+@pytest.mark.asyncio
+async def test_a_tool_only_turn_still_closes_its_window() -> None:
+    """A tool-only turn posts files too; its sweep needs the window for the dedup."""
+    lc, _edits, _thread = _move_fixture(None)
+    await lc.on_sse_event(_thinking_event())
+    tool = ToolUseBlock(
+        kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}, status="complete"
+    )
+    await lc.on_terminal_success(TurnState(content=[tool]))
+
+    assert lc.turn_window is not None
 
 
 @pytest.mark.asyncio
