@@ -408,21 +408,60 @@ def _asks(sender: FakeSender, index: int) -> bool:
 
 
 @pytest.mark.parametrize("ask_human", [True, False])
-async def test_the_last_answer_part_carries_feedback_and_ask_a_human_when_support_is_on(
+async def test_the_last_answer_part_carries_feedback_and_ask_a_human_follows_when_support_is_on(
     ask_human: bool,
 ) -> None:
-    """As on Slack: Ask a human sits on the final answer, beside the 👍/👎."""
+    """As on Slack, Ask a human follows the final answer, beside the 👍/👎. In a card of its
+    own: Teams refuses an edit carrying both text and a card, so every answer failed."""
     sender = FakeSender()
     lifecycle = await _posted(sender, ask_human=ask_human)
     await lifecycle.on_terminal_success(_answer("x" * (card.TEAMS_LIMIT + 10)))
 
-    first, last = sender.activities[-2:]
-    assert not _rated(first) and not _asks(sender, -2), "earlier parts carry no controls"
+    first, last = [activity for activity in sender.activities if activity.text][-2:]
+    assert not _rated(first) and not first.attachments, "earlier parts carry no controls"
     assert _rated(last), "the 👍/👎 open daimon's own form"
-    assert _asks(sender, -1) is ask_human, "the button only when support is on"
+    assert not last.attachments, "the answer stays text alone, so Teams takes the edit"
     assert last.text and last.text.startswith("x"), "the answer stays markdown text"
+    assert _asks(sender, -1) is ask_human, "the button follows only when support is on"
     assert await lifecycle.append_to_answer("Saved to this channel's files:")
-    assert _asks(sender, -1) is ask_human and _rated(sender.activities[-1]), "edits keep both"
+    edit = sender.activities[-1]
+    assert edit.text and _rated(edit) and not edit.attachments, "an edit keeps the 👍/👎"
+
+
+async def test_a_lost_ask_a_human_button_leaves_the_answer_as_delivered() -> None:
+    """The answer landed: a button that fails to post is no cut-short answer."""
+    sender = FakeSender(fail_on={2})
+    lifecycle = await _posted(sender, ask_human=True)
+    await lifecycle.on_terminal_success(_answer("hello"))
+
+    assert len(sender.activities) == 3, "no notice follows the lost button"
+    assert _asks(sender, -1), "the third send was the button"
+    assert lifecycle.final_message_id == sender.activities[1].id, "the answer counts as seen"
+
+
+async def test_with_support_on_a_one_part_answer_and_its_edits_are_ones_teams_takes() -> None:
+    """Production's shape: one part, edited in place, then amended by later notices."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender, ask_human=True)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+
+    answer, button = sender.activities[1:]
+    assert answer.id == "m-1" and answer.text == "The posterior mean is 3.", "the card became it"
+    assert button.id is None and _asks(sender, -1), "the button follows in a post of its own"
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace."), "a notice fits above"
+    assert await lifecycle.append_to_answer("Saved to this channel's files:"), "links fit below"
+    assert all(not a.attachments for a in sender.activities[-2:]), "both edits stay text"
+
+
+async def test_a_completion_ping_with_support_on_posts_the_button_below_the_answer() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender, completion_ping=True, ask_human=True)
+    await lifecycle.on_terminal_success(_answer("Done."))
+
+    answer, button, closed = sender.activities[1:]
+    assert answer.id is None and answer.text == "Done." and not answer.attachments
+    assert button.id is None and _asks(sender, 2), "the button follows the answer"
+    assert closed.id == "m-1" and card.ANSWERED_BELOW in closed.model_dump_json(), "then retired"
 
 
 async def test_a_tool_only_turn_carries_the_controls_and_a_cancelled_one_none() -> None:

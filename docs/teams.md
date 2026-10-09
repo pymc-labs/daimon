@@ -69,8 +69,8 @@ restart runs again.
 
 The last part of an answer carries Teams' thumbs up/down. 👍 records the vote;
 👎 opens a "What went wrong?" form with optional reasons and text, at least one
-required. When support is set up the answer also has an Ask a person button
-that opens the `support` form for it, spending a credit, and the post links
+required. When support is set up an Ask a person button follows the answer,
+in a message of its own, and opens the `support` form for it, spending a credit, and the post links
 to the answer; asking again about the same answer spends nothing. A turn that only ran tools gets both on its finished card; a
 cancelled turn gets neither. Only people who could start a turn at that
 answer can vote or ask. With `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` on, each

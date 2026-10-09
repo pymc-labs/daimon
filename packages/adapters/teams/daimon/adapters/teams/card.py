@@ -5,8 +5,9 @@ The status card says what Discord's and Slack's say, in the words of
 elapsed time, the turn's tool lines, the latest draft, and a Cancel button.
 The answer replaces the card as plain markdown messages: a card TextBlock
 renders no code blocks, a message does. Its last message, and a tool-only
-turn's ✅ Done, carry Teams' 👍/👎 (`rated`, answered by `feedback`) and, when
-support is on, an Ask a human button in a one-button card below the text.
+turn's ✅ Done, carry Teams' 👍/👎 (`rated`, answered by `feedback`). When
+support is on, an Ask a human button follows in a one-button card of its own:
+Teams refuses an edit carrying both text and a card.
 """
 
 from __future__ import annotations
@@ -165,11 +166,19 @@ def rated(message: MessageActivityInput) -> MessageActivityInput:
     return message.add_feedback("custom")
 
 
+def ask_human_card() -> MessageActivityInput:
+    """Ask a human's button, posted just below the answer's last message.
+
+    A click names this message (`replyToId`), so a request links to it, the
+    answer's next message, and is made once per answer.
+    """
+    return _card([ActionSet(actions=[ask_human_action()])], fallback=ASK_HUMAN)
+
+
 def answer_message(
-    text: str, *, is_last: bool, mention: Account | None = None, ask_human: bool = False
+    text: str, *, is_last: bool, mention: Account | None = None
 ) -> MessageActivityInput:
-    """One chunk of the answer; the last carries the feedback buttons and, with
-    `ask_human`, the Ask a human button.
+    """One chunk of the answer, text only; the last carries the feedback buttons.
 
     A completion ping leads with `mention` (an AAD object id is enough).
     """
@@ -178,10 +187,4 @@ def answer_message(
         tag = f"<at>{(mention.name or 'you').replace('<', '').replace('>', '')}</at>"
         message.text = f"{tag}\n\n{text}"
         message.add_entity(MentionEntity(mentioned=mention, text=tag))
-    if not is_last:
-        return message
-    if ask_human:
-        # Beside the text, not in place of it: a card renders no code blocks.
-        buttons = ActionSet(actions=[ask_human_action()])
-        message.add_card(AdaptiveCard(body=[buttons], fallback_text=ASK_HUMAN))
-    return rated(message)
+    return rated(message) if is_last else message

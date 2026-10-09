@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Teams answers arrive again when support is set up.** The answer's last message carried the Ask a person button in a card beside its text, and Teams refuses an edit carrying both, so every answer was replaced by "Something went wrong. Mention me to try again." The button now follows the answer in a message of its own.
 - A finished Discord or Slack answer ends with one short line instead of a five-line Details block: `Ada  12s  $0.042 used  $41.20 left`. Fields are set apart by spacing, not dots. Token counts are gone, and a channel budget's remainder reads `$8.10 left` like the prepaid balance.
 - The summary line and Discord's 👍 👎 🙋 sit under the last message of an answer, not the first: the last chunk of a long answer on Discord and Slack, or on Discord a file Daimon posts after it.
 - Discord no longer attaches a generated file twice when the agent already sent it in the thread itself.
@@ -16,7 +17,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hackathon staging layouts accept the existing QA admin bot and recognize Discord Administrator permissions, so private team roles can be provisioned without the roleless fallback.
 - The file-handling skill now tells agents to export only the current turn's finished deliverables, keeping working directories and already delivered files out of outputs to avoid duplicate attachments.
 - A copied agent keeps the skills its source added itself again. Copying (a channel's own agent made with `--copy-from`, or `fork_agent`) downloaded each skill with a header a workspace API key is refused for, so the copy silently left those skills off. The workspace recovery export downloads skills the same way and is fixed too.
-||||||| parent of fc92a34c1 (fix(core): count an approval as taken only when its tool result appears)
 - A turn with several approval cards no longer fails with "The agent stopped because it couldn't confirm your approval" when the stream reconnects while the answers are being applied. An approval card that takes longer than two seconds to update now still updates, instead of keeping its buttons.
 - A new agent's first Slack or Discord answer now shows its generated face. The first turn waits up to three seconds for the face to render instead of posting without a picture.
 - GitHub connection links now appear as buttons where the person asked, without GitHub setup DMs. Discord conversation buttons mint the invitation on the requester's click and reveal its URL ephemerally; Slack uses ephemeral messages in the originating channel or thread. After a self-serve connection, interrupted work resumes in its thread. A bare connection confirms ephemerally where possible, with a count-only Discord thread fallback. Failed confirmations back off and expire after eight attempts or 24 hours.
