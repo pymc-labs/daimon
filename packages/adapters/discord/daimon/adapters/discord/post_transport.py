@@ -23,13 +23,16 @@ import discord
 
 _POOL_SIZE = 1
 _CREATE_WAIT_SECONDS = 2.0
-_UNAVAILABLE_SECONDS = 600
+_UNAVAILABLE_SECONDS = 60
 _locks: dict[int, asyncio.Lock] = {}
 _webhooks: dict[int, dict[int, discord.Webhook]] = {}
 _creation_tasks: dict[int, asyncio.Task[discord.Webhook | None]] = {}
 _deferred_channels: set[int] = set()
 _unavailable_until: dict[int, float] = {}
 _send_unavailable_until: dict[tuple[int, str, str | None], float] = {}
+# Guilds already logged as falling back for want of Manage Webhooks, so the
+# warning fires once per guild per process rather than on every answer.
+_warned_no_manage_webhooks: set[int] = set()
 _log = structlog.get_logger()
 
 
@@ -81,6 +84,25 @@ def _snowflake(value: object) -> int | None:
 
 def _cooldown(exc: discord.HTTPException) -> bool:
     return exc.code == 30007 or exc.status == 403
+
+
+def clear_webhook_backoff(guild: discord.Guild) -> None:
+    """End the webhook back-off for this guild's channels the bot can now manage.
+
+    Called when a role, the bot's member or a channel's overwrites change, so a
+    server that re-authorizes the bot gets agent names back on the next answer
+    rather than after the back-off runs out.
+    """
+    cleared = 0
+    for channel_id in list(_unavailable_until):
+        channel = guild.get_channel(channel_id)
+        if channel is None or not channel.permissions_for(guild.me).manage_webhooks:
+            continue
+        _unavailable_until.pop(channel_id, None)
+        cleared += 1
+    if cleared:
+        _warned_no_manage_webhooks.discard(guild.id)
+        _log.info("discord.webhook.backoff_cleared", guild_id=guild.id, channels=cleared)
 
 
 def known_webhook_ids() -> frozenset[int]:
@@ -264,6 +286,12 @@ class DiscordPostTransport:
                 member = parent.guild.me
                 if member is None or not parent.permissions_for(member).manage_webhooks:  # pyright: ignore[reportUnnecessaryComparison]
                     _unavailable_until[parent.id] = time.monotonic() + _UNAVAILABLE_SECONDS
+                    if not pool and parent.guild.id not in _warned_no_manage_webhooks:
+                        _warned_no_manage_webhooks.add(parent.guild.id)
+                        _log.warning(
+                            "discord.identity_fallback_no_manage_webhooks",
+                            guild_id=parent.guild.id,
+                        )
                     return self._pick(pool)
             if webhook_id is None and not create and pool:
                 return self._pick(pool)

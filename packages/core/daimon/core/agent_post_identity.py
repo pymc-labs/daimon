@@ -15,10 +15,17 @@ def discord_username(name: str) -> str:
 
 
 def fallback_name_prefix(name: str, content: str) -> str:
-    """Label the first answer chunk when platform identity override is unavailable."""
-    safe_name = discord_username(name).replace("\\", "\\\\").replace("*", "\\*")
-    safe_name = safe_name.replace("@", "@\u200b").replace("`", "\\`")
-    return f"**{safe_name}**\n\n{content}"
+    """Label the first answer chunk when platform identity override is unavailable.
+
+    The label is one Discord subtext line (``-# name``) so it reads as a small
+    byline rather than a bold header. The name is escaped and kept on one line,
+    since a newline would end the subtext early.
+    """
+    safe_name = " ".join(discord_username(name).split()).replace("\\", "\\\\")
+    for char in "*_~|`":
+        safe_name = safe_name.replace(char, f"\\{char}")
+    safe_name = safe_name.replace("@", "@\u200b")
+    return f"-# {safe_name}\n{content}"
 
 
 def is_our_discord_webhook(

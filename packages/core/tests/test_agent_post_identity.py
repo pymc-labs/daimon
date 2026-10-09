@@ -15,9 +15,19 @@ def test_discord_username_removes_reserved_words_and_fences() -> None:
     assert discord_username("discord") == "Agent"
 
 
-def test_fallback_prefix_labels_only_the_passed_chunk() -> None:
-    assert fallback_name_prefix("Research", "First answer") == "**Research**\n\nFirst answer"
-    assert fallback_name_prefix("A* @everyone", "x") == "**A\\* @\u200beveryone**\n\nx"
+def test_fallback_prefix_is_one_subtext_line_above_the_chunk() -> None:
+    assert fallback_name_prefix("Research", "First answer") == "-# Research\nFirst answer"
+    assert fallback_name_prefix("Research", "") == "-# Research\n"
+
+
+def test_fallback_prefix_escapes_markdown_mentions_and_backticks() -> None:
+    assert fallback_name_prefix("A* @everyone", "x") == "-# A\\* @\u200beveryone\nx"
+    assert fallback_name_prefix("ag_acme `x` ||y||", "x") == "-# ag\\_acme \\`x\\` \\|\\|y\\|\\|\nx"
+    assert fallback_name_prefix("back\\slash ~~s~~", "x") == "-# back\\\\slash \\~\\~s\\~\\~\nx"
+
+
+def test_fallback_prefix_keeps_the_name_on_one_line() -> None:
+    assert fallback_name_prefix("two\nlines", "x") == "-# two lines\nx"
 
 
 def test_webhook_must_match_application_and_channel() -> None:

@@ -35,7 +35,11 @@ from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.names import remember_guild_user
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
-from daimon.adapters.discord.post_transport import DiscordPostTransport, known_webhook_ids
+from daimon.adapters.discord.post_transport import (
+    DiscordPostTransport,
+    clear_webhook_backoff,
+    known_webhook_ids,
+)
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
@@ -2766,6 +2770,20 @@ class DaimonBot(commands.Bot):
         )
         if archive_after:
             await self._archive_after_outputs(outcome, thread)
+
+    async def on_guild_role_update(self, before: discord.Role, after: discord.Role) -> None:
+        if before.permissions != after.permissions:
+            clear_webhook_backoff(after.guild)
+
+    async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
+        if self.user is not None and after.id == self.user.id and before.roles != after.roles:
+            clear_webhook_backoff(after.guild)
+
+    async def on_guild_channel_update(
+        self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel
+    ) -> None:
+        if before.overwrites != after.overwrites:
+            clear_webhook_backoff(after.guild)
 
     async def on_raw_thread_update(self, payload: discord.RawThreadUpdateEvent) -> None:
         metadata = payload.data["thread_metadata"]

@@ -565,7 +565,7 @@ async def test_outcome_replaced_after_loss_prepends_exactly_one_loss_notice_to_t
 
     notice = render_unexpected_loss("transcript" if transfer_kind == "transcript" else "history")
     assert expected_phrase in notice, "the parametrized phrase must pin the right variant"
-    assert _final_answer_text(message) == f"**test-agent**\n\n{notice}\n\n{_ANSWER}", (
+    assert _final_answer_text(message) == f"-# test-agent\n{notice}\n\n{_ANSWER}", (
         "the loss notice must be the answer's first paragraph, exactly once"
     )
     sent_texts = [c.args[0] for c in message.channel.send.call_args_list if c.args]
@@ -740,7 +740,7 @@ async def test_replaced_makes_the_replacement_summary_the_answers_first_paragrap
         await bot.on_message(message)
 
     summary = render_replacement_summary("transcript", [])
-    assert _final_answer_text(message) == f"**test-agent**\n\n{summary}\n\n{_ANSWER}", (
+    assert _final_answer_text(message) == f"-# test-agent\n{summary}\n\n{_ANSWER}", (
         "the replacement summary must be the answer's first paragraph"
     )
     sent_texts = [c.args[0] for c in message.channel.send.call_args_list if c.args]
@@ -863,7 +863,7 @@ async def test_replaced_with_no_transfer_kind_posts_no_summary_prefix(
     ):
         await bot.on_message(message)
 
-    assert _final_answer_text(message) == f"**test-agent**\n\n{_ANSWER}", (
+    assert _final_answer_text(message) == f"-# test-agent\n{_ANSWER}", (
         "a fresh start must not prefix the answer with a replacement summary"
     )
     sent_texts = [c.args[0] for c in message.channel.send.call_args_list if c.args]
