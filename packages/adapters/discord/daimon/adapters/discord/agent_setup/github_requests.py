@@ -149,7 +149,9 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
     deferred = False
 
     async def reply(text: str, *, view: discord.ui.View | None = None) -> None:
-        if deferred:
+        if deferred and not shared_action:
+            await interaction.followup.send(text, ephemeral=True)
+        elif deferred:
             await interaction.edit_original_response(content=text, view=view)
         elif view is None:
             await interaction.response.send_message(text, ephemeral=True)
@@ -297,7 +299,9 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
     member = guild.get_member(interaction.user.id)
     if member is None:
         if not deferred:
-            await interaction.response.defer(ephemeral=True, thinking=True)
+            # This is the requester's thread card. Keep its edit target when
+            # the member lookup needs more than Discord's response window.
+            await interaction.response.defer(thinking=False)
             deferred = True
         try:
             member = await guild.fetch_member(interaction.user.id)

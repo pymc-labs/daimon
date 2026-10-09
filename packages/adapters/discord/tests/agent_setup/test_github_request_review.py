@@ -132,3 +132,73 @@ async def test_review_defers_before_fetch_member(monkeypatch: pytest.MonkeyPatch
     )
     assert await module.handle_request_card(interaction, SimpleNamespace(sessionmaker=_Sessions()))  # type: ignore[arg-type]
     interaction.edit_original_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["hide", "approve"])
+async def test_uncached_member_decision_edits_requester_thread_card(
+    monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    request_id, tenant_id, account_id, agent_id = (uuid.uuid4() for _ in range(4))
+    request = SimpleNamespace(
+        id=request_id,
+        tenant_id=tenant_id,
+        thread_id="200",
+        status="open",
+        requester_account_id=account_id,
+        agent_id=agent_id,
+        ma_agent_id="ma_agent",
+        agent_name="Helper",
+    )
+    monkeypatch.setattr(module, "lookup_request", AsyncMock(return_value=request))
+    monkeypatch.setattr(
+        module, "get_tenant", AsyncMock(return_value=SimpleNamespace(external_id="123"))
+    )
+    monkeypatch.setattr(
+        module,
+        "find_platform_principal",
+        AsyncMock(return_value=SimpleNamespace(account_id=account_id)),
+    )
+    monkeypatch.setattr(
+        module,
+        "get_delivery",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                message_id="42",
+                dismissed_at=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(module, "is_member_guild_admin", MagicMock(return_value=True))
+    monkeypatch.setattr(module, "dismiss_delivery", AsyncMock(return_value=True))
+    monkeypatch.setattr(module, "approve_connected_request", AsyncMock(return_value=True))
+    monkeypatch.setattr(module, "update_requester_card", AsyncMock())
+    monkeypatch.setattr(
+        module,
+        "find_agent_by_derived_uuid",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                id="ma_agent",
+                metadata={},
+                name="Helper",
+            )
+        ),
+    )
+    monkeypatch.setattr(module, "decide_operation", MagicMock(return_value="allow"))
+    member = SimpleNamespace(id=99)
+    fetched = AsyncMock(return_value=member)
+    guild = SimpleNamespace(owner_id=1, get_member=lambda _id: None, fetch_member=fetched)
+    interaction = MagicMock()
+    interaction.data = {"custom_id": f"github_request:{request_id}:{action}"}
+    interaction.message.id = 42
+    interaction.channel_id = 200
+    interaction.user.id = 99
+    interaction.client.get_guild.return_value = guild
+    interaction.response.defer = AsyncMock()
+    interaction.response.edit_message = AsyncMock()
+    interaction.edit_original_response = AsyncMock()
+    runtime = SimpleNamespace(sessionmaker=_Sessions(), anthropic=object())
+    assert await module.handle_request_card(interaction, runtime)  # type: ignore[arg-type]
+    interaction.response.defer.assert_awaited_once_with(thinking=False)
+    interaction.response.edit_message.assert_not_awaited()
+    assert interaction.edit_original_response.await_args.kwargs["embed"] is not None

@@ -35,7 +35,7 @@ async def test_review_requires_card_ts_and_live_admin(monkeypatch: pytest.Monkey
         admin_card_message_id="123.456",
         status="open",
         agent_name="Helper",
-        repo_names=["private/repo"],
+        repo_names=["private/connected", "private/unconnected"],
         required_ability="write",
     )
     client = SimpleNamespace(views_open=AsyncMock())
@@ -45,6 +45,22 @@ async def test_review_requires_card_ts_and_live_admin(monkeypatch: pytest.Monkey
     monkeypatch.setattr(module, "resolve_web_client", AsyncMock(return_value=client))
     monkeypatch.setattr(module, "lookup_request", AsyncMock(return_value=request))
     monkeypatch.setattr(module, "find_platform_principal", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        module,
+        "list_authorized_repos",
+        AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    repo_full_name="private/connected", status="active", installation_id=7
+                ),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "get_app_installation",
+        AsyncMock(return_value=SimpleNamespace(repo_full_names=["private/connected"])),
+    )
     monkeypatch.setattr(module, "resolve_is_admin", admin)
     monkeypatch.setattr(module, "post_ephemeral", ephemeral)
     payload = {
@@ -67,9 +83,11 @@ async def test_review_requires_card_ts_and_live_admin(monkeypatch: pytest.Monkey
     await module.handle_action(runtime, payload)  # type: ignore[arg-type]
     client.views_open.assert_awaited_once()
     view = client.views_open.await_args.kwargs["view"]
-    assert "private/repo" in str(view["blocks"])
+    assert "private/connected" in str(view["blocks"])
+    assert "private/unconnected" not in str(view["blocks"])
+    assert "1 other repo(s) not connected yet" in str(view["blocks"])
     assert view["private_metadata"]
-    assert "private/repo" not in str(payload)
+    assert "private/connected" not in str(payload)
     client.views_update = AsyncMock()
     modal_payload = {
         "team": {"id": "T1"},
@@ -160,6 +178,7 @@ def test_slack_review_modal_escapes_only_mrkdwn_control_characters() -> None:
         message_id="1",
         agent_name='A" & <B>',
         repo_names=["owner/repo"],
+        other_repo_count=1,
         ability="Read only",
     )
     text = view["blocks"][0]["text"]["text"]

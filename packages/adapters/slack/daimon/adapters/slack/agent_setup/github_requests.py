@@ -16,6 +16,7 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.github_request_cards import slack_mrkdwn_escape
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.github_access import list_authorized_repos
 from daimon.core.stores.github_access_requests import (
     cancel_request,
     dismiss_delivery,
@@ -25,6 +26,7 @@ from daimon.core.stores.github_access_requests import (
     record_reposted_requester_card,
     set_status,
 )
+from daimon.core.stores.github_app_installations import get as get_app_installation
 from daimon.core.stores.github_request_actions import (
     approve_connected_request,
     approve_connection_request,
@@ -53,11 +55,16 @@ def _review_modal(
     message_id: str,
     agent_name: str,
     repo_names: list[str],
+    other_repo_count: int,
     ability: str,
 ) -> dict[str, Any]:
     metadata = json.dumps(
         {"request_id": str(request_id), "channel_id": channel_id, "message_id": message_id}
     )
+    repo_lines = [f"Repo: {slack_mrkdwn_escape(name)}" for name in repo_names]
+    if other_repo_count:
+        repo_lines.append(f"{other_repo_count} other repo(s) not connected yet")
+    repo_detail = "\n".join(repo_lines)
     return {
         "type": "modal",
         "callback_id": "github_request_review",
@@ -71,7 +78,7 @@ def _review_modal(
                     "type": "mrkdwn",
                     "text": (
                         f"*{slack_mrkdwn_escape(agent_name)} needs GitHub access*\n"
-                        f"Repo: {slack_mrkdwn_escape(', '.join(repo_names))}\n"
+                        f"{repo_detail}\n"
                         f"Access: {slack_mrkdwn_escape(ability)}"
                     ),
                 },
@@ -302,6 +309,21 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 text="Only a workspace admin can review GitHub requests.",
             )
             return
+        async with runtime.sessionmaker() as session:
+            connected: dict[str, str] = {}
+            for repo in await list_authorized_repos(session, tenant_id=tenant_id):
+                if repo.status != "active":
+                    continue
+                installation = await get_app_installation(
+                    session, installation_id=repo.installation_id
+                )
+                if installation and repo.repo_full_name in installation.repo_full_names:
+                    connected[repo.repo_full_name.casefold()] = repo.repo_full_name
+        connected_names = [
+            connected[name.casefold()]
+            for name in request.repo_names
+            if name.casefold() in connected
+        ]
         level = "Read only" if request.required_ability == "read" else "Read and write"
         await client.views_open(  # pyright: ignore[reportUnknownMemberType]
             trigger_id=str(payload.get("trigger_id") or ""),
@@ -310,7 +332,8 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 channel_id=channel_id,
                 message_id=message_id,
                 agent_name=request.agent_name,
-                repo_names=request.repo_names,
+                repo_names=connected_names,
+                other_repo_count=len(request.repo_names) - len(connected_names),
                 ability=level,
             ),
         )

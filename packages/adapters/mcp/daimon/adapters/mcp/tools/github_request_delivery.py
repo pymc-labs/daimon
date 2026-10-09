@@ -253,9 +253,9 @@ async def deliver_private_request_card(
                     if not isinstance(channel, discord.Thread):
                         return False
                     view = _discord_view(card, request_id=request_id, link_url=link_url)
-                    # A thread message is public to its readers. Only status
-                    # text with no requested repo name belongs on this card.
-                    if any(name.casefold() in card.text.casefold() for name in request.repo_names):
+                    # A thread message is public to its readers. The renderer
+                    # marks cards that name repositories before delivery.
+                    if card.names_repos:
                         embed = discord.Embed(
                             title="GitHub request",
                             description="Only the requester can use this card.",

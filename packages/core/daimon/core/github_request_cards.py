@@ -13,6 +13,7 @@ class RequestCard:
     text: str
     primary: str | None
     secondary: tuple[str, ...] = ()
+    names_repos: bool = False
 
 
 def slack_mrkdwn_escape(value: str) -> str:
@@ -70,7 +71,9 @@ def requester_card(
     detail = f"Can: {level}."
     if not connected_names:
         detail = "GitHub will ask someone who manages it to confirm.\n" + detail
-    return RequestCard(f"{title}\n{detail}", action, ("Cancel request",))
+    return RequestCard(
+        f"{title}\n{detail}", action, ("Cancel request",), names_repos=bool(connected_names)
+    )
 
 
 def admin_card(
@@ -99,4 +102,5 @@ def admin_card(
         f"{heading}\n{names}\nCan: {level}",
         action,
         ("Decline", "Hide for me"),
+        names_repos=bool(connected_names),
     )

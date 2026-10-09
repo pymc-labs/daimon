@@ -118,7 +118,10 @@ async def test_request_card_stays_at_origin_without_dm(
         settings=SimpleNamespace(discord=SimpleNamespace(bot_token=SecretStr("token"))),
     )
     card = RequestCard(
-        "Let ResearchBot use private/repo?\nCan: Read and write.", "Connect and add", ()
+        "Let ResearchBot use private/repo?\nCan: Read and write.",
+        "Connect and add",
+        (),
+        names_repos=True,
     )
     if platform == "discord":
 
@@ -164,16 +167,18 @@ async def test_request_card_stays_at_origin_without_dm(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("card_text", "expected"),
+    ("card_text", "names_repos", "expected"),
     [
-        ("GitHub access pending. An admin has been asked.", "GitHub access pending"),
-        ("✓ Linked as @person", "✓ Linked as @person"),
-        ("Admin unavailable. Ask an admin to open /github.", "Admin unavailable"),
-        ("Let Bot use private/repo?", "GitHub request"),
+        ("GitHub access pending. An admin has been asked.", False, "GitHub access pending"),
+        ("✓ Linked as @person", False, "✓ Linked as @person"),
+        ("Admin unavailable. Ask an admin to open /github.", False, "Admin unavailable"),
+        ("Let Bot use private/repo?", True, "GitHub request"),
+        ("Let Bot use private/repo?", False, "Let Bot use private/repo?"),
     ],
 )
 async def test_discord_requester_status_only_neutralizes_repo_names(
     card_text: str,
+    names_repos: bool,
     expected: str,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -221,10 +226,10 @@ async def test_discord_requester_status_only_neutralizes_repo_names(
         request_id=request.id,
         recipient_account_id=account.id,
         platform_user_id="person",
-        card=RequestCard(card_text, None),
+        card=RequestCard(card_text, None, names_repos=names_repos),
     )
     assert expected in Thread.send.await_args.kwargs["embed"].title
-    if "private/repo" in card_text:
+    if names_repos:
         assert "private/repo" not in str(Thread.send.await_args.kwargs)
 
 

@@ -169,6 +169,7 @@ async def test_request_collects_repos_and_is_asker_bound(db_session: AsyncSessio
         ability="write",
     )
     assert private.primary == "Connect and add"
+    assert not private.names_repos
     assert "example/first" not in private.text
     admin = admin_card(
         second,
@@ -187,6 +188,7 @@ async def test_request_collects_repos_and_is_asker_bound(db_session: AsyncSessio
         ability="write",
     )
     assert connected.primary == "Add repo"
+    assert connected.names_repos
     assert "example/second" in connected.text
     assert (
         requester_card(
