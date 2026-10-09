@@ -1136,8 +1136,11 @@ async def test_an_upstream_failure_is_a_tool_error(
         raise anthropic.APIStatusError("boom", response=response, body=None)
 
     monkeypatch.setattr(skill_uploads, "add_agent_skill", failing)
-    with pytest.raises(ToolError, match=r"failed upstream \(HTTP 500\)"):
+    with pytest.raises(ToolError, match=r"failed upstream \(HTTP 500\)") as failure:
         await _preview_then_confirm(world, skill_md=_MD)
+    # A card approval was not used up, so the agent may simply retry.
+    assert "Try again later." in str(failure.value)
+    assert "preview again" not in str(failure.value)
 
 
 async def test_failed_upload_after_chat_approval_asks_for_new_preview_and_yes(
