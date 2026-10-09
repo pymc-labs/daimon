@@ -33,7 +33,7 @@ async def test_shared_review_requires_live_admin_and_returns_ephemeral_detail(
         admin_card_message_id="42",
         status="open",
         agent_name="Helper",
-        repo_names=["private/repo"],
+        repo_names=["private/connected", "private/unconnected"],
         required_ability="write",
     )
     monkeypatch.setattr(module, "lookup_request", AsyncMock(return_value=request))
@@ -43,6 +43,22 @@ async def test_shared_review_requires_live_admin_and_returns_ephemeral_detail(
     principal = SimpleNamespace(account_id=account_id)
     monkeypatch.setattr(module, "find_platform_principal", AsyncMock(return_value=principal))
     monkeypatch.setattr(module, "get_delivery", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        module,
+        "list_authorized_repos",
+        AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    repo_full_name="private/connected", status="active", installation_id=7
+                ),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "get_app_installation",
+        AsyncMock(return_value=SimpleNamespace(repo_full_names=["private/connected"])),
+    )
     admin = MagicMock(return_value=False)
     monkeypatch.setattr(module, "is_member_guild_admin", admin)
     sync = AsyncMock()
@@ -55,15 +71,64 @@ async def test_shared_review_requires_live_admin_and_returns_ephemeral_detail(
     interaction.user.id = 99
     interaction.client.get_guild.return_value = guild
     interaction.response.send_message = AsyncMock()
+    interaction.response.defer = AsyncMock()
+    interaction.edit_original_response = AsyncMock()
     runtime = SimpleNamespace(sessionmaker=_Sessions())
     assert await module.handle_request_card(interaction, runtime)  # type: ignore[arg-type]
-    assert "Only a server admin" in interaction.response.send_message.await_args.args[0]
+    assert "Only a server admin" in interaction.edit_original_response.await_args.kwargs["content"]
     sync.assert_not_awaited()
     admin.return_value = True
-    interaction.response.send_message.reset_mock()
+    interaction.edit_original_response.reset_mock()
     assert await module.handle_request_card(interaction, runtime)  # type: ignore[arg-type]
-    sent = interaction.response.send_message.await_args.kwargs
-    assert sent["ephemeral"] is True
-    assert "private/repo" in sent["embed"].description
+    interaction.response.defer.assert_awaited()
+    sent = interaction.edit_original_response.await_args.kwargs
+    assert "private/connected" in sent["embed"].description
+    assert "private/unconnected" not in sent["embed"].description
+    assert "1 other repo(s) not connected yet" in sent["embed"].description
     assert {button.label for button in sent["view"].children} >= {"Approve", "Decline"}
     sync.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_review_defers_before_fetch_member(monkeypatch: pytest.MonkeyPatch) -> None:
+    request_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+    request = SimpleNamespace(
+        id=request_id,
+        tenant_id=tenant_id,
+        thread_id="200",
+        admin_card_message_id="42",
+        status="open",
+        agent_name="Helper",
+        repo_names=[],
+        required_ability="read",
+    )
+    monkeypatch.setattr(module, "lookup_request", AsyncMock(return_value=request))
+    monkeypatch.setattr(
+        module, "get_tenant", AsyncMock(return_value=SimpleNamespace(external_id="123"))
+    )
+    monkeypatch.setattr(module, "find_platform_principal", AsyncMock(return_value=None))
+    monkeypatch.setattr(module, "get_delivery", AsyncMock(return_value=None))
+    interaction = MagicMock()
+    interaction.data = {"custom_id": f"github_request:{request_id}:review"}
+    interaction.message.id = 42
+    interaction.channel_id = 200
+    interaction.user.id = 99
+    deferred = False
+
+    async def defer(**_kw: object) -> None:
+        nonlocal deferred
+        deferred = True
+
+    async def fetch_member(_id: int) -> object:
+        assert deferred
+        raise module.discord.NotFound(MagicMock(), "missing")
+
+    interaction.response.defer = AsyncMock(side_effect=defer)
+    interaction.edit_original_response = AsyncMock()
+    interaction.client.get_guild.return_value = SimpleNamespace(
+        owner_id=1,
+        get_member=lambda _id: None,
+        fetch_member=fetch_member,
+    )
+    assert await module.handle_request_card(interaction, SimpleNamespace(sessionmaker=_Sessions()))  # type: ignore[arg-type]
+    interaction.edit_original_response.assert_awaited_once()

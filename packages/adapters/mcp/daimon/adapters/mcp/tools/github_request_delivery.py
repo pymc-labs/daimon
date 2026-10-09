@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import uuid
-from html import escape
 
 import discord
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.discord._client import rest_client
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
-from daimon.core.github_request_cards import RequestCard
+from daimon.core.github_request_cards import RequestCard, slack_mrkdwn_escape
 from daimon.core.stores.github_access_requests import (
     get_delivery,
     lock_delivery_slot,
@@ -136,7 +135,7 @@ async def deliver_shared_admin_card(
                 mentions = (
                     " ".join(f"<@{user_id}>" for user_id in admin_user_ids) if mention else ""
                 )
-                text = f"{escape(title)} {mentions}".strip()
+                text = f"{slack_mrkdwn_escape(title)} {mentions}".strip()
                 blocks = [
                     {"type": "section", "text": {"type": "mrkdwn", "text": text}},
                     {
@@ -203,10 +202,12 @@ def _slack_blocks(
             )
     title, detail = _card_parts(card.text)
     blocks: list[dict[str, object]] = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}}
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{slack_mrkdwn_escape(title)}*"}}
     ]
     if detail:
-        blocks.append({"type": "section", "fields": [{"type": "mrkdwn", "text": detail}]})
+        blocks.append(
+            {"type": "section", "fields": [{"type": "mrkdwn", "text": slack_mrkdwn_escape(detail)}]}
+        )
     if buttons:
         blocks.append({"type": "divider"})
         blocks.append({"type": "actions", "elements": buttons})
@@ -252,22 +253,27 @@ async def deliver_private_request_card(
                     if not isinstance(channel, discord.Thread):
                         return False
                     view = _discord_view(card, request_id=request_id, link_url=link_url)
-                    # Thread messages are visible to everyone with channel access.
-                    # Request details are never rendered in this shared surface.
-                    neutral = discord.Embed(
-                        title="GitHub request", description="Only the requester can use this card."
-                    )
+                    # A thread message is public to its readers. Only status
+                    # text with no requested repo name belongs on this card.
+                    if any(name.casefold() in card.text.casefold() for name in request.repo_names):
+                        embed = discord.Embed(
+                            title="GitHub request",
+                            description="Only the requester can use this card.",
+                        )
+                    else:
+                        title, detail = _card_parts(card.text)
+                        embed = discord.Embed(title=title, description=detail or None)
                     if delivery is not None and delivery.message_id is not None:
                         message = channel.get_partial_message(int(delivery.message_id))
                         await message.edit(
                             content=None,
-                            embed=neutral,
+                            embed=embed,
                             view=view,
                             allowed_mentions=discord.AllowedMentions.none(),
                         )
                         return True
                     message = await channel.send(
-                        embed=neutral,
+                        embed=embed,
                         view=view,
                         allowed_mentions=discord.AllowedMentions.none(),
                     )

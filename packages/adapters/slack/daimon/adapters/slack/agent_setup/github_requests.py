@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from html import escape
 from typing import Any, cast
 
 from daimon.adapters.slack.admin import resolve_is_admin
@@ -15,12 +14,15 @@ from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
+from daimon.core.github_request_cards import slack_mrkdwn_escape
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.github_access_requests import (
     cancel_request,
     dismiss_delivery,
     get_delivery,
+    lock_delivery_slot,
     lookup_request,
+    record_reposted_requester_card,
     set_status,
 )
 from daimon.core.stores.github_request_actions import (
@@ -68,8 +70,9 @@ def _review_modal(
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        f"*{escape(agent_name)} needs GitHub access*\n"
-                        f"Repo: {', '.join(repo_names)}\nAccess: {ability}"
+                        f"*{slack_mrkdwn_escape(agent_name)} needs GitHub access*\n"
+                        f"Repo: {slack_mrkdwn_escape(', '.join(repo_names))}\n"
+                        f"Access: {slack_mrkdwn_escape(ability)}"
                     ),
                 },
             },
@@ -180,13 +183,26 @@ async def update_requester_card(
                     }
                 )
         blocks = github_card_blocks(text, buttons=buttons)
-        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
-            channel=request.parent_channel_id,
-            thread_ts=request.thread_id,
-            user=request.requester_platform_user_id,
-            text=text,
-            blocks=blocks,
-        )
+        async with runtime.sessionmaker.begin() as session:
+            await lock_delivery_slot(
+                session, request_id=request_id, recipient_account_id=request.requester_account_id
+            )
+            sent = await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                channel=request.parent_channel_id,
+                thread_ts=request.thread_id,
+                user=request.requester_platform_user_id,
+                text=text,
+                blocks=blocks,
+            )
+            message_id = sent.get("message_ts") or sent.get("ts")
+            if isinstance(message_id, str) and message_id:
+                await record_reposted_requester_card(
+                    session,
+                    tenant_id=tenant_id,
+                    request_id=request_id,
+                    recipient_account_id=request.requester_account_id,
+                    message_id=message_id,
+                )
     except SlackApiError:
         return
 
@@ -196,11 +212,12 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     user = cast("dict[str, Any]", payload.get("user") or {})
     channel = cast("dict[str, Any]", payload.get("channel") or {})
     message = cast("dict[str, Any]", payload.get("message") or {})
+    container = cast("dict[str, Any]", payload.get("container") or {})
     action = cast("dict[str, Any]", (payload.get("actions") or [{}])[0])
     team_id = str(team.get("id") or "")
     user_id = str(user.get("id") or "")
     channel_id = str(channel.get("id") or "")
-    message_id = str(message.get("ts") or "")
+    message_id = str(container.get("message_ts") or message.get("ts") or "")
     action_id = str(action.get("action_id") or "")
     modal_view = cast("dict[str, Any]", payload.get("view") or {})
     modal = bool(modal_view)

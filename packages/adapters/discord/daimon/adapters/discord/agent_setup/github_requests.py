@@ -13,6 +13,7 @@ from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.operation_policy import TargetFacts, decide_operation
+from daimon.core.stores.github_access import list_authorized_repos
 from daimon.core.stores.github_access_requests import (
     cancel_request,
     dismiss_delivery,
@@ -20,6 +21,7 @@ from daimon.core.stores.github_access_requests import (
     lookup_request,
     set_status,
 )
+from daimon.core.stores.github_app_installations import get as get_app_installation
 from daimon.core.stores.github_personal_links import mint_link
 from daimon.core.stores.github_request_actions import (
     approve_connected_request,
@@ -144,6 +146,22 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         return True
     action = parts[2]
     shared_action = action == "review" or len(parts) == 4
+    deferred = False
+
+    async def reply(text: str, *, view: discord.ui.View | None = None) -> None:
+        if deferred:
+            await interaction.edit_original_response(content=text, view=view)
+        elif view is None:
+            await interaction.response.send_message(text, ephemeral=True)
+        else:
+            await interaction.response.send_message(text, ephemeral=True, view=view)
+
+    async def edit_card(*, embed: discord.Embed, view: discord.ui.View | None = None) -> None:
+        if deferred:
+            await interaction.edit_original_response(content=None, embed=embed, view=view)
+        else:
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+
     if shared_action:
         if (
             not request.admin_card_message_id
@@ -156,19 +174,19 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         if guild is None:
             await interaction.response.send_message("This request is unavailable.", ephemeral=True)
             return True
+        # Review opens a private response; a decision updates its existing
+        # private review card so its buttons cannot be clicked again.
+        await interaction.response.defer(ephemeral=True, thinking=action == "review")
+        deferred = True
         member = guild.get_member(interaction.user.id)
         if member is None:
             try:
                 member = await guild.fetch_member(interaction.user.id)
             except discord.HTTPException:
-                await interaction.response.send_message(
-                    "This request is unavailable.", ephemeral=True
-                )
+                await reply("This request is unavailable.")
                 return True
         if not is_member_guild_admin(member, guild_owner_id=guild.owner_id):
-            await interaction.response.send_message(
-                "Only a server admin can review GitHub requests.", ephemeral=True
-            )
+            await reply("Only a server admin can review GitHub requests.")
             return True
         async with runtime.sessionmaker.begin() as session:
             await sync_connect_admin(
@@ -186,14 +204,31 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
             )
         if action == "review":
             if request.status not in ("open", "waiting_github"):
-                await interaction.response.send_message(
-                    "This request is unavailable.", ephemeral=True
-                )
+                await reply("This request is unavailable.")
                 return True
+            async with runtime.sessionmaker() as session:
+                connected: dict[str, str] = {}
+                for repo in await list_authorized_repos(session, tenant_id=request.tenant_id):
+                    if repo.status != "active":
+                        continue
+                    installation = await get_app_installation(
+                        session, installation_id=repo.installation_id
+                    )
+                    if installation and repo.repo_full_name in installation.repo_full_names:
+                        connected[repo.repo_full_name.casefold()] = repo.repo_full_name
+            connected_names = [
+                connected[name.casefold()]
+                for name in request.repo_names
+                if name.casefold() in connected
+            ]
+            other_count = len(request.repo_names) - len(connected_names)
+            repo_lines = [f"Repo: {name}" for name in connected_names]
+            if other_count:
+                repo_lines.append(f"{other_count} other repo(s) not connected yet")
             level = "Read only" if request.required_ability == "read" else "Read and write"
             detail = discord.Embed(
                 title=f"{request.agent_name} needs GitHub access",
-                description=f"Repo: {', '.join(request.repo_names)}\nAccess: {level}",
+                description="\n".join((*repo_lines, f"Access: {level}")),
             )
             view = discord.ui.View(timeout=900)
             for label, decision in (
@@ -207,7 +242,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                         custom_id=f"github_request:{request_id}:{decision}:{request.admin_card_message_id}",
                     )
                 )
-            await interaction.response.send_message(embed=detail, view=view, ephemeral=True)
+            await interaction.edit_original_response(embed=detail, view=view)
             return True
     elif (
         principal is None
@@ -217,18 +252,16 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
     ):
         await interaction.response.send_message("This request is unavailable.", ephemeral=True)
         return True
-    assert principal is not None
+    if principal is None:
+        await reply("This request is unavailable.")
+        return True
     if action == "link":
         if principal.account_id != request.requester_account_id:
-            await interaction.response.send_message(
-                "Only the requester can use this.", ephemeral=True
-            )
+            await reply("Only the requester can use this.")
             return True
         root = runtime.settings.mcp.app_root_url
         if root is None:
-            await interaction.response.send_message(
-                "GitHub linking is unavailable.", ephemeral=True
-            )
+            await reply("GitHub linking is unavailable.")
             return True
         async with runtime.sessionmaker.begin() as session:
             url = await mint_link(
@@ -241,9 +274,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
             )
         from daimon.adapters.discord.agent_setup.github_home import connect_button_view
 
-        await interaction.response.send_message(
-            "Connect GitHub.", view=connect_button_view(url), ephemeral=True
-        )
+        await reply("Connect GitHub.", view=connect_button_view(url))
         return True
     if action == "cancel":
         async with runtime.sessionmaker.begin() as session:
@@ -253,24 +284,25 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 request_id=request_id,
                 account_id=principal.account_id,
             )
-        await interaction.response.edit_message(
-            content=None,
+        await edit_card(
             embed=github_embed(
                 "Request cancelled." if cancelled else "This request is unavailable."
             ),
-            view=None,
         )
         return True
     guild = interaction.client.get_guild(int(tenant.external_id))
     if guild is None:
-        await interaction.response.send_message("This request is unavailable.", ephemeral=True)
+        await reply("This request is unavailable.")
         return True
     member = guild.get_member(interaction.user.id)
     if member is None:
+        if not deferred:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            deferred = True
         try:
             member = await guild.fetch_member(interaction.user.id)
         except discord.HTTPException:
-            await interaction.response.send_message("This request is unavailable.", ephemeral=True)
+            await reply("This request is unavailable.")
             return True
     is_admin = is_member_guild_admin(member, guild_owner_id=guild.owner_id)
     if action == "hide":
@@ -281,22 +313,18 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 request_id=request_id,
                 account_id=principal.account_id,
             )
-        await interaction.response.edit_message(
-            content=None,
+        await edit_card(
             embed=github_embed("Hidden for you." if hidden else "This request is unavailable."),
-            view=None,
         )
         return True
     if not is_admin:
-        await interaction.response.send_message(
-            "Only a server admin can approve GitHub requests.", ephemeral=True
-        )
+        await reply("Only a server admin can approve GitHub requests.")
         return True
     live_agent = await find_agent_by_derived_uuid(
         runtime.anthropic, tenant_id=request.tenant_id, agent_id=request.agent_id
     )
     if live_agent is None or live_agent.id != request.ma_agent_id:
-        await interaction.response.send_message("This agent is unavailable.", ephemeral=True)
+        await reply("This agent is unavailable.")
         return True
     managed = live_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     async with runtime.sessionmaker() as session:
@@ -318,9 +346,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         )
     can_manage = decide_operation("github_grant", is_admin=is_admin, target=facts) == "allow"
     if not can_manage or (action == "connect" and not is_admin):
-        await interaction.response.send_message(
-            "You cannot change this agent's GitHub repos.", ephemeral=True
-        )
+        await reply("You cannot change this agent's GitHub repos.")
         return True
     if action == "decline":
         async with runtime.sessionmaker.begin() as session:
@@ -331,12 +357,10 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 expected=request.status,
                 status="declined",
             )
-        await interaction.response.edit_message(
-            content=None,
+        await edit_card(
             embed=github_embed(
                 "Declined." if declined else "This request is unavailable.", state="danger"
             ),
-            view=None,
         )
         if declined:
             await update_requester_card(
@@ -358,17 +382,15 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                     account_id=principal.account_id,
                 )
         except ValueError as error:
-            await interaction.response.send_message(safe_github_error(error), ephemeral=True)
+            await reply(safe_github_error(error))
             return True
-        await interaction.response.edit_message(
-            content=None,
+        await edit_card(
             embed=github_embed(
                 f"✓ Added. {request.agent_name} is continuing."
                 if approved
                 else "This request is unavailable.",
                 state="success" if approved else "info",
             ),
-            view=None,
         )
         if approved:
             await update_requester_card(
@@ -410,15 +432,11 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 account_id=principal.account_id,
             )
     except ValueError as error:
-        await interaction.response.send_message(safe_github_error(error), ephemeral=True)
+        await reply(safe_github_error(error))
         return True
     from daimon.adapters.discord.agent_setup.github_home import connect_button_view
 
-    await interaction.response.edit_message(
-        content=None,
-        embed=github_embed("Waiting for GitHub confirmation.", state="waiting"),
-        view=None,
-    )
+    await edit_card(embed=github_embed("Waiting for GitHub confirmation.", state="waiting"))
     await interaction.followup.send(
         "Connect GitHub.", view=connect_button_view(url), ephemeral=True
     )

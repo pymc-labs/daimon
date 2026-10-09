@@ -22,6 +22,7 @@ from daimon.core.stores.github_access_requests import (
     mark_expiry_notice_sent,
     ready_and_continue,
     record_delivery,
+    record_reposted_requester_card,
     record_shared_card,
     request_access,
     set_status,
@@ -73,6 +74,59 @@ async def test_shared_request_cards_cap_mentions_per_thread(db_session: AsyncSes
     await record_shared_card(db_session, request=requests[0], message_id="updated", mentioned=False)
     await db_session.flush()
     assert not await shared_card_mention_allowed(db_session, request=requests[3])
+
+
+@pytest.mark.asyncio
+async def test_declined_slack_requester_repost_rebinds_buttons(db_session: AsyncSession) -> None:
+    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="slack", external_id="T2"))
+    await db_session.flush()
+    db_session.add(Account(id=account_id, tenant_id=tenant_id, role="user"))
+    await db_session.flush()
+    request = await request_access(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=account_id,
+        requester_platform_user_id="U2",
+        platform="slack",
+        parent_channel_id="C2",
+        thread_id="123.1",
+        agent_id=uuid.uuid4(),
+        ma_agent_id="agent",
+        agent_name="Helper",
+        repo_name="private/repo",
+        requested_work="Continue task",
+        is_admin=False,
+    )
+    assert await record_delivery(
+        db_session,
+        tenant_id=tenant_id,
+        request_id=request.id,
+        recipient_account_id=account_id,
+        platform_user_id="U2",
+        message_id="123.2",
+    )
+    assert await set_status(
+        db_session,
+        tenant_id=tenant_id,
+        request_id=request.id,
+        expected="open",
+        status="declined",
+    )
+    assert await record_reposted_requester_card(
+        db_session,
+        tenant_id=tenant_id,
+        request_id=request.id,
+        recipient_account_id=account_id,
+        message_id="123.3",
+    )
+    delivery = await get_delivery(
+        db_session,
+        tenant_id=tenant_id,
+        request_id=request.id,
+        recipient_account_id=account_id,
+    )
+    assert delivery is not None and delivery.message_id == "123.3"
 
 
 @pytest.mark.asyncio
@@ -134,6 +188,26 @@ async def test_request_collects_repos_and_is_asker_bound(db_session: AsyncSessio
     )
     assert connected.primary == "Add repo"
     assert "example/second" in connected.text
+    assert (
+        requester_card(
+            second,
+            connected_names=(),
+            asker_is_admin=False,
+            ability="read",
+            admin_status="unseen",
+        ).text
+        == "No admin can see this channel. Ask an admin to open /github."
+    )
+    assert (
+        requester_card(
+            second,
+            connected_names=(),
+            asker_is_admin=False,
+            ability="read",
+            admin_status="recent",
+        ).text
+        == "Admins were notified recently."
+    )
     assert await record_delivery(
         db_session,
         tenant_id=tenant_id,

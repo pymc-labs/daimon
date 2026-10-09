@@ -495,6 +495,33 @@ async def record_delivery(
     return True
 
 
+async def record_reposted_requester_card(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    request_id: uuid.UUID,
+    recipient_account_id: uuid.UUID,
+    message_id: str,
+) -> bool:
+    """Bind a new Slack ephemeral card even after an admin has declined."""
+    request = await session.get(GitHubAccessRequest, request_id)
+    row = await session.get(
+        GitHubAccessRequestDelivery, (request_id, recipient_account_id), with_for_update=True
+    )
+    if (
+        request is None
+        or request.tenant_id != tenant_id
+        or request.platform != "slack"
+        or request.requester_account_id != recipient_account_id
+        or row is None
+        or row.dismissed_at is not None
+    ):
+        return False
+    row.message_id = message_id
+    row.delivered_at = datetime.now(UTC)
+    return True
+
+
 async def dismiss_delivery(
     session: AsyncSession, *, tenant_id: uuid.UUID, request_id: uuid.UUID, account_id: uuid.UUID
 ) -> bool:

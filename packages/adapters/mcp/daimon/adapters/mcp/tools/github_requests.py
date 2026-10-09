@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import uuid
-from typing import Literal
+from typing import Literal, cast
 
+import discord
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.discord._client import (
+    _resolve_channel,  # pyright: ignore[reportPrivateUsage]
+    _resolve_member,  # pyright: ignore[reportPrivateUsage]
+    rest_client,
+)
 from daimon.adapters.mcp.tools.github_request_delivery import (
     deliver_private_request_card,
     deliver_shared_admin_card,
 )
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.github_app_session import effective_repo_state
 from daimon.core.github_request_cards import RequestCard, requester_card
 from daimon.core.ma_identity import derive_agent_uuid
@@ -30,6 +37,7 @@ from daimon.core.stores.github_personal_links import mint_link
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
+from slack_sdk.errors import SlackApiError
 
 
 class GitHubRequestResult(BaseModel):
@@ -38,6 +46,50 @@ class GitHubRequestResult(BaseModel):
     status: Literal["ready", "waiting", "no_admin", "personal_link", "unavailable"]
     message: str
     request_id: uuid.UUID | None = None
+
+
+async def _can_see_origin(
+    runtime: McpRuntime,
+    *,
+    platform: Literal["discord", "slack"],
+    workspace_id: str,
+    channel_id: str,
+    platform_user_id: str,
+) -> bool:
+    """Only mention admins who can read the requesting channel."""
+    if platform == "slack" and channel_id.startswith("D"):
+        return False
+    try:
+        if platform == "discord":
+            if runtime.settings.discord is None:
+                return False
+            async with rest_client(runtime.settings.discord.bot_token.get_secret_value()) as client:
+                _, member = await _resolve_member(client, workspace_id, platform_user_id)
+                channel = await _resolve_channel(client, channel_id)
+                return not isinstance(channel, discord.DMChannel) and bool(
+                    channel.permissions_for(member).view_channel
+                )
+        client = await slack_web_client(runtime, team_id=workspace_id)
+        info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
+        raw_channel: object = info.get("channel")
+        channel = cast("dict[str, object]", raw_channel) if isinstance(raw_channel, dict) else {}
+        if not channel:
+            return False
+        if not channel.get("is_private"):
+            return True
+        cursor = ""
+        while True:
+            members = await client.conversations_members(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_id, limit=1000, cursor=cursor or None
+            )
+            if platform_user_id in (members.get("members") or []):
+                return True
+            metadata = members.get("response_metadata") or {}
+            cursor = str(metadata.get("next_cursor") or "")
+            if not cursor:
+                return False
+    except (discord.HTTPException, SlackApiError, ToolError, ValueError, KeyError):
+        return False
 
 
 async def _admin_recipients(
@@ -255,13 +307,24 @@ async def request_github_access_impl(
         platform=origin.platform,
         requester_account_id=origin.account_id,
     )
-    await deliver_shared_admin_card(
+    visible_admins = [
+        recipient
+        for recipient in recipients
+        if await _can_see_origin(
+            runtime,
+            platform=origin.platform,
+            workspace_id=workspace_id,
+            channel_id=request.parent_channel_id,
+            platform_user_id=recipient.platform_user_id,
+        )
+    ]
+    posted = await deliver_shared_admin_card(
         runtime,
         tenant_id=origin.tenant_id,
         platform=origin.platform,
         workspace_id=workspace_id,
         request_id=request.id,
-        admin_user_ids=[recipient.platform_user_id for recipient in recipients],
+        admin_user_ids=[recipient.platform_user_id for recipient in visible_admins],
     )
     async with runtime.session_factory() as session:
         updated = await get_request(session, tenant_id=origin.tenant_id, request_id=request.id)
@@ -272,6 +335,13 @@ async def request_github_access_impl(
         connected_names=(),
         asker_is_admin=False,
         ability=ability,
+        admin_status=(
+            "unseen"
+            if not visible_admins
+            else "recent"
+            if posted and updated.admin_notified_at is None
+            else None
+        ),
     )
     await deliver_private_request_card(
         runtime,

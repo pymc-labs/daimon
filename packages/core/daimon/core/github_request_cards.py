@@ -15,6 +15,11 @@ class RequestCard:
     secondary: tuple[str, ...] = ()
 
 
+def slack_mrkdwn_escape(value: str) -> str:
+    """Escape Slack mrkdwn control characters without HTML-escaping quotes."""
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def requester_card(
     request: AccessRequest,
     *,
@@ -22,11 +27,20 @@ def requester_card(
     asker_is_admin: bool,
     needs_more_ability: bool = False,
     ability: Literal["read", "write"],
+    admin_status: Literal["unseen", "recent", "unavailable"] | None = None,
 ) -> RequestCard:
     """A name is shown only after a caller proved it is connected here."""
     if request.status == "waiting_github":
         return RequestCard("Waiting for GitHub confirmation.", None, ("Cancel request",))
     if not asker_is_admin:
+        if admin_status == "unseen":
+            return RequestCard(
+                "No admin can see this channel. Ask an admin to open /github.",
+                None,
+                ("Cancel request",),
+            )
+        if admin_status == "recent":
+            return RequestCard("Admins were notified recently.", None, ("Cancel request",))
         if request.admin_notified_at is None:
             return RequestCard(
                 "Admin unavailable. Ask an admin to open `/github`.",

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from daimon.adapters.mcp.tools import github_request_delivery as delivery_module
+from daimon.adapters.mcp.tools import github_requests as requests_module
 from daimon.adapters.mcp.tools.github_request_delivery import (
     _discord_view,
     _slack_blocks,
@@ -53,6 +54,36 @@ def test_personal_link_is_private_on_discord_and_keeps_its_label() -> None:
     action = next(block for block in blocks if block["type"] == "actions")
     assert action["elements"][0]["text"]["text"] == "Get a new link"
     assert action["elements"][0]["url"] == "https://private.example/link"
+
+
+@pytest.mark.asyncio
+async def test_slack_admin_visibility_requires_private_channel_membership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SimpleNamespace(
+        conversations_info=AsyncMock(return_value={"channel": {"is_private": True}}),
+        conversations_members=AsyncMock(return_value={"members": ["U-visible"]}),
+    )
+    monkeypatch.setattr(requests_module, "slack_web_client", AsyncMock(return_value=client))
+    runtime = SimpleNamespace()
+    kwargs = dict(
+        platform="slack",
+        workspace_id="T1",
+        channel_id="G1",
+    )
+    assert await requests_module._can_see_origin(  # type: ignore[attr-defined]
+        runtime, platform_user_id="U-visible", **kwargs
+    )
+    assert not await requests_module._can_see_origin(  # type: ignore[attr-defined]
+        runtime, platform_user_id="U-hidden", **kwargs
+    )
+    assert not await requests_module._can_see_origin(  # type: ignore[attr-defined]
+        runtime,
+        platform_user_id="U-visible",
+        platform="slack",
+        workspace_id="T1",
+        channel_id="D1",
+    )
 
 
 @pytest.mark.asyncio
@@ -129,6 +160,72 @@ async def test_request_card_stays_at_origin_without_dm(
         client.chat_postEphemeral.assert_awaited_once()
         client.conversations_open.assert_not_awaited()
         client.chat_postMessage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("card_text", "expected"),
+    [
+        ("GitHub access pending. An admin has been asked.", "GitHub access pending"),
+        ("✓ Linked as @person", "✓ Linked as @person"),
+        ("Admin unavailable. Ask an admin to open /github.", "Admin unavailable"),
+        ("Let Bot use private/repo?", "GitHub request"),
+    ],
+)
+async def test_discord_requester_status_only_neutralizes_repo_names(
+    card_text: str,
+    expected: str,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id="workspace")
+        account = await make_account(session, tenant=tenant)
+        request = await request_access(
+            session,
+            tenant_id=tenant.id,
+            requester_account_id=account.id,
+            requester_platform_user_id="person",
+            platform="discord",
+            parent_channel_id="100",
+            thread_id="200",
+            agent_id=uuid.uuid4(),
+            ma_agent_id="agent_1",
+            agent_name="Bot",
+            requested_work="Continue task",
+            repo_name="private/repo",
+            required_ability="read",
+            is_admin=False,
+        )
+
+    class Thread:
+        send = AsyncMock(return_value=SimpleNamespace(id=42))
+
+    client = SimpleNamespace(fetch_channel=AsyncMock(return_value=Thread()))
+
+    @asynccontextmanager
+    async def rest_client(_token: str):  # type: ignore[no-untyped-def]
+        yield client
+
+    monkeypatch.setattr(delivery_module.discord, "Thread", Thread)
+    monkeypatch.setattr(delivery_module, "rest_client", rest_client)
+    runtime = SimpleNamespace(
+        session_factory=committing_sessionmaker,
+        settings=SimpleNamespace(discord=SimpleNamespace(bot_token=SecretStr("token"))),
+    )
+    assert await delivery_module.deliver_private_request_card(
+        runtime,
+        tenant_id=tenant.id,
+        platform="discord",
+        workspace_id="workspace",
+        request_id=request.id,
+        recipient_account_id=account.id,
+        platform_user_id="person",
+        card=RequestCard(card_text, None),
+    )
+    assert expected in Thread.send.await_args.kwargs["embed"].title
+    if "private/repo" in card_text:
+        assert "private/repo" not in str(Thread.send.await_args.kwargs)
 
 
 @pytest.mark.asyncio
