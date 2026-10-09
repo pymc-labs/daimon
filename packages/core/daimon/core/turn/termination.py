@@ -31,6 +31,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.turn.errors import (
     AdmissionDenied,
     MissingTurnConfigError,
+    NamedAgentRefused,
     SessionAgentMismatch,
     SessionBusyError,
     SessionPreparationFailed,
@@ -140,6 +141,8 @@ def termination_reason(err: BaseException | None) -> TerminationReason:
             return _BY_VALUE.get(str(err.kind), TerminationReason.UNKNOWN)
         case AdmissionDenied():
             return denial_termination_reason(getattr(err, "reason", None))
+        case NamedAgentRefused():
+            return denial_termination_reason(err.denial_reason)
         case MissingTurnConfigError():
             return TerminationReason.MISSING_CONFIG
         case MAResolverMissError():

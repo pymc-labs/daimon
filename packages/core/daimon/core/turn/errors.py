@@ -118,6 +118,44 @@ class SessionBusyError(DaimonError):
         self.retry_after: datetime = retry_after
 
 
+class NamedAgentRefused(DaimonError):
+    """A named request cannot run here; a thread switch may offer Hand over."""
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        kind: Literal["two", "unavailable", "setup", "thread", "own"] | None = None,
+        current_name: str | None = None,
+        named_name: str | None = None,
+        denial_reason: AdmissionDenialReason | None = None,
+        hand_over_agent_id: str | None = None,
+        hand_over_agent_name: str | None = None,
+    ) -> None:
+        if kind == "two":
+            title, detail = "You named two agents.", "Use one name, like `@daimon planner: …`"
+        elif kind == "unavailable":
+            title, detail = "That agent isn't available.", "Ask again without the name."
+        elif kind == "setup":
+            title = f"You're setting up {current_name} here."
+            detail = f"Start a new message in the channel to ask {named_name}."
+        elif kind == "thread":
+            title = f"This thread is with {current_name}."
+            detail = f"Start a new message in the channel to ask {named_name}."
+        elif kind == "own":
+            title = f"Only {current_name} answers here."
+            detail = "Ask again without the other name."
+        else:
+            title, detail = (message or ""), ""
+        super().__init__(f"{title}\n{detail}" if detail else title)
+        self.kind = kind
+        self.title = title
+        self.detail = detail
+        self.denial_reason = denial_reason
+        self.hand_over_agent_id = hand_over_agent_id
+        self.hand_over_agent_name = hand_over_agent_name
+
+
 class SessionAgentMismatch(DaimonError):
     """An existing workspace belongs to a different responder; leave it intact."""
 

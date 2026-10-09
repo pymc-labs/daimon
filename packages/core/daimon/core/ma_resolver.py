@@ -54,6 +54,10 @@ class ResolverCache(TTLCache[_CacheKey, str]):
         self.agents: TTLCache[_ResourceKey, BetaManagedAgentsAgent] = TTLCache[
             _ResourceKey, BetaManagedAgentsAgent
         ](500, 30, timer=timer)
+        self.named_rosters: TTLCache[uuid.UUID, list[BetaManagedAgentsAgent]] = TTLCache[
+            uuid.UUID, list[BetaManagedAgentsAgent]
+        ](500, 30, timer=timer)
+        self.named_roster_reads: dict[uuid.UUID, asyncio.Task[list[BetaManagedAgentsAgent]]] = {}
         self.environments: TTLCache[_ResourceKey, BetaEnvironment] = TTLCache[
             _ResourceKey, BetaEnvironment
         ](500, 30, timer=timer)

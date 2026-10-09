@@ -16,6 +16,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from daimon.core.support_escalation import ASK_THE_TEAM, ESCALATE
+from daimon.core.turn.errors import NamedAgentRefused
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
@@ -87,6 +88,14 @@ def enable_files_card(url: str) -> MessageActivityInput:
     action = OpenUrlAction(title="Enable files", url=url)
     card = AdaptiveCard(body=body, actions=[action], fallback_text=ENABLE_FILES)
     return MessageActivityInput().add_card(card)
+
+
+def named_agent_notice_card(err: NamedAgentRefused) -> MessageActivityInput:
+    """Show the approved two-line agent notice with distinct title and detail."""
+    body: list[CardElement] = [TextBlock(text=err.title, weight="Bolder", wrap=True)]
+    if err.detail:
+        body.append(TextBlock(text=err.detail, wrap=True))
+    return _card(body, fallback=str(err))
 
 
 def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActivityInput:

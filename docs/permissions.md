@@ -68,6 +68,10 @@ Daimon's server-wide name or avatar there. See [publishing](#publishing).
 
 **Listed** covers agents, their skills, environments, routines, timers and
 defaults. From outside, a channel's own agents are hidden everywhere.
+Named-agent lookup follows the same visibility: a home agent named outside
+its home is treated as an unknown name, and ordinary routing continues.
+Discord creates mentionable agent roles only for agents without a home that
+can run somewhere.
 
 **People from another organisation** (a Teams guest the tenant doesn't list
 as a member) are answered only in a channel with `readers: own` or its

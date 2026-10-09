@@ -28,7 +28,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.budget_notice import with_budget_notifier
-from daimon.adapters.teams.card import enable_files_card
+from daimon.adapters.teams.card import enable_files_card, named_agent_notice_card
 from daimon.adapters.teams.card_actions import stored_external, toast
 from daimon.adapters.teams.channel_admin_groups import owned_team_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
@@ -94,6 +94,7 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.named_agent import bind_named_thread, name_after_mention
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.permissions import home_of
@@ -127,6 +128,7 @@ from daimon.core.turn.admission import (
 )
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
+    NamedAgentRefused,
     SessionAgentMismatch,
     SessionBusyError,
     SessionPreparationFailed,
@@ -877,7 +879,20 @@ class TeamsApp:
                 now=datetime.now(UTC),
                 is_dm=inbound.kind == "dm",
                 external=ExternalFinding(inbound.is_external, inbound.is_external_known),
+                requested_agent_name=name_after_mention(inbound.text)
+                if inbound.bot_mentioned
+                else None,
             )
+        except NamedAgentRefused as err:
+            if not inbound.unprompted:
+                await self._sender.send(
+                    inbound.conversation_id,
+                    named_agent_notice_card(err),
+                    service_url=inbound.service_url,
+                )
+            if reraise:
+                raise
+            return
         except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
             refusal = _admission_refusal(err, tenant_id)
             if refusal is not None and continuation is None:  # queued work settles silently
@@ -896,6 +911,18 @@ class TeamsApp:
                 admitted_ma_agent_id=admission.agent.id,
                 admitted_name=admission.agent.name,
                 asking_ma_agent_id=await self._asking_agent_id(continuation, tenant_id),
+            )
+        if inbound.kind == "channel":
+            await bind_named_thread(
+                self.runtime.sessionmaker,
+                config=admission.config,
+                tenant_id=tenant_id,
+                platform="teams",
+                parent_channel_id=inbound.channel_id,
+                thread_id=inbound.thread_id,
+                responder_ma_agent_id=admission.agent.id,
+                responder_name=admission.agent.name,
+                creator_account_id=admission.account_id,
             )
 
         # Committed before the post so a lost response still leaves a record. An

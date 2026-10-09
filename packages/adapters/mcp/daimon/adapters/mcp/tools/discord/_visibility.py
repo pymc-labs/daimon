@@ -28,10 +28,9 @@ def _bot_read_error(  # pyright: ignore[reportUnusedFunction]
 ) -> ToolError:
     """Explain a Discord bot permission denial without exposing an HTTP error."""
     label = f"#{channel.name}" if not isinstance(channel, str) else f"#{channel}"
-    verb = "read" if missing_history else "view"
     return ToolError(
-        f"daimon's Discord role can't {verb} {label}; a server admin can grant "
-        "View Channel and Read Message History"
+        f"I can't open {label}.\n"
+        "A server admin can give daimon View Channel and Read Message History there."
     )
 
 

@@ -59,11 +59,12 @@ def test_personal_message_is_a_dm_keyed_on_the_chat() -> None:
         text="hello there",
         service_url=SERVICE_URL,
     )
+    assert isinstance(inbound, TeamsInbound) and not inbound.bot_mentioned
 
 
 def test_channel_mention_keys_on_the_thread_and_strips_the_bot_mention() -> None:
     inbound = _parse(make_channel_activity(text="fit a model"))
-    assert isinstance(inbound, TeamsInbound)
+    assert isinstance(inbound, TeamsInbound) and inbound.bot_mentioned
     assert inbound.kind == "channel"
     assert inbound.conversation_id == THREAD_ID
     assert inbound.channel_id == CHANNEL_ID

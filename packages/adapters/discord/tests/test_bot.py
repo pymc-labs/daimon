@@ -22,8 +22,10 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.stores.discord_agent_roles import save_role
 from daimon.core.stores.tenants import set_turn_cap
 from daimon.core.turn.deps import build_turn_deps
+from daimon.core.turn.errors import NamedAgentRefused
 from daimon.testing import ma_agent, ma_environment, ma_session
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -115,16 +117,17 @@ def _make_channel_message(
         "resolved_application_id",
         "qa_bot_author",
         "qa_bot_listed",
+        "ordinary_role_mention",
         "expected",
     ),
     [
-        ("tool", 999, None, None, False, False, True),
-        ("auto_thread", 999, None, None, False, False, False),
-        ("tool", 777, None, None, False, False, False),
-        ("tool", 777, 900, 10, False, False, True),
-        ("tool", 777, 901, 11, False, False, False),
-        ("tool", 777, 900, 10, True, True, True),
-        ("tool", 777, 900, 10, True, False, False),
+        ("tool", 999, None, None, False, False, True, True),
+        ("auto_thread", 999, None, None, False, False, False, False),
+        ("tool", 777, None, None, False, False, False, False),
+        ("tool", 777, 900, 10, False, False, False, True),
+        ("tool", 777, 901, 11, False, False, False, False),
+        ("tool", 777, 900, 10, True, True, False, True),
+        ("tool", 777, 900, 10, True, False, False, False),
     ],
 )
 async def test_reply_to_recorded_agent_post_starts_turn(
@@ -135,6 +138,7 @@ async def test_reply_to_recorded_agent_post_starts_turn(
     resolved_application_id: int | None,
     qa_bot_author: bool,
     qa_bot_listed: bool,
+    ordinary_role_mention: bool,
     expected: bool,
 ) -> None:
     from daimon.core.defaults.provisioning import provision_tenant
@@ -165,6 +169,7 @@ async def test_reply_to_recorded_agent_post_starts_turn(
     message = _make_channel_message(guild_id=int(guild_id), author_id=333 if qa_bot_author else 111)
     message.author.bot = qa_bot_author
     message.mentions = []
+    message.role_mentions = [SimpleNamespace(id=456)] if ordinary_role_mention else []  # type: ignore[list-item]
     message.webhook_id = None
     message.reference = discord.MessageReference(
         message_id=123, channel_id=789, guild_id=int(guild_id)
@@ -179,6 +184,68 @@ async def test_reply_to_recorded_agent_post_starts_turn(
         bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
     else:
         bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+
+
+async def test_two_managed_roles_reach_admission_instead_of_plain_text(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.defaults.provisioning import provision_tenant
+
+    guild_id = "801000094"
+    tenant = await provision_tenant(db_session_factory, platform="discord", workspace_id=guild_id)
+    async with db_session_factory.begin() as session:
+        for role_id in ("456", "457"):
+            await save_role(
+                session,
+                tenant_id=tenant.tenant_id,
+                ma_agent_id=f"ag_{role_id}",
+                role_id=role_id,
+                agent_name=f"Agent {role_id}",
+            )
+    bot = make_bot(_make_runtime(db_session_factory))
+    bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue,reportMethodAssign]
+    message = _make_channel_message(guild_id=int(guild_id))
+    message.role_mentions = [SimpleNamespace(id=456), SimpleNamespace(id=457)]  # type: ignore[list-item]
+    await bot.on_message(message)
+    bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+    message.channel.send.assert_not_awaited()  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
+
+
+async def test_recorded_post_reply_with_ordinary_role_reaches_admission(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.defaults.provisioning import provision_tenant
+    from daimon.core.stores.agent_posts import record_post
+
+    guild_id = "801000093"
+    tenant = await provision_tenant(db_session_factory, platform="discord", workspace_id=guild_id)
+    async with db_session_factory.begin() as session:
+        await record_post(
+            session,
+            tenant_id=tenant.tenant_id,
+            platform="discord",
+            channel_id="789",
+            message_id="123",
+            agent_id=uuid.uuid4(),
+            source="tool",
+        )
+    bot = make_bot(_make_runtime(db_session_factory))
+    message = _make_channel_message(guild_id=int(guild_id), content="<@&456> please draft")
+    message.mentions = []
+    message.role_mentions = [SimpleNamespace(id=456)]  # type: ignore[list-item]
+    message.webhook_id = None
+    message.reference = discord.MessageReference(
+        message_id=123, channel_id=789, guild_id=int(guild_id)
+    )
+    resolved = MagicMock(spec=discord.Message)
+    resolved.author.id = bot.user.id
+    resolved.webhook_id = None
+    message.reference.resolved = resolved
+    with patch("daimon.adapters.discord.bot.admit", new_callable=AsyncMock) as admission:
+        admission.side_effect = NamedAgentRefused(kind="unavailable")
+        await bot.on_message(message)
+    admission.assert_awaited_once()
+    assert admission.await_args.kwargs["requested_agent_ids"] == []
 
 
 @pytest.mark.parametrize("excluded", [False, True])
@@ -262,6 +329,50 @@ async def test_mention_skips_reply_lookup(
 
 class TestInflightCapRejection:
     """4th turn for a saturated tenant rejected (SCALE-01)."""
+
+    async def test_managed_role_mention_starts_a_turn_without_bot_mention(
+        self, db_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        from daimon.core.defaults.provisioning import provision_tenant
+
+        guild_id = "801000198"
+        tenant = await provision_tenant(
+            db_session_factory,
+            platform="discord",
+            workspace_id=guild_id,
+            signup_credit=Decimal("5.00"),
+        )
+        async with db_session_factory.begin() as session:
+            await save_role(
+                session,
+                tenant_id=tenant.tenant_id,
+                ma_agent_id="agent_named",
+                role_id="456",
+                agent_name="Planner",
+            )
+        bot = make_bot(_make_runtime(db_session_factory))
+        bot._handle_mention = AsyncMock()  # type: ignore[method-assign]  # test seam
+        message = _make_channel_message(content="<@&456> plan", guild_id=int(guild_id))
+        message.mentions = []
+        message.role_mentions = [SimpleNamespace(id=456)]  # type: ignore[list-item]  # fake role
+        with patch("daimon.adapters.discord.bot.sync_agent_roles", new_callable=AsyncMock):
+            await bot.on_message(message)
+        bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportAttributeAccessIssue]
+
+    async def test_unmanaged_role_mention_keeps_ordinary_message_behavior(
+        self, db_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        bot = make_bot(_make_runtime(db_session_factory))
+        bot._handle_mention = AsyncMock()  # type: ignore[method-assign]  # test seam
+        bot._ensure_provisioning = AsyncMock()  # type: ignore[method-assign]  # test seam
+        message = _make_channel_message(content="<@&456> plan")
+        message.mentions = []
+        message.role_mentions = [SimpleNamespace(id=456)]  # type: ignore[list-item]  # fake role
+
+        await bot.on_message(message)
+
+        bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportAttributeAccessIssue]
+        bot._ensure_provisioning.assert_not_awaited()  # pyright: ignore[reportAttributeAccessIssue]
 
     async def test_tenant_override_admits_above_deployment_default(
         self, db_session_factory: async_sessionmaker[AsyncSession]

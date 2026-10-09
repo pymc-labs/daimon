@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Annotated, Final, cast
 
 import typer
+from daimon.adapters.cli.commands.agent_roles import roles_app
 from daimon.adapters.cli.commands.channels import agent_rule_app
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import GUILD_OPTION, JSON_OPTION, TENANT_OPTION, YES_OPTION
@@ -49,8 +50,9 @@ from daimon.core.stores.tenants import list_tenants_by_platform
 from pydantic import BaseModel
 from rich.console import Console
 
-agents_app = typer.Typer(help="Agents: create, list, get, update, archive, fork, rule.")
+agents_app = typer.Typer(help="Agents: create, list, get, update, archive, fork, rule, roles.")
 agents_app.add_typer(agent_rule_app, name="rule")
+agents_app.add_typer(roles_app, name="roles")
 
 
 @agents_app.callback()

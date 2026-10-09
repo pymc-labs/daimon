@@ -20,6 +20,7 @@ their pre-turn gate.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -43,6 +44,7 @@ from daimon.core.authz import (
     Place,
     Subject,
     Surface,
+    agent_names,
     authorize,
     build_agent_ref,
     build_subject,
@@ -53,6 +55,7 @@ from daimon.core.channel_admins import ChannelAdminCaller, load_administered_cha
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills
+from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import (
     MAResolverMissError,
@@ -61,6 +64,7 @@ from daimon.core.ma_resolver import (
     retrieve_agent_cached,
     retrieve_environment_cached,
 )
+from daimon.core.named_agent import matching_agent
 from daimon.core.permissions import (
     agent_permissions,
     at_home,
@@ -68,6 +72,7 @@ from daimon.core.permissions import (
     dm_source_limited,
     home_of,
     limiting_ids_at,
+    run_refusal,
 )
 from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
@@ -83,12 +88,14 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
+from daimon.core.stores.thread_sessions import list_live_thread_sessions
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
     AdmissionDenied,
     DmSourceSealedError,
     MissingTurnConfigError,
+    NamedAgentRefused,
     SessionBusyError,
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
@@ -215,6 +222,9 @@ async def admit(
     category_id: str | None = None,
     category_unresolved: bool = False,
     external: ExternalFinding | None = None,
+    requested_agent_name: str | None = None,
+    requested_agent_id: str | None = None,
+    requested_agent_ids: Sequence[str] = (),
 ) -> Admission:
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
@@ -238,6 +248,9 @@ async def admit(
                 category_id=category_id,
                 category_unresolved=category_unresolved,
                 external=external,
+                requested_agent_name=requested_agent_name,
+                requested_agent_id=requested_agent_id,
+                requested_agent_ids=requested_agent_ids,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -263,6 +276,9 @@ async def admit_impl(
     category_id: str | None = None,
     category_unresolved: bool = False,
     external: ExternalFinding | None = None,
+    requested_agent_name: str | None = None,
+    requested_agent_id: str | None = None,
+    requested_agent_ids: Sequence[str] = (),
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool.
 
@@ -359,6 +375,133 @@ async def admit_impl(
             thread_id=thread_id,
         )
         config = await resolve_config(session, context=scope, default=deps.deployment_default)
+        parent_config = (
+            await resolve_config(
+                session,
+                context=scope.model_copy(update={"thread_id": None}),
+                default=deps.deployment_default,
+            )
+            if (
+                requested_agent_name is not None
+                or requested_agent_id is not None
+                or requested_agent_ids
+            )
+            and thread_id is not None
+            else config
+        )
+    named_agent = None
+    if requested_agent_name is not None or requested_agent_id is not None or requested_agent_ids:
+        here = channel_permissions(
+            policy,
+            channel_id=thread_id or channel_id,
+            parent_channel_id=channel_id if thread_id is not None else None,
+        )
+        roster = deps.resolver_cache.named_rosters.get(tenant_id)
+        if roster is None:
+            pending = deps.resolver_cache.named_roster_reads.get(tenant_id)
+            if pending is None:
+
+                async def read_roster() -> list[BetaManagedAgentsAgent]:
+                    found = await list_agents_by_tenant(deps.anthropic, tenant_id=tenant_id)
+                    deps.resolver_cache.named_rosters[tenant_id] = found
+                    return found
+
+                pending = asyncio.create_task(read_roster())
+                deps.resolver_cache.named_roster_reads[tenant_id] = pending
+
+                def clear(done: asyncio.Task[list[BetaManagedAgentsAgent]]) -> None:
+                    if deps.resolver_cache.named_roster_reads.get(tenant_id) is done:
+                        del deps.resolver_cache.named_roster_reads[tenant_id]
+                    if not done.cancelled():
+                        done.exception()
+
+                pending.add_done_callback(clear)
+            try:
+                roster = await asyncio.shield(pending)
+            except Exception as exc:
+                if requested_agent_name is None or requested_agent_id or requested_agent_ids:
+                    raise
+                _log.warning("named_agent.roster_lookup_failed", error_type=type(exc).__name__)
+                roster = []
+        visible = [
+            agent
+            for agent in roster
+            if (
+                agent_home := agent_permissions(
+                    policy, agent_names(agent.name, agent.metadata)
+                ).home
+            )
+            is None
+            or agent_home == here.home
+        ]
+        requested_ids = tuple(
+            dict.fromkeys(
+                (*requested_agent_ids, *((requested_agent_id,) if requested_agent_id else ()))
+            )
+        )
+        by_id = {agent.id: agent for agent in visible}
+        if any(agent_id not in by_id for agent_id in requested_ids):
+            raise NamedAgentRefused(kind="unavailable")
+        by_name = matching_agent(visible, requested_agent_name) if requested_agent_name else None
+        selected = {agent_id: by_id[agent_id] for agent_id in requested_ids}
+        if by_name is not None:
+            selected[by_name.id] = by_name
+        if len(selected) > 1:
+            raise NamedAgentRefused(kind="two")
+        named_agent = next(iter(selected.values()), None)
+        if named_agent is not None:
+            async with deps.sessionmaker() as session:
+                live_sessions = (
+                    await list_live_thread_sessions(
+                        session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+                    )
+                    if thread_id is not None
+                    else []
+                )
+            if (
+                config.thread_binding_id is not None
+                and config.responder_ma_agent_id != named_agent.id
+            ) or any(row.ma_agent_id != named_agent.id for row in live_sessions):
+                current_id = (
+                    config.responder_ma_agent_id
+                    if config.thread_binding_id
+                    else next(
+                        (
+                            row.ma_agent_id
+                            for row in live_sessions
+                            if row.ma_agent_id != named_agent.id
+                        ),
+                        None,
+                    )
+                )
+                current = by_id.get(current_id) if current_id is not None else None
+                current_name = current.name if current is not None else "an agent"
+                if config.thread_binding_kind == "setup":
+                    raise NamedAgentRefused(
+                        kind="setup", current_name=current_name, named_name=named_agent.name
+                    )
+                raise NamedAgentRefused(
+                    kind="thread",
+                    current_name=current_name,
+                    named_name=named_agent.name,
+                    hand_over_agent_id=named_agent.id,
+                    hand_over_agent_name=named_agent.name,
+                )
+            named_permissions = agent_permissions(
+                policy, agent_names(named_agent.name, named_agent.metadata)
+            )
+            if here.home is not None and run_refusal(named_permissions, here) is not None:
+                own = matching_agent(visible, parent_config.agent_name or "")
+                raise NamedAgentRefused(
+                    kind="own", current_name=own.name if own is not None else "this channel's agent"
+                )
+            config = config.model_copy(
+                update={
+                    "agent_name": named_agent.metadata.get("daimon_name") or named_agent.name,
+                    "agent_name_tier": "named",
+                    "responder_ma_agent_id": named_agent.id,
+                }
+            )
     mark("config")
 
     # --- An external caller is never answered in a setup conversation, even
@@ -421,7 +564,11 @@ async def admit_impl(
     # answer as the built-in Daimon (`get_setup_responder` asserts that), while
     # a thread whose task was handed to another agent answers as that agent,
     # which is an ordinary tenant-and-archive-checked retrieve.
-    if config.thread_binding_kind == "handoff":
+    if named_agent is not None:
+        agent = await get_setup_agent(
+            deps.anthropic, tenant_id=tenant_id, ma_agent_id=named_agent.id
+        )
+    elif config.thread_binding_kind == "handoff":
         agent = await get_setup_agent(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
     elif config.thread_binding_id is not None:
         agent = await get_setup_responder(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
@@ -496,7 +643,12 @@ async def admit_impl(
         is_dm=is_dm,
         is_external=is_external,
     )
-    _require_run_agent(policy, grant)
+    try:
+        _require_run_agent(policy, grant)
+    except AdmissionDenied as exc:
+        if named_agent is not None:
+            raise NamedAgentRefused(kind="unavailable", denial_reason=exc.reason) from exc
+        raise
     mark("agent_policy")
 
     budget_channel_id = agent_permissions(policy, grant.agent.names).budget_channel or (

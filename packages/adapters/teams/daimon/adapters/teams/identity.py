@@ -84,6 +84,7 @@ class TeamsInbound:
     text: str
     service_url: str | None
     bot_name: str | None = None
+    bot_mentioned: bool = False
     files: tuple[InboundFile, ...] = ()
     setup_thread_id: str | None = None
     team_id: str | None = None
@@ -256,6 +257,7 @@ def parse_inbound(
         text=text,
         service_url=service_url,
         bot_name=activity.recipient.name,
+        bot_mentioned=activity.is_recipient_mentioned(),
         files=files,
         team_id=team.id if team is not None else None,
         team_group_id=canonical_uuid(team.aad_group_id) if team is not None else None,

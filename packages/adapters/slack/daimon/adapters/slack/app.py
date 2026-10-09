@@ -216,6 +216,7 @@ from daimon.core.github_removal_delivery import run_removal_notice_poller
 from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.named_agent import bind_named_thread, name_after_mention
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.slack_oauth import build_slack_connect_url
@@ -249,6 +250,7 @@ from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn import turn_deadline
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.errors import (
+    NamedAgentRefused,
     SessionAgentMismatch,
     SessionBusyError,
     SessionPreparationFailed,
@@ -1977,6 +1979,7 @@ class SlackApp:
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- D-01 admit(). ---
         try:
+            bot_user_id = self._bot_user_ids.get(team_id)
             admission = await admit(
                 self.runtime.turn_deps,
                 tenant_id=tenant_id,
@@ -1993,7 +1996,22 @@ class SlackApp:
                     )
                 ),
                 now=datetime.now(UTC),
+                requested_agent_name=name_after_mention(
+                    str(event.get("text") or ""), f"<@{bot_user_id}>"
+                )
+                if bot_user_id is not None
+                else None,
             )
+        except NamedAgentRefused as err:
+            from daimon.adapters.slack.named_agent_notices import build_named_agent_blocks
+
+            await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel,
+                thread_ts=thread_id,
+                text=escape_mrkdwn(str(err)),
+                blocks=build_named_agent_blocks(err),
+            )
+            return
         except MissingTurnConfigError as err:
             log.info(
                 "slack.missing_config",
@@ -2105,6 +2123,18 @@ class SlackApp:
             return
 
         agent = admission.agent
+        if not channel.startswith("D"):
+            await bind_named_thread(
+                self.runtime.sessionmaker,
+                config=admission.config,
+                tenant_id=tenant_id,
+                platform="slack",
+                parent_channel_id=channel,
+                thread_id=thread_id,
+                responder_ma_agent_id=agent.id,
+                responder_name=agent.name,
+                creator_account_id=admission.account_id,
+            )
         _lc_agent_name: str = agent.name
         _lc_model_id: str = agent.model.id
         turn_identity: AgentIdentity | None = None

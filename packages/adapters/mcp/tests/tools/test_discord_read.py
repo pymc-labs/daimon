@@ -338,8 +338,12 @@ async def test_empty_read_explains_missing_bot_history_permission(
         raise AssertionError(f"unexpected route {route.method} {route.path}")
 
     patch_discord_http(monkeypatch, handler)
-    with pytest.raises(ToolError, match="daimon's Discord role can't read #general"):
+    with pytest.raises(ToolError) as refusal:
         await _read_channel_impl(_runtime_with_discord_token(), _auth(), channel_id="222")
+    assert str(refusal.value) == (
+        "I can't open #general.\n"
+        "A server admin can give daimon View Channel and Read Message History there."
+    )
 
 
 async def test_read_channel_403_missing_access_is_plain(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -358,8 +362,9 @@ async def test_read_channel_403_missing_access_is_plain(monkeypatch: pytest.Monk
         raise AssertionError(f"unexpected route {route.method} {route.path}")
 
     patch_discord_http(monkeypatch, handler)
-    with pytest.raises(ToolError, match="View Channel and Read Message History"):
+    with pytest.raises(ToolError) as refusal:
         await _read_channel_impl(_runtime_with_discord_token(), _auth(), channel_id="222")
+    assert str(refusal.value).startswith("I can't open #222.\n")
 
 
 async def test_read_channel_full_page_returns_cursor(monkeypatch: pytest.MonkeyPatch) -> None:

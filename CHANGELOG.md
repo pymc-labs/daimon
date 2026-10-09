@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
+- Operators can preview and purge recorded Discord agent roles with `daimon agents roles purge` before downgrading the role-map migration.
+- Name an agent with `@bot agent-name: request` on Discord, Slack or Teams, or mention its managed Discord role. Named turns use the normal admission checks and keep the named agent for later replies in the thread. An agent with a home is hidden outside it; an unknown name follows ordinary routing. An existing thread points a different named agent to Hand over or `hand_off_task`, and a channel with `readers: own` names its own agent when another is requested. Discord manages mentionable roles only for agents without a home and with a runnable channel; a background sweep backfills, renames and removes those roles.
+- Named-agent refusals use the same short copy on Discord, Slack and Teams. Discord shows a notice card, Slack uses Block Kit and Teams uses an Adaptive Card. Discord and Slack put the existing Hand over action on a thread-switch notice. Discord read and search tools name the missing channel permissions in two short lines.
 - MCP browser pages now share a responsive Daimon shell with Daimon's face in
   the page header, local Inter font, brand colours, and inline action icons.
   The picker uses separate desktop, tablet, and phone layouts. GitHub and Slack

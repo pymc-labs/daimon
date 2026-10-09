@@ -10,8 +10,9 @@ A missing row is the open default. A row that no longer validates raises
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import datetime
 from typing import Any, cast
 
 from daimon.core._models import Tenant, TenantAccessPolicyRecord
@@ -34,6 +35,21 @@ class AccessPolicyUnreadable(DaimonError):
             "ask an admin to fix them"
         )
         self.tenant_id = tenant_id
+
+
+async def policy_revisions(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, datetime]:
+    """Read policy write times in one query for role reconciliation."""
+    if not tenant_ids:
+        return {}
+    async with sessionmaker() as session:
+        rows = await session.execute(
+            select(TenantAccessPolicyRecord.tenant_id, TenantAccessPolicyRecord.updated_at).where(
+                TenantAccessPolicyRecord.tenant_id.in_(tenant_ids)
+            )
+        )
+        return dict(rows.tuples().all())
 
 
 def _policy_write_key(tenant_id: uuid.UUID) -> str:

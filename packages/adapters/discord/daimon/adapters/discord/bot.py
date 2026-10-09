@@ -5,18 +5,21 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 import anthropic as _anthropic
 import sentry_sdk
 import structlog
 import structlog.contextvars
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord import theme
+from daimon.adapters.discord.agent_roles import sync_agent_roles
 from daimon.adapters.discord.attachments import build_attachment_url_prefix
 from daimon.adapters.discord.budget_notice import with_budget_notifier
 from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
@@ -73,7 +76,11 @@ from daimon.core.continuity.messages import (
     render_unexpected_loss,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_thread_wakes
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
+from daimon.core.defaults.ma_index import (
+    find_agent_by_daimon_tag,
+    list_agents_by_tenant,
+    list_agents_by_tenants,
+)
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
@@ -84,10 +91,13 @@ from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.named_agent import bind_named_thread, name_after_mention
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.routine_delivery import run_delivery_poller
+from daimon.core.stores.access_policy import policy_revisions
 from daimon.core.stores.agent_posts import get_post
+from daimon.core.stores.discord_agent_roles import roles_mentioned
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_new_repo_notices import NewRepoNoticeGroup
@@ -121,6 +131,7 @@ from daimon.core.turn.bookkeeping import recover_orphan_marker
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
+    NamedAgentRefused,
     SessionAgentMismatch,
     SessionBusyError,
     SessionPreparationFailed,
@@ -513,6 +524,8 @@ class DaimonBot(commands.Bot):
         self._participant: ThreadParticipant | None = None
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
+        self._agent_role_policy_versions: dict[uuid.UUID, datetime | None] = {}
+        self._agent_role_last_sync_at: dict[uuid.UUID, float] = {}
         self._seed_sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
         # Gateway lifecycle callbacks run as separate tasks. Serialize only the
         # tenant provision/archive transitions so an earlier remove cannot
@@ -687,10 +700,65 @@ class DaimonBot(commands.Bot):
         await drain_budget_notices()
         await self.close()
 
+    async def _agent_role_sync_loop(self) -> None:
+        await self.wait_until_ready()
+        while not self.draining and not self.is_closed():
+            guild_tenants = {
+                guild.id: derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
+                for guild in self.guilds
+            }
+            try:
+                revisions = await policy_revisions(
+                    self.runtime.sessionmaker, tenant_ids=guild_tenants.values()
+                )
+                now = asyncio.get_running_loop().time()
+                due = {
+                    tenant_id
+                    for tenant_id in guild_tenants.values()
+                    if tenant_id not in self._agent_role_policy_versions
+                    or self._agent_role_policy_versions[tenant_id] != revisions.get(tenant_id)
+                    or now - self._agent_role_last_sync_at.get(tenant_id, 0) >= 600
+                }
+                rosters = (
+                    await list_agents_by_tenants(self.runtime.anthropic, tenant_ids=due)
+                    if due
+                    else {}
+                )
+            except Exception:
+                log.exception("agent_roles.sweep_lookup_failed")
+            else:
+                for guild in self.guilds:
+                    tenant_id = guild_tenants[guild.id]
+                    if tenant_id in due:
+                        await self._sync_agent_roles(
+                            guild, tenant_id, agents=rosters.get(tenant_id, [])
+                        )
+                        self._agent_role_policy_versions[tenant_id] = revisions.get(tenant_id)
+                        self._agent_role_last_sync_at[tenant_id] = now
+            if self.draining or self.is_closed():
+                break
+            await asyncio.sleep(60)
+
+    async def _sync_agent_roles(
+        self,
+        guild: discord.Guild,
+        tenant_id: uuid.UUID,
+        *,
+        agents: list[BetaManagedAgentsAgent] | None = None,
+    ) -> None:
+        await sync_agent_roles(
+            guild=guild,
+            tenant_id=tenant_id,
+            anthropic=self.runtime.anthropic,
+            sessionmaker=self.runtime.sessionmaker,
+            agents=agents,
+        )
+
     async def setup_hook(self) -> None:
         """Arm orphan recovery and load command Cogs before on_ready syncs the tree."""
         self.start_orphan_recovery()
         if self.wake_poller_enabled:
+            self._spawn(self._agent_role_sync_loop())
             self._spawn(
                 run_wake_poller(
                     self.runtime.sessionmaker,
@@ -1706,11 +1774,29 @@ class DaimonBot(commands.Bot):
         # (it short-circuits on message.mention_everyone), which would make the bot
         # reply to every mass ping. message.mentions excludes @everyone/@here and
         # role mentions, so this triggers only on a direct user mention of the bot.
-        bot_mentioned = self.user is not None and any(
+        directly_mentioned = self.user is not None and any(
             user.id == self.user.id for user in message.mentions
         )
         if self.draining:
             return
+        role_mentions = (
+            message.role_mentions if isinstance(cast(object, message.role_mentions), list) else []
+        )
+        managed_role_mentioned = False
+        if role_mentions and not directly_mentioned and message.guild is not None:
+            tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
+            try:
+                async with self.runtime.sessionmaker() as session:
+                    managed_role_mentioned = bool(
+                        await roles_mentioned(
+                            session,
+                            tenant_id=tenant_id,
+                            role_ids=[str(item.id) for item in role_mentions],
+                        )
+                    )
+            except Exception:
+                log.exception("agent_roles.mention_lookup_failed", guild_id=str(message.guild.id))
+        bot_mentioned = directly_mentioned or managed_role_mentioned
         is_webhook_post = isinstance(message.webhook_id, int)
         reply_to_recorded_post = False
         reference = message.reference
@@ -1839,8 +1925,8 @@ class DaimonBot(commands.Bot):
             if tr.provision_status == "pending":
                 await message.channel.send(_setting_up_message(bot_display_name))
                 return
-            # Only 'ready' proceeds.
-
+            # Only 'ready' proceeds. Managed role selection happens in admission;
+            # recorded-post replies and direct mentions also reach this path.
             log.info(
                 "mention_received",
                 guild_id=guild_id,
@@ -2801,7 +2887,24 @@ class DaimonBot(commands.Bot):
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- D-01 admit(). ---
+        role_mentions = (
+            message.role_mentions if isinstance(cast(object, message.role_mentions), list) else []
+        )
         try:
+            if role_mentions:
+                try:
+                    async with self.runtime.sessionmaker() as session:
+                        selected_roles = await roles_mentioned(
+                            session,
+                            tenant_id=tenant_id,
+                            role_ids=[str(item.id) for item in role_mentions],
+                        )
+                except Exception:
+                    log.exception("agent_roles.mention_lookup_failed", guild_id=guild_id)
+                    selected_roles = []
+            else:
+                selected_roles = []
+            direct_mention = re.search(rf"<@!?{self.user.id}>", message.content)
             admission = await admit(
                 self.runtime.turn_deps,
                 tenant_id=tenant_id,
@@ -2816,7 +2919,19 @@ class DaimonBot(commands.Bot):
                 now=datetime.now(UTC),
                 category_id=category_id,
                 category_unresolved=category_unresolved,
+                requested_agent_ids=[row.ma_agent_id for row in selected_roles],
+                requested_agent_name=name_after_mention(message.content, direct_mention.group(0))
+                if direct_mention is not None
+                else None,
             )
+        except NamedAgentRefused as err:
+            from daimon.adapters.discord.named_agent_notices import build_named_agent_notice
+
+            await (thread or message.channel).send(
+                view=build_named_agent_notice(err),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         except MissingTurnConfigError as err:
             log.info(
                 "missing_config",
@@ -2924,6 +3039,8 @@ class DaimonBot(commands.Bot):
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
 
         agent = admission.agent
+        if selected_roles and selected_roles[0].agent_name != agent.name and message.guild:
+            self._spawn(self._sync_agent_roles(message.guild, tenant_id))
 
         # --- Create thread + status embed BEFORE session create ---
         # MA sessions.create can hold its HTTP response for minutes while it
@@ -2977,6 +3094,17 @@ class DaimonBot(commands.Bot):
                 _open_thread(),
                 guild_id=guild_id,
                 after_s=discord_settings.thread_open_notice_after_s,
+            )
+            await bind_named_thread(
+                self.runtime.sessionmaker,
+                config=admission.config,
+                tenant_id=tenant_id,
+                platform="discord",
+                parent_channel_id=parent_channel_id,
+                thread_id=str(thread.id),
+                responder_ma_agent_id=agent.id,
+                responder_name=agent.name,
+                creator_account_id=admission.account_id,
             )
 
         # --- Wire lifecycle with send/edit callables ---

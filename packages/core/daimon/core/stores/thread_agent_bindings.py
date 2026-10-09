@@ -12,6 +12,7 @@ from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -52,6 +53,36 @@ async def create_binding(
     session.add(binding)
     await session.flush()
     return ThreadAgentBindingRow.model_validate(binding)
+
+
+async def create_named_binding_if_absent(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    parent_channel_id: str,
+    thread_id: str,
+    responder_ma_agent_id: str,
+    responder_name: str,
+    creator_account_id: uuid.UUID,
+) -> bool:
+    """Bind a newly named thread only if no setup or handoff binding won the race."""
+    statement = (
+        insert(ThreadAgentBinding)
+        .values(
+            tenant_id=tenant_id,
+            platform=platform,
+            parent_channel_id=parent_channel_id,
+            thread_id=thread_id,
+            kind="handoff",
+            responder_ma_agent_id=responder_ma_agent_id,
+            responder_name=responder_name,
+            creator_account_id=creator_account_id,
+        )
+        .on_conflict_do_nothing(constraint="uq_thread_agent_bindings_location")
+        .returning(ThreadAgentBinding.id)
+    )
+    return (await session.execute(statement)).scalar_one_or_none() is not None
 
 
 async def get_binding(
