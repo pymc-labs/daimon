@@ -31,6 +31,10 @@ connection opens, independently of its first event, so hosts can preserve
 connect-before-send order even on idle sessions. Records and previews normalize to owned
 `Event` values; previews use separate identities and never imply completion.
 Required actions carry the referenced call and retain native thread routing.
+Tool results with absent or null content retain their call pairing and native
+record while exposing empty neutral content. Listed pages follow the SDK's
+continuation rule; terminal pages expose no cursor. Malformed records raise an
+owned provider error on both the list and stream ports.
 Unknown native records survive as `native.*`, while subagent status records use
 `agent.thread.*`. A cancel receipt acknowledges a request, not a stop. A lost
 POST acknowledgment returns `outcome_unknown` without a port-level resend.

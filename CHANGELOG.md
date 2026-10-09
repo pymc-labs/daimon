@@ -38,7 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   host-dependent fixtures remain explicitly pending.
 
 - An unwired Anthropic Events port translates recorded turn streams into neutral
-  events and usage observations, preserving record and preview authority.
+  events and usage observations, preserving record and preview authority,
+  nullable tool results and the SDK's pagination termination rule.
 
 - Content-free baseline SQL and a pinned JSON converter summarize 14-day token
   mix and total latency, with explicit first-token and turn-bridge dependencies.

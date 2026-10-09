@@ -169,16 +169,22 @@ class AnthropicEvents:
             )
         )
         normalizer = EventNormalizer(session)
-        data = tuple(
-            normalizer.normalize(
-                object_json(event.model_dump(mode="json")), observed_at=datetime.now(UTC)
+        try:
+            data = tuple(
+                normalizer.normalize(
+                    object_json(event.model_dump(mode="json")), observed_at=datetime.now(UTC)
+                )
+                for event in result.data
             )
-            for event in result.data
-        )
+        except (ValueError, KeyError, TypeError) as error:
+            raise ProviderError(
+                "upstream", retryable=False, native_code="malformed_event"
+            ) from error
+        has_more = result.has_next_page()
         return Page(
             data=data,
-            has_more=result.next_page is not None,
-            next_cursor=result.next_page,
+            has_more=has_more,
+            next_cursor=result.next_page if has_more else None,
         )
 
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:

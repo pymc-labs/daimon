@@ -9,6 +9,11 @@ from pathlib import Path
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
+from anthropic.types.beta.sessions import (
+    BetaManagedAgentsAgentMCPToolResultEvent,
+    BetaManagedAgentsAgentToolResultEvent,
+    BetaManagedAgentsUserCustomToolResultEvent,
+)
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.actions import NativeInput, UserMessage, UserToolConfirmation, UserToolResult
 from mux.contracts.events import Event, TextPart
@@ -94,6 +99,27 @@ async def test_recorded_streams_cross_the_port_as_owned_events(scenario, recorde
         if raw["type"] == "span.model_request_end":
             assert event.type == "usage.observed"
             assert event.payload == {"observation_id": raw["id"], "revision": 1}
+        if raw["type"] == "session.status_idle":
+            stop = raw["stop_reason"]
+            if stop["type"] == "end_turn":
+                assert event.type == "session.turn_ended"
+                assert event.payload["outcome"] == "completed"
+                assert event.payload["native_reason"] == "end_turn"
+                assert event.payload["root_turn_id"]
+            elif stop["type"] == "requires_action":
+                assert event.type == "session.requires_action"
+                assert [action.id for action in event.typed_payload().actions] == stop["event_ids"]
+        if raw["type"] == "session.error":
+            error = raw["error"]
+            if (
+                error["type"] in {"mcp_connection_failed_error", "mcp_authentication_failed_error"}
+                and error["retry_status"]["type"] == "exhausted"
+            ):
+                assert event.type == "tool_server.degraded"
+        if raw["type"] == "agent.mcp_tool_use":
+            assert event.type == "agent.tool_use"
+            assert event.payload["executor"] == "mcp"
+            assert event.payload["mcp_server"] == raw["mcp_server_name"]
     transport.assert_consumed()
     request = transport.requests[0]
     assert request.query == (("beta", "true"),)
@@ -196,6 +222,99 @@ async def test_list_preserves_native_pagination_and_omitted_arguments():
             SCOPE, SESSION, page=PageRequest(cursor=first.next_cursor, limit=2, order="desc")
         )
         assert not last.has_more and last.next_cursor is None
+    transport.assert_consumed()
+
+
+@pytest.mark.parametrize("operation", ["list", "stream"])
+@pytest.mark.parametrize("content", ["omitted", None, []], ids=["omitted", "null", "empty"])
+@pytest.mark.parametrize(
+    "model,kind,pairing",
+    [
+        (BetaManagedAgentsAgentToolResultEvent, "agent.tool_result", "tool_use_id"),
+        (BetaManagedAgentsAgentMCPToolResultEvent, "agent.mcp_tool_result", "mcp_tool_use_id"),
+        (
+            BetaManagedAgentsUserCustomToolResultEvent,
+            "user.custom_tool_result",
+            "custom_tool_use_id",
+        ),
+    ],
+)
+async def test_nullable_tool_results_preserve_pairing_and_native_record(
+    operation, content, model, kind, pairing
+):
+    raw = native(kind, "result", **{pairing: "call"}, is_error=True)
+    if content != "omitted":
+        raw["content"] = content
+    expected_native = model.model_validate(raw).model_dump(mode="json")
+    transport = ScriptedTransport()
+    if operation == "list":
+        transport.queue(
+            ScriptedReply(
+                "GET",
+                "/v1/sessions/sess_1/events",
+                httpx.Response(200, json={"data": [raw], "next_page": None}),
+            )
+        )
+    else:
+        transport.queue(ScriptedReply.stream("/v1/sessions/sess_1/events/stream", [raw]))
+    async with transport.client() as sdk:
+        events = (
+            (await port(sdk).list(SCOPE, SESSION, page=PageRequest())).data
+            if operation == "list"
+            else [event async for event in port(sdk).stream(SCOPE, SESSION)]
+        )
+    assert len(events) == 1
+    event = events[0]
+    assert event.type == "agent.tool_result"
+    assert event.item_id == "result" and event.caused_by == ("call",)
+    assert event.payload == {"call_id": "call", "content": [], "is_error": True}
+    assert event.native.record == expected_native
+    assert event.typed_payload().content == ()
+    transport.assert_consumed()
+
+
+@pytest.mark.parametrize("operation", ["list", "stream"])
+@pytest.mark.parametrize("content", ["invalid", {}, [None], [{"type": "text"}]])
+async def test_malformed_non_null_result_content_raises_owned_error(operation, content):
+    raw = native("agent.tool_result", tool_use_id="call", content=content)
+    transport = ScriptedTransport()
+    if operation == "list":
+        transport.queue(
+            ScriptedReply(
+                "GET",
+                "/v1/sessions/sess_1/events",
+                httpx.Response(200, json={"data": [raw], "next_page": None}),
+            )
+        )
+    else:
+        transport.queue(ScriptedReply.stream("/v1/sessions/sess_1/events/stream", [raw]))
+    async with transport.client() as sdk:
+        with pytest.raises(ProviderError) as caught:
+            if operation == "list":
+                await port(sdk).list(SCOPE, SESSION, page=PageRequest())
+            else:
+                _ = [event async for event in port(sdk).stream(SCOPE, SESSION)]
+    assert caught.value.category == "upstream"
+    assert caught.value.native_code == "malformed_event" and not caught.value.retryable
+    assert isinstance(caught.value.__cause__, (ValueError, KeyError, TypeError))
+    transport.assert_consumed()
+
+
+@pytest.mark.parametrize("with_record,cursor", [(True, ""), (False, "next")])
+async def test_list_discards_terminal_cursor_using_sdk_continuation_truth(with_record, cursor):
+    records = [native("agent.message", content=[{"type": "text", "text": "hi"}])]
+    transport = ScriptedTransport()
+    transport.queue(
+        ScriptedReply(
+            "GET",
+            "/v1/sessions/sess_1/events",
+            httpx.Response(200, json={"data": records if with_record else [], "next_page": cursor}),
+        )
+    )
+    async with transport.client() as sdk:
+        page = await port(sdk).list(SCOPE, SESSION, page=PageRequest())
+    assert len(page.data) == int(with_record)
+    assert not page.has_more and page.next_cursor is None
     transport.assert_consumed()
 
 
@@ -434,6 +553,54 @@ def test_history_preserves_separate_root_turns_and_approval_resumption():
     assert first.turn_id == paused.turn_id == resumed.turn_id == ended.turn_id == "run1"
     assert second.turn_id == "run2"
     assert ended.payload["root_turn_id"] == "run1"
+
+
+def test_retries_exhausted_records_an_errored_turn_with_native_reason():
+    # FOLLOWUPS: M0's host preserves COMPLETED for an answer with no settled
+    # error, even though this neutral stop record correctly says errored.
+    normalizer = EventNormalizer(SESSION)
+    normalizer.normalize(native("session.status_running", "root"), observed_at=NOW)
+    event = normalizer.normalize(
+        native("session.status_idle", "ended", stop_reason={"type": "retries_exhausted"}),
+        observed_at=NOW,
+    )
+    assert event.type == "session.turn_ended"
+    assert event.payload == {
+        "root_turn_id": "root",
+        "outcome": "errored",
+        "native_reason": "retries_exhausted",
+    }
+
+
+@pytest.mark.parametrize("permission", ["ask", "allow", "deny", None])
+def test_tool_permission_preserves_ask_and_defaults_other_values_to_auto(permission):
+    event = EventNormalizer(SESSION).normalize(
+        native("agent.tool_use", name="run", input={}, evaluated_permission=permission),
+        observed_at=NOW,
+    )
+    assert event.type == "agent.tool_use"
+    assert event.payload["permission"] == ("ask" if permission == "ask" else "auto")
+
+
+def test_terminated_session_resets_root_identity_and_pending_calls():
+    normalizer = EventNormalizer(SESSION)
+    normalizer.normalize(native("session.status_running", "old-root"), observed_at=NOW)
+    normalizer.normalize(
+        native("agent.tool_use", "old-call", name="run", input={}), observed_at=NOW
+    )
+    terminated = normalizer.normalize(native("session.status_terminated"), observed_at=NOW)
+    running = normalizer.normalize(native("session.status_running", "new-root"), observed_at=NOW)
+    paused = normalizer.normalize(
+        native(
+            "session.status_idle",
+            stop_reason={"type": "requires_action", "event_ids": ["old-call"]},
+        ),
+        observed_at=NOW,
+    )
+    assert terminated.type == "session.status_terminated" and terminated.turn_id == "old-root"
+    assert running.turn_id == paused.turn_id == "new-root"
+    assert paused.type == "session.requires_action"
+    assert paused.typed_payload().actions[0].kind == "native"
 
 
 def test_unknown_idle_reason_does_not_invent_a_terminal_outcome():

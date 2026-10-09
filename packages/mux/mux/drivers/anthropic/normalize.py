@@ -152,9 +152,10 @@ class EventNormalizer:
             }[native_type]
             call_id = _text(data[pairing])
             name, item, causes = "agent.tool_result", event_id, (call_id,)
+            content = data.get("content")
             payload = {
                 "call_id": call_id,
-                "content": _content(data["content"]),
+                "content": [] if content is None else _content(content),
                 "is_error": bool(data.get("is_error", False)),
             }
         elif native_type == "session.status_running":
