@@ -421,3 +421,8 @@ repository tokens by reference. Session archive is a separate administration
 operation; it never archives or deletes shared vaults or memory stores. Workspace
 vault janitor and credential sweep retain their explicit operator scopes and host
 policy; GitHub session provisioning and token rotation use their tenant context.
+
+The vault administration branch adds two explicit platform call sites: the
+workspace orphan-vault janitor and stale-admin-credential operator sweep. Their
+existing inventories span accounts; tenant provisioning and rotation use tenant
+scopes. The construction inventory test includes both operator paths.
