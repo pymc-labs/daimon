@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import structlog
 from daimon.adapters.discord.feedback_modal import FeedbackModal
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -319,6 +320,53 @@ async def test_routed_text_posts_once_to_the_support_channel_without_pings(
     assert mentions.everyone is False and mentions.users is False
     assert isinstance(mentions, discord.AllowedMentions)
     interaction.followup.send.assert_awaited_once()
+
+
+async def test_long_feedback_reaches_support_in_order(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, feedback_id = await _routed_setup(
+        db_session_factory, guild="guild-long-feedback", message_id="msg-long-feedback"
+    )
+    runtime = _routed_runtime(sessionmaker=db_session_factory, routed={tenant_id: True})
+    modal = _modal(runtime=runtime, feedback_id=feedback_id, text="x" * 4000)
+    interaction, channel = _interaction_with_channel(user_id=_VOTER_ID)
+    sent: list[str] = []
+
+    async def send(body: str, **_kwargs: object) -> None:
+        assert len(body) <= 2000
+        sent.append(body)
+
+    channel.send = AsyncMock(side_effect=send)
+    await modal.on_submit(interaction)
+
+    assert sent[0].startswith(f"**\N{THUMBS DOWN SIGN} Feedback** from <@{_VOTER_ID}>")
+    assert "https://discord.com/channels/guild-long-feedback/chan-1/msg-long-feedback" in sent[0]
+    assert "".join(sent).endswith("x" * 4000)
+
+
+async def test_failed_feedback_delivery_is_logged_as_warning(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, feedback_id = await _routed_setup(
+        db_session_factory, guild="guild-failed-feedback", message_id="msg-failed-feedback"
+    )
+    runtime = _routed_runtime(sessionmaker=db_session_factory, routed={tenant_id: True})
+    modal = _modal(runtime=runtime, feedback_id=feedback_id, text="x" * 4000)
+    interaction, channel = _interaction_with_channel(user_id=_VOTER_ID)
+    channel.send = AsyncMock(
+        side_effect=discord.HTTPException(MagicMock(status=403, reason="Forbidden"), "closed")
+    )
+
+    with structlog.testing.capture_logs() as events:
+        await modal.on_submit(interaction)
+
+    assert any(
+        event["event"] == "feedback.routed_to_support"
+        and event["log_level"] == "warning"
+        and event["delivered"] is False
+        for event in events
+    )
 
 
 async def test_unrouted_text_stays_in_the_database(
