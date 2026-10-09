@@ -281,6 +281,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         if root is None:
             await reply("GitHub linking is unavailable.")
             return True
+        await interaction.response.defer(ephemeral=True, thinking=True)
         async with runtime.sessionmaker.begin() as session:
             url = await mint_link(
                 session,
@@ -300,7 +301,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
             workspace_id=str(interaction.guild_id),
             agent_name=request.agent_name,
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=connect_embed(card), view=connect_button_view(url), ephemeral=True
         )
         return True

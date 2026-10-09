@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+import discord
 import pytest
 from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
 from daimon.core.github_connect_cards import build_connect_card
@@ -30,3 +31,15 @@ def test_connect_embed_variants(variant: Literal["A", "B", "B_NO_FOOTER"]) -> No
     assert ("Default access: Read and write" in payload["description"]) == (variant != "A")
     assert ("footer" in payload) == (variant == "B")
     assert " · " not in str(payload)
+
+
+def test_connect_embed_escapes_agent_name_markdown() -> None:
+    name = "*Research_Bot*"
+    card = build_connect_card(
+        agent_name=name,
+        identity_enabled=True,
+        avatar_url=None,
+        public_base_url="https://mcp.test",
+    )
+    embed = connect_embed(card)
+    assert embed.description == discord.utils.escape_markdown(f"Pick repos {name} can use.")

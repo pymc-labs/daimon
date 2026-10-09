@@ -72,3 +72,15 @@ def test_module_switch_selects_variant(monkeypatch: pytest.MonkeyPatch) -> None:
         public_base_url="https://mcp.test",
     )
     assert card.variant == "B"
+
+
+def test_card_clips_long_agent_name() -> None:
+    name = "ResearchBot" * 12
+    card = cards.build_connect_card(
+        agent_name=name,
+        identity_enabled=True,
+        avatar_url=None,
+        public_base_url="https://mcp.test",
+    )
+    assert card.author_name == name[:80]
+    assert card.description == f"Pick repos {name[:80]} can use."

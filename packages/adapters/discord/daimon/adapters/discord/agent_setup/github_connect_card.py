@@ -8,4 +8,6 @@ import discord
 
 
 def connect_embed(card: ConnectCard) -> discord.Embed:
-    return discord.Embed.from_dict(discord_embed_payload(card))
+    payload = discord_embed_payload(card)
+    payload["description"] = discord.utils.escape_markdown(payload["description"])
+    return discord.Embed.from_dict(payload)

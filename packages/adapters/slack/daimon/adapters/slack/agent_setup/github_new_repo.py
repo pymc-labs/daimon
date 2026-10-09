@@ -231,6 +231,9 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
             thread_id=str(message.get("thread_ts") or "") or None,
             user_id=user_id,
             url=url,
+            app_root_url=str(runtime.settings.mcp.app_root_url)
+            if runtime.settings.mcp.app_root_url
+            else None,
         )
     else:
         reply = "Connect later: /github → Connect more repos."
