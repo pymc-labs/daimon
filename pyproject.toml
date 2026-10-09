@@ -288,6 +288,7 @@ source_modules = [
     "daimon.core.turn_origin",
     "daimon.core.untrusted",
     "daimon.core.usage_recording",
+    "daimon.core.usage_compat",
     "daimon.core.usage_sweep",
     "daimon.core.wizard",
     "daimon.core.wizard_sweep",

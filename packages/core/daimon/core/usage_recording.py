@@ -7,8 +7,9 @@ parameter to `headless_runner.run_turn`. The driver/runner invokes it for
 each `span.model_request_end` event.
 
 Per RESEARCH §"SDK Event Shape": the typed SDK event does NOT carry model_id.
-The caller resolves it once from `session.agent.model.id` and binds via
-`functools.partial`. This module reads tokens from `event.model_usage`.
+The caller resolves it once from `session.agent.model.id`. The neutral path
+takes `observation`; the temporary M0 `event` entrypoint converts the SDK
+event without provider I/O. Both paths preserve existing stored identities.
 
 Per `guideline:architecture` Error Propagation: exceptions are not
 swallowed. A DB failure here IS a turn failure.
@@ -17,18 +18,20 @@ swallowed. A DB failure here IS a turn failure.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal
 
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
-)
-from daimon.core.pricing import ModelRates, cost_of
+from daimon.core.pricing import ModelRates, cost_of, usage_tokens
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.usage_compat import event_observation
+from mux.contracts.ids import ModelRef, ResourceRef
+from mux.contracts.usage import UsageObservation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 TurnLedgerReason = Literal["turn_debit", "checkpoint_debit"]
@@ -50,14 +53,22 @@ or promo expiries. Timed promo credit is drawn down by exactly these rows, so a
 new debit kind added here must be added to this tuple too."""
 
 
+@dataclass(frozen=True)
+class _UsageEventTime:
+    """Provider event time under the legacy ledger boundary's field name."""
+
+    processed_at: datetime
+
+
 async def record_turn_usage(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID | None,
     platform_user_id: str | None,
-    managed_session_id: str,
-    model_id: str,
-    event: BetaManagedAgentsSpanModelRequestEndEvent,
+    managed_session_id: str | None = None,
+    model_id: str | None = None,
+    observation: UsageObservation | None = None,
+    event: BetaManagedAgentsSpanModelRequestEndEvent | None = None,
     markup: Decimal = Decimal("1.0"),
     pricing: ModelRates | None = None,
     reason: TurnLedgerReason = "turn_debit",
@@ -86,6 +97,40 @@ async def record_turn_usage(
     """
     if tenant_id is None:
         return  # DM turn — no tenant to bill, skip write
+    if observation is None:
+        if event is None or managed_session_id is None or model_id is None:
+            raise ValueError("usage requires an observation or a bound legacy event")
+        observation = event_observation(
+            event,
+            session_id=managed_session_id,
+            model_id=model_id,
+            tenant_id=str(tenant_id),
+        )
+    elif event is not None:
+        raise ValueError("supply either an observation or a legacy event")
+    if observation.revision != 1:
+        raise ValueError("usage corrections require the accounting outbox")
+    if observation.grain != "model_request" or observation.basis != "increment":
+        raise ValueError("turn billing requires incremental model-request usage")
+    if observation.session.kind != "session":
+        raise ValueError("usage observation requires a session reference")
+    if observation.session.tenant_id not in (None, str(tenant_id)):
+        raise ValueError("usage observation belongs to another tenant")
+    if managed_session_id is not None and managed_session_id != observation.session.id:
+        raise ValueError("usage observation belongs to another session")
+    if observation.model is None:
+        if model_id is None:
+            raise ValueError("turn billing requires a model")
+    elif model_id is not None and observation.model.id != model_id:
+        raise ValueError("usage observation belongs to another model")
+    else:
+        model_id = observation.model.id
+    managed_session_id = observation.session.id
+    assert model_id is not None
+    tokens = usage_tokens(observation)
+    if tokens is None:
+        raise ValueError("usage rows require all four reported token stages")
+    event_time = _UsageEventTime(processed_at=observation.observed_at)
     async with sessionmaker() as s, s.begin():
         await usage_events.record(
             s,
@@ -93,22 +138,22 @@ async def record_turn_usage(
             platform_user_id=platform_user_id,
             managed_session_id=managed_session_id,
             model=model_id,
-            model_usage=event.model_usage,
-            event_id=event.id,
+            model_usage=tokens,
+            event_id=observation.id,
             channel_id=channel_id,
         )
-        cost = cost_of(event.model_usage, pricing)
+        cost = cost_of(observation, pricing)
         debit = debit_amount(cost, markup=markup)
         await tenant_ledger.insert_entry(
             s,
             tenant_id=tenant_id,
             delta_usd=-debit,
             reason=reason,
-            idempotency_key=f"turn:{managed_session_id}:{event.id}",
+            idempotency_key=f"turn:{managed_session_id}:{observation.id}",
             channel_id=channel_id,
             # The model call's own time, so a debit the sweep writes late still
             # lands inside the timed promo window the call was made in.
-            occurred_at=event.processed_at,
+            occurred_at=event_time.processed_at,
         )
 
 
@@ -145,12 +190,30 @@ async def _record_tool_model_usage(
         managed_session_id = f"{session_prefix}:{uuid.uuid4()}"
     if event_id is None:
         event_id = str(uuid.uuid4())
-    model_usage = BetaManagedAgentsSpanModelUsage(
-        input_tokens=input_tokens,
+    observation = UsageObservation(
+        id=event_id,
+        revision=1,
+        session=ResourceRef(
+            id=managed_session_id,
+            kind="session",
+            provider="gemini" if session_prefix == "gemini" else "anthropic",
+            account_scope_id="host-tools",
+            tenant_id=str(tenant_id),
+        ),
+        model=ModelRef(
+            provider="gemini" if session_prefix == "gemini" else "anthropic", id=model_id
+        ),
+        grain="model_request",
+        basis="increment",
+        input_tokens=input_tokens + cache_read_input_tokens,
         output_tokens=output_tokens,
-        cache_creation_input_tokens=0,
-        cache_read_input_tokens=cache_read_input_tokens,
+        input_cache_write_tokens=0,
+        input_cached_tokens=cache_read_input_tokens,
+        completeness="measured",
+        observed_at=datetime.now(UTC),
     )
+    tokens = usage_tokens(observation)
+    assert tokens is not None
     async with sessionmaker() as s, s.begin():
         await usage_events.record(
             s,
@@ -158,11 +221,11 @@ async def _record_tool_model_usage(
             platform_user_id=platform_user_id,
             managed_session_id=managed_session_id,
             model=model_id,
-            model_usage=model_usage,
+            model_usage=tokens,
             event_id=event_id,
             channel_id=channel_id,
         )
-        cost = cost_of(model_usage, pricing)
+        cost = cost_of(observation, pricing)
         debit = debit_amount(cost, markup=markup)
         await tenant_ledger.insert_entry(
             s,

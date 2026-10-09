@@ -16,12 +16,10 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, cast
 
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
-)
 from daimon.core._models import UsageEvent
-from daimon.core.pricing import MODEL_PRICING, cost_of
+from daimon.core.pricing import MODEL_PRICING, LegacyUsage, UsageTokens, cost_of, usage_tokens
 from daimon.core.stores.domain import UsageEventRow
+from mux.contracts.usage import UsageObservation
 from sqlalchemy import Select, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
@@ -35,11 +33,18 @@ async def record(
     platform_user_id: str | None,
     managed_session_id: str,
     model: str,
-    model_usage: BetaManagedAgentsSpanModelUsage,
+    model_usage: LegacyUsage | None = None,
+    observation: UsageObservation | None = None,
     event_id: str,
     channel_id: str | None = None,
 ) -> None:
     """Insert one usage row idempotently on (managed_session_id, event_id)."""
+    if observation is not None:
+        if model_usage is not None:
+            raise ValueError("supply either an observation or legacy usage")
+        model_usage = usage_tokens(observation)
+    if model_usage is None:
+        raise ValueError("usage rows require all four reported token stages")
     stmt = (
         pg_insert(UsageEvent)
         .values(
@@ -106,7 +111,7 @@ def _sum_cost(rows: Sequence[UsageEventRow]) -> float:
     total = 0.0
     for row in rows:
         rates = MODEL_PRICING.get(row.model)
-        usage = BetaManagedAgentsSpanModelUsage(
+        usage = UsageTokens(
             input_tokens=row.input_tokens,
             output_tokens=row.output_tokens,
             cache_creation_input_tokens=row.cache_creation_input_tokens,
@@ -230,7 +235,7 @@ async def costs_by_user_in_tenant_since(
         user_id = row.platform_user_id
         if user_id is None:
             continue
-        usage = BetaManagedAgentsSpanModelUsage(
+        usage = UsageTokens(
             input_tokens=int(row.in_tok or 0),
             output_tokens=int(row.out_tok or 0),
             cache_creation_input_tokens=int(row.cw_tok or 0),

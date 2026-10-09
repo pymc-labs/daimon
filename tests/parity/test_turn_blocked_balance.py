@@ -11,6 +11,7 @@ D-10 -- Discord and Slack copy are allowed to differ) and zero
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import cast
 
 from daimon.core.stores import tenant_ledger, usage_events
@@ -55,3 +56,4 @@ async def test_turn_blocked_when_over_balance_writes_no_usage_and_no_ledger_row(
 
     ledger_rows = await tenant_ledger.list_for_tenant(db_session, tenant_id=tenant.id)
     assert ledger_rows == [], "over-balance turn must write zero tenant_ledger rows"
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("0")
