@@ -35,7 +35,8 @@ from daimon.adapters.mcp.oauth_slack import (
     build_oauth_slack_routes,
 )
 from daimon.adapters.mcp.server import create_mcp_app
-from daimon.adapters.mcp.web_shell import CSS_SHA256
+from daimon.adapters.mcp.web_icons import icon
+from daimon.adapters.mcp.web_shell import CSS_SHA256, render_page
 from daimon.core.config import (
     AgentIdentitySettings,
     AnthropicSettings,
@@ -76,6 +77,15 @@ def test_page_shell_contains_root_tokens() -> None:
     body = response.body.decode()
     assert f'href="/web/web.css?v={CSS_SHA256}"' in body
     assert 'src="/web/daimon-face.png"' in body
+    github_body = render_page(title="GitHub", body_html="", context="GitHub").body.decode()
+    assert 'class="web-icon web-icon--github"' in github_body
+
+
+def test_inline_web_icon_accessibility_and_allowlist() -> None:
+    assert 'aria-hidden="true"' in icon("search")
+    assert 'aria-label="Find &lt;repos&gt;"' in icon("search", label="Find <repos>")
+    with pytest.raises(ValueError):
+        icon("../daimon-face")
 
 
 def test_page_shell_contains_viewport_meta() -> None:

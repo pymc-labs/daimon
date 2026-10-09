@@ -29,6 +29,7 @@ from daimon.adapters.mcp.tools.slack._credential_button import (
     edit_card_state_for_tenant as edit_slack_card_state,
 )
 from daimon.adapters.mcp.tools.teams._send import edit_teams_card_state
+from daimon.adapters.mcp.web_icons import icon
 from daimon.adapters.mcp.web_shell import render_page
 from daimon.core.agent_pins import request_pin_refusal
 from daimon.core.authz import (
@@ -112,6 +113,7 @@ _ERROR_COPY: dict[_ErrorKind, tuple[str, str, int]] = {
 def _error_page(kind: _ErrorKind) -> HTMLResponse:
     headline, body_text, status = _ERROR_COPY[kind]
     body = (
+        f'<div class="gh-status-icon">{icon("triangle-alert")}</div>'
         f"<h1>{html.escape(headline, quote=False)}</h1><p>{html.escape(body_text, quote=False)}</p>"
     )
     return render_page(
@@ -128,6 +130,7 @@ def _success_page(
         else "Return to chat."
     )
     body = (
+        f'<div class="gh-status-icon">{icon("circle-check")}</div>'
         f"<h1>Connected {html.escape(server_name, quote=False)}</h1>"
         f"<p>{html.escape(agent_name, quote=False)} can use your connection from your next "
         f"message. {destination}</p>"

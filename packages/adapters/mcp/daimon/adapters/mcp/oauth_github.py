@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlencode
 import httpx
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.github_pages import github_page
+from daimon.adapters.mcp.web_icons import icon
 from daimon.core.config import Settings
 from daimon.core.github_app_auth import build_app_jwt, get_app_installation_details
 from daimon.core.github_credentials import decrypt_token, encrypt_token
@@ -52,6 +53,7 @@ class _Installation:
     owner_login: str
     repository_selection: str
     repos: tuple[_Repo, ...]
+    owner_type: str = ""
 
 
 class _OwnerPayload(BaseModel):
@@ -103,17 +105,22 @@ def _error(
 ) -> Response:
     retry = (
         '<div class="gh-actions"><a class="gh-primary" '
-        f'href="{html.escape(retry_url, quote=True)}">Try again</a></div>'
+        f'href="{html.escape(retry_url, quote=True)}">Try again{icon("chevron-right")}</a></div>'
         if retry_url
         else ""
     )
-    return github_page(title=message, body_html=retry, status=status, error=True)
+    return github_page(
+        title=message,
+        body_html=f'<div class="gh-status-icon">{icon("triangle-alert")}</div>' + retry,
+        status=status,
+        error=True,
+    )
 
 
 def _back_to_chat(platform: str, workspace_id: str) -> str:
     if platform == "discord":
         target = f"https://discord.com/channels/{html.escape(workspace_id, quote=True)}"
-        return f'<a class="gh-primary" href="{target}">Back to Discord</a>'
+        return f'<a class="gh-primary" href="{target}">{icon("chevron-left")}Back to Discord</a>'
     return "In Slack, run <code>/github</code>."
 
 
@@ -142,7 +149,8 @@ def _already_connected_page(
     )
     return github_page(
         title=label,
-        body_html=detail
+        body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div>'
+        + detail
         + "<p>You can close this tab.</p>"
         + (f'<div class="gh-actions">{back}</div>' if back else ""),
     )
@@ -162,7 +170,8 @@ def _done_page(
     if update_pending and agent_name:
         return github_page(
             title=f"Repos connected. An operator will finish switching {agent_name}.",
-            body_html="<p>You can close this tab.</p>",
+            body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div>'
+            "<p>You can close this tab.</p>",
         )
     if agent_name:
         ready = (
@@ -181,7 +190,10 @@ def _done_page(
                 f"{html.escape(agent_name)}. You can close this tab.</p>"
             )
         )
-        return github_page(title=f"Connected {_repo_count(count)}", body_html=ready + body)
+        return github_page(
+            title=f"Connected {_repo_count(count)}",
+            body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div>' + ready + body,
+        )
     if same_person:
         body = (
             "<p>The repos are connected. Choose which agents use them in GitHub setup.</p>"
@@ -194,7 +206,10 @@ def _done_page(
             f"<p>{html.escape(requester_label)} can now choose which agents use them. "
             "You can close this tab.</p>"
         )
-    return github_page(title=f"Connected {_repo_count(count)}", body_html=body)
+    return github_page(
+        title=f"Connected {_repo_count(count)}",
+        body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div>' + body,
+    )
 
 
 def _install_page(install_url: str, cancel_url: str) -> Response:
@@ -204,7 +219,8 @@ def _install_page(install_url: str, cancel_url: str) -> Response:
             "<p>Pick the account or organization with your repos. "
             "You'll choose which repos to connect after GitHub.</p>"
             '<div class="gh-actions">'
-            f'<a class="gh-primary" href="{install_url}">Continue to GitHub</a>'
+            f'<a class="gh-primary" href="{install_url}">'
+            f"Continue to GitHub{icon('chevron-right')}</a>"
             f'<a class="gh-link" href="{cancel_url}">Cancel</a></div>'
         ),
     )
@@ -219,9 +235,10 @@ def _pending_page(check_url: str, cancel_url: str, organization: str | None = No
     return github_page(
         title="Waiting for GitHub approval",
         body_html=(
+            f'<div class="gh-status-icon">{icon("hourglass")}</div>'
             f"<p>{who} Check again after they approve.</p>"
             '<div class="gh-actions">'
-            f'<a class="gh-primary" href="{check_url}">Check again</a>'
+            f'<a class="gh-primary" href="{check_url}">Check again{icon("chevron-right")}</a>'
             f'<a class="gh-link" href="{cancel_url}">Cancel</a></div>'
         ),
     )
@@ -256,7 +273,8 @@ def _cancelled_page(back: str = "") -> Response:
 def _expired_page(requester_label: str) -> Response:
     return github_page(
         title="This link has expired.",
-        body_html=f"<p>Ask {html.escape(requester_label)} for a new one.</p>",
+        body_html=f'<div class="gh-status-icon">{icon("clock")}</div>'
+        f"<p>Ask {html.escape(requester_label)} for a new one.</p>",
         status=400,
         error=True,
     )
@@ -281,6 +299,7 @@ _PICKER_SCRIPT = """
   const showSelected = document.getElementById("show-selected");
   const status = document.getElementById("selection-status");
   const submit = document.getElementById("connect-repos");
+  const submitLabel = submit.querySelector(".gh-button-label");
   let selectedOnly = false;
   let connecting = false;
   const plural = n => n === 1 ? "repo" : "repos";
@@ -312,7 +331,8 @@ _PICKER_SCRIPT = """
     const accessLabel = access === "write" ? "Read and write" : "Read only";
     status.textContent = selected ? `${selected} selected. ${accessLabel}.` : "0 selected";
     submit.disabled = selected === 0;
-    submit.textContent = selected ? `Connect ${selected} ${plural(selected)}` : "Connect repos";
+    submitLabel.textContent = selected ?
+      `Connect ${selected} ${plural(selected)}` : "Connect repos";
     form.querySelector(".gh-empty").hidden = visible !== 0;
   }
   search.addEventListener("input", render);
@@ -366,10 +386,10 @@ def _access_choices() -> str:
         '<section class="gh-side-card gh-access" id="github-access" '
         'aria-label="Access"><h2>Access</h2>'
         '<label><input type="radio" name="access" value="write" checked>'
-        "<span><strong>Read and write</strong>"
+        f'<span class="gh-access-copy"><strong>{icon("pencil")}Read and write</strong>'
         "<small>Push branches, open issues and pull requests.</small></span></label>"
         '<label><input type="radio" name="access" value="read">'
-        "<span><strong>Read only</strong>"
+        f'<span class="gh-access-copy"><strong>{icon("eye")}Read only</strong>'
         "<small>Read code, issues and pull requests.</small></span></label></section>"
     )
 
@@ -404,7 +424,8 @@ def _confirmation_page(
     parts.extend(
         [
             '<div class="gh-picker-grid"><section class="gh-results">',
-            '<div class="gh-search-wrap" hidden><input class="gh-search" type="search" '
+            f'<div class="gh-search-wrap" hidden>{icon("search")}'
+            '<input class="gh-search" type="search" '
             'id="search-repos" placeholder="Search repos" aria-label="Search repos" '
             'autocomplete="off"></div>',
             '<div class="gh-list-toolbar"><span id="repo-count" aria-live="polite"></span>'
@@ -420,7 +441,11 @@ def _confirmation_page(
         if not owned:
             continue
         parts.append('<div class="gh-repo-owner">')
-        parts.append(f'<div class="gh-repo-group">{html.escape(installation.owner_login)}</div>')
+        owner_icon = "user" if installation.owner_type.lower() == "user" else "building"
+        parts.append(
+            f'<div class="gh-repo-group">{icon(owner_icon)}'
+            f"{html.escape(installation.owner_login)}</div>"
+        )
         for repo in owned:
             prefix, _, name = repo.full_name.rpartition("/")
             selected = ""
@@ -428,7 +453,8 @@ def _confirmation_page(
                 '<label class="gh-choice repo-choice">'
                 f'<input type="checkbox" name="repo" value="{repo.id}"{selected}>'
                 f'<span><span class="gh-repo-prefix">{html.escape(prefix)}/</span>'
-                f'<span class="gh-repo-name">{html.escape(name)}</span></span></label>'
+                f'<span class="gh-repo-name">{html.escape(name)}</span></span>'
+                f'<span class="gh-row-check">{icon("check")}</span></label>'
             )
         parts.append("</div>")
     parts.extend(
@@ -441,7 +467,11 @@ def _confirmation_page(
             '<p id="selection-status" aria-live="polite">0 selected</p>'
             '<button class="gh-link-button" id="change-access" type="button" hidden>'
             "Change</button>"
-            + ('<p class="gh-client-note">Clients use this server.</p>' if clients_present else "")
+            + (
+                f'<p class="gh-client-note">{icon("info")}Clients use this server.</p>'
+                if clients_present
+                else ""
+            )
             + (
                 f'<p class="gh-inline-error" role="alert">{html.escape(selection_error)}</p>'
                 if selection_error
@@ -449,7 +479,7 @@ def _confirmation_page(
             )
             + '</div><div class="gh-finish-actions">',
             '<button class="gh-primary" id="connect-repos" type="submit">'
-            "Connect repos</button>"
+            f'{icon("link")}<span class="gh-button-label">Connect repos</span></button>'
             f'<a class="gh-link" href="{cancel_url}">Cancel</a></div></div>',
             "</form>",
             _PICKER_SCRIPT,
@@ -497,6 +527,7 @@ async def _installations(client: httpx.AsyncClient, token: str) -> list[_Install
                 owner_login=parsed.account.login,
                 repository_selection=parsed.repository_selection,
                 repos=tuple(repos),
+                owner_type=parsed.account.type,
             )
         )
     return result

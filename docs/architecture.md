@@ -104,6 +104,9 @@ headers. The pages are native HTML using shadcn New York styling recipes;
 checkboxes, radios and forms remain native controls. Page modules escape any
 dynamic content before passing their trusted markup to the shell. The
 stylesheet and assets are served at `/web/` from the MCP package.
+Meaningful page icons render as local inline Lucide SVGs. The GitHub mark is
+from Feather, since Lucide excludes brand marks; both licences are bundled
+beside the Inter font licence.
 
 `scripts/generate_web_css.py` compiles `static/input.css` using the pinned
 Tailwind v4 standalone Linux x64 CLI. Run the generator on Linux x64; it does

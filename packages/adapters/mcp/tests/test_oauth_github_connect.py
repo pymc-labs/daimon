@@ -269,6 +269,9 @@ async def test_connection_happy_path_and_rechecks(
         assert "submit.disabled = true" in page.text
         assert "if (connecting || !boxes.some(box => box.checked))" in page.text
         assert 'name="access" value="write" checked' in page.text
+        assert 'class="web-icon web-icon--search"' in page.text
+        assert 'class="web-icon web-icon--pencil"' in page.text
+        assert 'class="web-icon web-icon--link"' in page.text
         assert page.text.index('id="search-repos"') < page.text.index('class="gh-repo-list"')
         assert page.text.count('class="gh-primary"') == 1
         assert 'action="https://mcp.test/oauth/github/confirm"' in page.text

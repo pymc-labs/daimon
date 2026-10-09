@@ -27,8 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - MCP browser pages now share a responsive Daimon shell with Daimon's face in
-  the page header, local Inter font, and brand colours. GitHub and Slack page
-  copy has been rewritten. The GitHub picker shows access
+  the page header, local Inter font, brand colours, and inline action icons.
+  The picker uses separate desktop, tablet, and phone layouts. GitHub and Slack
+  page copy has been rewritten. The GitHub picker shows access
   before the repo list on narrow screens, keeps selections across search, and
   locks controls during Connect. Billing, Slack installation, personal GitHub
   linking, and MCP connection pages use the same shell. Tailwind CSS is
