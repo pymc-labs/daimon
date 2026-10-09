@@ -922,7 +922,12 @@ async def delete_expired_flows(session: AsyncSession, *, now: datetime, limit: i
         .limit(limit)
     )
     result = await session.execute(
-        delete(GitHubConnectFlow).where(GitHubConnectFlow.state_hash.in_(expired))
+        delete(GitHubConnectFlow).where(
+            GitHubConnectFlow.state_hash.in_(expired),
+            GitHubConnectFlow.expires_at <= now,
+            (GitHubConnectFlow.cancelled_at.is_(None))
+            | (GitHubConnectFlow.encrypted_user_token.is_(None)),
+        )
     )
     return cast(CursorResult[Any], result).rowcount
 

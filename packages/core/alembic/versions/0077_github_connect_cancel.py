@@ -1,6 +1,7 @@
 """Keep canceled GitHub OAuth tokens until revocation succeeds.
 
 downgrade: destructive
+Refused while cancelled flows retain tokens pending revocation.
 """
 
 import sqlalchemy as sa
@@ -17,4 +18,18 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Hold writers out until the column is gone: a concurrent Cancel must not
+    # create pending revocation work after the check but before DROP COLUMN.
+    op.execute("LOCK TABLE github_connect_flows IN SHARE ROW EXCLUSIVE MODE")
+    pending = op.get_bind().scalar(
+        sa.text(
+            "SELECT EXISTS (SELECT 1 FROM github_connect_flows "
+            "WHERE cancelled_at IS NOT NULL AND encrypted_user_token IS NOT NULL)"
+        )
+    )
+    if pending:
+        raise RuntimeError(
+            "Cannot downgrade GitHub Connect cancellation while cancelled flows "
+            "still hold tokens pending revocation"
+        )
     op.drop_column("github_connect_flows", "cancelled_at")

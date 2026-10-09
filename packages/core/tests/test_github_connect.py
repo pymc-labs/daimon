@@ -657,6 +657,91 @@ async def test_cancel_blocks_concurrent_github_confirmation(
 
 
 @pytest.mark.asyncio
+async def test_expiry_sweep_rechecks_cancel_after_waiting_for_row_lock(
+    db_engine: AsyncEngine, db_nullpool_engine: AsyncEngine, db_clean: None
+) -> None:
+    del db_clean
+    sessionmaker = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with sessionmaker.begin() as session:
+        session.add(
+            Tenant(id=(tenant_id := uuid.uuid4()), platform="discord", external_id="sweep-race")
+        )
+        await session.flush()
+        session.add(Account(id=(admin_id := uuid.uuid4()), tenant_id=tenant_id, role="admin"))
+        await session.flush()
+        invitation = await github_connect.mint_invitation(
+            session, tenant_id=tenant_id, requester_account_id=admin_id
+        )
+        await github_connect.create_flow(
+            session,
+            invitation_hash=github_connect.digest(invitation),
+            state="sweep-race-state",
+            cookie="sweep-race-cookie",
+            encrypted_verifier=b"encrypted",
+        )
+        assert await github_connect.set_user_token(
+            session, state="sweep-race-state", encrypted_token=b"pending-token", github_user_id=17
+        )
+        flow = await session.get(GitHubConnectFlow, github_connect.digest("sweep-race-state"))
+        assert flow is not None
+        flow.expires_at = datetime.now(UTC) + timedelta(seconds=3)
+
+    # The sweep starts against the old committed row while Cancel holds its
+    # update lock. PostgreSQL must recheck the outer DELETE after Cancel commits.
+    async with sessionmaker.begin() as cancel_session:
+        cancelled = await github_connect.cancel_flow(
+            cancel_session, state="sweep-race-state", cookie="sweep-race-cookie"
+        )
+        assert cancelled is not None and cancelled.cancelled_at is not None
+        await asyncio.sleep(max(0, (flow.expires_at - datetime.now(UTC)).total_seconds() + 0.05))
+
+        sweep_pid: int | None = None
+
+        async def sweep() -> int:
+            nonlocal sweep_pid
+            async with sessionmaker.begin() as sweep_session:
+                sweep_pid = await sweep_session.scalar(text("SELECT pg_backend_pid()"))
+                assert sweep_pid is not None
+                sweep_started.set()
+                return await github_connect.delete_expired_flows(
+                    sweep_session, now=datetime.now(UTC)
+                )
+
+        sweep_started = asyncio.Event()
+        sweep_task = asyncio.create_task(sweep())
+        try:
+            await asyncio.wait_for(sweep_started.wait(), timeout=5)
+            assert sweep_pid is not None
+            # Confirm the DELETE reached the row lock before committing Cancel.
+            async with AsyncSession(db_nullpool_engine) as probe:
+                for _ in range(500):
+                    waiting = await probe.scalar(
+                        text(
+                            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                            "WHERE pid = :pid AND wait_event_type = 'Lock' "
+                            "AND query LIKE '%DELETE FROM github_connect_flows%')"
+                        ),
+                        {"pid": sweep_pid},
+                    )
+                    if waiting:
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    raise AssertionError("sweep did not wait for Cancel's row lock")
+            assert not sweep_task.done()
+        except BaseException:
+            sweep_task.cancel()
+            raise
+
+    deleted = await asyncio.wait_for(sweep_task, timeout=5)
+    assert deleted == 0
+    async with sessionmaker() as session:
+        retained = await session.get(GitHubConnectFlow, github_connect.digest("sweep-race-state"))
+        assert retained is not None and retained.encrypted_user_token == b"pending-token"
+        assert retained.cancelled_at is not None
+
+
+@pytest.mark.asyncio
 async def test_mint_waits_for_concurrent_agent_key_write(
     db_engine: AsyncEngine,
     db_clean: None,

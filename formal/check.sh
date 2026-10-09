@@ -5,6 +5,8 @@
 # including a parse, semantic or deadlock error, fails the run.
 #
 # Usage: formal/check.sh
+# Set FORMAL_CHECK_FILTER to a registry directory (for example,
+# github_connect_cancel) to run only that model's configs.
 # Needs java (17+) and TLA2TOOLS_JAR (default: formal/tla2tools.jar), the
 # tla2tools v1.7.4 release pinned in formal/README.md.
 #
@@ -91,6 +93,7 @@ fail=0
 total_start=$SECONDS
 while IFS=$'\t' read -r dir spec cfg expect expect_states flags _note; do
   [[ -z "${dir}" || "${dir}" == \#* ]] && continue
+  [[ -n "${FORMAL_CHECK_FILTER:-}" && "$dir" != "$FORMAL_CHECK_FILTER" ]] && continue
   [[ "$flags" == "-" ]] && flags=""
   start=$SECONDS
   # shellcheck disable=SC2086  # flags is a deliberately word-split list
