@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 from anthropic.types.beta import SkillListResponse
 from anthropic.types.beta.skills import VersionCreateResponse
 from daimon.core.defaults.metadata import tenant_scoped_display_title
@@ -452,7 +453,8 @@ def _seeded_router(seeded_canonical: str) -> tuple[MARouter, list[str]]:
     return router, writes
 
 
-async def test_sync_matches_a_repo_copy_of_the_seeded_skill(tmp_path: Path) -> None:
+@pytest.mark.parametrize("is_admin", [True, False])
+async def test_sync_matches_a_repo_copy_of_the_seeded_skill(tmp_path: Path, is_admin: bool) -> None:
     """A repo vendoring the default unchanged (cnn-agent's `pymc-artifact-style`)
     is already in the library: SKIPPED with the seeded id, so the caller attaches it.
 
@@ -468,7 +470,7 @@ async def test_sync_matches_a_repo_copy_of_the_seeded_skill(tmp_path: Path) -> N
         [seeded],
         tenant_id=_TENANT_A,
         seeded_skills={"eda": _seeded_row(seeded, anthropic_id="sk_eda")},
-        is_admin=True,
+        is_admin=is_admin,
     )
 
     assert writes == [], "the seeded skill is never written by an import"
@@ -478,7 +480,10 @@ async def test_sync_matches_a_repo_copy_of_the_seeded_skill(tmp_path: Path) -> N
     assert summarize_failed_imports(outcomes) is None, "nothing is reported as not imported"
 
 
-async def test_sync_refuses_a_changed_copy_of_a_seeded_skill(tmp_path: Path) -> None:
+@pytest.mark.parametrize("is_admin", [True, False])
+async def test_sync_refuses_a_changed_copy_of_a_seeded_skill(
+    tmp_path: Path, is_admin: bool
+) -> None:
     """A same-named import with different content must not push a version onto
     the seeded skill.
 
@@ -497,7 +502,7 @@ async def test_sync_refuses_a_changed_copy_of_a_seeded_skill(tmp_path: Path) -> 
         [seeded, other],
         tenant_id=_TENANT_A,
         seeded_skills={"eda": _seeded_row(seeded, anthropic_id="sk_eda", content_hash="old")},
-        is_admin=True,
+        is_admin=is_admin,
     )
 
     assert writes == [], "no version may be pushed onto the seeded skill"
@@ -526,6 +531,8 @@ async def test_sync_refuses_a_seeded_match_on_another_skill_id(tmp_path: Path) -
 
     assert writes == [], "nothing is written"
     assert outcomes[0].action is Action.FAILED, "an unvouched skill is not matched"
+    assert "defaults apply" in (outcomes[0].error or ""), "it says how to repair the default"
+    assert "differs" not in (outcomes[0].refusal or ""), "the copy is not blamed"
     assert library_skill_ids(outcomes) == [], "nothing attaches"
 
 

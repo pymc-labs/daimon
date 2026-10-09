@@ -213,6 +213,24 @@ async def _match_seeded(
         return ResourceOutcome(
             kind="skill", name=name, action=Action.SKIPPED, anthropic_id=ma_match.id
         )
+    if ma_match is None or ma_match.id != seeded.anthropic_id:
+        # The content may well match; the default itself is missing or was
+        # recreated here, so the fingerprint cannot vouch for it.
+        _log.warning("sync.seeded_skill_unverified", name=name)
+        return ResourceOutcome(
+            kind="skill",
+            name=name,
+            action=Action.FAILED,
+            error=(
+                f"the default skill {name!r} is missing or out of date on this deployment, "
+                "so an import cannot be matched against it. Run `daimon defaults apply`, "
+                "then re-sync."
+            ),
+            refusal=(
+                f"`{name}` is a default skill that this server has not finished setting up. "
+                "Ask an operator to re-apply the defaults, then ask again to import."
+            ),
+        )
     _log.warning("sync.seeded_skill_refused", name=name)
     return ResourceOutcome(
         kind="skill",
