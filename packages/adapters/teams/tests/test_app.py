@@ -34,6 +34,7 @@ from daimon.core.turn.admission import AdmissionDenied, ExternalFinding
 from daimon.core.turn.errors import AdmissionDenialReason
 from daimon.core.turn.notices import admission_refusal_text
 from daimon.core.turn.outcomes import drain_outcomes
+from daimon.core.turn.slots import holding, wait_for_slot
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from microsoft_teams.api import MessageActivity
@@ -248,11 +249,56 @@ async def _outcomes(db_factory: async_sessionmaker[AsyncSession]) -> list[Outcom
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
-async def test_the_tenant_cap_sheds_a_new_thread(
+async def test_over_the_tenant_cap_a_new_thread_waits_for_a_slot(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     sender = FakeSender()
     teams = _app(db_session_factory, sender, cap=1)
+    started, release = asyncio.Event(), asyncio.Event()
+    ran: list[str] = []
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        # Stands in for _run_turn: its card is up, now it waits for a slot.
+        assert (
+            await wait_for_slot(
+                asyncio.Event(), sessionmaker=db_session_factory, tenant_id=tenant_id
+            )
+            == "started"
+        )
+        ran.append(inbound.conversation_id)
+        started.set()
+        await release.wait()
+
+    with (
+        patch.object(TeamsApp, "_run_turn", _turn),
+        patch("daimon.core.turn.slots.is_over_balance", AsyncMock(return_value=False)),
+    ):
+        first = asyncio.create_task(teams._orchestrate(make_inbound(), TENANT))
+        async with asyncio.timeout(5):
+            await started.wait()
+        second = asyncio.create_task(
+            teams._orchestrate(make_inbound(conversation="a:conversation-2"), TENANT)
+        )
+        async with asyncio.timeout(5):
+            while not teams.turn_queue.depth(TENANT):
+                await asyncio.sleep(0.01)
+        assert len(ran) == 1, "the second waits"
+        release.set()
+        async with asyncio.timeout(5):
+            await asyncio.gather(first, second)
+
+    assert ran == [CONVERSATION_ID, "a:conversation-2"]
+    assert sender.sent == [], "no capacity notice: the queue is backstage"
+    assert teams.turn_queue.in_flight() == 0
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_full_queue_at_the_tenant_cap_sheds_a_new_thread(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender, cap=1)
+    teams.turn_queue.max_queued_per_tenant = 0
     started, release = asyncio.Event(), asyncio.Event()
 
     async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
@@ -283,6 +329,7 @@ async def test_a_tenant_turn_cap_override_beats_the_deployment_cap(
         await set_turn_cap(session, tenant_id=TENANT, cap=1)
     sender = FakeSender()
     teams = _app(db_session_factory, sender, cap=3)
+    teams.turn_queue.max_queued_per_tenant = 0  # refuse at the cap, so the cap shows
     started, release = asyncio.Event(), asyncio.Event()
 
     async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
@@ -644,3 +691,66 @@ async def test_an_unmentioned_external_reply_is_judged_only_inside_an_isolated_c
     assert outside is None, "admission would refuse them: nothing they wrote is judged"
     assert inside is not None and inside.is_external, "batched as classified"
     assert len(externals.asked) == 2, "classified inside admitted, after the cheap checks"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+@pytest.mark.parametrize(
+    "outcome", ["starts-on-free-slot", "stopped-while-queued", "balance-ran-out-while-queued"]
+)
+async def test_a_queued_turn_posts_its_card_then_waits_behind_it(
+    outcome: str,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    stop = outcome == "stopped-while-queued"
+    depleted = outcome == "balance-ran-out-while-queued"
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender, cap=1)
+    held = teams.turn_queue.claim(TENANT)  # the tenant's one slot is taken
+    ticket = teams.turn_queue.admit(TENANT, cap=1)
+    assert ticket is not None and ticket.queued
+
+    async def _run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
+        state = TurnState(content=[TextBlock(kind="text", text="ok")])
+        await lifecycle.on_terminal_success(state)
+        return state
+
+    async def turn() -> None:
+        with holding(ticket):
+            await teams._run_turn(make_inbound(), TENANT)
+
+    run = AsyncMock(side_effect=_run_turn)
+    with (
+        patched_admission(),
+        patch("daimon.core.turn.run.run_turn", run),
+        # Admission passed before the wait; the re-check after it decides.
+        patch("daimon.core.turn.slots.is_over_balance", AsyncMock(return_value=depleted)),
+    ):
+        task = asyncio.create_task(turn())
+        async with asyncio.timeout(5):
+            while not teams._cancel_registry:
+                await asyncio.sleep(0.01)
+        card = sender.activities[0].model_dump_json()
+        assert "Working on it" in card
+        assert "slot" not in card.lower() and "queue" not in card.lower()
+        await asyncio.sleep(0.05)
+        run.assert_not_called()
+        if stop:
+            ((cancel, _author),) = teams._cancel_registry.values()
+            cancel.set()
+            async with asyncio.timeout(5):
+                await task
+            held.release()
+            await asyncio.sleep(0.05)
+            run.assert_not_called()
+            assert "Stopped." in sender.activities[-1].model_dump_json()
+        else:
+            held.release()
+            async with asyncio.timeout(5):
+                await task
+            if depleted:
+                run.assert_not_called()
+                assert "credit is depleted" in sender.activities[-1].model_dump_json()
+            else:
+                run.assert_awaited_once()
+    assert await _open_intents(db_session_factory) == [], "the card's intent is retired"
+    assert teams.turn_queue.in_flight() == 0 and teams.turn_queue.depth() == 0

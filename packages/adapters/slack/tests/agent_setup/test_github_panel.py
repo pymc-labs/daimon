@@ -31,6 +31,7 @@ from daimon.adapters.slack.agent_setup.state import (
     decode_panel_metadata,
     encode_panel_metadata,
 )
+from daimon.core.github_connect_cards import build_connect_card
 from daimon.core.github_panel import GrantsPanel, RepoChoice
 from daimon.core.stores.github_access import AuthorizedRepo
 from daimon.core.stores.github_access_requests import AccessRequest
@@ -112,28 +113,44 @@ def test_slack_waiting_review_hides_unconnected_repo_name() -> None:
 
 
 @pytest.mark.asyncio
-async def test_slack_connect_link_in_dm_has_private_actions() -> None:
+async def test_slack_connect_link_uses_ephemeral_actions() -> None:
     client = MagicMock()
     client.chat_postMessage = AsyncMock()
     client.chat_postEphemeral = AsyncMock()
-    await send_link(client, channel_id="D123", user_id="U123", url="https://example.test/link")
-    client.chat_postMessage.assert_awaited_once()
-    client.chat_postEphemeral.assert_not_awaited()
-    posted = client.chat_postMessage.await_args.kwargs
-    assert posted["channel"] == "D123"
-    assert [block["type"] for block in posted["blocks"]] == [
-        "section",
-        "section",
-        "divider",
-        "actions",
+    await send_link(
+        client,
+        channel_id="C123",
+        thread_id="123.456",
+        user_id="U123",
+        url="https://example.test/link",
+        app_root_url="https://mcp.test",
+    )
+    client.chat_postMessage.assert_not_awaited()
+    client.chat_postEphemeral.assert_awaited_once()
+    posted = client.chat_postEphemeral.await_args.kwargs
+    assert posted["channel"] == "C123"
+    assert posted["thread_ts"] == "123.456"
+    assert posted["text"] == "Connect GitHub"
+    assert "https://example.test/link" not in posted["text"]
+    attachment = posted["attachments"][0]
+    assert attachment["color"] == "#0C1F40"
+    assert attachment["blocks"][0]["elements"][0]["image_url"] == (
+        "https://mcp.test/web/daimon-face.png"
+    )
+    assert attachment["blocks"][2]["accessory"]["image_url"] == (
+        "https://mcp.test/web/github-mark.png"
+    )
+    assert [block["type"] for block in attachment["blocks"]] == [
         "context",
+        "header",
+        "section",
+        "actions",
     ]
-    actions = next(block for block in posted["blocks"] if block["type"] == "actions")
-    assert [button["text"]["text"] for button in actions["elements"]] == [
-        "Open GitHub ↗",
-        "Copy link",
-        "◀ Back",
+    actions = next(block for block in attachment["blocks"] if block["type"] == "actions")
+    assert [button["text"] for button in actions["elements"]] == [
+        {"type": "plain_text", "text": "🔗 Connect GitHub", "emoji": True}
     ]
+    assert actions["elements"][0]["url"] == "https://example.test/link"
 
 
 def test_slack_grants_view_shows_staged_and_live_values() -> None:
@@ -230,7 +247,7 @@ def test_slack_github_home_and_confirmations() -> None:
         meta, connected_count=2, pending_url="https://example.invalid/connect"
     )
     pending_text = str(pending["blocks"])
-    assert "Continue" in pending_text and "Start over" in pending_text
+    assert "Connect GitHub" in pending_text and "Start over" in pending_text
     assert "Choose agent" not in pending_text
     no_admin = build_github_home_view(meta, connected_count=0, is_admin=False)
     assert "Workspace admins connect repos here" in str(no_admin["blocks"])
@@ -291,6 +308,27 @@ def test_slack_member_github_home_shows_only_personal_link() -> None:
         is_admin=True,
     )
     assert "Connect GitHub" in str(admin["blocks"])
+    branded = build_github_home_view(
+        PanelMetadata(team_id="T", channel_id="C", view="github_home"),
+        connected_count=0,
+        is_admin=True,
+        public_base_url="https://mcp.test",
+    )
+    assert branded["blocks"][0]["elements"][0]["image_url"] == (
+        "https://mcp.test/web/daimon-face.png"
+    )
+    assert branded["blocks"][1]["text"]["text"] == "Connect GitHub"
+    assert branded["blocks"][2]["accessory"]["image_url"] == (
+        "https://mcp.test/web/github-mark.png"
+    )
+    connect = next(
+        element
+        for block in admin["blocks"]
+        if block["type"] == "actions"
+        for element in block["elements"]
+        if element["action_id"] == "agent_setup__github_start"
+    )
+    assert connect["text"] == {"type": "plain_text", "text": "🔗 Connect GitHub", "emoji": True}
 
 
 @pytest.mark.asyncio
@@ -369,8 +407,23 @@ def test_slack_add_repos_keeps_selection_on_one_screen() -> None:
         for element in block["elements"]
         if element["type"] == "button"
     ]
-    assert "Connect GitHub" in empty_actions
+    assert "🔗 Connect GitHub" in empty_actions
     assert "Add repos" not in empty_actions
+    branded_empty = build_add_view(
+        meta,
+        GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=False),
+        is_admin=True,
+        connect_card=build_connect_card(
+            agent_name="ResearchBot",
+            identity_enabled=True,
+            avatar_url="https://mcp.test/avatars/research.png",
+            public_base_url="https://mcp.test",
+        ),
+    )
+    assert branded_empty["blocks"][0]["elements"][0]["image_url"] == (
+        "https://mcp.test/avatars/research.png"
+    )
+    assert branded_empty["blocks"][1]["text"]["text"] == "Connect GitHub"
     saved_key = build_add_view(
         PanelMetadata(team_id="T", channel_id="C", view="github_add", agent_name="helper"),
         GrantsPanel(mode="legacy", repos=(), working_repo=None, has_pat=True, saved_state=True),

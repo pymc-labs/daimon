@@ -1,6 +1,8 @@
 """Opt-in /dm move command and private-message listener."""
 
+import asyncio
 import contextlib
+import uuid
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -32,6 +34,7 @@ from daimon.core.stores.direct_messages import dm_enabled, get_conversation, set
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -40,6 +43,8 @@ from discord.ext import commands
 
 log = structlog.get_logger(__name__)
 _CONVERSATION_TYPES = frozenset({discord.MessageType.default, discord.MessageType.reply})
+# DMs never had a per-tenant cap; only the process-wide cap bounds them.
+_DM_LANE_CAP = 1_000_000
 
 
 def _error_text(exc: Exception, fallback: str, *, settings: Settings) -> str:
@@ -194,13 +199,35 @@ class DirectMessageCog(commands.Cog):
             if not message.content.strip():
                 await message.channel.send("Send a text message to continue this conversation.")
                 return
-            if not self.bot.try_claim_global_turn():
+            # A DM has no card: over the cap it waits under the typing
+            # indicator. Only the process-wide cap applies, as before; a
+            # tenant's DMs share their own round-robin lane, apart from the
+            # server's per-tenant cap.
+            ticket = self.bot.turn_queue.admit(
+                uuid.uuid5(conversation.tenant_id, "dm"),
+                cap=_DM_LANE_CAP,
+                tenant_id=str(conversation.tenant_id),
+                lane="dm",
+                channel_id=str(message.channel.id),
+            )
+            if ticket is None:
+                log.info(
+                    "turn.skipped.global_concurrency_shed",
+                    tenant_id=str(conversation.tenant_id),
+                    path="dm",
+                    reason="queue_full",
+                )
                 await message.channel.send(
                     GLOBAL_CAP_NOTICE, allowed_mentions=discord.AllowedMentions.none()
                 )
                 return
             try:
                 async with message.channel.typing():
+                    if await ticket.wait(asyncio.Event()) != "started":
+                        await message.channel.send(
+                            QUEUE_TIMED_OUT_TEXT, allowed_mentions=discord.AllowedMentions.none()
+                        )
+                        return
                     answer = await reply_to_dm(
                         runtime.turn_deps,
                         platform="discord",
@@ -213,7 +240,7 @@ class DirectMessageCog(commands.Cog):
                         platform_role_ids=member_role_ids(member),
                     )
             finally:
-                self.bot.release_global_turn()
+                ticket.release()
             if answer is not None:
                 for start in range(0, len(answer), 1900):
                     await message.channel.send(

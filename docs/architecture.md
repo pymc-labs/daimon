@@ -199,7 +199,10 @@ the current picture remains in use until it is stored. Slack is expected to keep
 answer; each new turn post is recorded under the turn's agent and card intent.
 
 Discord starts a turn on a direct bot mention or a reply to a recorded bot or
-application-owned webhook post in the same tenant and channel. The usual
+application-owned webhook post in the same tenant and channel. With agent
+identity off, the reply must be to a turn post the bot itself sent (the card or
+any chunk of the answer), so a reply to the second message of a long answer
+counts like a reply to the first, pinged or not. The usual
 admission path follows either trigger. Agent turn posts use a pool of up to
 three application-owned webhooks per text or forum channel, with each thread
 assigned by its ID; built-in Daimon posts use the bot. If a webhook is
@@ -229,18 +232,51 @@ verdict runs an ordinary turn through `admit()` as the burst's newest author,
 with every notice withheld. Teams also counts a quote of the bot's message as
 a mention.
 
-Discord checks its per-guild in-flight limit before the optional process-wide
-turn limit (`DAIMON_DISCORD__MAX_CONCURRENT_TURNS`). Guild mentions, unprompted
-replies and DMs count against it; an excess requested turn gets a retry notice.
-Unprompted replies follow their existing silent-refusal policy. Continuation
-wakes retain their existing admission path. The limit is unset by default and
-applies only to this Discord process.
+Discord, Slack and Teams limit simultaneous chat turns per tenant, and Discord
+also has an optional process-wide limit (`DAIMON_DISCORD__MAX_CONCURRENT_TURNS`,
+unset by default). `daimon tenants turn-cap PLATFORM WORKSPACE_ID N` stores a
+tenant override; `default` clears it and restores the adapter's deployment
+setting (3 by default). The limits cover Discord mentions, DMs, thread
+participation and wizard submits, Slack mentions, and Teams messages, wakes and
+thread participation. They do not limit MCP or routine turns, and they count
+per adapter process.
 
-Discord, Slack and Teams also limit simultaneous chat turns per tenant before admission.
-`daimon tenants turn-cap PLATFORM WORKSPACE_ID N` stores a tenant override;
-`default` clears it and restores the adapter's deployment setting (3 by default).
-The check covers Discord mentions, thread participation and wizard submits,
-Slack mentions, and Teams messages, wakes and thread participation. It does not limit MCP or routine turns.
+Each adapter process keeps its slots in one `TurnQueue`
+(`packages/core/daimon/core/turn_queue.py`). A requested turn over either limit
+is not refused: it joins its tenant's queue (`DAIMON_TURN_QUEUE__*`), posts the
+ordinary "Working on it…" card with Stop, and waits after the card and before
+`bind_session` (`wait_for_slot` in `packages/core/daimon/core/turn/slots.py`).
+Nothing on the card says it is queued. A released slot goes, in the same
+synchronous span, to the first tenant in round-robin order that has a waiting
+turn and a free tenant slot; within a tenant the queue is FIFO. A slot covers
+one turn: it is returned when the turn ends (`release_turn_slot`), and each
+follow-up drained in the same thread takes a fresh ticket through admission,
+so a busy thread queues behind other tenants instead of keeping its slot.
+Stop removes a waiting turn and ends its card as Stopped. After `max_wait_s`
+(300 s) the turn leaves the queue, whether its own timer or the dispatcher
+notices first, and its card ends with "Something went wrong. Mention me to
+try again." A turn that waited runs the balance gate again once it has a
+slot, since `admit()` ran before the wait. The per-turn ceiling starts after
+the wait. A Discord wizard submit posts its card and card intent first, like a
+mention, and binds its session only once it holds the slot, so session
+preparation never runs outside the caps. A Teams continuation turn that never
+gets a slot raises `TurnNotStarted` to its dispatcher: a full queue or the max
+wait puts the row back to pending, and Stop settles it not delivered, never
+as delivered. Only a full queue (50 per tenant, 500 in total) refuses, with the plain
+capacity notice and the existing `turn.skipped.*concurrency_shed` logs, now
+with a `reason`. Discord DMs have no card and wait under the typing indicator;
+Slack DMs are not limited. Unprompted replies and Teams continuation wakes
+never queue: they take a free slot or keep their silent refusal or retry. The
+queue is in memory, so a restart drops it; queued turns' card intents are
+written before the wait, so the boot sweep retires their cards as "Stopped:
+Daimon restarted." like any orphan. `formal/turn_queue/` models it.
+
+Queue events: `turn.queue.enqueued`, `turn.queue.started` (`waited_ms`),
+`turn.queue.cancelled`, `turn.queue.timed_out` (`waited_ms`),
+`turn.queue.full` (`reason`) and `turn.queue.balance_depleted`. The
+`runtime.health` heartbeat carries `turn_queue` beside `turns_in_flight`: depth
+now (global and largest tenant) and the p50, p95 and max wait of the turns that
+started in that window.
 
 A channel with `writers: none` hears nothing from the agent, not even a
 refusal or an error. Each turn entry decides FIRST, before tenant liveness, provisioning or
@@ -814,7 +850,13 @@ per-MA-session-chained sweep of downloadable session files through
 `daimon.core.output_delivery`. It posts each file into the conversation thread
 before deleting its MA listing entry. Failed posts stay listed for a later
 sweep. Discord uses the guild's upload limit, skips oversize files with an
-in-thread notice, and checks the channel's writers before posting.
+in-thread notice, and checks the channel's writers before posting. A file
+Daimon already attached in the thread after the turn's card (the agent sent it
+itself), with the same name and size, is cleared from the listing without a
+second post. Once the sweep ends, the answer's summary line moves onto the
+turn's last post if that is a plain message the bot posted after the answer,
+so it always closes the turn; the 👍 👎 🙋 emoji move with it. A long answer carries it on its last chunk on
+both platforms.
 
 Reconnection is two loops for two failure modes. The outer loop handles
 eventless cycles — the server closes cleanly roughly every ten minutes by
@@ -880,8 +922,8 @@ not recognise is `unknown`. Each `AdmissionDenied` reason with a member of its
 own (balance, cap, channel budget, writers none, agent rule, own agents only) maps to it, and
 `denial_termination_reason` gives the same member to a gate that decides with
 `authorize` instead of raising; the rest are `admission_denied`. Two members have no exception behind them and are
-set outside the mapper: `admission_concurrency_shed` by callers when
-`should_admit_turn` refuses, and `recovery_failed` by `run_prepared_turn` on
+set outside the mapper: `admission_concurrency_shed` by callers when the
+turn queue is full or a queued turn passes its max wait, and `recovery_failed` by `run_prepared_turn` on
 the terminal hook when replacing a lost session raises (the exception it
 re-raises maps to `unknown`). A session MA reports terminated without any terminal
 event for this turn is `session_terminated`, never `completed`.
@@ -1153,10 +1195,11 @@ admission before any of this runs.
 ## Entry points that are not a chat message
 
 - **Agent setup picture controls** show the current agent picture in Details.
-  Admins can open a Slack upload form or a Discord file modal from Change;
-  Discord's attachment option remains a fallback. The upload path checks
-  platform file URLs, size, and image content before replacing the public
-  picture. Details keeps visibility and cache guidance off the main row.
+  Admins get **Use default**, which restores the generated face. Custom
+  uploads are turned off: a Change button, Slack upload form or Discord
+  `/agent-setup` picture option from before answers with the refusal and
+  writes nothing. Details keeps
+  visibility and cache guidance off the main row.
 
 - **`/here`** in Discord and Slack, and `here` in Teams (answered in the 1:1
   chat), reads routing and access policy, then shows a private card built from
@@ -1191,12 +1234,23 @@ admission before any of this runs.
   Discord `/github home` and Slack `/github`, plus `/agent-setup` on both,
   expose connected repos, agent grants, personal links, waiting requests, and
   disconnects.
+  Connect links appear as buttons where the person asked. Discord slash
+  commands answer ephemerally; a conversational mention posts a requester-bound
+  button in the thread and mints the single-use invitation only when that
+  requester clicks it. The click reveals the URL ephemerally. Slack slash
+  commands and mentions use `chat.postEphemeral` in the originating channel or
+  thread. Neither platform sends a GitHub setup DM. After confirmation,
+  `requested_work` resumes the calling agent's task in its original thread.
+  A bare connect posts one confirmation: Slack uses `chat.postEphemeral`, while
+  Discord uses an interaction follow-up until it expires and then a count-only
+  line in the origin thread or channel. Failed notices back off and expire
+  after eight attempts or 24 hours.
   The connection page offers a searchable repo picker and confirms each repo
   against the signed-in GitHub account. The same browser can safely repeat a
   successful submission; a signed invitation receipt also handles concurrent
-  submissions. New installation repos queue private admin notices after the
-  UTC day closes. Confirmed installation removal cancels affected requests and
-  notifies known admins.
+  submissions. New installation repos appear in the GitHub setup panel after
+  the UTC day closes. Confirmed installation removal cancels affected requests
+  and offers an ephemeral reconnect button when an admin next opens setup.
 
 - **Scheduled routines** go through
   `packages/core/daimon/core/headless_runner.py`, which creates a session with

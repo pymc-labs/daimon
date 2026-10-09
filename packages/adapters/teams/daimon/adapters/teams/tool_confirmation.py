@@ -8,13 +8,13 @@ in-process, like the cancel registry: a restart ends the card and its turn toget
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from datetime import UTC
 
 import structlog
 from daimon.adapters.teams.card_actions import (
     button,
-    replace_card,
     submitted_fields,
     toast,
 )
@@ -33,7 +33,11 @@ from daimon.core.posted_controls.confirmation import (
     build_confirmation_card,
     confirmation_card_text,
 )
-from daimon.core.posted_controls.lifecycle import PostedConfirmations
+from daimon.core.posted_controls.lifecycle import (
+    PostedConfirmations,
+    edit_card_within,
+    queue_card_edit,
+)
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -57,6 +61,14 @@ log = structlog.get_logger(__name__)
 
 VERB = "tool_confirm"
 _ANSWERS: dict[str, ConfirmationAnswer] = {"approve": "approved", "deny": "denied"}
+#: Waits between attempts to send a card edit; the last value is unused.
+_CARD_SEND_RETRY_DELAYS_S: tuple[float, ...] = (1.0, 3.0, 0.0)
+#: The click's brief acknowledgement; the card itself updates through its queue.
+_ANSWER_TOASTS: dict[ConfirmationAnswer, str] = {
+    "approved": "Approved",
+    "denied": "Denied",
+    "expired": "Expired",
+}
 
 #: Most time a card edit may take.
 EDIT_TIMEOUT_S = 2.0
@@ -177,7 +189,8 @@ class TeamsConfirmationCards:
                 answered_posted = posted_cards[0]
 
                 async def retire_unsent() -> None:
-                    await answered_posted.answered_edit_done.wait()
+                    # Queued behind the Approved edit on the same card
+                    # (`edit_card_within` keeps per-card call order).
                     await self._edit(answered_posted, "stopped")
 
                 return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
@@ -207,21 +220,53 @@ class TeamsConfirmationCards:
             posted.prompt, state=answer, answered_by_platform_user_id=clicker
         )
         name = activity.from_.name
-        response = replace_card(confirmation_adaptive_card(card, posted.prompt, answered_by=name))
+        # The answered card goes through the card's edit queue, registered
+        # before this returns, rather than as the invoke response: a delayed
+        # response could otherwise land after a Stopped retire that followed.
+        queue_card_edit(
+            self._send_card(posted, card, answered_by=name),
+            card_key=self._card_key(posted),
+            failure_errors=TEAMS_SEND_ERRORS,
+            failed_event="teams.tool_confirmation.edit_failed",
+        )
         posted.answered_edit_done.set()
-        return response
+        return toast(_ANSWER_TOASTS[answer])
+
+    @staticmethod
+    def _card_key(posted: _PostedCard) -> object:
+        return ("teams", posted.conversation_id, posted.message_id)
+
+    def _send_card(
+        self, posted: _PostedCard, card: ConfirmationCard, *, answered_by: str | None = None
+    ) -> Awaitable[object]:
+        edit = MessageActivityInput(id=posted.message_id).add_card(
+            confirmation_adaptive_card(card, posted.prompt, answered_by=answered_by)
+        )
+
+        async def _send_with_retry() -> object:
+            # The click was acknowledged and its token claimed, so a failed
+            # card edit could never be repaired by another click: retry a
+            # transient failure a few times before giving up (and logging).
+            for attempt, delay in enumerate(_CARD_SEND_RETRY_DELAYS_S):
+                try:
+                    return await self._sender.send(
+                        posted.conversation_id, edit, service_url=posted.service_url
+                    )
+                except TEAMS_SEND_ERRORS:
+                    if attempt == len(_CARD_SEND_RETRY_DELAYS_S) - 1:
+                        raise
+                    await asyncio.sleep(delay)
+            raise AssertionError("unreachable")
+
+        return _send_with_retry()
 
     async def _edit(self, posted: _PostedCard, state: ConfirmationCardState) -> None:
         card = build_confirmation_card(posted.prompt, state=state)
-        edit = MessageActivityInput(id=posted.message_id).add_card(
-            confirmation_adaptive_card(card, posted.prompt)
+        # Bounded for the turn, finished in the background (`edit_card_within`).
+        await edit_card_within(
+            self._send_card(posted, card),
+            card_key=self._card_key(posted),
+            budget_s=EDIT_TIMEOUT_S,
+            failure_errors=TEAMS_SEND_ERRORS,
+            failed_event="teams.tool_confirmation.edit_failed",
         )
-        try:
-            # Bounded: this also runs while a turn is being stopped or timed
-            # out, and a slow Teams must not hold that up.
-            await asyncio.wait_for(
-                self._sender.send(posted.conversation_id, edit, service_url=posted.service_url),
-                EDIT_TIMEOUT_S,
-            )
-        except TEAMS_SEND_ERRORS as err:
-            log.warning("teams.tool_confirmation.edit_failed", error=str(err) or type(err).__name__)

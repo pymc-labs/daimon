@@ -91,8 +91,7 @@ async def main() -> None:
             # through the same dispatch a form submission uses.
             app.start_wake_poller()
             app.start_github_request_expiry_poller()
-            app.start_github_new_repo_poller()
-            app.start_github_removal_poller()
+            app.start_connect_notice_poller()
             app.start_delivery_poller()
             # Boot-time reconcile sweep, in the background so a slow provider
             # cannot delay mention handling. A crash is logged, never raised —
@@ -122,7 +121,7 @@ async def main() -> None:
                 "slack",
                 cast(AsyncEngine, runtime.sessionmaker.kw["bind"]),
                 settings.observability.health_interval_s,
-                lambda: (sum(app._inflight.values()), max(app._inflight.values(), default=0)),  # pyright: ignore[reportPrivateUsage]
+                lambda: (app.turn_queue.in_flight(), app.turn_queue.in_flight_max()),
             ):
                 await stop.wait()  # released by _shutdown after drain completes
         finally:

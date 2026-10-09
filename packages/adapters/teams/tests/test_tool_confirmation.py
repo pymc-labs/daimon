@@ -28,7 +28,7 @@ from daimon.core.posted_controls.confirmation import (
     build_confirmation_card,
 )
 from daimon.core.tool_safety import ToolCall
-from microsoft_teams.api import AdaptiveCardActionCardResponse, AdaptiveCardInvokeActivity
+from microsoft_teams.api import AdaptiveCardInvokeActivity
 
 from .conftest import (
     AAD_OBJECT_ID,
@@ -123,8 +123,14 @@ async def test_only_the_requesters_click_answers_and_replaces_the_card(
 
     result = await asyncio.wait_for(waiting, timeout=1)
     assert (result.answer if isinstance(result, ApprovedConfirmation) else result) == answer
-    assert isinstance(answered, AdaptiveCardActionCardResponse)
-    body = answered.value.model_dump_json(by_alias=True)
+    assert answered.value == headline, "the click is acknowledged briefly"
+    # The answered card goes through the card's edit queue, not the invoke
+    # response, so a later Stopped retire can never be overwritten by it.
+    for _ in range(50):
+        if len(sender.sent) >= 2:
+            break
+        await asyncio.sleep(0)
+    body = _json(sender, len(sender.sent) - 1)
     assert headline in body, "the card shows the answer"
     assert f"by {USER_NAME}" in body, "an answer names who"
     assert "Action.Execute" not in body, "an answered card has no live buttons"
@@ -205,3 +211,51 @@ def test_upload_card_has_expander_and_state_color() -> None:
     ).model_dump_json(by_alias=True)
     assert "emphasis" in denied and "Action.Execute" not in denied
     assert " · " not in denied
+
+
+async def test_a_stop_after_approve_lands_after_the_approved_card() -> None:
+    """Re-review of #504: the Approved card returned as the invoke response
+    could land after a Stopped retire that followed it."""
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    waiting, token = await _post(cards, sender)
+    await cards.on_action(_click(token, "approve", AAD_OBJECT_ID.upper()))
+    result = await asyncio.wait_for(waiting, timeout=1)
+    assert isinstance(result, ApprovedConfirmation)
+    await result.retire_unsent()
+    for _ in range(50):
+        if len(sender.sent) >= 3:
+            break
+        await asyncio.sleep(0)
+    approved, stopped = _json(sender, 1), _json(sender, 2)
+    assert "Approved" in approved
+    assert "Stopped" in stopped, "Stopped is the last state the card shows"
+
+
+async def test_a_transient_send_failure_on_the_answered_card_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final review of #504: the token is claimed once the click is answered,
+    so a failed card edit could never be repaired; it is retried instead."""
+    from daimon.adapters.teams import tool_confirmation
+
+    monkeypatch.setattr(tool_confirmation, "_CARD_SEND_RETRY_DELAYS_S", (0.0, 0.0, 0.0))
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    waiting, token = await _post(cards, sender)
+    real_send = sender.send
+    failures = [ValueError("transient")]
+
+    async def flaky_send(*args: object, **kwargs: object) -> object:
+        if failures:
+            raise failures.pop()
+        return await real_send(*args, **kwargs)
+
+    monkeypatch.setattr(sender, "send", flaky_send)
+    await cards.on_action(_click(token, "deny", AAD_OBJECT_ID.upper()))
+    assert await asyncio.wait_for(waiting, timeout=1) == "denied"
+    for _ in range(50):
+        if len(sender.sent) >= 2:
+            break
+        await asyncio.sleep(0)
+    assert "Denied" in _json(sender, len(sender.sent) - 1), "the retry landed the answer"

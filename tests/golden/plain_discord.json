@@ -493,16 +493,9 @@
           "embeds": [
             {
               "color": 5763719,
-              "fields": [
-                {
-                  "inline": false,
-                  "name": "Details",
-                  "value": "Time: 0s\nCost: $0.001\nTokens: 100 in / 50 out\nBalance: $100.00 left"
-                }
-              ],
               "flags": 0,
               "footer": {
-                "text": "test-agent"
+                "text": "test-agent\u2003\u20030s\u2003\u2003$0.001 used\u2003\u2003$100.00 left"
               },
               "type": "rich"
             }

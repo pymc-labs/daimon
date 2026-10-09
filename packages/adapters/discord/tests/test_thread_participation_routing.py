@@ -271,7 +271,7 @@ async def test_a_burst_is_judged_once_and_the_last_message_is_the_trigger(
     assert THREAD_ID not in bot._processing, (  # pyright: ignore[reportPrivateUsage]
         "the in-flight slot is released when the turn ends"
     )
-    assert bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
+    assert bot.turn_queue.in_flight() == 0
     assert bot._participation_pending == {}, (  # pyright: ignore[reportPrivateUsage]
         "a judged batch is gone"
     )
@@ -285,16 +285,17 @@ async def test_global_cap_sheds_unprompted_turn_after_classifier(
     await _follow_thread(db_session_factory, tenant_id)
     bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
     assert bot.runtime.settings.discord is not None
-    bot.runtime.settings.discord.max_concurrent_turns = 1
-    bot._global_inflight = 1  # pyright: ignore[reportPrivateUsage]
+    bot.turn_queue.global_cap = 1
+    bot.turn_queue.claim(uuid.uuid4())
     turns = _stub_turn(bot)
 
     await bot.on_message(_thread_message(_make_thread(), content="a question?"))
     await _drain_timer(bot)
 
     assert len(classifier.calls) == 1
-    assert turns == []
-    assert bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+    assert turns == [], "an unasked-for turn never queues"
+    assert bot.turn_queue.in_flight() == 1
+    assert bot.turn_queue.depth() == 0
 
 
 async def test_classifier_silence_runs_no_turn(
@@ -409,7 +410,7 @@ async def test_concurrency_shed_is_silent(
     async with db_session_factory() as session, session.begin():
         await set_turn_cap(session, tenant_id=tenant_id, cap=1)
     bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.ON, cap=100))
-    bot._inflight[tenant_id] = 1  # pyright: ignore[reportPrivateUsage]
+    bot.turn_queue.claim(tenant_id)
     turns = _stub_turn(bot)
     message = _thread_message(_make_thread(), content="anyone?")
 
@@ -417,6 +418,7 @@ async def test_concurrency_shed_is_silent(
     await _drain_timer(bot)
 
     assert turns == [], "the tenant override sheds the unasked-for turn"
+    assert bot.turn_queue.depth() == 0, "an unasked-for turn never queues"
     message.channel.send.assert_not_called()
 
 

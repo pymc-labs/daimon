@@ -18,7 +18,7 @@ from daimon.adapters.discord.bot import GLOBAL_CAP_NOTICE, DaimonBot
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import McpSettings
+from daimon.core.config import McpSettings, TurnQueueSettings
 from daimon.core.direct_messages import reply_to_dm, start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
@@ -37,6 +37,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.admission import AdmissionDenied, admit
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn_queue import TurnQueue
 from daimon.testing import build_turn_router
 from daimon.testing.factories import make_ledger_entry, make_tenant
 from daimon.testing.ma import build_fake_anthropic, combine_handlers, make_fake_memory_store_handler
@@ -390,7 +391,7 @@ async def test_discord_refuses_a_departed_member_before_running_a_dm(
     message.channel.send.assert_awaited_once()
 
 
-async def test_discord_dm_counts_global_slot_and_releases_on_success_and_error(
+async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_error(
     db_session, db_session_factory
 ):
     tenant, deps, admission, *_ = await _setup(db_session, db_session_factory)
@@ -399,6 +400,7 @@ async def test_discord_dm_counts_global_slot_and_releases_on_success_and_error(
     runtime.sessionmaker = db_session_factory
     runtime.turn_deps = deps
     runtime.settings.discord.max_concurrent_turns = 1
+    runtime.settings.turn_queue = TurnQueueSettings()
     bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
     guild = MagicMock(spec=discord.Guild)
     member = MagicMock(spec=discord.Member)
@@ -428,10 +430,14 @@ async def test_discord_dm_counts_global_slot_and_releases_on_success_and_error(
     entered = asyncio.Event()
     release = asyncio.Event()
 
+    replies: list[str] = []
+
     async def slow_reply(*_args, **_kwargs):
-        assert bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+        assert bot.turn_queue.in_flight() == 1
+        replies.append("reply")
         entered.set()
-        await release.wait()
+        if len(replies) == 1:
+            await release.wait()
         return "answer"
 
     with (
@@ -442,14 +448,19 @@ async def test_discord_dm_counts_global_slot_and_releases_on_success_and_error(
     ):
         first = asyncio.create_task(DirectMessageCog(bot).on_message(message(1)))
         await entered.wait()
+        second = asyncio.create_task(DirectMessageCog(bot).on_message(message(2)))
         try:
-            await DirectMessageCog(bot).on_message(message(2))
-            assert bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
-            assert any(call.args[0] == GLOBAL_CAP_NOTICE for call in channel.send.await_args_list)
+            async with asyncio.timeout(5):
+                while not bot.turn_queue.depth():  # over the cap the second DM waits
+                    await asyncio.sleep(0.01)
+            assert bot.turn_queue.in_flight() == 1
+            assert replies == ["reply"]
         finally:
             release.set()
-            await first
-    assert bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
+            await asyncio.gather(first, second)
+    assert replies == ["reply", "reply"]
+    assert not any(call.args[0] == GLOBAL_CAP_NOTICE for call in channel.send.await_args_list)
+    assert bot.turn_queue.in_flight() == 0
 
     with (
         patch.object(bot, "get_guild", return_value=guild),
@@ -459,7 +470,7 @@ async def test_discord_dm_counts_global_slot_and_releases_on_success_and_error(
         ),
     ):
         await DirectMessageCog(bot).on_message(message(3))
-    assert bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
+    assert bot.turn_queue.in_flight() == 0
 
 
 @pytest.mark.parametrize("denied", [False, True])
@@ -477,6 +488,7 @@ async def test_discord_move_command_seeds_and_runs_a_real_private_turn(
     bot.user.id = 999
     bot.runtime.sessionmaker = db_session_factory
     bot.runtime.turn_deps = deps
+    bot.turn_queue = TurnQueue.from_settings(TurnQueueSettings(), platform="discord")
     guild = MagicMock(spec=discord.Guild)
     guild.id = 123
     guild.owner_id = 9999

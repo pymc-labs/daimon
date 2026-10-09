@@ -9,6 +9,7 @@ from daimon.core.turn.status_lines import (
     format_draft,
     format_duration,
     format_headline,
+    format_summary,
     format_tool_lines,
     has_running_tool,
 )
@@ -32,6 +33,20 @@ def _call(
         input=input or {},
         mcp_server_name=server,
         status=status,
+    )
+
+
+def test_format_summary_is_one_line_set_apart_by_space_alone() -> None:
+    line = format_summary(agent_name="Ada", elapsed_seconds=194, cost="$0.014", left="$24.93 left")
+    assert line == "Ada\u2003\u20033m 14s\u2003\u2003$0.014 used\u2003\u2003$24.93 left"
+    assert "\n" not in line and "·" not in line and "|" not in line, "one line, no separators"
+
+
+def test_format_summary_drops_missing_fields_with_their_gap() -> None:
+    assert format_summary(agent_name=None, elapsed_seconds=5, cost=None, left=None) == "5s"
+    assert (
+        format_summary(agent_name="", elapsed_seconds=5, cost=None, left="$1.00 left")
+        == "5s\u2003\u2003$1.00 left"
     )
 
 

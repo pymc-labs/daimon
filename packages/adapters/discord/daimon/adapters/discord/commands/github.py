@@ -1,9 +1,11 @@
 """Private /github connect link for one selected agent."""
 
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import anthropic
-from daimon.adapters.discord.agent_setup.github_home import load_home
+from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
+from daimon.adapters.discord.agent_setup.github_home import connect_button_view, load_home
 from daimon.adapters.discord.agent_setup.hydrate import load_roster_state
 from daimon.adapters.discord.checks import (
     is_guild_admin,
@@ -12,6 +14,8 @@ from daimon.adapters.discord.checks import (
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.ma_index import list_agents_by_tenant
+from daimon.core.github_connect_cards import resolve_connect_card
+from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
@@ -72,6 +76,16 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
             allowed_mentions=discord.AllowedMentions.none(),
         )
         home.attach_message(message)
+        if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+            from daimon.adapters.discord.agent_setup.github_new_repo import (
+                send_pending_notice as send_pending_new_repo_notice,
+            )
+            from daimon.adapters.discord.agent_setup.github_removal import (
+                send_pending_notice as send_pending_removal_notice,
+            )
+
+            await send_pending_new_repo_notice(runtime, interaction, tenant_id=tenant_id)
+            await send_pending_removal_notice(runtime, interaction, tenant_id=tenant_id)
 
     @app_commands.command(name="connect", description="Connect repos to one agent")
     @app_commands.describe(agent="Agent to connect")
@@ -143,8 +157,19 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     tenant_id=tenant_id,
                     requester_account_id=principal.account_id,
                     requester_label=str(interaction.user.id),
+                    requester_platform_user_id=str(interaction.user.id),
                     agent_id=agent_id,
                     agent_name=target_name,
+                    origin_platform="discord",
+                    origin_parent_channel_id=str(interaction.channel_id),
+                    origin_thread_id=str(interaction.channel_id),
+                    encrypted_origin_followup=encrypt_token(
+                        build_multifernet(
+                            tuple(key.get_secret_value() for key in runtime.settings.crypto.keys)
+                        ),
+                        f"{interaction.application_id}:{interaction.token}",
+                    ),
+                    origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
                 )
                 await append_event(
                     session,
@@ -158,16 +183,17 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     outcome="allowed",
                     reason="admin link minted",
                 )
+            card = await resolve_connect_card(
+                runtime.sessionmaker,
+                runtime.settings,
+                tenant_id=tenant_id,
+                platform="discord",
+                workspace_id=str(interaction.guild_id),
+                agent_name=target_name,
+            )
             await interaction.followup.send(
-                f"Opens GitHub to pick repos for {target_name}.\n"
-                "Nothing is shared until you confirm.",
-                view=discord.ui.View().add_item(
-                    discord.ui.Button(
-                        label="Connect GitHub",
-                        style=discord.ButtonStyle.link,
-                        url=f"{root}/oauth/github/connect/{token}",
-                    )
-                ),
+                embed=connect_embed(card),
+                view=connect_button_view(f"{root}/oauth/github/connect/{token}"),
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )

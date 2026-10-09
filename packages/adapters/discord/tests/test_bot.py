@@ -182,29 +182,80 @@ async def test_reply_to_recorded_agent_post_starts_turn(
 
 
 @pytest.mark.parametrize("excluded", [False, True])
-async def test_identity_off_or_excluded_ignores_reply_without_mention(
+@pytest.mark.parametrize(
+    ("source", "by_bot", "expected"),
+    [
+        ("turn", True, True),
+        ("tool", True, False),
+        ("auto_thread", True, False),
+        ("turn", False, False),
+    ],
+    ids=["answer-chunk", "tool-post", "thread", "not-the-bot"],
+)
+async def test_identity_off_reply_to_any_answer_message_starts_a_turn(
     db_session_factory: async_sessionmaker[AsyncSession],
     excluded: bool,
+    source: Literal["turn", "tool", "auto_thread"],
+    by_bot: bool,
+    expected: bool,
 ) -> None:
+    """Without identity a reply to ANY message of an answer counts, pinged or not.
+
+    Each chunk is a recorded `turn` post by the bot itself, so a reply to the
+    second chunk of a long answer starts a turn just like a reply to the first.
+    """
+    from daimon.core.defaults.provisioning import provision_tenant
+    from daimon.core.stores.agent_posts import record_post
+    from daimon.core.stores.turn_card_intents import create_turn_card_intent
+
+    guild_id = "801000099"
+    result = await provision_tenant(
+        db_session_factory,
+        platform="discord",
+        workspace_id=guild_id,
+        signup_credit=Decimal("5.00"),
+    )
+    async with db_session_factory() as session, session.begin():
+        intent = await create_turn_card_intent(
+            session,
+            tenant_id=result.tenant_id,
+            platform="discord",
+            thread_id="789",
+            turn_token=uuid.uuid4(),
+        )
+        await record_post(
+            session,
+            tenant_id=result.tenant_id,
+            platform="discord",
+            channel_id="789",
+            message_id="124",
+            agent_id=uuid.uuid4(),
+            source=source,
+            turn_card_intent_id=intent.id if source == "turn" else None,
+        )
     runtime = _make_runtime(db_session_factory)
     if excluded:
-        runtime.settings.agent_identity.excluded_discord_guild_ids = ["801000099"]
+        runtime.settings.agent_identity.excluded_discord_guild_ids = [guild_id]
     else:
         runtime.settings.agent_identity.enabled = False
     bot = make_bot(runtime)
     bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue,reportMethodAssign]
-    message = _make_channel_message(guild_id=801000099)
+    message = _make_channel_message(guild_id=int(guild_id))
     message.mentions = []
     message.webhook_id = None
-    message.reference = discord.MessageReference(message_id=123, channel_id=789, guild_id=801000099)
+    message.reference = discord.MessageReference(
+        message_id=124, channel_id=789, guild_id=int(guild_id)
+    )
     resolved = MagicMock(spec=discord.Message)
-    resolved.author.id = bot.user.id
-    resolved.webhook_id = None
+    resolved.author.id = bot.user.id if by_bot else 555
+    resolved.webhook_id = None if by_bot else 556
+    resolved.application_id = None
     message.reference.resolved = resolved
-    with patch("daimon.adapters.discord.bot.get_post", new_callable=AsyncMock) as get_post:
-        await bot.on_message(message)
-    get_post.assert_not_awaited()
-    bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+    await bot.on_message(message)
+    if expected:
+        bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+    else:
+        bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
 
 
 async def test_reply_to_unrecorded_post_does_not_start_turn(
@@ -278,21 +329,23 @@ class TestInflightCapRejection:
         async with db_session_factory() as session, session.begin():
             await set_turn_cap(session, tenant_id=result.tenant_id, cap=30)
         bot = make_bot(_make_runtime(db_session_factory, max_concurrent_turns_per_tenant=3))
-        bot._inflight[result.tenant_id] = 3  # pyright: ignore[reportPrivateUsage]
+        for _ in range(3):
+            bot.turn_queue.claim(result.tenant_id)
         bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue, reportMethodAssign]
 
         message = _make_channel_message(guild_id=int(guild_id))
         await bot.on_message(message)
 
         bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
-        assert bot._inflight[result.tenant_id] == 3  # pyright: ignore[reportPrivateUsage]
+        assert bot.turn_queue.in_flight(result.tenant_id) == 3
+        assert bot.turn_queue.depth() == 0, "the raised cap admits at once, no queueing"
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_on_message_rejects_over_cap_for_tenant(
+    async def test_on_message_refuses_when_the_tenant_queue_is_full(
         self,
         mock_resolve_config: AsyncMock,
         mock_create_session: AsyncMock,
@@ -302,10 +355,12 @@ class TestInflightCapRejection:
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        """4th turn for a saturated tenant rejected (SCALE-01).
+        """A turn for a saturated tenant whose queue is full is refused (SCALE-01).
 
-        Pre-seed inflight count at the cap; the next on_message call must send
-        the over-cap message and NOT start a turn.
+        Over the cap a turn queues; the plain refusal is only the last resort,
+        when the queue is full too. Pre-seed the slots at the cap with no
+        queue room; the next on_message must send the over-cap message and
+        NOT start a turn.
         """
         from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
@@ -323,8 +378,10 @@ class TestInflightCapRejection:
         runtime = _make_runtime(db_session_factory, max_concurrent_turns_per_tenant=cap)
         bot = make_bot(runtime)
 
-        # Saturate the tenant's in-flight slot.
-        bot._inflight[tenant_id] = cap  # pyright: ignore[reportPrivateUsage]
+        # Saturate the tenant's slots and leave no queue room.
+        bot.turn_queue.max_queued_per_tenant = 0
+        for _ in range(cap):
+            bot.turn_queue.claim(tenant_id)
 
         message = _make_channel_message(guild_id=int(guild_id))
 
@@ -395,8 +452,8 @@ class TestInflightDecrement:
 
         await bot.on_message(message)
 
-        # After the turn completes, tenant_id must be absent (or 0) from _inflight.
-        count_after = bot._inflight.get(tenant_id, 0)  # pyright: ignore[reportPrivateUsage]
+        # After the turn completes, the tenant holds no slot.
+        count_after = bot.turn_queue.in_flight(tenant_id)
         assert count_after == 0, (
             f"in-flight counter must be 0 after a successful turn; got {count_after}"
         )
@@ -451,7 +508,7 @@ class TestInflightDecrement:
 
         await bot.on_message(message)
 
-        count_after = bot._inflight.get(tenant_id, 0)  # pyright: ignore[reportPrivateUsage]
+        count_after = bot.turn_queue.in_flight(tenant_id)
         assert count_after == 0, (
             f"in-flight counter must be 0 after a failed turn; got {count_after}"
         )
@@ -509,8 +566,10 @@ class TestInflightIsolation:
         runtime = _make_runtime(db_session_factory, max_concurrent_turns_per_tenant=cap)
         bot = make_bot(runtime)
 
-        # Saturate only guild A.
-        bot._inflight[tenant_a] = cap  # pyright: ignore[reportPrivateUsage]
+        # Saturate only guild A, with no queue room.
+        bot.turn_queue.max_queued_per_tenant = 0
+        for _ in range(cap):
+            bot.turn_queue.claim(tenant_a)
 
         # Guild A message: must be rejected.
         message_a = _make_channel_message(guild_id=int(guild_a), channel_id=7010)
@@ -2104,6 +2163,22 @@ class TestCredentialButtonRegistration:
             "CredentialRequestButton's compiled template must be registered as a "
             "dynamic item after setup_hook runs"
         )
+
+    async def test_setup_hook_registers_the_stale_picture_change_button(
+        self, db_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
+
+        bot = make_bot(_make_runtime(db_session_factory))
+        bot.start_orphan_recovery = MagicMock()  # type: ignore[method-assign]  # the boot sweep is not under test
+
+        await bot.setup_hook()
+
+        dynamic_items = (
+            bot._connection._view_store._dynamic_items  # pyright: ignore[reportPrivateUsage]  # discord.py exposes no public accessor
+        )
+        template = StalePictureChangeButton.__discord_ui_compiled_template__
+        assert dynamic_items.get(template) is StalePictureChangeButton
 
 
 class TestGuildInstallLifecycle:

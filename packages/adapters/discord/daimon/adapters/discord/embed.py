@@ -32,8 +32,10 @@ from daimon.core.turn.card_state import (
 )
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.status_lines import (
+    SUMMARY_GAP,
     format_duration,
     format_headline,
+    format_summary,
 )
 
 EmbedEvent = _CardEvent
@@ -77,6 +79,8 @@ _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
 
 # Discord caps an embed description at 4,096 characters.
 _NOTICE_MAX_CHARS = 950
+# Discord caps an embed footer at 2,048 characters.
+_FOOTER_MAX_CHARS = 2048
 
 
 def _escape_markdown(text: str) -> str:
@@ -87,39 +91,33 @@ def _escape_markdown(text: str) -> str:
     return text
 
 
-def _fmt_tokens(n: int) -> str:
-    """Humanize a token count: <1000 verbatim, else one-decimal k with trailing
-    ``.0`` stripped (``320`` -> ``"320"``, ``1500`` -> ``"1.5k"``, ``12000`` -> ``"12k"``)."""
-    if n < 1000:
-        return str(n)
-    return f"{n / 1000:.1f}".rstrip("0").rstrip(".") + "k"
-
-
 def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
     """Render EmbedState into an EmbedData output shape.
 
     now: current monotonic time (pass time.monotonic() from caller).
-    Terminal phases put time, cost, tokens and balance in Details.
+    Terminal phases put name, time, cost and money left on one footer line.
     """
     color = _PHASE_COLOR[state.phase]
 
     if state.phase in _TERMINAL_PHASES:
         # Terminal turns drop the activity trail. The coloured edge signals
-        # outcome; metrics remain visible together in Details.
-        elapsed = int(now - state.started_at) if now is not None else 0
-        tokens = f"{_fmt_tokens(state.usage_in)} in / {_fmt_tokens(state.usage_out)} out"
-        parts = [f"Time: {elapsed}s"]
-        if state.cost_str is not None:
-            parts.append(f"Cost: {state.cost_str}")
-        parts.append(f"Tokens: {tokens}")
-        if state.balance_str is not None:
-            parts.append(f"Balance: {state.balance_str}")
+        # outcome; the footer carries the numbers on one quiet line.
+        elapsed = now - state.started_at if now is not None else 0
+        numbers = format_summary(
+            agent_name=None, elapsed_seconds=elapsed, cost=state.cost_str, left=state.balance_str
+        )
+        # The name gives way so the numbers always fit the footer.
+        room = _FOOTER_MAX_CHARS - len(numbers) - len(SUMMARY_GAP)
+        name = state.agent_name
+        if len(name) > room:
+            name = name[: room - 1] + "…"
+        footer = format_summary(
+            agent_name=name, elapsed_seconds=elapsed, cost=state.cost_str, left=state.balance_str
+        )
         description = ""
         title = ""
-        details = "\n".join(parts)
         notice_text: str | None = None
         if state.phase is TurnPhase.ERROR:
-            footer = state.agent_name
             title = "Something went wrong."
             description = "Mention me to try again."
             if state.notice:
@@ -135,15 +133,13 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
                     )
                 else:
                     notice_text = state.notice
-        else:
-            footer = state.agent_name
         return EmbedData(
             phase=state.phase,
             title=title,
             description=description,
             color=color,
             footer=footer,
-            details=details,
+            details=None,
             notice=notice_text,
         )
 

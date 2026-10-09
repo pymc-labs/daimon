@@ -234,7 +234,11 @@ def require_not_escalation_channel(
     support = runtime.settings.support
     protected = {
         value
-        for value in (support.escalation_channel_id, support.slack_escalation_channel_id)
+        for value in (
+            support.escalation_channel_id,
+            support.slack_escalation_channel_id,
+            support.teams_escalation_channel_id,
+        )
         if isinstance(value, str) and value
     }
     if channel_id in protected or (

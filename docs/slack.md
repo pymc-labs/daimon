@@ -152,9 +152,10 @@ Trust model notes for operators:
 
 `/agent-setup` opens the Agents roster, which pushes into either an agent's Details view or Who answers where. Setup conversations can be opened with **⚙️ Manage agents** from the Agents roster or from Details; creating a new agent lands on its Details view rather than a separate confirmation screen, and Details also offers **🧰 Use from your coding tools** to connect that agent over MCP. The channel gets a short launcher with a **Reply to Daimon** button; Daimon's welcome appears inside the shared thread. The panel also provides the reply button immediately after opening setup. Follow it, reply in that thread, and mention the bot. Daimon answers while the named agent is configured. Opening setup does not run a billed turn or change channel defaults. Each participant keeps a separate session.
 
-`/github connect` sends a workspace admin a private link for the agent answering
-in that channel. Use `/github connect AgentName` to choose another agent. The
-link lets the admin pick repos, then activates them for that agent. If the
+`/github connect` shows a workspace admin an ephemeral **Connect GitHub** button
+in the channel or thread where they asked. Use `/github connect AgentName` to
+choose another agent. The button opens the repo picker, then activates the
+selected repos for that agent. If the
 agent still has a saved GitHub key, `/github connect` asks the admin to contact
 the Daimon operator to switch it. Existing Slack installations need the
 `/github` command added from `docs/slack-app-manifest.yaml` and reinstallation.
@@ -163,12 +164,17 @@ Existing Slack apps must update **Event Subscriptions → Subscribe to bot event
 
 Workspace admins can click **🐙 GitHub** in `/agent-setup` or run `/github`.
 Anyone can run `/github` to see their personal GitHub link. Admins also see
-pending connection links and **Requests waiting**. The private link opens GitHub to
+pending connection links and **Requests waiting**. The ephemeral button opens GitHub to
 confirm repos. Each agent's Details view has
 **🐙 GitHub repos** to add connected repos to an agent. **Settings** changes or
 removes the agent's repos; **Manage connected repos** changes or disconnects
-them for the workspace. New repos appear in a private, grouped
-**Connect more repos** or **Not now** card after the UTC day closes. Add the
+them for the workspace. New repos appear in a grouped **Connect more repos**
+or **Not now** card when an admin opens GitHub setup after the UTC day closes.
+Installation removals appear as an ephemeral reconnect button when an admin opens setup.
+GitHub request cards use ephemeral replies in their originating thread; no
+GitHub connection or confirmation is sent as a DM. A bare connection confirms
+ephemerally in that channel or thread, while an interrupted task resumes in
+its original thread. Add the
 `/github` command from `docs/slack-app-manifest.yaml` and reinstall the Slack
 app before testing it.
 
@@ -256,11 +262,11 @@ once.
 
 - **Slack-only deployments** set the Slack channel. Leaving it unset hides the
   button: a request nobody reads is worse than none.
-- **Discord + Slack deployments** set both channels. Discord (and Teams) requests go
-  to `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`, Slack requests to the Slack channel; a
-  Slack request is never posted to another platform, and setting only the Discord
-  channel leaves Slack off. (Teams is the one cross-platform case: its `support`
-  command may post to a Discord channel, see [Teams](teams.md).)
+- **Multi-platform deployments** set one channel per platform. Discord requests go
+  to `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`, Teams requests to
+  `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`, Slack requests to the Slack channel;
+  no request is posted to another platform, and setting only another platform's
+  channel leaves Slack off.
 - **Several workspaces**: requests are posted with the requesting workspace's bot
   token unless `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that
   owns the channel; then every workspace's requests are posted with that one's token.
@@ -343,11 +349,9 @@ header until it is reinstalled.
 Restart the Slack and MCP services after reinstalling to clear any remembered
 missing-scope result immediately; otherwise the result expires within 15 minutes.
 
-Workspace admins can open `/agent-setup`, select an agent, then use the Picture
-row's **Change** button to upload one PNG, JPG, GIF, or WebP image (up to 2 MB).
-The image is center-cropped to a 256×256 PNG. **Reset** restores the assigned
-default Daimon face. The Picture control is hidden when identity is off. Each
-change gets a new URL. Pictures are public: anyone who sees a message can open
-its image, and platform caches can keep a copy after the picture changes.
-Uploaded files stay in the uploader's Slack files until
-that person removes them from Slack.
+Each agent shows its generated Daimon face. Custom picture uploads are turned
+off. An agent with a picture uploaded earlier keeps it until a workspace admin
+opens `/agent-setup`, selects the agent, and clicks **Use default** in the
+Picture row. The Picture row is hidden when identity is off. Each change gets a
+new URL. Pictures are public: anyone who sees a message can open its image, and
+platform caches can keep a copy after the picture changes.

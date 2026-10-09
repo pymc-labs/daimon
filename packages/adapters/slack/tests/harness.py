@@ -12,6 +12,7 @@ import httpx
 from anthropic import AsyncAnthropic
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.config import TurnQueueSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import build_turn_deps
@@ -80,6 +81,7 @@ def make_orchestrate_app(
     settings = MagicMock()
     settings.crypto.keys = (SecretStr(crypto_key),) if crypto_key is not None else ()
     settings.slack.max_concurrent_turns_per_tenant = max_concurrent_turns_per_tenant
+    settings.turn_queue = TurnQueueSettings()
     settings.slack.history_page_limit = 100
     settings.slack.bot_display_name = "daimon"
     settings.mcp.public_url = None

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Discord and Slack Connect GitHub buttons now show a link emoji.
+- GitHub connection links now appear in a branded card with the agent's face and readable name when agent identity is enabled. Generated names are shown as "this agent". The compact card is the default; a richer card is available with a one-line switch.
 - Report adapter-declared conformance gaps as typed PENDING results, retaining
   their reasons and blocking certification without hiding other probe failures.
 
@@ -63,13 +67,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve workspace-key skill copies and recovery exports through neutral resource ports, using native version IDs and the existing header omission.
 
+- Discord acknowledges a GitHub requester's Link click before minting the link and resolving the card. Connect cards clip long agent names, escape Discord markdown, and load images from the configured app host.
+- The `used` amount on a finished Discord or Slack answer is what the tenant is debited, markup included, so it agrees with `left`. With a 1.1 markup it showed the raw model cost, 10% low.
+- A deploy no longer stops an answer that is about to finish with "Stopped: Daimon restarted." When a deploy replaces the worker containers, in-flight turns now get up to 60 seconds to finish, as the adapters intended; Docker killed them after its default 10.
+- A finished Discord or Slack answer ends with one short line instead of a five-line Details block: `Ada  12s  $0.042 used  $41.20 left`. Fields are set apart by spacing, not dots. Token counts are gone, and a channel budget's remainder reads `$8.10 left` like the prepaid balance.
+- The summary line and Discord's 👍 👎 🙋 sit under the last message of an answer, not the first: the last chunk of a long answer on Discord and Slack, or on Discord a file Daimon posts after it.
+- Discord no longer attaches a generated file twice when the agent already sent it in the thread itself.
+- On Discord, a reply to any message of an answer reaches the agent, not only a reply to the first one. With agent identity off, a reply without the ping to the card or a later chunk used to be ignored.
 - Hackathon staging layouts accept the existing QA admin bot and recognize Discord Administrator permissions, so private team roles can be provisioned without the roleless fallback.
-
 - The file-handling skill now tells agents to export only the current turn's finished deliverables, keeping working directories and already delivered files out of outputs to avoid duplicate attachments.
 - A copied agent keeps the skills its source added itself again. Copying (a channel's own agent made with `--copy-from`, or `fork_agent`) downloaded each skill with a header a workspace API key is refused for, so the copy silently left those skills off. The workspace recovery export downloads skills the same way and is fixed too.
+- A turn with several approval cards no longer fails with "The agent stopped because it couldn't confirm your approval" when the stream reconnects while the answers are being applied. An approval card that takes longer than two seconds to update now still updates, instead of keeping its buttons.
 - A new agent's first Slack or Discord answer now shows its generated face. The first turn waits up to three seconds for the face to render instead of posting without a picture.
 
 - Normalize offline oracle provider handles by first capture appearance, including SDK responses, transport paths/query, deduplication keys and encoded SSE/control JSON; preserve literal filesystem paths and configured URLs even when they contain provider handles. Verify stored session fingerprints and hash their normalized inputs so unrelated ID generation cannot change goldens.
+- GitHub connection links now appear as buttons where the person asked, without GitHub setup DMs. Discord conversation buttons mint the invitation on the requester's click and reveal its URL ephemerally; Slack uses ephemeral messages in the originating channel or thread. After a self-serve connection, interrupted work resumes in its thread. A bare connection confirms ephemerally where possible, with a count-only Discord thread fallback. Failed confirmations back off and expire after eight attempts or 24 hours.
+- GitHub new-repo and removal notices are available when an admin opens the setup panel; they are no longer pushed automatically.
 - Discord agent posts and MCP tools now wait at most two seconds for a new channel webhook, then post through the bot with the agent name while creation continues in the background. Creation is deduplicated per channel, 429 retries respect a cooldown, and new channels create one webhook.
 - **The scheduler's usage sweep no longer re-replays every model call it has
   already metered.** It asks the API for `span.model_request_end` events only
@@ -88,6 +101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
+- Re-record the neutral-core oracle against synced main, attributing every changed transcript to its main PR while retaining exact provider requests and database effects.
 - Run the offline golden matrix on both legacy and mux turn paths against the same recordings, with explicit pending skips until the mux bridge lands and legacy-only regeneration.
 
 - Conformance now probes durable send replay, independent recovery evidence, lease ownership,
@@ -130,7 +144,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scripted offline MA transport and platform/DB effect recorders support
   deterministic neutral-core parity checks with exact billing values and
   jitter-safe DB timestamps that preserve scheduled durations.
-- Where approval cards are turned off, a person adds a skill from chat by replying `yes` to its preview. "Add this skill to our agent" previews it. Daimon reads the person's next message in that thread itself: a plain yes (or y, confirm, approve) approves the upload for that turn, and any other reply cancels it. The preview is valid for 15 minutes, for that person, thread, agent and content only, and is used once. A newer preview replaces an older one. Who may change the agent is unchanged. Discord turns pass the message; elsewhere the chat path stays preview-only.
+- The approval card's expiry is now a setting, `DAIMON_TOOL_SAFETY__CONFIRMATION_TIMEOUT_S`. It defaults to 600 seconds and can be set between 30 and 3600, so staging can use a short expiry while production keeps ten minutes.
+- Where approval cards are turned off, a person adds a skill from chat by replying `yes` to its preview. "Add this skill to our agent" previews it. Daimon reads the person's next message in that thread itself: a plain yes (or y, confirm, approve) approves the upload for that turn, and any other reply cancels it. The preview is valid for 15 minutes, for that person, thread, agent and content only, and is used once. A newer preview replaces an older one, even when two arrive at once: only one preview per person, thread and agent is ever open. Who may change the agent is unchanged. Discord turns pass the message; elsewhere the chat path stays preview-only.
+- Turns over the concurrency caps now wait instead of being refused. On Discord, Slack and Teams a mention over the per-workspace cap (or Discord's process-wide cap) shows the usual "Working on it…" card with Stop and starts when a slot frees, served round-robin across workspaces and in order within one. Stop cancels a waiting turn. A turn still waiting after five minutes ends with the usual error. The capacity notice now appears only when the queue itself is full (50 per workspace, 500 in total, per adapter process; `DAIMON_TURN_QUEUE__*`). Queue depth and wait times are in the `runtime.health` log.
 - MCP browser pages now share a responsive Daimon shell with Daimon's face in
   the page header, local Inter font, brand colours, and inline action icons.
   The picker uses separate desktop, tablet, and phone layouts. GitHub and Slack
@@ -204,7 +220,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   come with messages the read already returns, so a sealed thread's files
   stay out. Each file is now an object with `name` and `url`, not a name.
 - Agent setup uses short Picture labels on Slack and Discord. Discord Change opens a file upload form; the attachment option on `/agent-setup` remains available.
-- Status cards and follow-up prompts use short labels on Discord, Slack and Teams. Working cards show Stop, tool steps sit under Details, and finished Discord and Slack cards show time, cost, tokens and balance under Details for everyone. Error, stop, restart and post-failure notices show a clear next step. Feedback and help forms use the same short wording across platforms. Threads whose channel responder changed offer Switch to the new agent and a new-thread hint; staying with the old agent in that thread is not a supported action.
+- Status cards and follow-up prompts use short labels on Discord, Slack and Teams. Working cards show Stop, tool steps sit under Details, and finished Discord and Slack cards end with one summary line of time, cost and money left for everyone. Error, stop, restart and post-failure notices show a clear next step. Feedback and help forms use the same short wording across platforms. Threads whose channel responder changed offer Switch to the new agent and a new-thread hint; staying with the old agent in that thread is not a supported action.
 - **Teams files in private and shared channels, turned on by asking.** The
   Enable files sign-in now starts from a channel and grants daimon that
   channel's own SharePoint site: the team's for a standard channel, a site of
@@ -363,7 +379,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the event journal and the usage-revision outbox) with a restartable
   in-memory store. Daimon has no Postgres implementation of it yet, so
   nothing a user sees changes.
-- Migration `0075_neutral_state` adds the Postgres tables behind the mux
+- Migration `0077_neutral_state` adds the Postgres tables behind the mux
   state store (`daimon.core.stores.mux_state`) and nullable `binding_id` and
   `binding_generation` columns on `thread_sessions`, and backfills bindings
   for callers' threads with a live session from one snapshot of
@@ -371,6 +387,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (well under a second at 200,000 rows); the new columns stay NULL until
   `link_legacy_thread_sessions` fills them in batches. Nothing reads them
   yet, so nothing a user sees changes.
+- Agent setup on Slack and Discord no longer takes custom picture uploads. Each agent shows its generated face, and **Use default** turns a picture uploaded earlier back into that face. The `/agent-setup` picture options are gone, and an upload form opened earlier says custom pictures are turned off.
+- Teams Ask a person posts to its own `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`, as Slack has its own. It no longer shares `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` with Discord, so one deployment can run Ask a human on both.
 - Tool approval cards on Discord, Slack and Teams now name the action and consequence, show plain labelled inputs in Details, and collapse after a decision. Each blocked call gets its own card and confirmation event.
 - If a turn stops after an approval click but before its confirmation is sent, the answered card now shows Stopped.
 
@@ -564,6 +582,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Teams Ask a person: a deployment that put a Teams channel (`19:…`) in `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` moves it to `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`; until then Teams offers no Ask a person, and Discord ignores the Teams id.
 - Building the image needs Docker 23 or later: the Dockerfile uses BuildKit instructions the legacy builder rejects.
 - Run migrations `0046_account_external` and `0047_turn_origin_external` before deploying. The new code leaves an empty member guest list out of the stored access policy, so older processes still read it; once one is listed, upgrade every process.
 - Isolated channels' agents no longer read other channels, nor sessions with no channel stamp: setups that relied on it stop working.
@@ -631,7 +650,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same rules as the chat tool and the setup panels: a built-in agent is
   refused, and a skill another agent also has is never given a new version.
 
-- **Ask a human on Slack.** Slack answers get an Ask a human button beside 👍/👎 when `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` is set. It opens a form and posts the note, the asker and a link to the answer (no answer text, link previews off) to that channel. It uses the same per-person, per-workspace allowance and messages as Discord and Teams, from the same ledger. Slack requests post only to the Slack channel, never to the Discord/Teams one; leaving the Slack one unset keeps the button hidden. `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that owns the channel when daimon is installed in several. Only people who may start a turn in that thread can ask, checked on click and again under the tenant's policy lock in the transaction that spends the credit, so a policy edit committed first refuses with nothing spent and a later one waits. The escalation channel's protection is checked from a fresh read right before the post. Asking twice on one answer records and posts once. Requests from a sealed channel warn that the note leaves it.
+- **Ask a human on Slack.** Slack answers get an Ask a human button beside 👍/👎 when `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` is set. It opens a form and posts the note, the asker and a link to the answer (no answer text, link previews off) to that channel. It uses the same per-person, per-workspace allowance and messages as Discord and Teams, from the same ledger. Slack requests post only to the Slack channel, never to Discord's or Teams' channel; leaving the Slack one unset keeps the button hidden. `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that owns the channel when daimon is installed in several. Only people who may start a turn in that thread can ask, checked on click and again under the tenant's policy lock in the transaction that spends the credit, so a policy edit committed first refuses with nothing spent and a later one waits. The escalation channel's protection is checked from a fresh read right before the post. Asking twice on one answer records and posts once. Requests from a sealed channel warn that the note leaves it.
 - **Scoped operator tokens for integrations.** `daimon mcp mint-operator-token`
   mints a token acting over `/mcp` for one server admin with only the scopes it
   names (`tenant:read`, `channels:write`, `promo:redeem`, deployment-wide
@@ -862,7 +881,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before.
 
 - Per-turn token, cache and estimated provider-cost telemetry shares the terminal outcome row; operators can query tenant usage by channel and origin with `daimon usage turns`. MCP SDK polling outcomes retain unknown usage rather than zero. Billing and admission behavior are unchanged.
-
 
 - Opt-in Discord and Slack DM conversations: admins enable with `/dm enable`;
   `/dm` moves recent channel context into a private, resettable session. Every

@@ -12,7 +12,7 @@ Task 1 (debounce / registry / usage):
     (debounce elapsed).
   - The first flush's registration rides post_initial(); a later
     render-tick update does not re-register.
-  - _apply_usage folds usage_totals into merged usage_in / usage_out / cost_str.
+  - _apply_usage prices usage_totals into cost_str.
 
 on_render error propagation:
   - A failing chat.update surfaces out of on_render unswallowed -- the
@@ -70,6 +70,7 @@ from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.tenants import set_funding_mode
+from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import (
@@ -79,6 +80,7 @@ from daimon.core.turn.state import (
     TurnState,
     UsageTotals,
 )
+from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing import ma_model_usage
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
@@ -162,7 +164,7 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     )
     await lc.post_initial()
     await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
-    assert _block_text(_last_update_blocks(fake_slack_web_client)).endswith("Balance: $12.50 left")
+    assert _block_text(_last_update_blocks(fake_slack_web_client)).endswith(f"{GAP}$12.50 left")
 
     async with db_session_factory() as s, s.begin():
         await set_funding_mode(s, tenant_id=tenant.id, funding_mode="operator_funded")
@@ -715,7 +717,7 @@ async def test_status_ts_is_none_before_anything_is_posted(fake_slack_web_client
 
 
 async def test_apply_usage_folds_usage_totals(fake_slack_web_client: Any) -> None:
-    """_apply_usage folds usage_totals (merged input + output + cost_str) onto lifecycle state."""
+    """_apply_usage prices usage_totals onto the lifecycle state's cost_str."""
     lc, *_ = _make_lifecycle(fake_slack_web_client, model_id="claude-sonnet-4-6")
     state = dataclasses.replace(
         TurnState(),
@@ -728,14 +730,6 @@ async def test_apply_usage_folds_usage_totals(fake_slack_web_client: Any) -> Non
     )
 
     lc._apply_usage(state)  # pyright: ignore[reportPrivateUsage]  # unit-testing internal helper
-
-    # merged_in = 1000 + 500 + 2000 = 3500
-    assert lc._state.usage_in == 3500, (  # pyright: ignore[reportPrivateUsage]
-        "usage_in must be the merged input (input + cache_creation + cache_read)"
-    )
-    assert lc._state.usage_out == 300, (  # pyright: ignore[reportPrivateUsage]
-        "usage_out must equal output_tokens"
-    )
 
     expected_cost = format_cost(
         cost_of(
@@ -752,6 +746,36 @@ async def test_apply_usage_folds_usage_totals(fake_slack_web_client: Any) -> Non
     assert lc._state.cost_str == expected_cost, (  # pyright: ignore[reportPrivateUsage]
         "cost_str must match the billing-ledger cost to the cent"
     )
+
+
+async def test_apply_usage_shows_the_debit_with_markup(fake_slack_web_client: Any) -> None:
+    """`used` is what the tenant is debited, markup included, so it agrees with `left`."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client, model_id="claude-sonnet-4-6")
+    lc._markup = Decimal("1.1")  # pyright: ignore[reportPrivateUsage]
+    state = dataclasses.replace(
+        TurnState(),
+        usage_totals=UsageTotals(
+            input_tokens=10000,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            output_tokens=3000,
+        ),
+    )
+
+    lc._apply_usage(state)  # pyright: ignore[reportPrivateUsage]
+
+    raw = cost_of(
+        ma_model_usage(
+            input_tokens=10000,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            output_tokens=3000,
+        ),
+        MODEL_PRICING["claude-sonnet-4-6"],
+    )
+    expected = format_cost(float(debit_amount(raw, markup=Decimal("1.1"))))
+    assert lc._state.cost_str == expected  # pyright: ignore[reportPrivateUsage]
+    assert lc._state.cost_str != format_cost(raw), "the raw model cost understates the debit"
 
 
 # ---------------------------------------------------------------------------
@@ -806,6 +830,25 @@ async def test_terminal_success_overflow_posts_and_widens_final_ts(
     overflow_posts = _post_count(fake_slack_web_client) - initial_posts
     assert overflow_posts >= 1, "overflow chunks must be posted as new chat.postMessage calls"
     assert lc.final_ts is not None, "final_ts must be set after overflow"
+
+
+async def test_long_answer_carries_the_summary_on_its_last_message(
+    fake_slack_web_client: Any,
+) -> None:
+    """The summary line closes the answer: it rides the last chunk, not the first."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="x" * 24000)]))
+
+    first = _last_update_blocks(fake_slack_web_client)
+    assert not any(block["type"] == "context" for block in first), "the first chunk is bare"
+    posts = fake_slack_web_client.mock.requests.get(("POST", _POST_URL), [])
+    last = posts[-1].kwargs["json"]["blocks"]
+    contexts = [block for block in last if block["type"] == "context"]
+    assert contexts, "the last chunk carries the summary"
+    assert contexts[0]["elements"][0]["text"].startswith(f"test-agent{GAP}"), "the summary line"
 
 
 async def test_terminal_success_bounds_notification_text_on_long_answers(
@@ -1822,9 +1865,9 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
         await lc.post_initial()
         await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
         footers[channel] = _block_text(_last_update_blocks(fake_slack_web_client))
-    assert footers["C1"].endswith("Balance: $3.75 of channel budget left"), "the budget's remainder"
+    assert footers["C1"].endswith(f"{GAP}$3.75 left"), "the budget's remainder"
     for channel in ("C2", "C3", None):
-        assert footers[channel].endswith("Balance: $11.25 left"), (
+        assert footers[channel].endswith(f"{GAP}$11.25 left"), (
             f"{channel}: an inactive or missing budget shows the tenant balance"
         )
 

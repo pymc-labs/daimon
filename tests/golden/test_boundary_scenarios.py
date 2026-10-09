@@ -25,7 +25,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.adapters.slack.app import SlackApp
-from daimon.core.config import McpSettings
+from daimon.core.config import McpSettings, TurnQueueSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.turn import driver as turn_driver
@@ -235,6 +235,7 @@ async def test_dm_reply_delivery_and_deduplication(
     runtime.sessionmaker = db_session_factory
     runtime.turn_deps = deps
     runtime.settings.discord.max_concurrent_turns = 10
+    runtime.settings.turn_queue = TurnQueueSettings()
     bot: Any = DaimonBot(runtime=runtime, intents=discord.Intents.default())
     guild = MagicMock(spec=discord.Guild)
     guild.owner_id = 1
@@ -271,4 +272,5 @@ async def test_dm_reply_delivery_and_deduplication(
     assert len(streams) == 2
     assert len(created) == 1
     assert channel.send.await_count == 2
-    assert bot._global_inflight == 0
+    assert bot.turn_queue.in_flight() == 0
+    assert bot.turn_queue.depth() == 0

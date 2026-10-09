@@ -45,7 +45,11 @@ class DirectMessageResult(BaseModel):
 
 
 async def send_direct_message_impl(
-    runtime: McpRuntime, auth: AuthIdentity, *, recipient_id: str, content: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    recipient_id: str,
+    content: str,
 ) -> DirectMessageResult:
     """Validate policy before opening a DM; verify both people in the live tenant."""
     if auth.platform not in _RECIPIENT:

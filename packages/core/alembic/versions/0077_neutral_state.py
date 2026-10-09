@@ -43,8 +43,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0075_neutral_state"
-down_revision: str | None = "0074_pending_skill_adds"
+revision: str = "0077_neutral_state"
+down_revision: str | None = "0076_github_connect_followup"
 branch_labels: str | None = None
 depends_on: str | None = None
 

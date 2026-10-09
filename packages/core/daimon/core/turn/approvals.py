@@ -21,7 +21,7 @@ that talks to a platform, and a hook that raises counts as a refusal."""
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsUserToolConfirmationEventParams
@@ -244,7 +244,10 @@ def interactive_decider(
         if verdict.outcome == "deny":
             return ToolConfirmationResult(allow=False, deny_message=refusal_message(call, verdict))
         prompt = prompt_for_tool_call(
-            call, requester_platform_user_id=requester_platform_user_id, now=now()
+            call,
+            requester_platform_user_id=requester_platform_user_id,
+            now=now(),
+            timeout=timedelta(seconds=policy.confirmation_timeout_s),
         )
         try:
             response = await confirm(prompt)

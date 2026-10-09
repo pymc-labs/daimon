@@ -56,6 +56,7 @@
           },
           "tenant_id": "8b369f43-5689-50e4-9636-670ae2d2e0ea",
           "tool_safety": {
+            "confirmation_timeout_s": 600,
             "denied": [],
             "effects": {},
             "enabled": false,

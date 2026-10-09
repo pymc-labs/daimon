@@ -15,8 +15,9 @@ single structured exempt-billing log line at turn start and meters nothing.
   multiple such cycles. The driver asks MA (`sessions.retrieve`) whether the
   session is still running before deciding anything, so silence alone can
   never finalize a turn as a quiet, truncated success (Class A). This loop
-  has no attempt cap while MA is running. An idle pause with an unechoed
-  confirmation has two extra reconnects before the existing failure. The
+  has no attempt cap while MA is running. An idle pause with a confirmation
+  MA has not acted on yet (no tool result for the call) has two extra
+  reconnects before the existing failure. The
   per-turn ceiling
   (`daimon.core.turn.ceiling`), enforced at `bind_session` and
   `run_prepared_turn` for the chat paths and, for callers that bypass those,
@@ -56,6 +57,8 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
 from anthropic.types.beta.sessions import (
+    BetaManagedAgentsAgentMCPToolResultEvent,
+    BetaManagedAgentsAgentToolResultEvent,
     BetaManagedAgentsEventParams,
     BetaManagedAgentsImageBlockParam,
     BetaManagedAgentsSessionStatusIdleEvent,
@@ -63,8 +66,8 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsStreamSessionEvents,
     BetaManagedAgentsSystemMessageEventParams,
     BetaManagedAgentsTextBlockParam,
+    BetaManagedAgentsUserCustomToolResultEvent,
     BetaManagedAgentsUserMessageEventParams,
-    BetaManagedAgentsUserToolConfirmationEvent,
     BetaManagedAgentsUserToolConfirmationEventParams,
 )
 from daimon.core.errors import TurnError
@@ -105,8 +108,9 @@ InterruptPhase = Literal["pre-stream", "stream-open", "send-initial", "replay", 
 _DEFAULT_TOOL_CONFIRMATION: ToolConfirmation = RequireApproval()
 
 # An idle MA session can still have an HTTP-accepted confirmation queued.
-# Give it two more stream generations to echo the event before treating the
-# quiet pause as a failure; never send the same decision again.
+# Give it two more stream generations to act on it (the call's tool result)
+# before treating the quiet pause as a failure; never send the same decision
+# again.
 _PENDING_CONFIRMATION_RECONNECTS = 2
 
 T = TypeVar("T")
@@ -717,7 +721,7 @@ async def _pump(
     #   cycles (`_EventlessCycle` — a clean close or read-timeout with no
     #   terminal event). It is unbounded while MA is `running`/`rescheduling`:
     #   a healthy long tool call can produce repeated quiet streams. An idle
-    #   `requires_action` with sent but unechoed confirmations gets at most
+    #   `requires_action` with sent confirmations MA has not acted on gets at most
     #   two extra stream generations before a requires-action failure. The
     #   per-turn ceiling
     #   (`daimon.core.turn.ceiling`), enforced at `bind_session` and
@@ -880,7 +884,7 @@ async def _pump(
                                     stop_reason is not None
                                     and stop_reason.type == "requires_action"
                                     and stop_reason.event_ids
-                                    and not _reasked_after_echo(
+                                    and not _reasked_after_result(
                                         current_turn_events, set(stop_reason.event_ids)
                                     )
                                 ):
@@ -1085,12 +1089,28 @@ def _events_since_last_turn_boundary(
 
 
 def _note_accepted(events: Sequence[object], accepted: set[str]) -> None:
-    """Add the tool_use ids whose `user.tool_confirmation` MA has recorded."""
+    """Add the tool_use ids MA has acted on: those with a tool result.
+
+    A `user.tool_confirmation` in the event history is not proof: the list
+    endpoint returns a confirmation as soon as MA has queued it, before MA has
+    taken it, and MA takes a batch one per pause (staging, 2026-10-09: six
+    queued denies replayed as taken, and the next one-per-pause idle ended
+    the turn as a re-ask). MA emits each call's result only after it has
+    acted on that call's confirmation, so the result is the evidence.
+    """
     accepted.update(
-        event.tool_use_id
-        for event in events
-        if isinstance(event, BetaManagedAgentsUserToolConfirmationEvent)
+        tool_use_id for event in events if (tool_use_id := _result_tool_use_id(event)) is not None
     )
+
+
+def _result_tool_use_id(event: object) -> str | None:
+    if isinstance(event, BetaManagedAgentsAgentToolResultEvent):
+        return event.tool_use_id
+    if isinstance(event, BetaManagedAgentsAgentMCPToolResultEvent):
+        return event.mcp_tool_use_id
+    if isinstance(event, BetaManagedAgentsUserCustomToolResultEvent):
+        return event.custom_tool_use_id
+    return None
 
 
 def _note_requires_action_ids(events: Sequence[object], seen: set[str]) -> None:
@@ -1103,16 +1123,17 @@ def _note_requires_action_ids(events: Sequence[object], seen: set[str]) -> None:
     )
 
 
-def _reasked_after_echo(events: Sequence[object], pending_ids: set[str]) -> bool:
-    """Only a replayed pause *after* its confirmation echoes proves a re-ask.
+def _reasked_after_result(events: Sequence[object], pending_ids: set[str]) -> bool:
+    """Only a replayed pause *after* MA acted on those calls proves a re-ask.
 
-    The reducer retains the last stop reason across confirmation events, so a
-    replay ending with an echo can otherwise make the older pause look fresh.
+    MA has acted on a call once its tool result is in the history; a queued
+    confirmation alone is not enough (`_note_accepted`). The reducer retains
+    the last stop reason, so an older pause must not look fresh.
     """
     echoed: set[str] = set()
     for event in events:
-        if isinstance(event, BetaManagedAgentsUserToolConfirmationEvent):
-            echoed.add(event.tool_use_id)
+        if (tool_use_id := _result_tool_use_id(event)) is not None:
+            echoed.add(tool_use_id)
         elif isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
             reason = event.stop_reason
             if (
@@ -1374,8 +1395,9 @@ async def _consume_with_reconnect(
                             event.stop_reason, confirmed=accepted_tool_use_ids
                         ):
                             # MA repeats a `requires_action` idle while the
-                            # paused batch's other tools run. An unechoed
-                            # confirmation or an event ID already seen in
+                            # paused batch's other tools run, and pauses once
+                            # per queued confirmation. A pause naming a call
+                            # with no tool result yet, or an event ID already seen in
                             # stream/replay is a duplicate: keep reading.
                             # If MA never takes it, the stream goes quiet and
                             # the eventless-cycle check ends the turn.

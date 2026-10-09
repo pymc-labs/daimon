@@ -547,12 +547,15 @@ async def test_bot_message_edits_and_deletes_through_bot() -> None:
     client, channel, hook = _world()
     message = MagicMock(spec=discord.Message)
     message.webhook_id = None
-    message.edit = AsyncMock()
+    edited = MagicMock(spec=discord.Message)
+    message.edit = AsyncMock(return_value=edited)
     message.delete = AsyncMock()
     transport = DiscordPostTransport(
         client, channel, name="Research", avatar_url=None, builtin=False
     )
-    await transport.edit(message, content="updated")
+    assert await transport.edit(message, content="updated") is edited, (
+        "the edited message comes back, so a turn can read Discord's edit time"
+    )
     await transport.delete(message)
     message.edit.assert_awaited_once_with(content="updated")
     message.delete.assert_awaited_once()

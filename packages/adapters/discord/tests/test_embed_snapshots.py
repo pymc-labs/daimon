@@ -60,23 +60,17 @@ _STATES: dict[str, EmbedState] = {
             "🖋️ Running a command",
         ),
         text_preview="Preview text describing the ongoing work.",
-        usage_in=1500,
-        usage_out=320,
         cost_str="$0.04",
     ),
     "terminal_done_no_cost": EmbedState(
         phase=TurnPhase.DONE,
         agent_name="Atlas",
         started_at=100.0,
-        usage_in=1500,
-        usage_out=320,
     ),
     "terminal_done_with_cost": EmbedState(
         phase=TurnPhase.DONE,
         agent_name="Atlas",
         started_at=100.0,
-        usage_in=1500,
-        usage_out=320,
         cost_str="$0.04",
     ),
     "terminal_error_with_reason": EmbedState(
@@ -84,8 +78,6 @@ _STATES: dict[str, EmbedState] = {
         agent_name="Atlas",
         started_at=100.0,
         error_reason="rate limited",
-        usage_in=100,
-        usage_out=50,
     ),
     "terminal_error_no_trail": EmbedState(
         phase=TurnPhase.ERROR, agent_name="Atlas", started_at=100.0

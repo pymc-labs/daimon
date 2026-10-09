@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
+from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
 from daimon.adapters.discord.agent_setup.github_embed_panel import (
     EmbedActionRow,
 )
@@ -13,8 +16,12 @@ from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.github_connect_cards import (
+    CONNECT_GITHUB_EMOJI,
+    build_connect_card,
+    resolve_connect_card,
+)
 from daimon.core.github_panel import (
-    CONNECT_COPY,
     connect_link,
     pending_connect_link,
     safe_github_error,
@@ -25,79 +32,31 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access_requests import list_asker_requests
 from daimon.core.stores.github_connected_repos import summary as connected_summary
 from daimon.core.stores.github_links import account_link_status
-from daimon.core.stores.github_new_repo_notices import NewRepoNoticeGroup
 from daimon.core.stores.github_personal_links import mint_link
 from daimon.core.stores.identity import get_or_create_platform_principal
 
 import discord
 
 
+def connect_button(url: str) -> discord.ui.Button[discord.ui.View]:
+    """The shared Discord link button for private GitHub connection URLs."""
+    return discord.ui.Button(
+        label="Connect GitHub", emoji=CONNECT_GITHUB_EMOJI, style=discord.ButtonStyle.link, url=url
+    )
+
+
+def connect_button_view(url: str, *, timeout: float | None = None) -> discord.ui.View:
+    view = discord.ui.View(timeout=timeout)
+    view.add_item(connect_button(url))
+    return view
+
+
 class GitHubLinkView(discord.ui.View):
-    """A private browser link with a copyable raw URL for forwarding."""
+    """A private browser link displayed as a button."""
 
-    def __init__(
-        self,
-        url: str,
-        *,
-        user_id: int,
-        runtime: DiscordRuntime | None = None,
-        state: PanelState | None = None,
-        notice_group: NewRepoNoticeGroup | None = None,
-        notice_visible_names: tuple[str, ...] = (),
-    ) -> None:
+    def __init__(self, url: str) -> None:
         super().__init__(timeout=600)
-        self.url = url
-        self.user_id = user_id
-        self.runtime = runtime
-        self.state = state
-        self.notice_group = notice_group
-        self.notice_visible_names = notice_visible_names
-        self.add_item(discord.ui.Button(label="Open GitHub ↗", url=url))
-
-    @discord.ui.button(label="Copy link", style=discord.ButtonStyle.secondary)
-    async def copy_link(
-        self, interaction: discord.Interaction, button: discord.ui.Button[GitHubLinkView]
-    ) -> None:
-        del button
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This link is private.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            self.url, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
-        )
-
-    @discord.ui.button(label="◀ Back", style=discord.ButtonStyle.secondary)
-    async def back(
-        self, interaction: discord.Interaction, button: discord.ui.Button[GitHubLinkView]
-    ) -> None:
-        del button
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This link is private.", ephemeral=True)
-            return
-        if self.runtime is not None and self.state is not None:
-            home = await load_home(self.state, runtime=self.runtime, user_id=self.user_id)
-            await interaction.response.edit_message(
-                content=None,
-                embed=home.embed,
-                view=home.bind_render_interaction(interaction, panel=self.state),
-            )
-            home.attach_message(await interaction.original_response())
-        elif self.runtime is not None and self.notice_group is not None:
-            from daimon.adapters.discord.agent_setup.github_new_repo import NewRepoCard
-            from daimon.core.github_notice_visibility import new_repo_notice_copy
-
-            await interaction.response.edit_message(
-                content=None,
-                embed=github_embed(
-                    new_repo_notice_copy(self.notice_visible_names).text, state="waiting"
-                ),
-                view=NewRepoCard(
-                    self.runtime,
-                    self.notice_group,
-                    self.user_id,
-                    visible_names=self.notice_visible_names,
-                ),
-            )
+        self.add_item(connect_button(url))
 
 
 class GitHubHomeView(PanelViewBase):
@@ -152,7 +111,7 @@ class GitHubHomeView(PanelViewBase):
             unlink.callback = self._on_unlink_prompt  # type: ignore[method-assign]
             (personal_actions if state.is_admin else actions).add_item(unlink)
         if state.is_admin and pending_url:
-            actions.add_item(discord.ui.Button(label="Continue", url=pending_url))
+            actions.add_item(connect_button(pending_url))
             start_over: discord.ui.Button[GitHubHomeView] = discord.ui.Button(
                 label="Start over", style=discord.ButtonStyle.secondary
             )
@@ -161,6 +120,7 @@ class GitHubHomeView(PanelViewBase):
         elif state.is_admin:
             connect: discord.ui.Button[GitHubHomeView] = discord.ui.Button(
                 label="Connect more repos" if connected_count else "Connect GitHub",
+                emoji=CONNECT_GITHUB_EMOJI if not connected_count else None,
                 style=discord.ButtonStyle.primary,
             )
             connect.callback = self._on_connect  # type: ignore[method-assign]
@@ -201,6 +161,15 @@ class GitHubHomeView(PanelViewBase):
             waiting_row.add_item(waiting)
             container.add_item(waiting_row)
         self.add_item(container)
+        if state.is_admin and not connected_count and runtime.settings.mcp.app_root_url:
+            self.embed = connect_embed(
+                build_connect_card(
+                    agent_name=None,
+                    identity_enabled=False,
+                    avatar_url=None,
+                    public_base_url=str(runtime.settings.mcp.app_root_url),
+                )
+            )
 
     async def _on_waiting(self, interaction: discord.Interaction) -> None:
         if (
@@ -255,17 +224,25 @@ class GitHubHomeView(PanelViewBase):
                         else None
                     ),
                     agent_name=agent.name if agent is not None else None,
+                    origin_parent_channel_id=str(interaction.channel_id),
+                    origin_thread_id=str(interaction.channel_id),
+                    origin_followup_token=f"{interaction.application_id}:{interaction.token}",
+                    origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
                 )
         except ValueError as error:
             await interaction.followup.send(safe_github_error(error), ephemeral=True)
             return
+        card = await resolve_connect_card(
+            self.runtime.sessionmaker,
+            self.runtime.settings,
+            tenant_id=tenant_id,
+            platform="discord",
+            workspace_id=str(self.state.guild_id),
+            agent_name=agent.name if agent is not None else None,
+        )
         await interaction.followup.send(
-            embed=github_embed(
-                f"{CONNECT_COPY}\nLink works once\nExpires in 7 days", state="waiting"
-            ),
-            view=GitHubLinkView(
-                url, user_id=interaction.user.id, runtime=self.runtime, state=self.state
-            ),
+            embed=connect_embed(card),
+            view=GitHubLinkView(url),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -346,8 +323,7 @@ class GitHubHomeView(PanelViewBase):
                 "GitHub didn't answer. Try again in a minute.", ephemeral=True
             )
             return
-        view = discord.ui.View(timeout=600)
-        view.add_item(discord.ui.Button(label="Link GitHub", url=url))
+        view = connect_button_view(url, timeout=600)
         await interaction.response.send_message(
             embed=github_embed("Link GitHub to your account."),
             view=view,

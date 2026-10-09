@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from daimon.adapters.discord.agent_setup.github_embed_panel import (
     EmbedActionRow,
@@ -396,6 +397,10 @@ class GitHubWaitingView(PanelViewBase):
                         verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
                         workspace_label=interaction.guild.name if interaction.guild else None,
                         requester_label=interaction.user.display_name,
+                        origin_parent_channel_id=str(interaction.channel_id),
+                        origin_thread_id=str(interaction.channel_id),
+                        origin_followup_token=f"{interaction.application_id}:{interaction.token}",
+                        origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
                     )
                     changed = await approve_connection_request(
                         session,
@@ -447,10 +452,21 @@ class GitHubWaitingView(PanelViewBase):
         )
         await self.swap_to(interaction, refreshed)
         if url is not None:
-            link_view = discord.ui.View(timeout=600)
-            link_view.add_item(discord.ui.Button(label="Open GitHub ↗", url=url))
+            from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
+            from daimon.adapters.discord.agent_setup.github_home import connect_button_view
+            from daimon.core.github_connect_cards import resolve_connect_card
+
+            link_view = connect_button_view(url, timeout=600)
+            card = await resolve_connect_card(
+                self.runtime.sessionmaker,
+                self.runtime.settings,
+                tenant_id=tenant_id,
+                platform="discord",
+                workspace_id=str(self.state.guild_id),
+                agent_name=request.agent_name,
+            )
             await interaction.followup.send(
-                "Waiting for GitHub confirmation.", view=link_view, ephemeral=True
+                embed=connect_embed(card), view=link_view, ephemeral=True
             )
 
     async def _on_decline(self, interaction: discord.Interaction) -> None:

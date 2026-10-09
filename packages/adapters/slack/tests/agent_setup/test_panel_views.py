@@ -483,8 +483,15 @@ def test_details_avatar_row_and_admin_controls() -> None:
     assert any(
         block.get("accessory", {}).get("image_url") == avatar_url for block in admin["blocks"]
     )
-    assert ACTION_AVATAR_CHANGE in json.dumps(admin)
+    assert ACTION_AVATAR_CHANGE not in json.dumps(admin)
     assert ACTION_AVATAR_RESET in json.dumps(admin)
+    picture_buttons = [
+        element["text"]["text"]
+        for block in admin["blocks"]
+        for element in block.get("elements", [])
+        if element.get("action_id", "").startswith("agent_setup__avatar")
+    ]
+    assert picture_buttons == ["Use default", "Details"]
     assert "Shown next to this agent's messages." in _joined(admin)
     assert "Anyone who sees a message" not in _joined(admin)
     reset_button = next(

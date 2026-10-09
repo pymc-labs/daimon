@@ -23,6 +23,7 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
+from daimon.core.github_connect_delivery import claim_next, settle
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores import github_access, github_app_installations, github_connect
 from daimon.core.stores.accounts import set_external, set_role
@@ -175,6 +176,8 @@ async def test_connection_happy_path_and_rechecks(
             tenant_id=tenant_id,
             requester_account_id=account_id,
             requester_label="Alex",
+            requester_platform_user_id="123",
+            origin_platform="discord",
         )
     repo_admin = True
     repo_two_admin = False
@@ -469,6 +472,12 @@ async def test_connection_happy_path_and_rechecks(
             "Already connected: 2 repos." in reused.text
             and "You can close this tab." in reused.text
         )
+        async with sessionmaker.begin() as session:
+            notice = await claim_next(session, platform="discord", now=datetime.now(UTC))
+            assert notice is not None
+            assert notice.text == "Connected example/one, example/two, Read only. Ready."
+            await settle(session, notice=notice, delivered=True, now=datetime.now(UTC))
+            assert await claim_next(session, platform="discord", now=datetime.now(UTC)) is None
         forged = await browser.post(
             "/oauth/github/confirm",
             data={

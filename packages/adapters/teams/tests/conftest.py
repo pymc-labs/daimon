@@ -20,7 +20,12 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.config import SupportSettings, TeamsSettings, ThreadParticipationSettings
+from daimon.core.config import (
+    SupportSettings,
+    TeamsSettings,
+    ThreadParticipationSettings,
+    TurnQueueSettings,
+)
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
@@ -393,6 +398,7 @@ def build_teams_runtime(
     settings = MagicMock()
     settings.agent_identity.enabled = False
     settings.teams = teams or teams_settings()
+    settings.turn_queue = TurnQueueSettings()
     settings.crypto.keys = ()
     settings.mcp.public_url = None
     settings.defaults_root = MagicMock()
@@ -545,3 +551,13 @@ def stub_bot_token(monkeypatch: pytest.MonkeyPatch) -> None:
         return "test-bot-token"
 
     monkeypatch.setattr(TokenManager, "get_app_token", _fake_token)
+
+
+@pytest.fixture(autouse=True)
+def isolate_card_edits() -> Iterator[None]:
+    """Card edits finish in the background; one test's stalled edit must not
+    hold the next test's edit to a card with the same id."""
+    from daimon.core.posted_controls.lifecycle import cancel_pending_card_edits
+
+    yield
+    cancel_pending_card_edits()

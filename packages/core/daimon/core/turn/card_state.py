@@ -55,8 +55,6 @@ class CardState:
     agent_name: str = ""
     header_customized: bool = False
     started_at: float = 0.0
-    usage_in: int = 0
-    usage_out: int = 0
     cost_str: str | None = None
     balance_str: str | None = None
     text_preview: str | None = None

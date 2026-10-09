@@ -143,7 +143,7 @@ def test_the_dm_button_and_form_say_ask_the_team_like_slack() -> None:
 
 
 def test_a_teams_escalation_channel_is_not_a_discord_one() -> None:
-    """A deployment running both bots shares the setting; a `19:` id is the Teams bot's."""
+    """A Teams id left from when Teams shared the setting is not Discord's."""
     teams = SupportSettings(escalation_channel_id="19:support@thread.tacv2")
     assert discord_channel(teams) is None, "the Discord bot cannot post in a Teams channel"
     assert discord_channel(SupportSettings(escalation_channel_id=_ESCALATION)) == _ESCALATION, (
