@@ -26,6 +26,7 @@ from daimon.adapters.discord.privacy_panel.read import (
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
+from sqlalchemy.exc import SQLAlchemyError
 
 import discord
 from discord import Interaction, app_commands
@@ -114,7 +115,7 @@ class PrivacyCog(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
                 ephemeral=True,
             )
-        except (DaimonError, anthropic.APIError, discord.HTTPException) as exc:
+        except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             log.warning("privacy.handler.failed", rid=rid, error=str(exc))
             await interaction.followup.send(
                 render_error(exc, request_id=rid),
