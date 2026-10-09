@@ -9,10 +9,14 @@ A call without ``content_hash`` only previews. The upload needs the hash that
 preview returned, bound to this agent, and it never lands on the model's word
 alone: the server confirms only from a chat turn's verified origin whose live
 session itself makes ``add_skill`` wait for the person's Approve on the card
-(`has_confirmation_gate`). Anything else (tool safety off, an ``agent_chat``
-or unattended run, a session whose tools have not caught up with tool safety
-yet) adds nothing, says which it was, and points to Add skill in
-``/agent-setup``, which previews and adds on the person's own click. The pin
+(`has_confirmation_gate`). Where the deployment turned cards off, a chat
+preview is recorded instead (`daimon.core.stores.pending_skill_adds`) and the
+person confirms it with their next message in that thread: the confirm must
+come from that later turn of theirs, for the same agent and content, once,
+within the TTL. Anything else (an ``agent_chat`` or unattended run, a session
+whose tools have not caught up with tool safety yet) adds nothing, says which
+it was, and points to Add skill in ``/agent-setup``, which previews and adds
+on the person's own click. The pin
 and sharing gates run again on the fresh agent right before the upload and the
 attach.
 """
@@ -76,6 +80,12 @@ from daimon.core.skills.ingest import (
 )
 from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.stores.pending_skill_adds import (
+    PENDING_SKILL_ADD_TTL,
+    ConfirmRefusal,
+    consume_pending_skill_add,
+    record_pending_skill_add,
+)
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -179,6 +189,29 @@ def _no_card_text(reason: NoCardReason) -> tuple[str, str | None]:
             f"one: {why}"
         )
     return why, fix
+
+
+_CONFIRM_REFUSALS: dict[ConfirmRefusal, str] = {
+    "no_preview": (
+        "there is no open preview of this content for this agent from this person in this "
+        "thread (it was never previewed here, already used, or expired)"
+    ),
+    "same_turn": "the person has not replied since the preview; they confirm in a new message",
+    "not_next_message": "the person sent another message since the preview without confirming",
+}
+
+
+def _chat_confirms(
+    auth: AuthIdentity, origin: TurnOriginRow | None, no_card: NoCardReason | None
+) -> bool:
+    """Whether this call's person confirms in their next message, cards being off."""
+    return (
+        no_card == "cards_off"
+        and origin is not None
+        and auth.agent_id is None
+        and auth.chat_agent_id is not None
+        and auth.platform_user_id is not None
+    )
 
 
 def _panel(agent_name: str) -> str:
@@ -431,7 +464,8 @@ async def _add_skill_impl(
                 confirm=content_hash is not None,
                 agent_name=agent_name,
             )
-        if content_hash is not None and no_card is not None:
+        chat_confirms = _chat_confirms(auth, origin, no_card)
+        if content_hash is not None and no_card is not None and not chat_confirms:
             raise ToolError(_no_card_refusal(no_card, agent_name))
         async with httpx.AsyncClient(timeout=30.0) as http:
             bundle, source = await _load_bundle(
@@ -451,12 +485,30 @@ async def _add_skill_impl(
             scripts = (
                 f" It holds {len(preview.scripts)} runnable file(s)." if preview.scripts else ""
             )
-            then = (
-                f"Only after they say yes, call add_skill again with the same arguments and "
-                f"content_hash='{bound}'; they approve it once more on the card."
-                if no_card is None
-                else _no_card_preview(no_card, agent_name)
-            )
+            if chat_confirms:
+                assert origin is not None
+                async with runtime.session_factory.begin() as session:
+                    await record_pending_skill_add(
+                        session,
+                        origin=origin,
+                        ma_agent_id=agent.id,
+                        content_hash=bound,
+                        now=datetime.now(UTC),
+                    )
+                minutes = int(PENDING_SKILL_ADD_TTL.total_seconds() // 60)
+                then = (
+                    "Ask them to reply in this thread to add it. Only in the turn their next "
+                    "message starts, and only if it says yes, call add_skill again with the "
+                    f"same arguments, content_hash='{bound}' and that turn's "
+                    f"origin_context_id. It works once, within {minutes} minutes, for them only."
+                )
+            elif no_card is None:
+                then = (
+                    f"Only after they say yes, call add_skill again with the same arguments and "
+                    f"content_hash='{bound}'; they approve it once more on the card."
+                )
+            else:
+                then = _no_card_preview(no_card, agent_name)
             return AddSkillResult(
                 status="preview",
                 agent_name=agent_name,
@@ -471,6 +523,21 @@ async def _add_skill_impl(
                 "The skill changed since its preview, so nothing was added. Call add_skill "
                 "without content_hash to preview it again."
             )
+        if chat_confirms:
+            assert origin is not None
+            async with runtime.session_factory.begin() as session:
+                refusal = await consume_pending_skill_add(
+                    session,
+                    origin=origin,
+                    ma_agent_id=agent.id,
+                    content_hash=bound,
+                    now=datetime.now(UTC),
+                )
+            if refusal is not None:
+                raise ToolError(
+                    f"Nothing was added: {_CONFIRM_REFUSALS[refusal]}. Call add_skill without "
+                    "content_hash to preview it again, then wait for the person's reply."
+                )
         added = await add_agent_skill(
             runtime.client,
             runtime.session_factory,
@@ -536,9 +603,11 @@ def register_skill_upload_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         The first call only previews: name, description, files and the files the
         agent could run. Show that to the person; only when they confirm, call again
         with the same arguments plus the preview's ``content_hash``, and the person
-        approves the upload on a confirmation card. Where no card can show, the
-        preview's summary says why (approval cards off on this deployment, or a reason
-        this conversation can't show one) and points to Add skill in /agent-setup. The
+        approves the upload on a confirmation card. Where this deployment turned cards
+        off, the person confirms by replying in this thread instead: call again only in
+        the turn their reply starts, with that turn's ``origin_context_id``. Where
+        neither can happen, the preview's summary says why and points to Add skill in
+        /agent-setup. The
         skill belongs to this agent alone; ``sync_skills`` fills the shared library
         instead, and ``remove_skill`` detaches it. A built-in agent is refused. Anyone
         may change an agent nobody else uses (no default, bound thread, or other

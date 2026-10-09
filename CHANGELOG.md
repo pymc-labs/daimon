@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
+- Where approval cards are turned off, a person adds a skill from chat by replying to its preview. "Add this skill to our agent" previews it, and the person's next message in that thread confirms it. The server holds the preview for 15 minutes, for that person, thread, agent and content only, and uses it once. The model can't confirm in the turn that previewed, for someone else, or after a different reply. Changed content needs a new preview. Who may change the agent is unchanged.
 - MCP browser pages now share a responsive Daimon shell with Daimon's face in
   the page header, local Inter font, brand colours, and inline action icons.
   The picker uses separate desktop, tablet, and phone layouts. GitHub and Slack

@@ -917,15 +917,14 @@ async def test_a_pin_or_share_added_during_the_fetch_still_refuses_the_upload(
     assert world.state.agents["agent_helper"]["skills"] == []
 
 
-@pytest.mark.parametrize("caller", ["chat_turn", "direct"])
 async def test_with_approval_cards_off_the_preview_says_the_deployment_turned_them_off(
-    db_session_factory: async_sessionmaker[AsyncSession], caller: str
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Even from a chat turn whose session is gated, tool safety off means no card,
+    """Outside a chat turn, tool safety off means no card and no reply to confirm with,
     and the preview and refusal blame the deployment, not the conversation."""
     world = await _world(db_session_factory)
     world.runtime.settings.tool_safety = ToolSafetyPolicy(enabled=False)
-    auth, origin = await _chat_turn(world) if caller == "chat_turn" else (world.auth(), None)
+    auth, origin = world.auth(), None
 
     async def add(**extra: Any) -> AddSkillResult:
         return await _add_skill_impl(
@@ -1104,3 +1103,170 @@ async def test_an_attachment_of_the_wrong_kind_is_refused_before_download(
             attachment_url="https://cdn.discordapp.com/attachments/1/2/huge.iso",
         )
     assert fetched == []
+
+
+async def _next_turn(world: _World, auth: AuthIdentity, *, thread_id: str = CHAT_THREAD) -> str:
+    """The same person's next message in a thread: a new verified origin, a moment later."""
+    now = datetime.now(UTC) + timedelta(seconds=1)
+    async with world.runtime.session_factory.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=world.tenant_id,
+            account_id=auth.account_id,
+            platform="discord",
+            parent_channel_id=ROOM,
+            thread_id=thread_id,
+            responder_ma_agent_id="agent_helper",
+            responder_name="helper",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=auth.role,
+            expires_at=now + timedelta(minutes=10),
+            now=now,
+        )
+    return str(origin.id)
+
+
+async def _cards_off_turn(world: _World) -> tuple[AuthIdentity, str]:
+    """A member's chat turn in ROOM on a deployment with approval cards off."""
+    world.runtime.settings.tool_safety = ToolSafetyPolicy(enabled=False)
+    return await _chat_turn(world, admin=False)
+
+
+async def _add_from(
+    world: _World, auth: AuthIdentity, origin: str | None, **extra: Any
+) -> AddSkillResult:
+    return await _add_skill_impl(
+        world.runtime,
+        auth,
+        agent_name="helper",
+        expected_ma_agent_id="agent_helper",
+        skill_md=extra.pop("skill_md", _MD),
+        origin_context_id=origin,
+        **extra,
+    )
+
+
+async def test_with_cards_off_the_persons_next_message_confirms_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+
+    preview = await _add_from(world, auth, origin)
+    content_hash = preview.preview.content_hash
+    assert f"content_hash='{content_hash}'" in preview.summary
+    assert "next message" in preview.summary and "/agent-setup" not in preview.summary
+
+    reply = await _next_turn(world, auth)
+    added = await _add_from(world, auth, reply, content_hash=content_hash)
+    assert added.status == "added" and len(world.created) == 1
+
+    with pytest.raises(ToolError, match="already used"):
+        await _add_from(world, auth, reply, content_hash=content_hash)
+
+
+async def test_with_cards_off_the_model_cannot_confirm_in_the_previewing_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    preview = await _add_from(world, auth, origin)
+
+    with pytest.raises(ToolError, match="has not replied since the preview"):
+        await _add_from(world, auth, origin, content_hash=preview.preview.content_hash)
+    with pytest.raises(ToolError, match="approval cards are turned off"):
+        await _add_from(world, auth, None, content_hash=preview.preview.content_hash)
+    assert world.created == []
+
+
+async def test_with_cards_off_only_the_next_message_confirms(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    preview = await _add_from(world, auth, origin)
+
+    await _next_turn(world, auth)  # a reply that did not confirm
+    later = await _next_turn(world, auth)
+    with pytest.raises(ToolError, match="sent another message since the preview"):
+        await _add_from(world, auth, later, content_hash=preview.preview.content_hash)
+    assert world.created == []
+
+
+async def test_with_cards_off_nobody_else_confirms_and_nowhere_else(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Another person's turn (even an admin's) or the same person in another thread:
+    neither has an open preview to consume."""
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    preview = await _add_from(world, auth, origin)
+    content_hash = preview.preview.content_hash
+
+    async with world.runtime.session_factory.begin() as session:
+        other = await make_account(session)
+    someone_else = dataclasses.replace(
+        auth, account_id=other.id, role=Role.ADMIN, is_admin=True, platform_user_id="777"
+    )
+    with pytest.raises(ToolError, match="no open preview"):
+        await _add_from(
+            world, someone_else, await _next_turn(world, someone_else), content_hash=content_hash
+        )
+
+    elsewhere = await _next_turn(world, auth, thread_id="666666666666666666")
+    with pytest.raises(ToolError, match="no open preview"):
+        await _add_from(world, auth, elsewhere, content_hash=content_hash)
+    assert world.created == []
+
+
+async def test_with_cards_off_a_changed_skill_needs_a_fresh_preview(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    preview = await _add_from(world, auth, origin)
+    reply = await _next_turn(world, auth)
+
+    changed = _MD.replace("Write them down.", "Email them to everyone.")
+    with pytest.raises(ToolError, match="changed since its preview"):
+        await _add_from(
+            world, auth, reply, skill_md=changed, content_hash=preview.preview.content_hash
+        )
+    assert world.created == []
+
+
+async def test_with_cards_off_an_expired_preview_confirms_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    monkeypatch.setattr("daimon.core.stores.pending_skill_adds.PENDING_SKILL_ADD_TTL", timedelta(0))
+    preview = await _add_from(world, auth, origin)
+
+    with pytest.raises(ToolError, match="no open preview"):
+        await _add_from(
+            world, auth, await _next_turn(world, auth), content_hash=preview.preview.content_hash
+        )
+    assert world.created == []
+
+
+async def test_with_cards_off_a_member_still_cannot_add_to_a_shared_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The next-message confirm changes who approves, not who may change the agent."""
+    world = await _world(db_session_factory)
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=world.tenant_id, channel_id=ROOM),
+            tenant_id=world.tenant_id,
+            agent_name="helper",
+            mode="agent",
+        )
+    auth, origin = await _cards_off_turn(world)
+
+    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+        await _add_from(world, auth, origin)
+    assert world.created == []
