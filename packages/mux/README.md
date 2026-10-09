@@ -240,6 +240,12 @@ The host retains the one billed checkpoint, its access fence, fallback notices,
 quoted transcript and system-message policy. Generic lifecycle export/restore
 stay unsupported; this explicit native extension handles the existing MA ladder.
 
+Workspace checkpoint runners carry the caller's authorized tenant and account
+into the turn scope and native restore without another authorization lookup or
+provider request. The production chat caller supplies its reauthorized account;
+existing direct callers retain their optional-account semantics, request and
+billing behavior.
+
 OpenAI's resource slice supplies default inline skills, exact binary artifacts and
 scoped vault ports. Its persistent profile is core with nine-capability offline
 evidence and is the profile for an explicitly selected OpenAI backend; a model is

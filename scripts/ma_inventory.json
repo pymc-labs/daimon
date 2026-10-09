@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2181,
+  "files_scanned": 2164,
   "parse_errors": [],
   "calls": [
     {
@@ -3644,6 +3644,17 @@
       "response_access": [
         "agent.id"
       ]
+    },
+    {
+      "file": "packages/core/tests/test_checkpoint_turn_scope.py",
+      "line": 78,
+      "end": 78,
+      "scope": "test_checkpoint_passes_real_scope_and_preserves_the_existing_read",
+      "category": "test",
+      "resource": "sessions.events.list",
+      "call": "legacy.beta.sessions.events.list(session_id='sess_old')",
+      "request_keys": [],
+      "response_access": []
     },
     {
       "file": "packages/core/tests/test_core_admin_port_requests.py",
@@ -14015,32 +14026,6 @@
       "category": "production"
     },
     {
-      "file": "packages/core/daimon/core/turn/openai_codec.py",
-      "line": 12,
-      "module": "anthropic.types.beta.sessions",
-      "names": [
-        "BetaManagedAgentsAgentMCPToolUseEvent",
-        "BetaManagedAgentsAgentMessageEvent",
-        "BetaManagedAgentsAgentToolResultEvent",
-        "BetaManagedAgentsAgentToolUseEvent",
-        "BetaManagedAgentsSessionStatusIdleEvent",
-        "BetaManagedAgentsSessionStatusRunningEvent",
-        "BetaManagedAgentsSessionStatusTerminatedEvent",
-        "BetaManagedAgentsUserMessageEvent"
-      ],
-      "category": "production"
-    },
-    {
-      "file": "packages/core/daimon/core/turn/openai_io.py",
-      "line": 19,
-      "module": "anthropic.types.beta.sessions",
-      "names": [
-        "BetaManagedAgentsEventParams",
-        "BetaManagedAgentsSessionEvent"
-      ],
-      "category": "production"
-    },
-    {
       "file": "packages/core/daimon/core/turn/outcomes.py",
       "line": 17,
       "module": "anthropic.types.beta.sessions",
@@ -15313,6 +15298,16 @@
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/test_checkpoint_turn_scope.py",
+      "line": 11,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsAgentMessageEvent",
+        "BetaManagedAgentsTextBlock"
       ],
       "category": "test"
     },
@@ -16987,15 +16982,6 @@
       "names": [
         "BetaEnvironment",
         "BetaManagedAgentsAgent"
-      ],
-      "category": "test"
-    },
-    {
-      "file": "packages/core/tests/turn/test_prepared_provider_billing.py",
-      "line": 14,
-      "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event",
-      "names": [
-        "BetaManagedAgentsSpanModelRequestEndEvent"
       ],
       "category": "test"
     },
