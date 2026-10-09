@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Annotated, Literal, Protocol, cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.session_create_params import SessionCreateParams
 from anthropic.types.beta.session_list_params import SessionListParams
-from pydantic import Field, JsonValue
+from pydantic import BaseModel, Field, JsonValue
 
 from mux.contracts.actions import UserMessage
 from mux.contracts.config import ConfigRevision
@@ -37,6 +37,22 @@ from mux.drivers.anthropic.resources._authorization import (
 from mux.drivers.anthropic.resources._errors import provider_call
 from mux.drivers.anthropic.schemas import AgentTool, NativeConfig
 from mux.errors import MigrationUnsupported, ScopeViolation, UnsupportedCapability
+
+
+def _native_json(value: object) -> JsonValue:
+    """Keep response field presence, including partial SDK-compatible replies."""
+    if isinstance(value, BaseModel):
+        return cast(JsonValue, value.model_dump(mode="json", exclude_unset=True))
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {
+            str(key): _native_json(item)
+            for key, item in cast(Mapping[object, object], value).items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_native_json(item) for item in cast(list[object] | tuple[object, ...], value)]
+    return _native_json(vars(value))
 
 
 class MCPServer(NativeConfig):
@@ -175,11 +191,14 @@ class AnthropicSessions:
         check_ref(scope, ref, self._account_scope_id, kind)
 
     def _session(self, scope: Scope, native: BetaManagedAgentsSession) -> Session:
-        check_record(scope, native.id, native.metadata)
-        revision = Revision(local=native.agent.version, native=str(native.agent.version))
+        metadata = cast(dict[str, str], getattr(native, "metadata", None) or {})
+        check_record(scope, native.id, metadata)
+        version = getattr(getattr(native, "agent", None), "version", None)
+        revision = Revision(
+            local=version or 0, native=str(version) if version is not None else None
+        )
         # The host's durable thread binding remains authoritative. This record
         # adopts the native session identity without writing/rebinding any slot.
-        metadata = native.metadata
         binding = ProviderBinding(
             id=native.id,
             thread=ThreadRef(
@@ -197,7 +216,8 @@ class AnthropicSessions:
             config_revision=0,
             legacy_account_id=scope.account_id,
         )
-        state = "provisioning" if native.status == "rescheduling" else native.status
+        status = getattr(native, "status", None) or "provisioning"
+        state = "provisioning" if status == "rescheduling" else status
         return Session(
             ref=self._ref(scope, "session", native.id),
             binding=binding,
@@ -209,7 +229,7 @@ class AnthropicSessions:
             requested_revision=revision,
             effective_revision=revision,
             state=state,
-            native=cast(JsonValue, native.model_dump(mode="json", exclude_unset=True)),
+            native=_native_json(native),
         )
 
     def _create_request(self, scope: Scope, spec: SessionSpec) -> SessionCreateRequest:

@@ -3,13 +3,80 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from anthropic import omit
+from anthropic import AsyncAnthropic, omit
+from anthropic.types.beta import BetaManagedAgentsSessionAgent
+from daimon.core.session_ports_compat import create_session_record, session_scope
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"id": "sess_partial", "agent": {"model": {"id": "claude-sonnet-4-5"}, "system": None}},
+        {
+            "id": "sess_partial",
+            "resources": [{"type": "github_repository", "url": "https://github.com/example/repo"}],
+        },
+    ],
+)
+async def test_partial_sdk_response_keeps_original_parser_semantics(response: dict) -> None:
+    old, new = ScriptedTransport(), ScriptedTransport()
+    for transport in (old, new):
+        transport.queue(ScriptedReply("POST", "/v1/sessions", httpx.Response(200, json=response)))
+    async with old.client() as legacy, new.client() as client:
+        original = await legacy.beta.sessions.create(agent="ag_1", environment_id="env_1")
+        result = await create_session_record(
+            client,
+            agent="ag_1",
+            environment_id="env_1",
+            scope=session_scope(tenant_id=None, account_id=None, call_site="test:partial"),
+            metadata=None,
+            resources=None,
+        )
+    old.assert_consumed()
+    new.assert_consumed()
+    assert old.requests == new.requests
+    assert result.model_dump(mode="json", exclude_unset=True) == original.model_dump(
+        mode="json", exclude_unset=True
+    )
+    if "agent" in response:
+        assert isinstance(result.agent, BetaManagedAgentsSessionAgent)
+        assert result.agent.model.id == "claude-sonnet-4-5"
+
+
+async def test_partial_client_reply_retains_nested_fields_without_synthetic_native_fields() -> None:
+    create = AsyncMock(
+        return_value=SimpleNamespace(
+            id="sess_partial",
+            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
+        )
+    )
+    client = cast(
+        AsyncAnthropic,
+        SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace(create=create))),
+    )
+    result = await create_session_record(
+        client,
+        agent="ag_1",
+        environment_id="env_1",
+        scope=session_scope(tenant_id=None, account_id=None, call_site="test:partial"),
+        metadata=None,
+        resources=None,
+    )
+    create.assert_awaited_once()
+    assert result.model_dump(mode="json", exclude_unset=True) == {
+        "id": "sess_partial",
+        "agent": {"model": {"id": "claude-sonnet-4-5"}, "system": None},
+    }
+    assert isinstance(result.agent, BetaManagedAgentsSessionAgent)
 
 
 @pytest.mark.parametrize("isolated", [False, True])

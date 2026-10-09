@@ -12,6 +12,7 @@ from secrets import token_hex
 from typing import cast
 
 from anthropic import AsyncAnthropic
+from anthropic._models import construct_type_unchecked
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.session_create_params import Agent, Resource
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
@@ -37,7 +38,9 @@ def session_scope(
 def sdk_session(record: Session) -> BetaManagedAgentsSession:
     if record.native is None:
         raise ValueError("the M0 session codec requires the provider snapshot")
-    return BetaManagedAgentsSession.model_validate(record.native)
+    # Match the SDK response parser's permissive construction, including
+    # partial resource records and unknown fields, at this temporary M0 edge.
+    return construct_type_unchecked(value=record.native, type_=BetaManagedAgentsSession)
 
 
 async def create_session_record(
