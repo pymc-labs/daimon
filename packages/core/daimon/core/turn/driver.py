@@ -561,6 +561,14 @@ async def run_turn(
     if isinstance(billing, BillingExempt):
         log.info("turn.billing_exempt", session_id=session_id, reason=billing.reason)
 
+    # A session can be left waiting on tool confirmations no turn will answer:
+    # a restart cancelled the turn that owned them before its denials went
+    # out (staging, 2026-10-09). MA then refuses every user.message with a
+    # 400 and the thread is stuck. The first send detects that once; the
+    # turn interrupts the session and starts over. A second refusal is a
+    # normal upstream failure.
+    unwedge_attempts = [0]
+
     async def _send_initial() -> None:
         content: list[BetaManagedAgentsImageBlockParam | BetaManagedAgentsTextBlockParam] = [
             *(image_blocks or []),
@@ -584,27 +592,45 @@ async def run_turn(
             if before_send is not None:
                 # A last check by the caller, after the stream is open (`run_prepared_turn`).
                 await before_send()
-            await anthropic.beta.sessions.events.send(session_id, events=batch)
+            try:
+                await anthropic.beta.sessions.events.send(session_id, events=batch)
+            except _anthropic.BadRequestError as err:
+                if _AWAITING_CONFIRMATIONS in str(err) and unwedge_attempts[0] == 0:
+                    unwedge_attempts[0] += 1
+                    raise _SessionAwaitingConfirmations() from err
+                raise
         await acknowledge(lifecycle, "accepted")
 
     if (observation := current_outcome.get()) is not None:
         observation.session_id = session_id
-    pump_coro = _pump(
-        anthropic=anthropic,
-        session_id=session_id,
-        send_initial=_send_initial,
-        render_anchor=TurnState(),
-        seed_state=TurnState(),
-        lifecycle=lifecycle,
-        cancel=cancel,
-        render_interval_s=render_interval_s,
-        interrupt_timeout_s=interrupt_timeout_s,
-        stream_read_timeout_s=stream_read_timeout_s,
-        now=now,
-        entry="run",
-        billing=billing,
-        tool_confirmation=tool_confirmation,
-    )
+
+    def _new_pump() -> Coroutine[Any, Any, TurnState]:
+        return _pump(
+            anthropic=anthropic,
+            session_id=session_id,
+            send_initial=_send_initial,
+            render_anchor=TurnState(),
+            seed_state=TurnState(),
+            lifecycle=lifecycle,
+            cancel=cancel,
+            render_interval_s=render_interval_s,
+            interrupt_timeout_s=interrupt_timeout_s,
+            stream_read_timeout_s=stream_read_timeout_s,
+            now=now,
+            entry="run",
+            billing=billing,
+            tool_confirmation=tool_confirmation,
+        )
+
+    async def _pump_unwedging() -> TurnState:
+        try:
+            return await _new_pump()
+        except _SessionAwaitingConfirmations:
+            log.warning("turn.session_awaiting_confirmations", session_id=session_id)
+            await _interrupt_and_settle(anthropic, session_id=session_id)
+            return await _new_pump()
+
+    pump_coro = _pump_unwedging()
     if deadline is None:
         return await pump_coro
 
@@ -626,6 +652,36 @@ async def run_turn(
             # must not mask the ceiling error itself.
             log.warning("turn.ceiling_render_failed", session_id=session_id, error=str(render_err))
         return ceiling_state
+
+
+#: MA's refusal of a user.message while confirmations are pending.
+_AWAITING_CONFIRMATIONS = "waiting on responses to events"
+
+#: Most a stuck session gets to settle after the interrupt.
+_UNWEDGE_SETTLE_S = 15.0
+
+
+class _SessionAwaitingConfirmations(Exception):
+    """MA refused the turn's user.message: the session waits on confirmations."""
+
+
+async def _interrupt_and_settle(anthropic: AsyncAnthropic, *, session_id: str) -> None:
+    """Interrupt a session stuck on confirmations and wait until it is idle.
+
+    An interrupt answers the pending calls and ends MA's turn (verified on
+    staging, 2026-10-09). No stream is open here, so the interrupt's own
+    events cannot end the retried turn early.
+    """
+    await anthropic.beta.sessions.events.send(session_id, events=[{"type": "user.interrupt"}])
+    loop = asyncio.get_running_loop()
+    give_up = loop.time() + _UNWEDGE_SETTLE_S
+    while loop.time() < give_up:
+        session = await anthropic.beta.sessions.retrieve(session_id)
+        if session.status != "running":
+            log.info("turn.session_unwedged", session_id=session_id, status=session.status)
+            return
+        await asyncio.sleep(0.5)
+    log.warning("turn.session_unwedge_timeout", session_id=session_id)
 
 
 async def _pump(
