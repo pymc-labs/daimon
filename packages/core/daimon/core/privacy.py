@@ -80,6 +80,7 @@ class PurgePreview(BaseModel):
     user_skills: PurgePreviewRow
     github_credentials: PurgePreviewRow
     github_connect_requests: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    github_connect_click_intents: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     github_user_links: PurgePreviewRow
     github_oauth_states: PurgePreviewRow
     mcp_tokens: PurgePreviewRow
@@ -105,6 +106,7 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.user_skills, "synced skill(s)"),
         (preview.github_credentials, "GitHub token(s)"),
         (preview.github_connect_requests, "GitHub setup request(s)"),
+        (preview.github_connect_click_intents, "GitHub connect button(s)"),
         (preview.github_user_links, "GitHub user link(s)"),
         (preview.github_oauth_states, "OAuth handshake record(s)"),
         (preview.mcp_tokens, "MCP token(s)"),
@@ -429,6 +431,11 @@ async def collect_purge_preview(
         github_connect_requests_count = await github_connect_store.count_requests_for_account(
             session, account_id=account_id
         )
+        github_connect_click_intents_count = (
+            await github_connect_store.count_click_intents_for_account(
+                session, account_id=account_id
+            )
+        )
 
     return PurgePreview(
         linked_principals=linked_principals,
@@ -439,6 +446,9 @@ async def collect_purge_preview(
         user_skills=user_skills,
         github_credentials=github_credentials,
         github_connect_requests=PurgePreviewRow(count=github_connect_requests_count, example=None),
+        github_connect_click_intents=PurgePreviewRow(
+            count=github_connect_click_intents_count, example=None
+        ),
         github_user_links=github_user_links,
         github_oauth_states=github_oauth_states,
         mcp_tokens=mcp_tokens,

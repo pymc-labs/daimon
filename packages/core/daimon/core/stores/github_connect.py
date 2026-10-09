@@ -290,6 +290,24 @@ async def delete_requests_for_account(session: AsyncSession, *, account_id: uuid
     return cast(CursorResult[Any], result).rowcount
 
 
+async def count_click_intents_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
+    count = await session.scalar(
+        select(func.count())
+        .select_from(GitHubConnectClickIntent)
+        .where(GitHubConnectClickIntent.requester_account_id == account_id)
+    )
+    return count or 0
+
+
+async def delete_click_intents_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
+    result = await session.execute(
+        delete(GitHubConnectClickIntent).where(
+            GitHubConnectClickIntent.requester_account_id == account_id
+        )
+    )
+    return cast(CursorResult[Any], result).rowcount
+
+
 async def activate_confirmed_agent(
     session: AsyncSession,
     *,
