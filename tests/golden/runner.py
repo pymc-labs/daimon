@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import os
 import subprocess
 import sys
@@ -84,8 +85,21 @@ def replay(name: str, *, mutation: str | None = None) -> str:
         return output.read_text()
 
 
+def legacy_transcript(transcript: str) -> str:
+    """Ignore only the explicitly labelled additive DB-column capture.
+
+    The raw replay retains new fields for binding-specific assertions. Existing
+    database fields, effects, requests and every other root section stay exact.
+    """
+    data = json.loads(transcript)
+    if "database_extensions" not in data:
+        return transcript
+    del data["database_extensions"]
+    return json.dumps(data, indent=2, sort_keys=True) + "\n"
+
+
 def check(name: str, *, regen: bool = False, mutation: str | None = None) -> None:
-    actual = replay(name, mutation=mutation)
+    actual = legacy_transcript(replay(name, mutation=mutation))
     path = GOLDENS / f"{name}.json"
     if regen:
         path.write_text(actual)

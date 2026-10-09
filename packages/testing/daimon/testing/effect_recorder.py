@@ -32,6 +32,117 @@ DB_TABLES = (
     "thread_sessions",
     "task_continuations",
 )
+# Pinned at integration 4d61c7391a5098f8ae1cffd7ca1a80fb077af326.
+# Additive schema fields are captured separately; never regenerate this list.
+LEGACY_DB_COLUMNS: dict[str, tuple[str, ...]] = {
+    "usage_events": (
+        "id",
+        "tenant_id",
+        "occurred_at",
+        "platform_user_id",
+        "managed_session_id",
+        "model",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "event_id",
+        "channel_id",
+    ),
+    "tenant_ledger": (
+        "id",
+        "tenant_id",
+        "delta_usd",
+        "reason",
+        "idempotency_key",
+        "payment_event_id",
+        "payment_intent",
+        "occurred_at",
+        "channel_id",
+    ),
+    "turn_outcomes": (
+        "id",
+        "tenant_id",
+        "account_id",
+        "platform",
+        "channel_id",
+        "thread_id",
+        "agent_id",
+        "session_id",
+        "origin",
+        "reason",
+        "started_at",
+        "ended_at",
+        "duration_ms",
+        "recovered",
+        "error_class",
+        "release",
+        "usage_refs",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "model_calls",
+        "model_ids",
+        "cost_usd",
+        "unpriced_calls",
+        "billing_posture",
+    ),
+    "thread_sessions": (
+        "id",
+        "tenant_id",
+        "platform",
+        "thread_id",
+        "account_id",
+        "ma_session_id",
+        "ma_agent_id",
+        "channel_id",
+        "seal_ids",
+        "watermark_message_id",
+        "status",
+        "effective_config",
+        "identity_fingerprint",
+        "mutable_fingerprint",
+        "predecessor_id",
+        "replaced_by_id",
+        "transfer_file_id",
+        "transfer_kind",
+        "fresh_start_requested_at",
+        "github_key_restart_notice",
+        "pending_unsaved_work",
+        "active_turn_message_id",
+        "active_turn_started_at",
+        "active_turn_channel_id",
+        "created_at",
+        "updated_at",
+    ),
+    "task_continuations": (
+        "id",
+        "tenant_id",
+        "platform",
+        "parent_channel_id",
+        "thread_id",
+        "requester_account_id",
+        "requester_external_user_id",
+        "target_ma_agent_id",
+        "target_name",
+        "requested_work",
+        "reason",
+        "status",
+        "skip_reason",
+        "idempotency_key",
+        "created_at",
+        "claimed_at",
+        "delivered_at",
+        "available_at",
+        "lease_owner",
+        "lease_expires_at",
+        "started_at",
+        "attempts",
+    ),
+}
+DATABASE_EXTENSIONS = "non_legacy_columns"
+
 ID_FIELDS = frozenset(
     {
         "event_id",
@@ -296,10 +407,10 @@ class EffectRecorder:
         )
 
     async def database(self, session: AsyncSession) -> dict[str, Json]:
-        """Capture every column, ordered by semantic row identity before normalization.
+        """Capture pinned legacy rows and separately labelled additive columns.
 
         DB rowsets have no effect order. Runtime PKs cannot establish a stable
-        order across runs. Keep causal references in each row, sorting by all
+        order across runs. Keep causal references in each row, sorting by legacy
         non-runtime fields with created_at as a temporal tiebreak. Fixtures must
         pin caller/tenant identity and provider resource ids. Platform effects
         retain their original order and are never sorted. Semantically identical
@@ -307,25 +418,49 @@ class EffectRecorder:
         their identities or give them a distinct semantic/sequence field.
         """
         snapshot: dict[str, Json] = {}
+        extensions: dict[str, Json] = {}
         for name in DB_TABLES:
-            table = Base.metadata.tables[name]
+            table = database_metadata().tables[name]
+            legacy_columns = LEGACY_DB_COLUMNS[name]
+            missing = set(legacy_columns) - set(table.columns.keys())
+            if missing:
+                raise ValueError(f"Oracle legacy columns missing from {name}: {sorted(missing)}")
+            added = tuple(
+                column.name for column in table.columns if column.name not in legacy_columns
+            )
             rows = (await session.execute(select(table))).mappings()
-            serialized = [cast(dict[str, Json], json_value(dict(row))) for row in rows]
+            serialized = [
+                (
+                    cast(dict[str, Json], json_value({key: row[key] for key in legacy_columns})),
+                    cast(dict[str, Json], json_value({key: row[key] for key in added})),
+                )
+                for row in rows
+            ]
             serialized.sort(
-                key=lambda row: (
+                key=lambda pair: (
                     json.dumps(
                         _semantic_key(
-                            row,
+                            pair[0],
                             runtime_fields=frozenset({"id", "idempotency_key"})
                             if name == "task_continuations"
                             else frozenset({"id"}),
                         ),
                         sort_keys=True,
                     ),
-                    str(row.get("created_at", "")),
+                    str(pair[0].get("created_at", "")),
                 )
             )
-            snapshot[name] = cast(list[Json], serialized)
+            snapshot[name] = [legacy for legacy, _ in serialized]
+            if added:
+                extensions[name] = {
+                    "columns": list(added),
+                    "rows": [
+                        {"legacy_row_index": index, "values": extra}
+                        for index, (_, extra) in enumerate(serialized)
+                    ],
+                }
+        if extensions:
+            snapshot[DATABASE_EXTENSIONS] = extensions
         return snapshot
 
     def transcript(
@@ -336,7 +471,13 @@ class EffectRecorder:
         epoch: datetime | None = None,
         runtime_ids: Iterable[str] = (),
     ) -> str:
-        data = json_value({"effects": self.effects, "database": database, "requests": requests})
+        serialized_database = json_value(database)
+        extensions: Json = None
+        if isinstance(serialized_database, dict):
+            extensions = serialized_database.pop(DATABASE_EXTENSIONS, None)
+        data = json_value(
+            {"effects": self.effects, "database": serialized_database, "requests": requests}
+        )
         registered = set(runtime_ids)
         if isinstance(data, dict) and isinstance(data["database"], dict):
             for table in DB_TABLES:
@@ -348,7 +489,12 @@ class EffectRecorder:
                             if isinstance(identifier, str):
                                 registered.add(identifier)
         normalizer = Normalizer(epoch=epoch, runtime_ids=registered)
-        return json.dumps(normalizer.normalize(data), indent=2, sort_keys=True) + "\n"
+        normalized = normalizer.normalize(data)
+        if extensions is not None:
+            # New fields must not consume legacy runtime-id numbers or alter dates.
+            assert isinstance(normalized, dict)
+            normalized["database_extensions"] = extensions
+        return json.dumps(normalized, indent=2, sort_keys=True) + "\n"
 
 
 def platform_receipt(value: object) -> object:

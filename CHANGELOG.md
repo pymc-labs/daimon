@@ -83,6 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and stream-read barrier make ceiling/cancel HTTP replay deterministic under load; a fixed call ceiling prevents
   inventory regeneration from raising the MA ratchet. Golden fixture defaults
   use public testing metadata access, preserving the private-core import boundary.
+  Database goldens pin all legacy columns at integration 4d61c73 and retain
+  additive schema fields in a separate capture, preventing new binding columns
+  from changing the existing behavior oracle.
 - Scripted offline MA transport and platform/DB effect recorders support
   deterministic neutral-core parity checks with exact billing values and
   jitter-safe DB timestamps that preserve scheduled durations.
