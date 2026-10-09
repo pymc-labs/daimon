@@ -139,3 +139,10 @@ The native session-resources extension adds lazy `walk` and identity-returning
 `add_file` methods. Existing methods retain their behavior. The host stops at
 the first `.env` mount without fetching later pages and records the one add
 response identity without a retrieve. Session and file grants are checked before I/O.
+OpenAI's opt-in offline conformance registration lives in
+`mux.drivers.openai.conformance`. It exercises the actual pinned SDK and driver
+over synthetic HTTP/SSE replies, with fresh state per shared fixture. Five probes
+pass; thirteen declare typed pending dependencies or unsupported capabilities.
+Broken driver variants must fail shared fixture checks. Registration adds no
+provider discovery, host wiring or live certification; see the driver README
+for the complete matrix and cleanup context.

@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Report adapter-declared conformance gaps as typed PENDING results, retaining
   their reasons and blocking certification without hiding other probe failures.
 
+- Register opt-in OpenAI offline conformance with five shared-fixture passes, thirteen typed pending reasons and broken-driver regressions, without provider calls or host activation.
 - Add an opt-in Gemini inline-reuse driver with offline transport probes, explicit continuity loss, normalized turn events and revisioned usage; Anthropic remains the default.
 - Filter completed Gemini function calls from required actions, defer open saved steps, and persist parsed usage timestamp watermarks without duplicate charges.
 - Register offline Gemini conformance probes with accurate typed deferred reasons and a pinned seven-pass, eleven-pending matrix; admission and fixture-family mutants reject broken drivers, and incomplete scenarios cannot certify.
