@@ -6,9 +6,19 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from mux.contracts.ids import Scope
+from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.resources import Session, SessionSpec
+
+
+class ConformanceFailure(Exception):
+    """A fixture-authored constant diagnostic, safe to include as evidence."""
+
+
+def require(condition: object, message: str) -> None:
+    """An optimization-safe check. Messages must be fixture-authored constants."""
+    if not condition:
+        raise ConformanceFailure(message)
 
 
 class StateStore(Protocol):
@@ -24,6 +34,7 @@ class Scenario:
     foreign_scope: Scope
     session: Session
     desired: SessionSpec
+    shared_resources: tuple[ResourceRef, ...] = ()
 
 
 class ScriptedTransport(Protocol):
@@ -33,12 +44,15 @@ class ScriptedTransport(Protocol):
     `arrange` seeds a populated session and the documented scenario faults.
     `fault` changes upstream responses without editing driver projections.
     `mutation_count` counts upstream writes (not reads or fixture seeding).
+    `deleted_resources` records actual upstream deletes, independently of receipts.
     """
 
     async def arrange(self, fixture_id: str) -> Scenario: ...
     def fault(self, name: str) -> None: ...
     @property
     def mutation_count(self) -> int: ...
+    @property
+    def deleted_resources(self) -> tuple[ResourceRef, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -86,6 +100,8 @@ async def run(registry: Registry, name: str) -> tuple[Result, ...]:
         adapter = registry.create(name)
         try:
             result = await probe(adapter.driver, adapter.store, adapter.transport)
+        except ConformanceFailure as exc:
+            result = Result(fixture_id, "fail", (f"check failed: {exc}",))
         except Exception as exc:
             # Do not serialize provider exception text, which can contain credentials.
             result = Result(fixture_id, "fail", (f"probe raised {type(exc).__name__}",))

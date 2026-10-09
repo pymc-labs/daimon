@@ -62,6 +62,8 @@ from mux.contracts.resources import (
 )
 from mux.profiles import MANAGED_AGENTS
 
+IS_TEST_ORACLE = True
+
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
 
 
@@ -77,6 +79,7 @@ class Transport:
         self.mutations = 0
         self.reconciled = False
         self.history: list[Event] = []
+        self.deletions: list[ResourceRef] = []
         self.scope = Scope(
             tenant_id="tenant", account_id="account", principal_id="human", authorization_id="auth"
         )
@@ -132,6 +135,7 @@ class Transport:
             self.scope.model_copy(update={"tenant_id": "foreign"}),
             self.session,
             desired,
+            shared_resources=(self.ref.model_copy(update={"id": "shared-vault", "kind": "vault"}),),
         )
 
     def fault(self, name: str) -> None:
@@ -140,6 +144,10 @@ class Transport:
     @property
     def mutation_count(self) -> int:
         return self.mutations
+
+    @property
+    def deleted_resources(self) -> tuple[ResourceRef, ...]:
+        return tuple(self.deletions)
 
     def check(self, scope: Scope, ref: ResourceRef) -> None:
         if (
@@ -174,7 +182,12 @@ class ReferenceSessions(UnsupportedPort):
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
         self.t.check(scope, ref)
         if self.t.faults & {"expiry", "unexpected_loss"}:
-            raise ContinuityLost(self.t.session.binding.id, ("scripted workspace loss",))
+            reason = (
+                "unexpected workspace loss"
+                if "unexpected_loss" in self.t.faults
+                else "workspace expiry"
+            )
+            raise ContinuityLost(self.t.session.binding.id, (reason,))
         return self.t.session
 
     async def plan_update(self, scope: Scope, ref: ResourceRef, desired: SessionSpec) -> UpdatePlan:
@@ -209,6 +222,7 @@ class ReferenceSessions(UnsupportedPort):
     async def delete(self, scope: Scope, ref: ResourceRef, *, key: str) -> DeletionReceipt:
         self.t.check(scope, ref)
         self.t.mutations += 1
+        self.t.deletions.append(ref)
         return DeletionReceipt(
             operation_id=key,
             deleted=(ref,),
@@ -274,6 +288,17 @@ class ReferenceEvents(UnsupportedPort):
             )
         else:
             yield self.t.event(0, "agent.thread.ended", {"outcome": "completed"}, thread="child")
+            if self.t.fixture == "C05":
+                yield self.t.event(
+                    1,
+                    "agent.message",
+                    {"item_id": "item", "content": [{"type": "text", "text": "done"}]},
+                )
+                yield self.t.event(
+                    2,
+                    "agent.tool_result",
+                    {"call_id": "call", "content": [{"type": "text", "text": "result"}]},
+                )
         # Disconnect is EOF; completion must come from reconciliation, never EOF.
 
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
@@ -336,7 +361,7 @@ class ReferenceEvents(UnsupportedPort):
         self, scope: Scope, receipt: CancelReceipt, *, deadline: datetime
     ) -> StopObservation:
         self.t.check(scope, receipt.session)
-        stopped = "observed_stop" in self.t.faults
+        stopped = "observed_stop" in self.t.faults and datetime.now(UTC) < deadline
         if stopped:
             self.t.session = self.t.session.model_copy(
                 update={"state": "idle", "active_root_turn": None}
