@@ -45,9 +45,11 @@ host-provided scope and skill grant before I/O.
 
 ### Anthropic turn event translation
 
-`AnthropicManagedAgents` registers an unwired `AnthropicEvents` port over the
+`AnthropicManagedAgents` registers an `AnthropicEvents` port over the
 host's existing SDK client; an explicitly injected Events implementation still
-wins. No host turn path, database writes, client retries or settings change.
+wins. The host bridge is experimental and requires `DAIMON_TURN__PATH=mux`;
+unset or empty selects the unchanged `legacy` path. No database writes or
+client retry settings are added by the bridge.
 Sessions lifecycle remains a separately injected port.
 
 The Events port checks host resource authorization before sending, listing,
@@ -68,8 +70,9 @@ Anthropic has no root-turn IDs, resumable SSE cursor or atomic turn precondition
 `EventNormalizer` can receive the host's root identity; a chronological history
 walk otherwise anchors turns on user input or the first running record. Pending
 actions whose source call is outside that walk remain native. SSE cursors, turn
-preconditions, reconciliation, stop waiting and native input extensions are
-explicitly unsupported in this first unwired implementation. The cancellation
+preconditions, reconciliation and stop waiting remain explicitly unsupported.
+The closed `anthropic.session_system_message@1` input schema carries only
+privileged text framing and validates the final-event ordering before I/O. The cancellation
 and host bridge units provide their policies separately.
 
 `usage.observation_from_event` converts a model-request end span to revision 1 of an

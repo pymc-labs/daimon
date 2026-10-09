@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from typing import Literal, TypedDict
 
 import anthropic as _anthropic
 import structlog
@@ -24,6 +25,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
     BetaManagedAgentsSystemContentBlockParam,
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.errors import TurnError
@@ -33,6 +35,7 @@ from daimon.core.handoff_context import (
     select_recent_turns,
 )
 from daimon.core.ma import replay_events
+from daimon.core.mux_backend import resource_scope
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
@@ -71,6 +74,41 @@ from daimon.core.turn.prepare import (
 )
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from mux.contracts.ids import ResourceRef, Scope
+from mux.contracts.ports import ManagedAgents
+from mux.errors import ScopeViolation
+
+
+class _TurnPortKwargs(TypedDict, total=False):
+    path: Literal["legacy", "mux"]
+    backend: ManagedAgents
+    scope: Scope
+    session_ref: ResourceRef
+
+
+def _turn_port_kwargs(
+    deps: TurnDeps, admission: Admission, session_id: str, *, tenant_id: uuid.UUID
+) -> _TurnPortKwargs:
+    """Derive a real tenant scope from the existing admitted operation."""
+    selected = deps.turn_path or load_turn_settings().path
+    if selected == "legacy":
+        # Keep today's call arguments unchanged in the normal default case.
+        return {"path": "legacy"} if load_turn_settings().path != "legacy" else {}
+    if admission.grant is not None and admission.grant.tenant_id != tenant_id:
+        raise ScopeViolation(session_id, "the prepared turn belongs to another tenant")
+    scope = resource_scope(
+        tenant_id=str(tenant_id),
+        account_id=str(admission.account_id),
+        authorization_id="admitted-turn",
+    )
+    result: _TurnPortKwargs = {"path": "mux", "scope": scope}
+    if deps.backend is not None:
+        if deps.backend_session_ref is None:
+            raise ScopeViolation(session_id, "an injected backend requires a session ref resolver")
+        result["backend"] = deps.backend
+        result["session_ref"] = deps.backend_session_ref(session_id, scope)
+    return result
+
 
 log = structlog.get_logger(__name__)
 
@@ -701,6 +739,7 @@ async def run_prepared_turn_impl(
 
         first_attempt = _DeferredFailureLifecycle(inner=lifecycle)
         state = await run_turn(
+            **_turn_port_kwargs(deps, prepared.admission, ma_session_id, tenant_id=tenant_id),
             anthropic=deps.anthropic,
             session_id=ma_session_id,
             user_message=_with_prefix(prefix, user_message),
@@ -833,6 +872,12 @@ async def run_prepared_turn_impl(
             )
             try:
                 recovered_state = await run_turn(
+                    **_turn_port_kwargs(
+                        deps,
+                        recovery.admission or prepared.admission,
+                        new_session_id,
+                        tenant_id=tenant_id,
+                    ),
                     anthropic=deps.anthropic,
                     session_id=new_session_id,
                     user_message=context + reseeded_message,

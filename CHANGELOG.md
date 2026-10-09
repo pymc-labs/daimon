@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Add an experimental neutral turn bridge behind `DAIMON_TURN__PATH=mux`; legacy remains the default, with unchanged input order, lifecycle effects and host accounting.
+
 - Discord and Slack Connect GitHub buttons now show a link emoji.
 - GitHub connection links now appear in a branded card with the agent's face and readable name when agent identity is enabled. Generated names are shown as "this agent". The compact card is the default; a richer card is available with a one-line switch.
 - Add standalone manual probe budget admission and durable spend receipts,

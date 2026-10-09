@@ -63,13 +63,13 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsImageBlockParam,
     BetaManagedAgentsSessionStatusIdleEvent,
     BetaManagedAgentsSpanModelRequestEndEvent,
-    BetaManagedAgentsStreamSessionEvents,
     BetaManagedAgentsSystemMessageEventParams,
     BetaManagedAgentsTextBlockParam,
     BetaManagedAgentsUserCustomToolResultEvent,
     BetaManagedAgentsUserMessageEventParams,
     BetaManagedAgentsUserToolConfirmationEventParams,
 )
+from daimon.core.config import load_turn_settings
 from daimon.core.errors import TurnError
 from daimon.core.ma import replay_events, send_interrupt_and_wait, terminal_stop_reason
 from daimon.core.tool_safety import ToolCall
@@ -81,6 +81,7 @@ from daimon.core.turn.approvals import (
 )
 from daimon.core.turn.ceiling import ceiling_error, remaining_s
 from daimon.core.turn.degraded import degraded_failure_message
+from daimon.core.turn.io import LegacyTurnIO, MuxTurnIO, TurnConnectionLost, TurnIO, TurnStream
 from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import (
@@ -95,7 +96,15 @@ from daimon.core.turn.posture import (
 )
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState
-from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.turn.termination import (
+    TerminationReason,
+    normalized_stop_reason,
+    normalized_termination_reason,
+    termination_reason,
+)
+from mux.contracts.ids import ResourceRef, Scope
+from mux.contracts.ports import ManagedAgents
+from mux.errors import ProviderError, ScopeViolation
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 
 log = structlog.get_logger(__name__)
@@ -194,9 +203,7 @@ async def _bounded(task: asyncio.Task[Any], *, what: str, session_id: str) -> No
     log.warning("turn.cleanup_timed_out", session_id=session_id, step=what)
 
 
-async def _refuse_blocked(
-    anthropic: AsyncAnthropic, session_id: str, fresh: list[str], *, message: str
-) -> None:
+async def _refuse_blocked(io: TurnIO, session_id: str, fresh: list[str], *, message: str) -> None:
     """Send `deny` for every id in `fresh`, best effort.
 
     The session is on a `requires_action` idle, so the send is accepted and
@@ -206,8 +213,8 @@ async def _refuse_blocked(
         (tool_use_id, ToolConfirmationResult(allow=False, deny_message=message))
         for tool_use_id in fresh
     )
-    with contextlib.suppress(_anthropic.APIError):
-        await anthropic.beta.sessions.events.send(session_id, events=refusals)
+    with contextlib.suppress(_anthropic.APIError, ProviderError, TurnConnectionLost):
+        await io.send(refusals)
 
 
 async def _decide_or_refuse_on_cancel(
@@ -216,7 +223,7 @@ async def _decide_or_refuse_on_cancel(
     fresh: list[str],
     *,
     cancel: asyncio.Event,
-    anthropic: AsyncAnthropic,
+    io: TurnIO,
     session_id: str,
 ) -> _DecisionBatch:
     """`_decide_blocked`, raced against the turn's cancel signal.
@@ -288,7 +295,7 @@ async def _decide_or_refuse_on_cancel(
             await _bounded(
                 asyncio.create_task(
                     _refuse_blocked(
-                        anthropic,
+                        io,
                         session_id,
                         fresh,
                         message="This turn ended before the call was approved; it did not run.",
@@ -301,7 +308,7 @@ async def _decide_or_refuse_on_cancel(
     await _bounded(
         asyncio.create_task(
             _refuse_blocked(
-                anthropic,
+                io,
                 session_id,
                 fresh,
                 message="The user stopped this turn; the call did not run.",
@@ -319,14 +326,14 @@ async def _send_decision_batch(
     *,
     fresh: list[str],
     cancel: asyncio.Event,
-    anthropic: AsyncAnthropic,
+    io: TurnIO,
     session_id: str,
 ) -> None:
     """Send decisions, retiring approved cards if no allow is sent."""
     try:
         if cancel.is_set():
             raise _InterruptInConsume()
-        await anthropic.beta.sessions.events.send(session_id, events=batch.events)
+        await io.send(batch.events)
     except BaseException as err:
         await _bounded(
             asyncio.create_task(
@@ -340,7 +347,7 @@ async def _send_decision_batch(
             await _bounded(
                 asyncio.create_task(
                     _refuse_blocked(
-                        anthropic,
+                        io,
                         session_id,
                         fresh,
                         message="This turn ended before the call was approved; it did not run.",
@@ -365,7 +372,7 @@ async def _send_decision_batch(
 # connection error — the driver asks MA for the session's status before
 # deciding anything, so it does not consume the bounded 2-attempt retry
 # budget reserved for genuine connection loss.
-_CONNECTION_LOST = (_anthropic.APIConnectionError, httpx.RemoteProtocolError)
+_CONNECTION_LOST = (_anthropic.APIConnectionError, httpx.RemoteProtocolError, TurnConnectionLost)
 
 # Guarded single-render: no-op if `diff(prev, state)` is empty; else calls
 # `lifecycle.on_render(state)` and advances the render anchor. Finalizers
@@ -506,6 +513,10 @@ async def run_turn(
     deadline: datetime | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     send_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
+    path: Literal["legacy", "mux"] | None = None,
+    backend: ManagedAgents | None = None,
+    scope: Scope | None = None,
+    session_ref: ResourceRef | None = None,
 ) -> TurnState:
     """Open the SSE stream, post the user message, and pump to terminal idle.
 
@@ -558,6 +569,25 @@ async def run_turn(
 
     Returns the final `TurnState`.
     """
+    selected_path = path if path is not None else load_turn_settings().path
+    io: TurnIO
+    if selected_path == "legacy":
+        io = LegacyTurnIO(anthropic, session_id)
+    else:
+        if scope is None:
+            raise ScopeViolation(session_id, "mux turns require the caller's authorized scope")
+        if backend is None:
+            from daimon.core.turn.io import default_mux_turn_io
+
+            io = default_mux_turn_io(
+                anthropic, scope, session_id, read_timeout_s=stream_read_timeout_s
+            )
+        else:
+            if session_ref is None or session_ref.id != session_id:
+                raise ScopeViolation(
+                    session_id, "an injected backend requires the bound session ref"
+                )
+            io = MuxTurnIO(backend, scope, session_ref)
     if isinstance(billing, BillingExempt):
         log.info("turn.billing_exempt", session_id=session_id, reason=billing.reason)
 
@@ -584,12 +614,13 @@ async def run_turn(
             if before_send is not None:
                 # A last check by the caller, after the stream is open (`run_prepared_turn`).
                 await before_send()
-            await anthropic.beta.sessions.events.send(session_id, events=batch)
+            await io.send(batch)
         await acknowledge(lifecycle, "accepted")
 
     if (observation := current_outcome.get()) is not None:
         observation.session_id = session_id
     pump_coro = _pump(
+        io=io,
         anthropic=anthropic,
         session_id=session_id,
         send_initial=_send_initial,
@@ -630,6 +661,7 @@ async def run_turn(
 
 async def _pump(
     *,
+    io: TurnIO,
     anthropic: AsyncAnthropic,
     session_id: str,
     send_initial: Callable[[], Awaitable[None]],
@@ -651,6 +683,7 @@ async def _pump(
     prev_cell: list[TurnState] = [render_anchor]
     events_folded_cell: list[int] = [0]
     renders_failed_cell: list[int] = [0]
+    normalized_terminal_cell: list[TerminationReason | None] = [None]
     # Per-turn dedup for AutoApprove: lives here (not in
     # `_consume_with_reconnect`) so it survives a reconnect -- a
     # re-delivered `requires_action` idle after an eventless-cycle
@@ -757,12 +790,14 @@ async def _pump(
                                 attempt_is_retry = not first_attempt_of_generation
                                 attempt_reason = "connection_dropped"
                             await _consume_with_reconnect(
+                                io=io,
                                 anthropic=anthropic,
                                 session_id=session_id,
                                 send_initial=send_initial,
                                 is_retry=attempt_is_retry,
                                 reconnect_reason=attempt_reason,
                                 state_cell=state_cell,
+                                normalized_terminal_cell=normalized_terminal_cell,
                                 events_folded_cell=events_folded_cell,
                                 cancel=cancel,
                                 lifecycle=lifecycle,
@@ -777,13 +812,13 @@ async def _pump(
                             )
                     break  # a terminal event was found — exit the outer loop too
                 except _EventlessCycle as cycle:
-                    session = await anthropic.beta.sessions.retrieve(session_id)
-                    if session.status in {"running", "rescheduling"}:
+                    status = await io.status()
+                    if status in {"running", "rescheduling"}:
                         log.info(
                             "turn.eventless_cycle",
                             session_id=session_id,
                             reason=cycle.reason,
-                            status=session.status,
+                            status=status,
                         )
                         eventless_reconnect = True
                         eventless_reason = cycle.reason
@@ -798,7 +833,7 @@ async def _pump(
                         "turn.eventless_cycle_replaying",
                         session_id=session_id,
                         reason=cycle.reason,
-                        status=session.status,
+                        status=status,
                     )
                     replayed = await replay_events(anthropic, session_id=session_id)
                     current_turn_events = _events_since_last_turn_boundary(
@@ -815,7 +850,7 @@ async def _pump(
                     state_cell[0] = functools.reduce(apply, current_turn_events, state_cell[0])
                     folded = state_cell[0]
                     if (
-                        session.status == "terminated"
+                        status == "terminated"
                         and folded.stop_reason is None
                         and folded.error is None
                     ):
@@ -828,7 +863,7 @@ async def _pump(
                             error=TurnError(kind="upstream", message="session terminated by MA"),
                             termination=TerminationReason.SESSION_TERMINATED,
                         )
-                    if session.status == "idle":
+                    if status == "idle":
                         match tool_confirmation:
                             case AutoApprove() | PolicyApproval():
                                 fresh = pending_confirmation_ids(
@@ -844,11 +879,11 @@ async def _pump(
                                         state_cell[0],
                                         fresh,
                                         cancel=cancel,
-                                        anthropic=anthropic,
+                                        io=io,
                                         session_id=session_id,
                                     )
                                     # Safe to send here (and only here on this
-                                    # branch): `session.status` just came back
+                                    # branch): `status` just came back
                                     # `idle` from the `sessions.retrieve` above,
                                     # i.e. the session is NOT running — the same
                                     # not-running precondition the live loop's
@@ -867,7 +902,7 @@ async def _pump(
                                         decisions,
                                         fresh=fresh,
                                         cancel=cancel,
-                                        anthropic=anthropic,
+                                        io=io,
                                         session_id=session_id,
                                     )
                                     log.info(
@@ -956,7 +991,7 @@ async def _pump(
                 retry_after_s=rate_limit[1] if rate_limit else None,
                 renders_failed=renders_failed_cell[0],
             )
-        except _anthropic.APIError as err:
+        except (_anthropic.APIError, ProviderError) as err:
             await _cancel_render()
             return await _finalize_upstream(
                 state_cell=state_cell,
@@ -972,6 +1007,7 @@ async def _pump(
         # Normal termination path.
         await _cancel_render()
         return await _finalize_success_or_error(
+            normalized_reason=normalized_terminal_cell[0],
             state_cell=state_cell,
             lifecycle=lifecycle,
             render_once=_render_once,
@@ -1187,6 +1223,8 @@ async def _bill_replayed(
 
 async def _consume_with_reconnect(
     *,
+    normalized_terminal_cell: list[TerminationReason | None],
+    io: TurnIO,
     anthropic: AsyncAnthropic,
     session_id: str,
     send_initial: Callable[[], Awaitable[None]],
@@ -1227,7 +1265,7 @@ async def _consume_with_reconnect(
     # the stream-open race in `_await_or_cancel` below: a stream that opens on
     # the losing side of that race never reaches this assignment, and its own
     # `on_cancel_win_result=lambda s: s.close()` already covers it.
-    opened_stream: _anthropic.AsyncStream[BetaManagedAgentsStreamSessionEvents] | None = None
+    opened_stream: TurnStream | None = None
     # The in-flight next-event fetch, if any. `asyncio.wait` below does not
     # cancel the tasks it waits on when the waiting task itself is cancelled
     # (a ceiling `wait_for` breach, an adapter tearing the turn down), so the
@@ -1260,11 +1298,8 @@ async def _consume_with_reconnect(
                 replayed=len(replayed),
             )
 
-        async def _open_stream() -> _anthropic.AsyncStream[BetaManagedAgentsStreamSessionEvents]:
-            return await anthropic.beta.sessions.events.stream(
-                session_id=session_id,
-                timeout=httpx.Timeout(stream_read_timeout_s, connect=5.0),
-            )
+        async def _open_stream() -> TurnStream:
+            return await io.open_stream(read_timeout_s=stream_read_timeout_s)
 
         stream = await _await_or_cancel(
             _open_stream(),
@@ -1318,7 +1353,8 @@ async def _consume_with_reconnect(
                     await next_task
                 raise _InterruptInConsume()
             try:
-                event = next_task.result()
+                item = next_task.result()
+                event = item.native
             except StopAsyncIteration:
                 # Clean close, no terminal event: not itself completion.
                 # The `finally` below closes the abandoned stream; hand the
@@ -1340,11 +1376,22 @@ async def _consume_with_reconnect(
                 await lifecycle.on_sse_event(event)
                 delivered_event_ids.add(event.id)
             _note_accepted((event,), accepted_tool_use_ids)
-            state_cell[0] = apply(state_cell[0], event)
+            state_cell[0] = apply(state_cell[0], event, usage=item.usage)
             events_folded_cell[0] += 1
+            normalized = item.normalized
+            if normalized is not None:
+                reason = normalized_termination_reason(normalized)
+                if reason is not None:
+                    normalized_terminal_cell[0] = reason
             if event.type == "session.status_terminated":
                 return
-            stop = terminal_stop_reason(event)
+            # Unknown root idle reasons stay opaque in normalization. The
+            # temporary SDK edge preserves legacy's terminal handling of them.
+            stop = (
+                normalized_stop_reason(normalized)
+                if normalized is not None and normalized.type != "native.session.status_idle"
+                else terminal_stop_reason(event)
+            )
             if stop == "requires_action":
                 seen_before = event.id in seen_requires_action_event_ids
                 seen_requires_action_event_ids.add(event.id)
@@ -1369,7 +1416,7 @@ async def _consume_with_reconnect(
                                 state_cell[0],
                                 fresh,
                                 cancel=cancel,
-                                anthropic=anthropic,
+                                io=io,
                                 session_id=session_id,
                             )
                             # Safe to send here (and ONLY here): this is a
@@ -1382,7 +1429,7 @@ async def _consume_with_reconnect(
                                 decisions,
                                 fresh=fresh,
                                 cancel=cancel,
-                                anthropic=anthropic,
+                                io=io,
                                 session_id=session_id,
                             )
                             log.info(
@@ -1444,6 +1491,7 @@ async def _consume_with_reconnect(
 
 async def _finalize_success_or_error(
     *,
+    normalized_reason: TerminationReason | None = None,
     state_cell: list[TurnState],
     lifecycle: TurnLifecycle,
     render_once: RenderOnce,
@@ -1501,10 +1549,18 @@ async def _finalize_success_or_error(
             )
             state_cell[0] = final_state
     if final_state.termination is None:
+        # Legacy treats a retries_exhausted idle with no recorded failure as
+        # completed. Preserve that M0 behavior: a normalized failure cannot
+        # create a new host error or change its outcome without the lead's
+        # explicit intentional-diff decision.
         # The reducer names the ends only it can see (MA terminating the
         # session); everything else follows from the error, or its absence.
         final_state = dataclasses.replace(
-            final_state, termination=termination_reason(final_state.error)
+            final_state,
+            termination=normalized_reason
+            if normalized_reason in {TerminationReason.COMPLETED, TerminationReason.INTERRUPTED}
+            and final_state.error is None
+            else termination_reason(final_state.error),
         )
         state_cell[0] = final_state
     await render_once(final_state)  # guarded final render (§6)
@@ -1584,6 +1640,7 @@ async def _finalize_upstream(
         termination=(
             TerminationReason.RATE_LIMITED
             if isinstance(err, _anthropic.RateLimitError)
+            or (isinstance(err, ProviderError) and err.category == "rate_limited")
             else TerminationReason.UPSTREAM
         ),
     )

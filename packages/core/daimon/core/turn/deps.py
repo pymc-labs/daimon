@@ -12,22 +12,25 @@ No I/O in this module; `build_turn_deps` derives the bundle from settings.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_admins import GroupMembersFor
 from daimon.core.channel_budget_notice import BudgetNotifier
-from daimon.core.config import GithubAppSettings, McpSettings, Settings
+from daimon.core.config import GithubAppSettings, McpSettings, Settings, TurnSettings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from mux.contracts.ids import ResourceRef, Scope
+from mux.contracts.ports import ManagedAgents
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -65,6 +68,12 @@ class TurnDeps:
     # Re-checks a notice recipient's stored Slack group or Teams team; set with the notifier.
     group_members: GroupMembersFor | None = None
     budget_notices_off: frozenset[uuid.UUID] = frozenset()
+    # Native MA client remains during the rollout; ancillary Messages calls
+    # have a separate injection point and never go through Events/Sessions.
+    messages: AsyncAnthropic | None = None
+    backend: ManagedAgents | None = None
+    backend_session_ref: Callable[[str, Scope], ResourceRef] | None = None
+    turn_path: Literal["legacy", "mux"] | None = None
 
 
 def _reveal(secret: SecretStr | None) -> str | None:
@@ -98,10 +107,13 @@ def build_turn_deps(
     billing_config: BillingConfig | None,
 ) -> TurnDeps:
     """Derive `TurnDeps` from `settings`, once per adapter runtime."""
+    turn_settings = cast(object, settings.turn)
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
     github = settings.github
     return TurnDeps(
         anthropic=anthropic,
+        messages=anthropic,
+        turn_path=turn_settings.path if isinstance(turn_settings, TurnSettings) else None,
         sessionmaker=sessionmaker,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,

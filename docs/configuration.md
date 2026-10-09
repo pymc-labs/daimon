@@ -39,6 +39,7 @@ typo is silent — check the spelling here.
 - [Sentry](#sentry)
 - [Billing Policy](#billing-policy)
 - [Support](#support)
+- [Turn](#turn)
 - [Thread Naming](#thread-naming)
 - [Turn Queue](#turn-queue)
 - [Tool Safety](#tool-safety)
@@ -1064,6 +1065,19 @@ DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID for Teams. Missing/false (the defaul
 the form in the database only. The form tells the person their answers are shared when
 it is on. Spends no support credit. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a
 JSON object.
+
+## Turn
+
+Read from `daimon.core.config.TurnSettings`. Prefix `DAIMON_TURN__`.
+
+Experimental neutral turn ports; legacy remains the default.
+
+### `DAIMON_TURN__PATH`
+
+`'legacy' | 'mux'` · optional · default `legacy`
+
+Experimental turn I/O path. legacy (the default) preserves the current behavior; mux
+opts into neutral Events/Sessions ports. Off by default.
 
 ## Thread Naming
 
