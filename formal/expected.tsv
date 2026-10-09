@@ -7,6 +7,16 @@ turn	TurnLifecycle	TurnLifecycle	violates:TerminalExclusive	39	-	adversarial ter
 turn	TurnLifecycle	TurnLifecycleReplay	clean	6926	-	stale replay with the merge fix: RenderAnchorBound holds
 turn	TurnLifecycle	TurnLifecycleBounded	clean	2646	-	adversarial conditions off: all safety invariants
 turn	TurnProgress	TurnProgress	clean	57	-	liveness: turn finalizes, periodic render resolves (weak fairness)
+# ---- turn slots and the queue at the concurrency cap ----
+turn_queue	TurnQueue	TurnQueueSafe	clean	773237	-	burst over the cap, round-robin, max wait, Stop, every end path, restart: all invariants
+turn_queue	TurnQueue	TurnQueueThreeTenants	clean	130235	-	round-robin over three tenants
+turn_queue	TurnQueue	TurnQueueFull	clean	174405	-	both queue bounds binding: all invariants
+turn_queue	TurnQueue	TurnQueueFullWitness	violates:NoRefusal	255	-	witness: the plain refusal is reachable from a full queue
+turn_queue	TurnQueue	TurnQueueProgress	clean	33475	-	liveness: queued turns resolve, cards settle, slots return (weak fairness)
+turn_queue	TurnQueue	LeakOnFailure	violates:SlotAccounting	13	-	unsafe: the failure end path forgets its slot
+turn_queue	TurnQueue	LeakStallsQueue	violates:QueuedResolves	823	-	unsafe: the leak without the max wait strands a queued turn
+turn_queue	TurnQueue	GlobalFifoStarves	violates:NoStarvation	107295	-	unsafe: one global FIFO lets a busy tenant overtake another
+turn_queue	TurnQueue	GrantThenPop	violates:NoDoubleStart	8084	-	unsafe: start then pop after an await runs a turn twice
 # ---- tool approval and Managed Agents pauses ----
 approvals	Approvals	ApprovalsSingle	clean	5489	-	three single cards: safety through duplicate pauses and queued echoes
 approvals	Approvals	ApprovalsBatched	clean	593	-	one card for three calls: same MA batch and safety invariants
