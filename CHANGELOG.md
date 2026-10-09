@@ -86,6 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Database goldens pin all legacy columns at integration 4d61c73 and retain
   additive schema fields in a separate capture, preventing new binding columns
   from changing the existing behavior oracle.
+  Transport recorder regressions also validate additive and empty-table captures
+  when combined with the new binding columns.
 - Scripted offline MA transport and platform/DB effect recorders support
   deterministic neutral-core parity checks with exact billing values and
   jitter-safe DB timestamps that preserve scheduled durations.
