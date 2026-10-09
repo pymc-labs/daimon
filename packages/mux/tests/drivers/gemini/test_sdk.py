@@ -1,21 +1,23 @@
 """Exercise the pinned SDK over HTTPX; every response is synthetic and offline."""
 
 import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import httpx
 import pytest
 from google import genai
-from mux.drivers.gemini.transport import SDKTransport
+from google.genai.types import HttpOptions, HttpRetryOptions
+from mux.drivers.gemini.transport import SDKTransport, close_iterator
 from mux.errors import ProviderError
 
 
 @pytest.mark.asyncio
-async def test_sdk_submits_documented_antigravity_extra_body_and_reads_steps():
-    captured = []
+async def test_sdk_submits_documented_antigravity_extra_body_and_reads_steps() -> None:
+    captured: list[httpx.Request] = []
     stamp = datetime.now(UTC).isoformat()
 
-    def handler(request):
+    def handler(request: httpx.Request) -> httpx.Response:
         captured.append(request)
         return httpx.Response(
             200,
@@ -33,7 +35,9 @@ async def test_sdk_submits_documented_antigravity_extra_body_and_reads_steps():
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         client = genai.Client(
             api_key="offline-fixture",
-            http_options={"httpx_async_client": http, "retry_options": {"attempts": 1}},
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
         )
         transport = SDKTransport(client)
         response = await transport.create(
@@ -73,10 +77,12 @@ async def test_sdk_submits_documented_antigravity_extra_body_and_reads_steps():
         (503, "overloaded"),
     ],
 )
-async def test_sdk_errors_are_owned_and_do_not_echo_provider_secrets(status, category):
-    calls = []
+async def test_sdk_errors_are_owned_and_do_not_echo_provider_secrets(
+    status: int, category: str
+) -> None:
+    calls: list[httpx.Request] = []
 
-    def handler(request):
+    def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
         return httpx.Response(
             status, json={"error": {"message": "SECRET echoed upstream", "code": status}}
@@ -85,7 +91,9 @@ async def test_sdk_errors_are_owned_and_do_not_echo_provider_secrets(status, cat
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         client = genai.Client(
             api_key="offline-fixture",
-            http_options={"httpx_async_client": http, "retry_options": {"attempts": 1}},
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
         )
         with pytest.raises(ProviderError) as exc:
             await SDKTransport(client).create(
@@ -99,28 +107,30 @@ async def test_sdk_errors_are_owned_and_do_not_echo_provider_secrets(status, cat
 
 
 @pytest.mark.asyncio
-async def test_sdk_open_stream_closes_http_response_without_iteration():
+async def test_sdk_open_stream_closes_http_response_without_iteration() -> None:
     class TrackedStream(httpx.AsyncByteStream):
         closed = False
 
-        async def __aiter__(self):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
             yield b'data: {"event_type":"step.delta","index":0,"delta":{"type":"text","text":"hi"}}\n\n'
 
-        async def aclose(self):
+        async def aclose(self) -> None:
             self.closed = True
 
     body = TrackedStream()
 
-    async def handler(request):
+    async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         client = genai.Client(
             api_key="offline-fixture",
-            http_options={"httpx_async_client": http, "retry_options": {"attempts": 1}},
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
         )
         opened = await SDKTransport(client).open_stream("i1")
         assert not body.closed
-        await opened.aclose()
+        await close_iterator(opened)
         assert body.closed
         await client.aio.aclose()

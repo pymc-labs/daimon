@@ -548,3 +548,16 @@ counts, raw meters and correction revisions. Gemini's separately reported
 response and thought tokens are combined into inclusive neutral output tokens.
 Unsupported capabilities fail admission or refuse before provider mutation.
 Existing default resolution continues to select Anthropic.
+
+Required actions exclude saved calls with matching results, including filesystem
+calls automatically executed in the environment. Open steps from in-progress
+snapshots enter authoritative history only after the interaction pauses or ends.
+A persisted provider timestamp watermark advances even when usage counts stay
+equal, so older snapshots cannot rewind usage or session state after a restart.
+
+Missing usage stages remain unknown pending recorded provider evidence; no zero
+counts or tool-token billing rules are inferred. Interaction meters under a
+shared root are separate observations, rather than a claimed root-turn aggregate.
+The host accounting bridge must establish coverage before summing overlapping
+grains. Production metadata storage is still injected: its transaction mechanism
+must avoid retaining database connections during provider I/O.

@@ -163,15 +163,25 @@ class Base:
     def _observe(self, record: SessionRecord, raw: Object, root: str) -> None:
         try:
             interaction = string(raw["id"])
+            # Provider chronology is independent of meter changes and survives
+            # restart. Parse offsets rather than ordering timestamp strings.
+            active = raw.get("updated") or raw.get("created")
+            stamp: datetime | None = None
+            if active is not None:
+                stamp = datetime.fromisoformat(string(active).replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    raise ValueError("provider timestamp has no timezone")
+                stamp = stamp.astimezone(UTC)
+                watermark = record.native_updated.get(interaction)
+                if watermark is not None and stamp < watermark:
+                    return
+                record.native_updated[interaction] = stamp
             env = raw.get("environment_id")
             if env is not None:
                 record.environment_id = string(env)
             # Only execution proves activity, not merely fetching old records.
-            active = raw.get("updated") or raw.get("created")
-            if isinstance(active, str) and record.environment_id is not None:
-                expiry = datetime.fromisoformat(active.replace("Z", "+00:00")) + timedelta(days=7)
-                if expiry.tzinfo is None:
-                    raise ValueError("provider timestamp has no timezone")
+            if stamp is not None and record.environment_id is not None:
+                expiry = stamp + timedelta(days=7)
                 record.workspace_expires_at = max(record.workspace_expires_at or expiry, expiry)
             prior = record.observations.get(interaction)
             observation = observation_from_interaction(
@@ -182,12 +192,6 @@ class Base:
                 root_turn=root,
                 model=record.model,
             )
-            if (
-                prior is not None
-                and prior.native_revision is not None
-                and observation.native_revision is not None
-            ) and observation.native_revision < prior.native_revision:
-                return
             if prior is not None and prior.native_meter != observation.native_meter:
                 observation = observation.model_copy(update={"revision": prior.revision + 1})
             if prior is None or prior.native_meter != observation.native_meter:

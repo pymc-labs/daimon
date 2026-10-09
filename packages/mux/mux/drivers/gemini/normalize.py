@@ -54,11 +54,18 @@ def actions(raw: Object) -> tuple[RequiredAction, ...]:
     steps = raw.get("steps", [])
     if not isinstance(steps, list):
         raise ValueError("expected saved steps")
+    executed = {
+        string(step["call_id"])
+        for value in steps
+        if (step := object_value(value)).get("type") == "function_result"
+    }
     pending: list[RequiredAction] = []
     for value in steps:
         step = object_value(value)
         if step.get("type") == "function_call":
             call = string(step["id"])
+            if call in executed:
+                continue
             pending.append(
                 RequiredAction(
                     id=call,
@@ -93,6 +100,10 @@ def saved_events(
     if not isinstance(steps, list):
         raise ValueError("expected saved steps")
     for index, value in enumerate(steps):
+        # An in-progress saved step may still be open. Its position is stable
+        # but its content is not; only paused/terminal snapshots enter history.
+        if raw.get("status") == "in_progress":
+            break
         step = object_value(value)
         kind = string(step["type"])
         identity = str(step.get("id") or f"step:{index}")

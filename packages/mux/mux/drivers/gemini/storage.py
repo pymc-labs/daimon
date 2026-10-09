@@ -33,6 +33,7 @@ class SessionRecord:
     interactions: dict[str, str] = field(default_factory=lambda: {})
     events: dict[str, Event] = field(default_factory=lambda: {})
     observations: dict[str, UsageObservation] = field(default_factory=lambda: {})
+    native_updated: dict[str, datetime] = field(default_factory=lambda: {})
     observation_history: dict[tuple[str, int], UsageObservation] = field(default_factory=lambda: {})
     unknown_delivery: bool = False
 

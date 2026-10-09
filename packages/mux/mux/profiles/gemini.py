@@ -8,7 +8,8 @@ it.
 
 from __future__ import annotations
 
-from mux.contracts.profile import ExtensionRef, Profile
+from mux.contracts.extensions import ExtensionRef
+from mux.contracts.profile import Profile
 
 INLINE_REUSE = Profile(
     provider="gemini",
@@ -22,7 +23,7 @@ INLINE_REUSE = Profile(
         "turn_lifecycle": "native",
         "cancel": "native",
         "tool_loop": "native",
-        # source-G-runtime.txt function results + official Interactions usage;
+        # source-G-runtime.txt pending function results + pinned SDK Usage schema;
         # tests/drivers/gemini/test_core.py proves actions, nulls and revisions.
         "required_actions": "native",
         "usage_observations": "emulated",
