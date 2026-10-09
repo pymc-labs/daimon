@@ -56,6 +56,7 @@ from daimon.core.continuity.messages import ConfigurationChange, render_env_impo
 from daimon.core.credential_requests import (
     CredentialRequestKind,
     availability_for_request,
+    mcp_permission_message,
     split_skill_repo_target,
 )
 from daimon.core.credential_submit import (
@@ -821,23 +822,31 @@ async def _refuse_mcp_replacement(
     thread_ts: str | None,
     channel_id: str,
     user_id: str,
+    policy_refused: bool = False,
 ) -> None:
     """Spend the request and write nothing: no vault token, no published token."""
     await settle_credential_submit(
         runtime.sessionmaker,
         row=row,
         platform="slack",
-        outcome="write_failed",
+        outcome="policy_refused" if policy_refused else "write_failed",
         carries_work=False,
         record=record_input_continuation,
     )
-    await edit_posted_card(client, row=row, state="refused", refusal="replacement_admin_required")
+    await edit_posted_card(
+        client,
+        row=row,
+        state="refused",
+        refusal="mcp_permission_required" if policy_refused else "replacement_admin_required",
+    )
     await post_ephemeral(
         client,
         thread_ts=thread_ts,
         channel_id=channel_id,
         user_id=user_id,
-        text=(
+        text=(mcp_permission_message(row.target_name or "The agent") + " Nothing was saved.")
+        if policy_refused
+        else (
             f"{row.target_name or 'The agent'} already has `{row.target}` (or a token for "
             "that URL) and is shared here, so replacing it needs a workspace admin. "
             "Nothing was saved."
@@ -934,6 +943,7 @@ async def run_mcp_credential_submission(
             thread_ts=thread_ts,
             channel_id=channel_id,
             user_id=user_id,
+            policy_refused=not connect.replaces,
         )
         return
 

@@ -64,6 +64,7 @@ from daimon.core.credential_requests import (
     ENV_FILE_TARGET,
     CredentialRequestKind,
     build_skill_repo_target,
+    mcp_permission_message,
     mint_request_token,
 )
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
@@ -366,9 +367,7 @@ async def _require_mcp_replacement_allowed(
     )
     if decision.refused:
         raise ToolError(
-            f"Changing '{ma_agent.name}'s MCP connections needs a server or workspace admin, "
-            "or an admin of every channel named by its rule, with every use staying inside "
-            "those channels. The caller does not have that permission. Nothing changed and "
+            f"{mcp_permission_message(ma_agent.name)} Nothing changed and "
             f"no card was posted. Tell them an admin can ask Daimon to connect '{server_name}' on "
             f"'{ma_agent.name}'. Do not retry under another name."
         )

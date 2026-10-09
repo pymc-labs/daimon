@@ -119,6 +119,7 @@ from daimon.core.continuity.messages import (
 from daimon.core.credential_requests import (
     CredentialRequestOutcome,
     availability_for_request,
+    mcp_permission_message,
     split_skill_repo_target,
 )
 from daimon.core.credential_submit import (
@@ -781,20 +782,29 @@ class McpCredentialModal(discord.ui.Modal):
         self.add_item(token_label)
 
     async def _refuse_replacement(
-        self, interaction: discord.Interaction, consumed_row: CredentialRequestRow
+        self,
+        interaction: discord.Interaction,
+        consumed_row: CredentialRequestRow,
+        *,
+        policy_refused: bool = False,
     ) -> None:
         """Spend the request and write nothing: no vault token, no attach."""
         await _settle_spent_request(
-            self._runtime, row=consumed_row, outcome="write_failed", carries_work=False
+            self._runtime,
+            row=consumed_row,
+            outcome="policy_refused" if policy_refused else "write_failed",
+            carries_work=False,
         )
         await edit_posted_card(
             interaction.client,
             row=consumed_row,
             state="refused",
-            refusal="replacement_admin_required",
+            refusal="mcp_permission_required" if policy_refused else "replacement_admin_required",
         )
         await interaction.followup.send(
-            f"{_agent_name(consumed_row)} already has `{consumed_row.target}` (or a token "
+            (mcp_permission_message(_agent_name(consumed_row)) + " Nothing was saved.")
+            if policy_refused
+            else f"{_agent_name(consumed_row)} already has `{consumed_row.target}` (or a token "
             "for that URL) and is shared here, so replacing it needs a server admin. "
             "Nothing was saved.",
             ephemeral=True,
@@ -845,7 +855,9 @@ class McpCredentialModal(discord.ui.Modal):
 
         await edit_posted_card(interaction.client, row=consumed_row, state="received")
         if connect.refused:
-            await self._refuse_replacement(interaction, consumed_row)
+            await self._refuse_replacement(
+                interaction, consumed_row, policy_refused=not connect.replaces
+            )
             return
 
         mcp_server_url = consumed_row.mcp_server_url

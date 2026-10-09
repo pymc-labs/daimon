@@ -235,7 +235,7 @@ async def complete_mcp_oauth_flow(
                     replace_allowed=decision.replace_allowed,
                     before_update=still_allowed,
                 )
-            except McpOAuthWriteRefusedError:
+            except (McpOAuthWriteRefusedError, McpServerReplaceRefusedError):
                 await _withdraw_grant(anthropic, credential_id=credential_id, vault_id=vault_id)
                 raise
     async with session_factory() as session, session.begin():

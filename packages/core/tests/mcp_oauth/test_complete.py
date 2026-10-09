@@ -493,3 +493,67 @@ async def test_personal_oauth_for_an_existing_server_does_not_mutate_the_agent(
     )
     assert completion.ma_agent_id == "ag_oauth" and len(created) == 1
     assert updates == [], "personal authentication must leave the shared spec untouched"
+
+
+async def test_concurrent_server_replacement_withdraws_the_new_oauth_grant(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A writer installs this name after the list read; the fresh attach refuses."""
+    from anthropic import AsyncAnthropic
+    from daimon.core.mcp_attach import McpServerReplaceRefusedError
+
+    flow, tenant_id = await _flow(db_session, admin=True)
+    await db_session.commit()
+    fake, created, updates = _fake_ma(
+        tenant_id, vault_id="vlt_me", account_id=flow.account_id, agent_id=flow.agent_id
+    )
+    inner = fake._client._transport
+    deleted: list[str] = []
+    installed: list[str] = []
+    listed = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal listed
+        if request.method == "DELETE" and request.url.path.endswith("/vcrd_oauth"):
+            deleted.append(request.url.path)
+            return httpx.Response(204)
+        response = await inner.handle_async_request(request)
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            listed = True
+        if request.method == "GET" and request.url.path == "/v1/agents/ag_oauth":
+            assert listed, "the decision read a server-free snapshot first"
+            body = response.json()
+            other_url = "https://concurrent.example.com/mcp"
+            installed.append(other_url)
+            body["mcp_servers"] = [{"name": "notion", "type": "url", "url": other_url}]
+            return httpx.Response(200, json=body)
+        return response
+
+    client = AsyncAnthropic(
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"access_token": "personal-grant"})
+        )
+    )
+    with pytest.raises(McpServerReplaceRefusedError):
+        await complete_mcp_oauth_flow(
+            http,
+            client,
+            flow=flow,
+            code="code",
+            fernet=make_fernet(),
+            jwt_secret=b"x" * 32,
+            public_url=_PUBLIC_URL,
+            now=_NOW,
+            session_factory=db_session_factory,
+            default=DeploymentDefault(agent_name="other"),
+        )
+    assert installed == ["https://concurrent.example.com/mcp"]
+    assert len(created) == 1, "the personal grant was already written before the attach"
+    assert deleted == ["/v1/vaults/vlt_me/credentials/vcrd_oauth"]
+    assert updates == [], "the concurrent server is never repointed"
+    assert not await flows_store.list_completed_grants(
+        db_session, tenant_id=tenant_id, server_urls=[_MCP_URL]
+    )
