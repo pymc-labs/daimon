@@ -9,10 +9,13 @@ breaks the relevant test.
 from __future__ import annotations
 
 import importlib.util
+import json
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, get_args
 from unittest.mock import MagicMock
 
@@ -23,6 +26,8 @@ import discord.http
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._tidy import PostRecord
+from daimon.adapters.mcp.tools.discord import _send as _send_mod
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
@@ -148,6 +153,8 @@ def _auth(*, external_id: str = "111", platform_user_id: str = "42") -> AuthIden
 # Permission flag constants (Discord docs).
 _VIEW_CHANNEL = 1 << 10  # 1024
 _SEND_MESSAGES = 1 << 11  # 2048
+_MANAGE_THREADS = 1 << 34
+_SEND_MESSAGES_IN_THREADS = 1 << 38
 
 
 def _guild_payload(*, guild_id: str = "111", owner_id: str = "1") -> dict[str, Any]:
@@ -297,6 +304,68 @@ async def test_send_message_text_only(
     assert row.id == "9001"
     assert row.content == "posted"
     assert row.channel_id == "222"
+
+
+async def test_send_message_long_text_is_split_before_discord_post(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    posted: list[str] = []
+    file_counts: list[int] = []
+    payload_bytes = b"attached"
+    fake_session = _FakeAiohttpSession(
+        _FakeAiohttpResponse(content_length=len(payload_bytes), chunks=[payload_bytes])
+    )
+    agent_id = uuid.uuid4()
+    auth = replace(_auth(), agent_id=agent_id)
+    recorded: list[PostRecord] = []
+
+    async def record(*_args: object, posts: list[PostRecord], **_kwargs: object) -> None:
+        recorded.extend(posts)
+
+    async def find_agent(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(name="test agent")
+
+    async def fail_identity(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("identity unavailable")
+
+    monkeypatch.setattr(_send_mod, "identity_enabled_for", lambda *_args: True)
+    monkeypatch.setattr(_send_mod, "find_agent_by_derived_uuid", find_agent)
+    monkeypatch.setattr(_send_mod, "resolve_agent_identity", fail_identity)
+    monkeypatch.setattr(_send_mod, "record_agent_posts", record)
+
+    async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload()
+        if route.method == "POST" and route.path == "/channels/{channel_id}/messages":
+            payload = kwargs.get("json") or json.loads(kwargs["form"][0]["value"])
+            content = payload["content"]
+            assert len(content) <= 2000, "Discord rejects a message over 2000 characters"
+            posted.append(content)
+            file_counts.append(len(kwargs.get("files", [])))
+            return _message_payload(message_id=str(9000 + len(posted)), content=content)
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    row = await _send_message_impl(
+        _runtime_with_discord_token(session_factory=db_session_factory),
+        auth,
+        channel_id="222",
+        content="x" * 4001,
+        attachments=[{"url": "https://cdn.discordapp.com/x.png", "filename": "x.png"}],
+        session=fake_session,  # type: ignore[arg-type]
+    )
+    assert row.id == "9001"
+    assert "".join(posted) == "x" * 4001
+    assert file_counts == [1, 0, 0]
+    assert [post.message_id for post in recorded] == ["9001", "9002", "9003"]
+    assert [post.content for post in recorded] == posted
 
 
 async def test_send_message_with_attachments(
@@ -539,7 +608,7 @@ async def test_send_message_to_thread_succeeds_for_non_admin_when_parent_uncache
         if route.path == "/guilds/{guild_id}":
             return _guild_payload()
         if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)]
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -563,17 +632,16 @@ async def test_send_message_to_thread_succeeds_for_non_admin_when_parent_uncache
     assert row.channel_id == "999", "message should land in the thread, not the parent"
 
 
-async def test_send_message_to_thread_denied_when_parent_denies_send(
+async def test_send_message_to_thread_denied_without_thread_send_permission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A non-admin without send_messages on the thread's parent gets ToolError,
-    not ClientException, when the parent starts uncached."""
+    """Parent send_messages does not grant the separate thread posting right."""
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
             return _guild_payload()
         if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]  # no send_messages
+            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -587,13 +655,108 @@ async def test_send_message_to_thread_denied_when_parent_denies_send(
         raise AssertionError(f"unexpected route {route.method} {route.path}")
 
     patch_discord_http(monkeypatch, handler)
-    with pytest.raises(ToolError, match="send_messages"):
+    with pytest.raises(ToolError, match="send_messages_in_threads"):
         await _send_message_impl(
             _runtime_with_discord_token(),
             _auth(),
             channel_id="999",
             content="x",
         )
+
+
+async def test_send_message_private_thread_denied_for_nonmember_with_thread_send_permission(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Thread posting permission does not replace private membership."""
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [
+                _everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES | _SEND_MESSAGES_IN_THREADS)
+            ]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            if str(route.channel_id) == "999":
+                payload = _thread_payload()
+                payload["type"] = 12
+                return payload
+            return _text_channel_payload()
+        if route.path == "/channels/{channel_id}/thread-members/{user_id}":
+            raise discord.NotFound(MagicMock(status=404), {"message": "Unknown Member"})
+        if route.method == "POST" and route.path == "/channels/{channel_id}/messages":
+            raise AssertionError("agent posted on behalf of a caller without thread rights")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    with pytest.raises(ToolError, match="view_channel"):
+        await _send_message_impl(
+            _runtime_with_discord_token(session_factory=db_session_factory),
+            _auth(),
+            channel_id="999",
+            content="should be denied",
+        )
+
+
+@pytest.mark.parametrize(
+    ("private", "member", "manage_threads"),
+    [(False, False, False), (True, True, False), (True, False, True)],
+)
+async def test_send_message_thread_allows_public_or_member_or_moderator_without_parent_send(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    private: bool,
+    member: bool,
+    manage_threads: bool,
+) -> None:
+    member_checks = 0
+    parent_fetches = 0
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        nonlocal member_checks, parent_fetches
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            perms = _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS
+            if manage_threads:
+                perms |= _MANAGE_THREADS
+            return [_everyone_role("111", perms)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            if str(route.channel_id) == "999":
+                payload = _thread_payload()
+                payload["type"] = 12 if private else 11
+                return payload
+            parent_fetches += 1
+            return _text_channel_payload()
+        if route.path == "/channels/{channel_id}/thread-members/{user_id}":
+            member_checks += 1
+            if member:
+                return {
+                    "id": "999",
+                    "user_id": "42",
+                    "join_timestamp": "2026-05-09T00:00:00+00:00",
+                    "flags": 0,
+                }
+            raise discord.NotFound(MagicMock(status=404), {"message": "Unknown Member"})
+        if route.method == "POST" and route.path == "/channels/{channel_id}/messages":
+            return _message_payload(message_id="9004", channel_id="999", content="in-thread")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    row = await _send_message_impl(
+        _runtime_with_discord_token(session_factory=db_session_factory),
+        _auth(),
+        channel_id="999",
+        content="in-thread",
+    )
+    assert row.id == "9004" and row.channel_id == "999"
+    assert parent_fetches == 1
+    assert member_checks == int(private and not manage_threads)
 
 
 # ---------------------------------------------------------------------------
@@ -889,7 +1052,7 @@ async def test_post_credential_button_hydrates_thread_parent_before_permission_c
         if route.path == "/guilds/{guild_id}":
             return _guild_payload()
         if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)]
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1004,7 +1167,11 @@ _ADMINISTRATOR = 1 << 3
     ("target_id", "policy", "everyone_perms"),
     [
         ("222", TenantAccessPolicy(protected_channel_ids=("222",)), _VIEW_CHANNEL | _SEND_MESSAGES),
-        ("999", TenantAccessPolicy(protected_channel_ids=("222",)), _VIEW_CHANNEL | _SEND_MESSAGES),
+        (
+            "999",
+            TenantAccessPolicy(protected_channel_ids=("222",)),
+            _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS,
+        ),
         (
             "222",
             TenantAccessPolicy(protected_category_ids=("777",)),

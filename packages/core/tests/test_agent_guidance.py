@@ -92,41 +92,75 @@ def test_states_the_interactive_delivery_contract_not_only_the_headless_one() ->
     assert "Never" in block and "invoked from" in block, (
         "block must forbid send_message into the thread the turn was invoked from"
     )
-    assert "interactive exception is Discord file delivery" in block, (
-        "the Discord file path must be explicit about overriding the general send_message rule"
-    )
-    slack = block[block.index("On Slack") : block.index("On Teams")]
-    discord = block[block.index("On Discord") : block.index("Calling `read`")]
-    assert "/mnt/session/outputs IS the delivery path" in slack
-    assert "do NOT also" in slack and "send_message" in slack, (
-        "Slack guidance must prevent output-directory files from being sent twice"
-    )
-    assert "/mnt/session/outputs is NOT a delivery path" in discord
-    assert "create_file_upload_url" in discord and "send_message" in discord, (
-        "Discord guidance must preserve its explicit file-upload sequence"
-    )
     assert "a FILE never does" not in block
     assert "There is no way to attach a file to your reply" not in block
+
+
+def _files_section() -> str:
+    block = CREDENTIAL_GUIDANCE_BLOCK
+    return _collapse(
+        block[block.index("FILES GO OUT WITH YOUR REPLY") : block.index("In a Teams channel")]
+    )
+
+
+def test_one_file_rule_for_discord_slack_and_teams_chats() -> None:
+    # Regression for the 2026-10-09 Discord incident: the guidance sent Discord
+    # files through send_message and told the agent to keep working files in
+    # the outputs directory, so one answer got the PDF in a separate post, a
+    # working .typ file swept in after it, and a reply that said "attached above".
+    files = _files_section()
+    assert (
+        "On Discord, on Slack, and in a Teams 1:1 chat (its channel id starts with `a:`), "
+        "saving a file under /mnt/session/outputs IS the delivery path" in files
+    ), "one rule for every chat whose files go out with the reply"
+    assert "attaches each file there to your reply" in files
+    assert "download card" in files, "a Teams 1:1 chat offers each file as a card"
+    assert "interactive turns only" in files and "a scheduled routine delivers nothing" in files
+    assert "keep working files (sources, drafts, intermediate data, logs) in /root/work" in files, (
+        "a working file in outputs is sent to the person"
+    )
+    assert "Name each file in your reply by its filename" in files
+    assert 'never say a file is "above" or "below"' in files, (
+        "the file's place relative to the reply differs by platform"
+    )
+    assert (
+        "Do NOT call create_file_upload_url or send_message for a file going to the thread "
+        "you were invoked from" in files
+    ), "posting a file into its own thread delivers it twice"
+    block = CREDENTIAL_GUIDANCE_BLOCK
+    assert "NOT a delivery path" not in block, "the old Discord exception is gone"
+    assert "interactive exception is Discord file delivery" not in block
+    assert block.count("On Discord") == 1, "Discord has no separate file rule any more"
+
+
+def test_routines_and_other_channels_keep_the_upload_route() -> None:
+    block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
+    routines = block[block.index("ROUTINES RUN HEADLESS") : block.index("WORKSPACE MOVES")]
+    assert "send_message tool with a channel_id" in routines
+    assert "create_file_upload_url" in routines and "file_handles" in routines, (
+        "a routine has no reply, so its files still go through an upload"
+    )
+    assert "not invoked from" in routines, "and so does a file for another channel"
 
 
 def test_teams_guidance_splits_one_to_one_delivery_from_channels() -> None:
     # Regression for a Teams 1:1 turn where the agent said file posting was not
     # built for Teams while the adapter offered the file anyway, and for channel
     # threads that got a separate note per file the agent could not deliver.
+    files = _files_section()
+    assert "Teams 1:1 chat (its channel id starts with `a:`)" in files, (
+        "the agent must be able to tell a 1:1 chat from the channel id it is given"
+    )
+    assert "download card the person accepts" in files, (
+        "a Teams 1:1 chat delivers through the same sweep; the person accepts each file"
+    )
     teams = _collapse(
         CREDENTIAL_GUIDANCE_BLOCK[
-            CREDENTIAL_GUIDANCE_BLOCK.index("On Teams") : CREDENTIAL_GUIDANCE_BLOCK.index(
-                "On Discord"
+            CREDENTIAL_GUIDANCE_BLOCK.index("In a Teams channel") : CREDENTIAL_GUIDANCE_BLOCK.index(
+                "Calling `read`"
             )
         ]
     )
-    assert "1:1 chat (its channel id starts with `a:`)" in teams, (
-        "the agent must be able to tell a 1:1 chat from the channel id it is given"
-    )
-    assert "/mnt/session/outputs IS the delivery path, with every Slack rule above" in teams, (
-        "a Teams 1:1 chat delivers through the same sweep, so the Slack write rules apply"
-    )
-    assert "download card" in teams, "the person accepts each file, so name the card"
     assert "never call it or create_file_upload_url for a file" in teams, (
         "Teams send_message refuses files; the agent must not reach for the Discord path"
     )
@@ -192,7 +226,9 @@ def test_slack_guidance_states_output_write_discipline() -> None:
     # facts needs its own line of guidance or agents will append, nest, and
     # delete their way into silently undelivered files.
     block = CREDENTIAL_GUIDANCE_BLOCK
-    slack = block[block.index("On Slack") : block.index("On Teams")]
+    slack = _collapse(
+        block[block.index("FILES GO OUT WITH YOUR REPLY") : block.index("In a Teams channel")]
+    )
     assert "interactive turns only" in slack, (
         "Slack guidance must scope delivery to interactive turns"
     )
@@ -208,7 +244,7 @@ def test_slack_guidance_states_output_write_discipline() -> None:
     assert "overwrite it in place" in slack and "never `rm`" in slack, (
         "Slack guidance must say overwrite-to-revise, never rm-and-recreate"
     )
-    assert "do NOT also call create_file_upload_url or send_message" in slack, (
+    assert "Do NOT call create_file_upload_url or send_message" in slack, (
         "the duplicate-delivery warning must survive the additions"
     )
     assert "at most five files" not in block and "five files per turn" not in block, (

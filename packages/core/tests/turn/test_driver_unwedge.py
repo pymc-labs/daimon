@@ -21,7 +21,7 @@ from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TextBlock
 from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent
 
-from .conftest import make_agent_message, make_end_turn, make_status_idle
+from .conftest import make_agent_message, make_end_turn, make_requires_action, make_status_idle
 
 _EXEMPT = BillingExempt(reason="cli-operator-run")
 _STUCK = (
@@ -43,19 +43,38 @@ def _refusal() -> anthropic.BadRequestError:
     )
 
 
-def _refuse_messages(fa: FakeAnthropic, *, times: int) -> None:
-    """Make the first `times` user.message sends fail as a stuck session does."""
-    events = fa.beta.sessions.events
-    real_send = events.send
+def _refuse_messages(fa: FakeAnthropic, *, times: int, interrupt_lag_s: float = 0.0) -> None:
+    """Make the first `times` user.message sends fail as a stuck session does.
+
+    The session starts idle on a `requires_action` pause, as MA leaves it.
+    MA takes an interrupt `interrupt_lag_s` later: its pause becomes an
+    end_turn, and until then every user.message is refused as well.
+    """
+    resource = fa.beta.sessions.events
+    real_send = resource.send
     left = [times]
+    resource.replay_events.append(
+        make_status_idle(
+            event_id="sevt_pause",
+            stop_reason=make_requires_action(event_ids=["sevt_1", "sevt_2"]),
+        )
+    )
+    interrupted = asyncio.Event()
+
+    def _take_interrupt() -> None:
+        resource.replay_events.append(make_status_idle(event_id="sevt_interrupted"))
+        interrupted.set()
 
     async def send(session_id: str, *, events: list[dict[str, Any]]) -> None:
-        if events and events[0]["type"] == "user.message" and left[0] > 0:
-            left[0] -= 1
+        stuck = left[0] > 0 or not interrupted.is_set()
+        if events and events[0]["type"] == "user.message" and stuck:
+            left[0] = max(left[0] - 1, 0)
             raise _refusal()
         await real_send(session_id, events=events)
+        if events and events[0]["type"] == "user.interrupt":
+            asyncio.get_running_loop().call_later(interrupt_lag_s, _take_interrupt)
 
-    events.send = send  # type: ignore[method-assign]
+    resource.send = send  # type: ignore[method-assign]
 
 
 async def test_a_stuck_session_is_interrupted_and_the_turn_runs() -> None:
@@ -67,7 +86,7 @@ async def test_a_stuck_session_is_interrupted_and_the_turn_runs() -> None:
             YieldEvent(make_status_idle(event_id="sevt_end", stop_reason=make_end_turn())),
         ],
     ]
-    fa.beta.sessions.retrieve_statuses = ["idle"]
+    fa.beta.sessions.retrieve_statuses = ["idle"] * 20
     _refuse_messages(fa, times=1)
 
     final = await run_turn(
@@ -90,7 +109,7 @@ async def test_a_stuck_session_is_interrupted_and_the_turn_runs() -> None:
 async def test_a_session_still_stuck_after_the_interrupt_says_start_a_new_thread() -> None:
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [[], []]
-    fa.beta.sessions.retrieve_statuses = ["idle"]
+    fa.beta.sessions.retrieve_statuses = ["idle"] * 20
     _refuse_messages(fa, times=2)
 
     final = await run_turn(
@@ -218,3 +237,64 @@ async def test_a_failed_recovery_never_opens_another_stream() -> None:
 
     assert fa.beta.sessions.events.stream_calls == 1, "no second stream after a failed recovery"
     assert final.error is not None and final.error.kind == "upstream"
+
+
+async def test_the_retry_waits_until_ma_has_taken_the_interrupt() -> None:
+    """Staging, 2026-10-09: the stuck session already read `idle`, so the retry
+    went out before MA took the interrupt and was refused again."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [],
+        [
+            YieldEvent(make_agent_message(event_id="sevt_a", text="hello again")),
+            YieldEvent(make_status_idle(event_id="sevt_end", stop_reason=make_end_turn())),
+        ],
+    ]
+    fa.beta.sessions.retrieve_statuses = ["idle"] * 20
+    _refuse_messages(fa, times=1, interrupt_lag_s=0.6)
+
+    final = await run_turn(
+        anthropic=cast(AsyncAnthropic, fa),
+        session_id="sess_1",
+        user_message="are you there?",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert final.error is None
+    assert final.content == [TextBlock(kind="text", text="hello again")]
+    sent = [batch[0]["type"] for _sid, batch in fa.beta.sessions.events.sent_events]
+    assert sent == ["user.interrupt", "user.message"]
+
+
+async def test_an_idle_with_no_idle_history_is_not_settled() -> None:
+    """Review of #546: without an idle event there is no evidence MA took the
+    interrupt, so the recovery keeps waiting and sends nothing more."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [[]]
+    fa.beta.sessions.retrieve_statuses = ["idle"] * 1000
+    _refuse_messages(fa, times=1, interrupt_lag_s=3600)
+    fa.beta.sessions.events.replay_events.clear()
+    cancel = asyncio.Event()
+    asyncio.get_running_loop().call_later(1.2, cancel.set)
+
+    final = await asyncio.wait_for(
+        run_turn(
+            anthropic=cast(AsyncAnthropic, fa),
+            session_id="sess_1",
+            user_message="are you there?",
+            lifecycle=RecordingLifecycle(),
+            cancel=cancel,
+            render_interval_s=0.001,
+            now=_now,
+            billing=_EXEMPT,
+        ),
+        timeout=5,
+    )
+
+    sent = [batch[0]["type"] for _sid, batch in fa.beta.sessions.events.sent_events]
+    assert sent == ["user.interrupt"], "no retry without evidence MA took the interrupt"
+    assert final.error is not None and final.error.kind == "interrupted"

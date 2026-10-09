@@ -151,9 +151,10 @@ a key not minted in a channel) and a channel with no budget are never gated.
 On Discord, Slack and Teams, a finished turn ends with one summary line: the agent,
 the turn's time, what it was debited (its model cost times `markup`) and the
 money left, for example
-`Ada  12s  $0.042 used  $41.20 left`, under the turn's last message: the last
-chunk of a long answer, on Discord a file posted after it, and on Teams a card
-below the answer beside 👍/👎 (or a tool-only or failed turn's card). Em spaces set
+`Ada  12s  $0.042 used  $41.20 left`, on the answer's last message: the last
+chunk of a long answer. On Discord the turn's files are attached to that same
+message; on Teams the line sits in a card below the answer beside 👍/👎 (or on a
+tool-only, cancelled or failed turn's card). Em spaces set
 the fields apart. The
 money left is the active channel budget's remainder; a channel without an
 active budget shows the tenant's prepaid balance when one exists. An unpriced
