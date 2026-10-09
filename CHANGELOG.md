@@ -36,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An offline driver-agnostic C01–C18 conformance runner reports explicit pending
   dependencies and includes a test-only reference driver.
 
+- The defaults resource pipeline now uses Anthropic resource ports in `mux`,
+  with offline request-equivalence checks. Existing resource requests,
+  reconcile policy, recovery exports and SDK error handling are preserved.
+
 - An offline Managed Agents call inventory and production call ratchet protect
   the neutral-core extraction boundary without changing runtime behavior.
 - Scripted offline MA transport and platform/DB effect recorders support

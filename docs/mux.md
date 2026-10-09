@@ -268,3 +268,32 @@ authentication is refused; normal pytest never invokes the judge.
 and export date, and an offline paired M0 replay benchmark. First-token latency
 is explicitly unavailable in the current telemetry schema. The benchmark remains
 pending until N4 supplies the legacy/mux transport adapter; pending never passes.
+
+## Resources (Anthropic driver)
+
+`mux.drivers.anthropic.AnthropicManagedAgents` assembles resource ports around
+Daimon's existing `AsyncAnthropic` client. The host continues to configure and
+close that client; constructing the backend makes no requests and introduces
+no settings or defaults. Agent, environment and skill requests retain omitted
+fields, explicit empty lists, metadata patches and provider version checks.
+The defaults pipeline keeps its current reconcile, duplicate and sweep policy.
+
+Anthropic toolsets and coordinator rosters use closed, versioned schemas in
+`mux.drivers.anthropic.schemas`. Native tool configuration is carried by
+`anthropic.agent_tools@1`; coordinator configuration uses
+`anthropic.multiagent@1`. Unknown properties are rejected before a request.
+The operator recovery export uses `anthropic.platform_export@1`, which exposes
+native JSON for the archive while keeping the SDK client private. It preserves
+the existing request pagination and closes each skill download response.
+
+The driver converts SDK failures to `ProviderError`, including failures while
+reading later pages, and retains the original exception as its cause. For M0,
+`daimon.core.mux_compat` restores the existing SDK exception and model types at
+the host edge so unchanged consumers keep their current behavior and copy.
+That module makes no SDK calls and is tracked for removal after M0 in the
+neutral-core sprint's `FOLLOWUPS.md`.
+
+M0 resource drivers accept operation keys and issue the existing requests
+without a driver cache or deduplication layer. Durable operation handling is
+owned by the host StateStore integration; resource drivers do not add provider
+headers or retry policy for it.

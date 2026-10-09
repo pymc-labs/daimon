@@ -39,6 +39,7 @@ from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_dis
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import DefaultsError
 from daimon.core.ma import delete_skill_and_versions
+from daimon.core.mux_compat import create_skill, publish_skill_version
 from daimon.core.skill_zip import build_skill_zip
 from daimon.core.stores.seeded_skills import load_seeded_skill, record_seeded_skill
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -124,9 +125,7 @@ async def reconcile_skill(
                 had_fingerprint=recorded is not None,
             )
             with pkg.path.open("rb") as fh:
-                await client.beta.skills.versions.create(
-                    ma_match.id, files=[("SKILL.zip", fh, "application/zip")]
-                )
+                await publish_skill_version(client, ma_match.id, data=fh.read())
             if db_session is None:
                 async with session_factory() as seed_session:
                     await record_seeded_skill(
@@ -153,9 +152,7 @@ async def reconcile_skill(
         if dry_run:
             return ResourceOutcome(kind="skill", name=spec.name, action=Action.CREATED)
         with pkg.path.open("rb") as fh:
-            created = await client.beta.skills.create(
-                display_title=display_title, files=[("SKILL.zip", fh, "application/zip")]
-            )
+            created = await create_skill(client, display_title=display_title, data=fh.read())
         if db_session is None:
             async with session_factory() as seed_session:
                 await record_seeded_skill(

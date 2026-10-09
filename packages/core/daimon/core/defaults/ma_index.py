@@ -33,6 +33,7 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.errors import SkillsListTruncatedError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_compat import collect_skills, list_agents, list_environments
 
 _log = structlog.get_logger(__name__)
 
@@ -71,7 +72,7 @@ async def find_agents_by_daimon_tag(
     archived agents.
     """
     matches: list[BetaManagedAgentsAgent] = []
-    async for ag in client.beta.agents.list(include_archived=include_archived):
+    async for ag in list_agents(client, include_archived=include_archived):
         if (
             ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
             and ag.metadata.get(MA_METADATA_KEY_NAME) == name
@@ -115,7 +116,7 @@ async def find_environments_by_daimon_tag(
 ) -> list[BetaEnvironment]:
     """Parity with `find_agents_by_daimon_tag` — canonical first, duplicates follow."""
     matches: list[BetaEnvironment] = []
-    async for env in client.beta.environments.list(include_archived=False):
+    async for env in list_environments(client, include_archived=False):
         if (
             env.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
             and env.metadata.get(MA_METADATA_KEY_NAME) == name
@@ -140,7 +141,7 @@ async def list_agents_by_tenant(
 ) -> list[BetaManagedAgentsAgent]:
     """Return all non-archived MA agents tagged with tenant_id."""
     results: list[BetaManagedAgentsAgent] = []
-    async for ag in client.beta.agents.list(include_archived=False):
+    async for ag in list_agents(client, include_archived=False):
         if ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(ag)
     return results
@@ -160,7 +161,7 @@ async def list_agents_by_tenants(
     results: dict[uuid.UUID, list[BetaManagedAgentsAgent]] = {t: [] for t in tenant_ids}
     if not wanted:
         return results
-    async for ag in client.beta.agents.list(include_archived=False):
+    async for ag in list_agents(client, include_archived=False):
         tenant = wanted.get(ag.metadata.get(MA_METADATA_KEY_TENANT, ""))
         if tenant is not None:
             results[tenant].append(ag)
@@ -195,7 +196,7 @@ async def list_referenced_skill_ids(client: AsyncAnthropic) -> set[str]:
     from an agent in any tenant counts.
     """
     referenced: set[str] = set()
-    async for ag in client.beta.agents.list(include_archived=False):
+    async for ag in list_agents(client, include_archived=False):
         for skill in ag.skills:
             referenced.add(skill.skill_id)
     return referenced
@@ -206,7 +207,7 @@ async def list_environments_by_tenant(
 ) -> list[BetaEnvironment]:
     """Return all non-archived MA environments tagged with tenant_id."""
     results: list[BetaEnvironment] = []
-    async for env in client.beta.environments.list(include_archived=False):
+    async for env in list_environments(client, include_archived=False):
         if env.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(env)
     return results
@@ -216,14 +217,7 @@ async def _collect_skills_page(
     client: AsyncAnthropic,
 ) -> tuple[list[SkillListResponse], bool]:
     """Follow skill cursors and flag a full terminal page with no cursor."""
-    rows: list[SkillListResponse] = []
-    page = await client.beta.skills.list(limit=_SKILLS_PAGE_LIMIT)
-    truncated = False
-    async for current in page.iter_pages():
-        rows.extend(current.data)
-        if len(current.data) >= _SKILLS_PAGE_LIMIT and not current.next_page:
-            truncated = True
-    return rows, truncated
+    return await collect_skills(client, limit=_SKILLS_PAGE_LIMIT)
 
 
 async def list_skills_strict(client: AsyncAnthropic) -> list[SkillListResponse]:

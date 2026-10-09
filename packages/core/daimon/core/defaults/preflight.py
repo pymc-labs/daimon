@@ -21,6 +21,7 @@ import uuid
 import anthropic
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.core.mux_compat import archive_agent, create_agent
 
 _log = structlog.get_logger(__name__)
 
@@ -37,16 +38,14 @@ async def check_model_accepted(client: AsyncAnthropic, model: str) -> str | None
     """
     probe_name = f"daimon-preflight-{uuid.uuid4().hex[:8]}"
     try:
-        agent = await client.beta.agents.create(
-            model=model,
-            name=probe_name,
-            metadata={"daimon_preflight": "true"},
+        agent = await create_agent(
+            client, {"model": model, "name": probe_name, "metadata": {"daimon_preflight": "true"}}
         )
     except anthropic.APIStatusError as err:
         if err.status_code == 400 and "is not supported" in str(err):
             return f"MA rejected model {model!r}: {str(err)[:200]}"
         raise
-    await client.beta.agents.archive(agent.id)
+    await archive_agent(client, agent.id)
     return None
 
 
