@@ -185,3 +185,57 @@ def state_id(api: FakeDiscord) -> str:
 def test_parse_agent_reads_the_name_alone(output: str) -> None:
     """A rerun on an own channel prints no copy source, and a warning may follow."""
     assert layout.parse_agent(output) == "team-a-copy"
+
+
+def test_setup_accepts_discord_administrator() -> None:
+    class Guild:
+        def request(self, method: str, path: str) -> object:
+            if path.endswith("/roles"):
+                return [{"id": layout.QA_GUILD, "permissions": str(layout.ADMINISTRATOR)}]
+            return {"roles": []}
+
+    layout.require_setup_permissions(
+        cast("layout.Discord", Guild()), layout.QA_GUILD, layout.QA_ADMIN_BOT_ID
+    )
+
+
+@pytest.mark.parametrize(
+    "bot_id,allowed", [(layout.QA_BOT_ID, True), (layout.QA_ADMIN_BOT_ID, True), ("999", False)]
+)
+def test_main_qa_identity_allowlist(
+    tmp_path: Path, monkeypatch, bot_id: str, allowed: bool
+) -> None:
+    import sys
+
+    class Driver:
+        def __init__(self, token: str) -> None:
+            pass
+
+        def request(self, method: str, path: str) -> object:
+            return {"id": bot_id}
+
+    teams = tmp_path / "teams.csv"
+    teams.write_text("team name,member Discord ids\nQA,123\n")
+    monkeypatch.setenv("DISCORD_QA_BOT_TOKEN", "test")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "layout",
+            "--guild-id",
+            layout.QA_GUILD,
+            "--teams",
+            str(teams),
+            "--state",
+            str(tmp_path / "state.json"),
+            "--run-id",
+            "qa",
+            "--teardown",
+        ],
+    )
+    monkeypatch.setattr(layout, "Discord", Driver)
+    if allowed:
+        layout.main()
+    else:
+        with pytest.raises(SystemExit):
+            layout.main()

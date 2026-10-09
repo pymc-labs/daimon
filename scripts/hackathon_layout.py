@@ -34,6 +34,8 @@ import httpx
 
 QA_GUILD = "1435062989119295640"
 QA_BOT_ID = "1533049261032341668"
+QA_ADMIN_BOT_ID = "1533287901595435129"
+ADMINISTRATOR = 1 << 3
 STAGING_DAIMON_BOT_ID = "1530628070405308456"
 API = "https://discord.com/api/v10"
 VIEW = 1 << 10
@@ -154,7 +156,7 @@ def require_setup_permissions(
     needed = [("Manage Channels", MANAGE_CHANNELS)]
     if not no_roles:
         needed.append(("Manage Roles", MANAGE_ROLES))
-    missing = [label for label, bit in needed if not permissions & bit]
+    missing = [label for label, bit in needed if not permissions & (bit | ADMINISTRATOR)]
     if missing:
         raise RuntimeError(f"bot lacks {', '.join(missing)} in guild {guild}")
 
@@ -402,8 +404,8 @@ def main() -> None:
         parser.error("state file role mode does not match")
     api = Discord(token)
     bot = api.request("GET", "/users/@me")
-    if args.guild_id == QA_GUILD and str(bot["id"]) != QA_BOT_ID:
-        parser.error("staging layout requires the QA bot token")
+    if args.guild_id == QA_GUILD and str(bot["id"]) not in {QA_BOT_ID, QA_ADMIN_BOT_ID}:
+        parser.error("staging layout requires an approved QA bot token")
     if not args.teardown:
         require_setup_permissions(api, args.guild_id, str(bot["id"]), args.no_roles)
     if args.teardown:
