@@ -35,7 +35,8 @@ from daimon.core.mcp_oauth import begin_mcp_oauth_flow
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
-from daimon.core.stores.domain import CredentialRequestRow, McpOAuthFlowRow
+from daimon.core.stores.accounts import set_role
+from daimon.core.stores.domain import CredentialRequestRow, McpOAuthFlowRow, Role
 from daimon.testing import ma_agent
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_tenant
@@ -222,9 +223,13 @@ def _fake_ma(
     return build_fake_anthropic(router.dispatch), created, updates
 
 
-async def _seed_flow(session: AsyncSession) -> tuple[McpOAuthFlowRow, uuid.UUID]:
+async def _seed_flow(
+    session: AsyncSession, *, admin: bool = False, with_origin: bool = False
+) -> tuple[McpOAuthFlowRow, uuid.UUID]:
     tenant = await make_tenant(session)
     account = await make_account(session, tenant=tenant)
+    if admin:
+        await set_role(session, account.id, Role.ADMIN)
     agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_oauth")
     request = await requests_store.create_credential_request(
         session,
@@ -236,7 +241,11 @@ async def _seed_flow(session: AsyncSession) -> tuple[McpOAuthFlowRow, uuid.UUID]
         target="notion",
         mcp_server_url=_MCP_URL,
         requester_platform_user_id="requester-1",
-        channel_id="chan-1",
+        channel_id="thread-1" if with_origin else "chan-1",
+        platform="discord" if with_origin else None,
+        parent_channel_id="chan-1" if with_origin else None,
+        origin_thread_id="thread-1" if with_origin else None,
+        posted_message_id="posted-1" if with_origin else None,
         expires_at=_NOW + timedelta(minutes=30),
         idempotency_key=uuid.uuid4(),
         target_ma_agent_id="ag_oauth",
@@ -255,12 +264,13 @@ def _app(
     anthropic: Any,
     transport: httpx.MockTransport,
     now: datetime = _NOW,
+    deployment_default: DeploymentDefault | None = None,
 ) -> Starlette:
     runtime = McpRuntime(
         session_factory=sessionmaker,
         client=anthropic,
         settings=_settings(),
-        deployment_default=DeploymentDefault(),
+        deployment_default=deployment_default or DeploymentDefault(),
         fernet=make_fernet(),
     )
     assert runtime.fernet is not None
@@ -326,7 +336,7 @@ async def test_start_answers_an_unknown_or_spent_state_with_the_expired_page(
 async def test_callback_stores_the_grant_attaches_the_server_and_is_single_use(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    flow, tenant_id = await _seed_flow(db_session)
+    flow, tenant_id = await _seed_flow(db_session, admin=True)
     await db_session.commit()
     anthropic, created, updates = _fake_ma(
         tenant_id, account_id=flow.account_id, agent_id=flow.agent_id

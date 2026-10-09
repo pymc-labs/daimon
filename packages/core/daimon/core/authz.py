@@ -619,12 +619,11 @@ def _channel_admin_hub_read(subject: Subject, facts: SessionFacts) -> bool:
 
 
 def _decide_shared_agent_change(req: Request) -> Decision:
-    """The blast-radius table (`daimon.core.operation_policy`): a change reaching one
-    agent is any member's, one reaching the tenant is an admin's.
+    """The shared-agent mutation table (`daimon.core.operation_policy`).
 
     A posted-token write always passes. A spec edit refuses a managed agent even
     for an admin, then passes an admin; an attachment write passes an admin
-    before the managed check. Then a reachable agent needs an admin unless it is
+    before the managed check. Every target needs an admin unless it is
     local to the caller's administered channels and theirs (`channel_admin_holds`).
     """
     reach = req.reach or AgentReach()
@@ -640,7 +639,7 @@ def _decide_shared_agent_change(req: Request) -> Decision:
             return ALLOW
         if reach.managed:
             return _deny("managed_agent")
-    if reach.reachable and not (reach.local_to_caller and reach.held_by_caller):
+    if not (reach.local_to_caller and reach.held_by_caller):
         return _deny("admin_required")
     return ALLOW
 

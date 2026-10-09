@@ -4,14 +4,47 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.accounts import get_account
+from daimon.core.stores.channel_admins import set_channel_admins
+from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.tenants import get_tenant
+from daimon.testing.factories import make_platform_principal
 
 from .test_oauth_mcp import _app, _fake_ma, _notion, _seed_flow
 
 
 @pytest.mark.parametrize("window", ["credential-list", "attach-agent-fetch"])
 async def test_oauth_pin_during_inner_helper_await(db_session, db_session_factory, window):
-    flow, tenant_id = await _seed_flow(db_session)
+    flow, tenant_id = await _seed_flow(db_session, with_origin=True)
+    tenant = await get_tenant(db_session, tenant_id)
+    account = await get_account(db_session, flow.account_id)
+    assert tenant is not None and account is not None
+    await make_platform_principal(
+        db_session, platform="discord", external_id="requester-1", tenant=tenant, account=account
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant_id,
+        policy=TenantAccessPolicy(agent_channel_pins={"daimon": ("chan-1",)}),
+    )
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        channel_id="chan-1",
+        role_ids=[],
+        user_ids=["requester-1"],
+        actor_account_id=None,
+    )
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="chan-1"),
+        tenant_id=tenant_id,
+        agent_name="daimon",
+        mode="agent",
+    )
     await db_session.commit()
     fake, created, updates = _fake_ma(tenant_id, account_id=flow.account_id, agent_id=flow.agent_id)
     inner = fake._client._transport
@@ -49,7 +82,12 @@ async def test_oauth_pin_during_inner_helper_await(db_session, db_session_factor
     anthropic = AsyncAnthropic(
         api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(changing))
     )
-    app = _app(db_session_factory, anthropic=anthropic, transport=_notion([]))
+    app = _app(
+        db_session_factory,
+        anthropic=anthropic,
+        transport=_notion([]),
+        deployment_default=DeploymentDefault(agent_name="other"),
+    )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:

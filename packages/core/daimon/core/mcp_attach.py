@@ -92,8 +92,9 @@ async def decide_mcp_replacement(
     Admin: allowed. Otherwise refused on a defaults-managed agent or one that
     is shared for key changes (`is_agent_shared_for_key_changes`), unless the
     caller administers every channel it answers and runs in; allowed on a
-    private draft. Every routine and live session counts, the caller's own
-    included. The facts are read only when the answer depends on them.
+    rule-bound agent local to administered channels. Every routine and live
+    session counts, the caller's own included. The facts are read only when the
+    answer depends on them.
     """
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     facts = TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
@@ -117,14 +118,16 @@ async def decide_mcp_replacement(
 
 @dataclass(frozen=True, slots=True)
 class McpConnectDecision:
-    """Whether a connection replaces shared state, and whether this caller may replace it."""
+    """Whether this caller may attach a server and replace existing shared state."""
 
     replaces: bool
     replace_allowed: bool
+    connect_allowed: bool = True
+    attaches: bool = True
 
     @property
     def refused(self) -> bool:
-        return self.replaces and not self.replace_allowed
+        return not self.connect_allowed or (self.replaces and not self.replace_allowed)
 
 
 async def decide_mcp_connect(
@@ -149,10 +152,18 @@ async def decide_mcp_connect(
     OAuth grant lands only in the requester's own vault, so only the first
     applies to it. Pass
     ``replace_allowed`` on to `attach_mcp_server_to_agent`, which re-checks
-    the first against the fresh agent. The policy is read only for an actual
-    replacement.
+    the first against the fresh agent. Every connection checks mutation ownership,
+    including connections using a new name.
     """
     replaces = replaced_server_url(agent, server_name=server_name, url=url) is not None
+    if (
+        not shares_token
+        and any(s.name == server_name and same_mcp_url(s.url, url) for s in agent.mcp_servers or [])
+        and any(t.type == "mcp_toolset" and t.mcp_server_name == server_name for t in agent.tools)
+    ):
+        # Signing into an already-declared server changes only this person's
+        # vault. No agent mutation is needed or authorized by this exception.
+        return McpConnectDecision(replaces=False, replace_allowed=False, attaches=False)
     if not replaces and shares_token:
         # A pasted token becomes the credential every caller's session uses for
         # this URL. If any server on the agent already points there, people
@@ -165,10 +176,8 @@ async def decide_mcp_connect(
                 session, tenant_id=tenant_id, agent_id=agent_id
             )
         replaces = any(same_mcp_url(row.mcp_server_url, url) for row in rows)
-    if not replaces:
-        # Nothing to replace, so nothing may be: a server attached under this
-        # name in the meantime makes the attach refuse rather than repoint it.
-        return McpConnectDecision(replaces=False, replace_allowed=False)
+    # Even a new name changes the shared agent's spec. A private token or
+    # OAuth grant does not confer permission to attach a server to that agent.
     outcome = await decide_mcp_replacement(
         session_factory,
         tenant_id=tenant_id,
@@ -177,7 +186,11 @@ async def decide_mcp_connect(
         caller=caller,
         default=default,
     )
-    return McpConnectDecision(replaces=True, replace_allowed=outcome == "allow")
+    return McpConnectDecision(
+        replaces=replaces,
+        replace_allowed=replaces and outcome == "allow",
+        connect_allowed=outcome == "allow",
+    )
 
 
 def _ma_tool_to_param(tool: MATool) -> Tool:

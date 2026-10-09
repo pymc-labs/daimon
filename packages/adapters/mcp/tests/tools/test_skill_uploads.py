@@ -29,7 +29,7 @@ from daimon.adapters.mcp.tools.skill_uploads import (
     _add_skill_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.skills import _list_impl  # pyright: ignore[reportPrivateUsage]
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
@@ -37,7 +37,7 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.session_snapshot import SessionSnapshot, desired_snapshot
 from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.slack_file_token import mint_file_token
-from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.agent_creation_channels import record_creation_channel
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
@@ -191,6 +191,34 @@ async def _live_session(
         )
     frozen = ma_session_agent(id=responder, tools=[_daimon_toolset(gated=gated)])
     world.sessions[session_id] = ma_session(id=session_id, agent=frozen).model_dump(mode="json")
+
+
+async def _grant_team_member(world: _World) -> None:
+    async with world.runtime.session_factory.begin() as session:
+        policy = await load_access_policy(session, tenant_id=world.tenant_id)
+        await set_access_policy(
+            session,
+            tenant_id=world.tenant_id,
+            policy=policy.model_copy(
+                update={"agent_rules": {**policy.agent_rules, "helper": AgentRule(runs_in=(ROOM,))}}
+            ),
+        )
+        await set_channel_admins(
+            session,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            channel_id=ROOM,
+            role_ids=[],
+            user_ids=[USER],
+            actor_account_id=None,
+        )
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=world.tenant_id, channel_id=ROOM),
+            tenant_id=world.tenant_id,
+            agent_name="helper",
+            mode="agent",
+        )
 
 
 async def _chat_turn(
@@ -495,15 +523,15 @@ async def test_a_built_in_agent_is_refused_even_for_an_admin(
         )
 
 
-async def test_a_member_may_change_an_agent_that_answers_nowhere_but_not_a_default(
+async def test_a_member_cannot_change_an_unbound_agent_or_a_default(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     world = await _world(db_session_factory)
     member = world.auth(admin=False)
-    result = await _add_skill_impl(
-        world.runtime, member, agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
-    )
-    assert result.status == "preview"
+    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+        await _add_skill_impl(
+            world.runtime, member, agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
+        )
 
     async with db_session_factory.begin() as session:
         await set_fields(
@@ -545,13 +573,19 @@ async def test_a_channel_admin_may_change_an_agent_local_to_their_channel(
     async def add() -> object:
         return await _add_skill_impl(
             world.runtime,
-            world.auth(admin=False, platform="discord"),
+            dataclasses.replace(
+                world.auth(admin=False, platform="discord"),
+                chat_agent_id=derive_agent_uuid(
+                    tenant_id=world.tenant_id, ma_agent_id="agent_helper"
+                ),
+                administered_channel_ids=frozenset({ROOM}),
+            ),
             agent_name="helper",
             expected_ma_agent_id="agent_helper",
             skill_md=_MD,
         )
 
-    with pytest.raises(ToolError, match="not made for, limited by its rule to or given to"):
+    with pytest.raises(ToolError, match="not limited by a channel rule"):
         await add()
     async with db_session_factory.begin() as session:
         await record_creation_channel(
@@ -560,6 +594,14 @@ async def test_a_channel_admin_may_change_an_agent_local_to_their_channel(
             ma_agent_id="agent_helper",
             platform="discord",
             channel_id=ROOM,
+        )
+    with pytest.raises(ToolError, match="not limited by a channel rule"):
+        await add()
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=world.tenant_id,
+            policy=TenantAccessPolicy(agent_rules={"helper": AgentRule(runs_in=(ROOM,))}),
         )
     result = await add()
     assert getattr(result, "status", None) == "preview", "one made for their channel is theirs"
@@ -783,6 +825,7 @@ async def test_an_isolated_channels_agent_takes_skills_only_from_inside_the_chan
                 agent_channel_pins={"helper": (ROOM,)},
             ),
         )
+    await _grant_team_member(world)
     origin = await _setup_thread_origin(world, db_session_factory)
 
     def member_run_by(agent_id: str) -> AuthIdentity:
@@ -858,6 +901,7 @@ async def test_a_pinned_agent_takes_a_chat_add_only_from_its_own_channels(
 
     with pytest.raises(ToolError, match="No card was posted"):
         await preview()
+    await _grant_team_member(world)
     origin = await _setup_thread_origin(world, db_session_factory)
     assert (await preview(origin_context_id=origin)).status == "preview", "inside the pin"
 
@@ -866,6 +910,8 @@ async def _preview_then_confirm(
     world: _World, *, admin: bool = True, gated: bool = True, **source: Any
 ) -> AddSkillResult:
     """Preview, then confirm, from one chat turn whose session is gated (or not)."""
+    if not admin:
+        await _grant_team_member(world)
     auth, origin = await _chat_turn(world, admin=admin, gated=gated)
     preview = await _add_skill_impl(
         world.runtime,
@@ -1055,11 +1101,14 @@ async def test_a_repo_skill_uses_stored_github_access_only_for_an_admin(
     url = "https://someone:ghp_secret@github.com/o/r.git?x=1"
     source = {"repo_url": url, "path": "skills/notes"}
 
+    await _grant_team_member(world)
+    member, origin = await _chat_turn(world, admin=False)
     await _add_skill_impl(
         world.runtime,
-        world.auth(admin=False),
+        member,
         agent_name="helper",
-        expected_ma_agent_id=None,
+        expected_ma_agent_id="agent_helper",
+        origin_context_id=origin,
         **source,
     )
     assert (resolved, tokens) == ([], [None]), "a member fetches without the stored access"
@@ -1133,10 +1182,15 @@ async def _reply(
         yield str(origin.id)
 
 
-async def _cards_off_turn(world: _World) -> tuple[AuthIdentity, str]:
+async def _cards_off_turn(world: _World, *, owned: bool = True) -> tuple[AuthIdentity, str]:
     """A member's chat turn in ROOM on a deployment with approval cards off."""
     world.runtime.settings.tool_safety = ToolSafetyPolicy(enabled=False)
-    return await _chat_turn(world, admin=False)
+    if owned:
+        await _grant_team_member(world)
+    auth, origin = await _chat_turn(world, admin=False)
+    if owned:
+        auth = dataclasses.replace(auth, administered_channel_ids=frozenset({ROOM}))
+    return auth, origin
 
 
 async def _add_from(
@@ -1359,7 +1413,7 @@ async def test_with_cards_off_a_member_still_cannot_add_to_a_shared_agent(
             agent_name="helper",
             mode="agent",
         )
-    auth, origin = await _cards_off_turn(world)
+    auth, origin = await _cards_off_turn(world, owned=False)
 
     with pytest.raises(ToolError, match="needs a workspace or server admin"):
         await _add_from(world, auth, origin)

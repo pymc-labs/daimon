@@ -4825,7 +4825,7 @@ async def test_update_agent_impl_rejects_non_admin_system_patch_when_agent_reach
         )
 
 
-async def test_update_agent_impl_allows_non_admin_description_patch_when_agent_reachable(
+async def test_update_agent_impl_refuses_non_admin_description_patch_when_agent_reachable(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     account_id = uuid.uuid4()
@@ -4835,20 +4835,19 @@ async def test_update_agent_impl_allows_non_admin_description_patch_when_agent_r
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    await _update_agent_impl(
-        _runtime(client, session_factory=db_session_factory),
-        auth,
-        name="scoped-agent",
-        model=None,
-        description="a label, not a spec field",
-        system=None,
-        tools=None,
-        mcp_servers=None,
-        skills=None,
-    )
-    assert captured.get("description") == "a label, not a spec field", (
-        "description is not in the gated field set — it must reach MA even on a reachable agent"
-    )
+    with pytest.raises(ToolError, match="admin"):
+        await _update_agent_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            name="scoped-agent",
+            model=None,
+            description="a label, not a spec field",
+            system=None,
+            tools=None,
+            mcp_servers=None,
+            skills=None,
+        )
+    assert captured == {}, "description changes require ownership too"
 
 
 async def test_update_agent_impl_rejects_non_admin_skills_patch_when_agent_reachable(
@@ -4923,7 +4922,7 @@ async def test_update_agent_impl_rejects_non_admin_tools_patch_when_agent_reacha
         )
 
 
-async def test_update_agent_impl_allows_non_admin_system_patch_when_agent_unreachable(
+async def test_update_agent_impl_refuses_non_admin_system_patch_when_agent_unreachable(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     account_id = uuid.uuid4()
@@ -4933,20 +4932,19 @@ async def test_update_agent_impl_allows_non_admin_system_patch_when_agent_unreac
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    await _update_agent_impl(
-        _runtime(client, session_factory=db_session_factory),
-        auth,
-        name="unscoped-agent",
-        model=None,
-        description=None,
-        system="new system prompt",
-        tools=None,
-        mcp_servers=None,
-        skills=None,
-    )
-    assert "new system prompt" in (captured.get("system") or ""), (
-        "an agent nobody has scoped is not gated — it's a member's own scratchpad"
-    )
+    with pytest.raises(ToolError, match="admin"):
+        await _update_agent_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            name="unscoped-agent",
+            model=None,
+            description=None,
+            system="new system prompt",
+            tools=None,
+            mcp_servers=None,
+            skills=None,
+        )
+    assert captured == {}, "refusal precedes the agent update"
 
 
 async def test_update_agent_impl_allows_admin_system_patch_without_a_reach_read(
@@ -4998,7 +4996,7 @@ async def test_attach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
         )
 
 
-async def test_attach_mcp_server_impl_allows_non_admin_when_agent_unreachable(
+async def test_attach_mcp_server_impl_refuses_non_admin_when_agent_unreachable(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     account_id = uuid.uuid4()
@@ -5008,14 +5006,15 @@ async def test_attach_mcp_server_impl_allows_non_admin_when_agent_unreachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    await _attach_mcp_server_impl(
-        _runtime(client, session_factory=db_session_factory),
-        auth,
-        agent_name="unscoped-agent",
-        server_name="ctx7",
-        url="https://ctx7.example/mcp",
-    )
-    assert "mcp_servers" in captured, "an unreachable agent's MCP attachment is not gated"
+    with pytest.raises(ToolError, match="admin"):
+        await _attach_mcp_server_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            agent_name="unscoped-agent",
+            server_name="ctx7",
+            url="https://ctx7.example/mcp",
+        )
+    assert captured == {}, "refusal precedes the agent update"
 
 
 async def test_fork_agent_impl_refuses_a_non_admin_even_for_the_seeded_agent(

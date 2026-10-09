@@ -6,6 +6,7 @@ import uuid
 
 import pytest
 from cryptography.fernet import Fernet, MultiFernet
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.mcp_attach import (
@@ -15,6 +16,7 @@ from daimon.core.mcp_attach import (
 )
 from daimon.core.mcp_server_url import canonical_mcp_url, same_mcp_url
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, UserScopeRef
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
@@ -142,6 +144,11 @@ async def test_a_channel_admin_replaces_a_server_only_on_an_agent_local_to_them(
         agent_name="private-bot",
         mode="agent",
         set_by_admin=True,
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"private-bot": ("c1",)}),
     )
     await db_session.commit()
     assert await outcome("u1") == "allow", "c1's admin repoints the agent a server admin gave c1"

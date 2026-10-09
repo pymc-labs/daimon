@@ -4434,9 +4434,9 @@
         Match supported authentication; an API key is not automatically an MCP token.
         <blank line>
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
-        credentials in chat. Members can use this form on shared agents and built-in
-        Daimon to add a server; replacing one the agent already has (same name at
-        another URL, or a new token for a connected URL) needs an admin there.
+        credentials in chat. Connecting requires a workspace or server admin, or an
+        admin of every channel the agent's rule names, with all of its uses staying
+        inside those channels. This applies to new servers and replacements.
         <blank line>
         Posts a requester-only card naming the agent and the server, opening a private
         form, expiring in 30 minutes. Submission attaches the server to the agent, not

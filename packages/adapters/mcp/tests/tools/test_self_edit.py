@@ -201,39 +201,26 @@ async def test_self_list_files_returns_only_caller_partition(
     )
 
 
-async def test_self_delete_file_idempotent(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    """Delete on a missing key returns success without raising."""
-    tenant_id = await _seed_tenant(committing_sessionmaker)
-    runtime, agent_id = _runtime_with_agent(committing_sessionmaker, tenant_id=tenant_id)
-    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
-
-    result = await _self_delete_file_impl(runtime, auth, key="never-written")
-
-    assert result == {"deleted": True, "key": "never-written"}, (
-        "delete on a missing key must succeed silently (idempotent)"
-    )
-
-
-async def test_self_delete_file_after_write_removes_row(
+async def test_self_delete_file_refuses_an_unbound_agent_key_even_when_absent(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = await _seed_tenant(committing_sessionmaker)
     runtime, agent_id = _runtime_with_agent(committing_sessionmaker, tenant_id=tenant_id)
     auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
+    with pytest.raises(ToolError, match="agent key acts as a member"):
+        await _self_delete_file_impl(runtime, auth, key="never-written")
 
+
+async def test_self_delete_file_refuses_an_unbound_agent_key_after_write(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    runtime, agent_id = _runtime_with_agent(committing_sessionmaker, tenant_id=tenant_id)
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
     await _self_write_file_impl(runtime, auth, key="EPHEMERAL_TOKEN", content="bye")
-    rows_before = await _self_list_files_impl(runtime, auth)
-    assert len(rows_before) == 1, "list must show the row that was just written"
-
-    result = await _self_delete_file_impl(runtime, auth, key="EPHEMERAL_TOKEN")
-    assert result == {"deleted": True, "key": "EPHEMERAL_TOKEN"}, (
-        "delete must report success on a row that existed"
-    )
-
-    rows_after = await _self_list_files_impl(runtime, auth)
-    assert rows_after == [], "list must be empty after the only row was deleted"
+    with pytest.raises(ToolError, match="agent key acts as a member"):
+        await _self_delete_file_impl(runtime, auth, key="EPHEMERAL_TOKEN")
+    assert len(await _self_list_files_impl(runtime, auth)) == 1
 
 
 async def test_self_write_file_rejects_empty_key(

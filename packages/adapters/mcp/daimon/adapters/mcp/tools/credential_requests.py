@@ -2,12 +2,12 @@
 
 These tools create single-use, expiring request rows and post a target-naming
 card through the caller's platform. Secret values never enter tool arguments.
-Submission checks requester identity; these enrollment paths deliberately do
-not inherit the admin gate for direct agent-spec mutations.
-
-Two exceptions: replacing a key that already exists destroys shared state,
-and a skill-repo import attaches skills to the agent. `daimon.core.operation_policy`
-decides both here, *before* the mint, and a refusal posts no card at all —
+Submission checks requester identity. Adding a new key is a contribution;
+MCP connections and skill imports also mutate the shared agent spec, so they
+require server-admin rights or exclusive rule-bound channel ownership.
+Replacing an existing key also requires mutation ownership.
+`daimon.core.operation_policy` decides these here, *before* the mint. A refusal
+posts no card at all —
 nobody is asked for a secret they were never going to be allowed to save. A
 skill-repo request naming a defaults-managed agent is refused for everyone,
 since its skills could never be attached.
@@ -366,10 +366,10 @@ async def _require_mcp_replacement_allowed(
     )
     if decision.refused:
         raise ToolError(
-            f"'{ma_agent.name}' is shared with everyone here and already has the MCP server "
-            f"'{server_name}' (or a token for {url}), so replacing it needs a server or "
-            "workspace admin, and the caller is not one. Nothing changed and no card was "
-            f"posted. Tell them an admin can ask Daimon to replace '{server_name}' on "
+            f"Changing '{ma_agent.name}'s MCP connections needs a server or workspace admin, "
+            "or an admin of every channel named by its rule, with every use staying inside "
+            "those channels. The caller does not have that permission. Nothing changed and "
+            f"no card was posted. Tell them an admin can ask Daimon to connect '{server_name}' on "
             f"'{ma_agent.name}'. Do not retry under another name."
         )
 
@@ -981,9 +981,9 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         Match supported authentication; an API key is not automatically an MCP token.
 
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
-        credentials in chat. Members can use this form on shared agents and built-in
-        Daimon to add a server; replacing one the agent already has (same name at
-        another URL, or a new token for a connected URL) needs an admin there.
+        credentials in chat. Connecting requires a workspace or server admin, or an
+        admin of every channel the agent's rule names, with all of its uses staying
+        inside those channels. This applies to new servers and replacements.
 
         Posts a requester-only card naming the agent and the server, opening a private
         form, expiring in 30 minutes. Submission attaches the server to the agent, not

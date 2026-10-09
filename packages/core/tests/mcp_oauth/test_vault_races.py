@@ -47,7 +47,8 @@ from daimon.core.mcp_vault import ensure_agent_mcp_vault as real_ensure_agent_mc
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
-from daimon.core.stores.domain import McpOAuthFlowRow
+from daimon.core.stores.accounts import set_role
+from daimon.core.stores.domain import McpOAuthFlowRow, Role
 from daimon.testing.crypto import make_fernet
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_tenant
@@ -275,6 +276,7 @@ async def _seed_flow_and_shared_token(
     async with sessionmaker() as session, session.begin():
         tenant = await make_tenant(session)
         account = await make_account(session, tenant=tenant)
+        await set_role(session, account.id, Role.ADMIN)
         agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_oauth")
         request = await requests_store.create_credential_request(
             session,
