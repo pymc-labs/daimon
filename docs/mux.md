@@ -199,12 +199,15 @@ second call is a restart). The memory store runs them in
 Daimon's Postgres store is `daimon.core.stores.mux_state.PostgresStateStore`,
 over the tables of migration `0074_neutral_state`. Races are settled by the
 database (unique constraints, row locks, and an advisory lock per usage
-observation), and lease expiry follows the database clock. Its module
+observation), and lease expiry follows the database's wall clock, read
+after the locks a decision depends on are held. Its module
 functions take an `AsyncSession`, so `mark_outbox_applied` can run in the
-transaction that writes the ledger rows. The migration backfills a binding
-per caller-owned `thread_sessions` row (one generation per row, in creation
-order) and records it in the row's new `binding_id` and `binding_generation`
-columns. Rows with no account are not backfilled. Nothing in Daimon calls
+transaction that writes the ledger rows. The migration backfills a binding for
+each caller's thread that has a live `thread_sessions` row; its current
+generation is the newest live row, the one Daimon resumes today, and the
+caller's other rows are earlier generations. A thread with no live row
+gets no binding. Rows with no account are not backfilled, and a session
+recorded by two callers is owned by neither. Nothing in Daimon calls
 the store yet.
 
 ## Events

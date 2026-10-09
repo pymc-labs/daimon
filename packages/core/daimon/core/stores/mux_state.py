@@ -7,9 +7,11 @@ UPDATE` on the row being changed, `FOR SHARE` on the lease a fenced write
 depends on (so a takeover waits for the write to commit) and a transaction
 advisory lock per usage observation.
 
-Lease expiry is judged against the database's transaction clock, not the
-`now` a caller passes, so a caller with a stale clock cannot keep an expired
-lease alive. `trust_caller_clock=True` is for tests that need to move time.
+Lease expiry is judged against the database's wall clock
+(`clock_timestamp()`), read after every lock the decision depends on is
+held, so neither a caller with a stale clock nor a write that queued on a
+lock until the lease expired can use an expired lease.
+`trust_caller_clock=True` is for tests that need to move time.
 
 The module functions take an `AsyncSession` so the host can run one inside
 its own transaction: `mark_outbox_applied` belongs in the same transaction
@@ -20,7 +22,7 @@ Daimon calls this store yet.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any
@@ -97,12 +99,24 @@ def _json(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
 
-async def _clock(session: AsyncSession, now: datetime, trust_caller_clock: bool) -> datetime:
-    if trust_caller_clock:
-        return now
-    db_now = await session.scalar(select(func.now()))
+type Clock = Callable[[AsyncSession], Awaitable[datetime]]
+"""Reads the time a lease decision is made at. Call it after taking the locks."""
+
+
+async def database_clock(session: AsyncSession) -> datetime:
+    """The database's wall clock at this moment, not at transaction start."""
+    db_now = await session.scalar(select(func.clock_timestamp()))
     assert db_now is not None
     return db_now
+
+
+def fixed_clock(now: datetime) -> Clock:
+    """A clock stuck at `now`, for tests that move time by hand."""
+
+    async def read(session: AsyncSession) -> datetime:
+        return now
+
+    return read
 
 
 # Config revisions
@@ -279,10 +293,10 @@ async def _save_lease(session: AsyncSession, state: LeaseState) -> None:
 
 
 async def _check_fence(
-    session: AsyncSession, target: Slot | None, fence: Lease | None, now: datetime
+    session: AsyncSession, target: Slot | None, fence: Lease | None, clock: Clock
 ) -> None:
     state = await _lease_state(session, target, lock="share") if target else None
-    leases.check_target(state, target, fence, now)
+    leases.check_target(state, target, fence, await clock(session))
 
 
 async def acquire_lease(
@@ -291,22 +305,22 @@ async def acquire_lease(
     *,
     holder: str,
     turn_id: str,
-    now: datetime,
+    clock: Clock,
     ttl: timedelta,
 ) -> Lease:
     state = await _locked_lease_state(session, slot)
     new_state, acquired = leases.acquire(
-        state, slot, holder=holder, turn_id=turn_id, now=now, ttl=ttl
+        state, slot, holder=holder, turn_id=turn_id, now=await clock(session), ttl=ttl
     )
     await _save_lease(session, new_state)
     return acquired
 
 
 async def renew_lease(
-    session: AsyncSession, lease: Lease, *, now: datetime, ttl: timedelta
+    session: AsyncSession, lease: Lease, *, clock: Clock, ttl: timedelta
 ) -> Lease:
     state = await _lease_state(session, lease.slot, lock="update")
-    new_state, renewed = leases.renew(state, lease, now=now, ttl=ttl)
+    new_state, renewed = leases.renew(state, lease, now=await clock(session), ttl=ttl)
     await _save_lease(session, new_state)
     return renewed
 
@@ -413,11 +427,11 @@ async def claim_send(
     key: str,
     *,
     now: datetime,
-    clock_now: datetime,
+    clock: Clock,
     fence: Lease | None,
 ) -> OperationRecord:
     record = await _owned(session, scope, key)
-    await _check_fence(session, record.slot, fence, clock_now)
+    await _check_fence(session, record.slot, fence, clock)
     claimed = operations.claim(record, now=now)
     await _save_operation(session, scope, claimed)
     return claimed
@@ -430,13 +444,13 @@ async def advance_operation(
     status: OperationStatus,
     *,
     now: datetime,
-    clock_now: datetime,
+    clock: Clock,
     fence: Lease | None,
     resource: ResourceRef | None = None,
     result: Mapping[str, JsonValue] | None = None,
 ) -> OperationRecord:
     record = await _owned(session, scope, key)
-    await _check_fence(session, record.slot, fence, clock_now)
+    await _check_fence(session, record.slot, fence, clock)
     advanced = operations.advance(record, status, now=now, resource=resource, result=result)
     await _save_operation(session, scope, advanced)
     return OperationRecord.model_validate(_json(advanced))
@@ -472,7 +486,7 @@ async def append_events(
     fence: Lease,
     cursor: str,
     now: datetime,
-    clock_now: datetime,
+    clock: Clock,
 ) -> JournalAppend:
     head = (
         await session.execute(
@@ -486,7 +500,7 @@ async def append_events(
     owner = await _session_owner(session, target.id) if head else None
     if head is None or owner is None:
         raise ScopeViolation(target.id, "no binding names this session")
-    await _check_fence(session, owner[1], fence, clock_now)
+    await _check_fence(session, owner[1], fence, clock)
     incoming = [JournalEntry.model_validate(_json(entry)) for entry in entries]
     keys = {entry.source_key for entry in incoming}
     seen: set[tuple[str, int, bool]] = set()
@@ -649,6 +663,9 @@ class PostgresStateStore:
         self._factory = session_factory
         self._trust_caller_clock = trust_caller_clock
 
+    def _clock(self, now: datetime) -> Clock:
+        return fixed_clock(now) if self._trust_caller_clock else database_clock
+
     @asynccontextmanager
     async def _tx(self) -> AsyncIterator[AsyncSession]:
         async with self._factory() as session, session.begin():
@@ -705,8 +722,9 @@ class PostgresStateStore:
         self, scope: Scope, key: str, *, now: datetime, fence: Lease | None
     ) -> OperationRecord:
         async with self._tx() as session:
-            clock_now = await _clock(session, now, self._trust_caller_clock)
-            return await claim_send(session, scope, key, now=now, clock_now=clock_now, fence=fence)
+            return await claim_send(
+                session, scope, key, now=now, clock=self._clock(now), fence=fence
+            )
 
     async def advance_operation(
         self,
@@ -720,14 +738,13 @@ class PostgresStateStore:
         result: Mapping[str, JsonValue] | None = None,
     ) -> OperationRecord:
         async with self._tx() as session:
-            clock_now = await _clock(session, now, self._trust_caller_clock)
             return await advance_operation(
                 session,
                 scope,
                 key,
                 status,
                 now=now,
-                clock_now=clock_now,
+                clock=self._clock(now),
                 fence=fence,
                 resource=resource,
                 result=result,
@@ -737,15 +754,13 @@ class PostgresStateStore:
         self, slot: Slot, *, holder: str, turn_id: str, now: datetime, ttl: timedelta
     ) -> Lease:
         async with self._tx() as session:
-            clock_now = await _clock(session, now, self._trust_caller_clock)
             return await acquire_lease(
-                session, slot, holder=holder, turn_id=turn_id, now=clock_now, ttl=ttl
+                session, slot, holder=holder, turn_id=turn_id, clock=self._clock(now), ttl=ttl
             )
 
     async def renew_lease(self, lease: Lease, *, now: datetime, ttl: timedelta) -> Lease:
         async with self._tx() as session:
-            clock_now = await _clock(session, now, self._trust_caller_clock)
-            return await renew_lease(session, lease, now=clock_now, ttl=ttl)
+            return await renew_lease(session, lease, clock=self._clock(now), ttl=ttl)
 
     async def release_lease(self, lease: Lease) -> None:
         async with self._tx() as session:
@@ -761,9 +776,8 @@ class PostgresStateStore:
         now: datetime,
     ) -> JournalAppend:
         async with self._tx() as db:
-            clock_now = await _clock(db, now, self._trust_caller_clock)
             return await append_events(
-                db, session, entries, fence=fence, cursor=cursor, now=now, clock_now=clock_now
+                db, session, entries, fence=fence, cursor=cursor, now=now, clock=self._clock(now)
             )
 
     async def read_events(

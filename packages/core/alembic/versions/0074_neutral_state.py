@@ -4,14 +4,21 @@ Adds the tables behind `daimon.core.stores.mux_state` and two nullable
 columns on `thread_sessions` naming the binding a row backs. Nothing reads
 them yet, and no existing query or default changes.
 
-Backfill: every caller-owned `thread_sessions` row (account_id set) becomes
-one generation of an Anthropic Managed Agents binding in that caller's
-private slot, numbered by creation order, so a slot's newest row is its
-current generation. The binding id is the slot's oldest row id. Rows with no
-account (frozen before per-caller sessions) are left alone: they match no
-caller today, and a binding with no account would read as a shared thread.
-A row with no recorded channel gets an empty channel id. A session id that
-two slots share stays with the slot that recorded it first.
+Backfill. A binding's current generation must be the row the legacy
+reader (`get_live_thread_session`) returns today: the newest `live` row of
+a caller's thread. So only caller-owned slots (account_id set) with a live
+row get a binding. Its generations are the slot's rows with the live ones
+last, each group in creation order, so the newest live row is the highest
+generation; the binding id is the slot's first row in that order. A slot
+with no live row gets no binding, as today such a thread cold-creates a
+fresh session. Rows with no account (frozen before per-caller sessions)
+are left alone: they match no caller today, and a binding with no account
+would read as a shared thread. A row with no recorded channel gets an
+empty channel id.
+
+A session id recorded in more than one slot is ambiguous: no slot owns it,
+so it takes no journal appends and no usage, and a slot whose live session
+is ambiguous gets no binding. The host resolves it by binding explicitly.
 
 downgrade: destructive
 """
@@ -50,27 +57,39 @@ def _binding_fk() -> sa.ForeignKey:
 _SLOT = ("tenant_id", "platform", "channel_id", "thread_id", "account_id")
 
 _BACKFILL = """
-WITH rows AS (
+WITH caller_rows AS (
     SELECT
-        ts.id,
-        ts.tenant_id,
-        ts.platform,
-        coalesce(ts.channel_id, '') AS channel_id,
-        ts.thread_id,
-        ts.account_id::text AS account_id,
-        ts.ma_session_id,
-        ts.ma_agent_id,
-        row_number() OVER slot_order AS generation,
-        first_value(ts.id::text) OVER slot_order AS binding_id,
-        count(*) OVER (PARTITION BY ts.tenant_id, ts.platform, coalesce(ts.channel_id, ''),
-                                    ts.thread_id, ts.account_id) AS generations,
-        ts.created_at
+        ts.*,
+        coalesce(ts.channel_id, '') AS slot_channel,
+        dense_rank() OVER (
+            ORDER BY ts.tenant_id, ts.platform, coalesce(ts.channel_id, ''), ts.thread_id,
+                     ts.account_id
+        ) AS slot
     FROM thread_sessions ts
     WHERE ts.account_id IS NOT NULL
+),
+ambiguous AS (
+    SELECT ma_session_id FROM caller_rows GROUP BY ma_session_id HAVING count(DISTINCT slot) > 1
+),
+live AS (
+    SELECT DISTINCT ON (slot) slot, ma_session_id
+    FROM caller_rows WHERE status = 'live'
+    ORDER BY slot, created_at DESC, id DESC
+),
+bound AS (
+    SELECT live.slot FROM live
+    WHERE live.ma_session_id NOT IN (SELECT ma_session_id FROM ambiguous)
+),
+rows AS (
+    SELECT
+        r.id, r.tenant_id, r.platform, r.slot_channel AS channel_id, r.thread_id,
+        r.account_id::text AS account_id, r.ma_session_id, r.ma_agent_id, r.created_at,
+        row_number() OVER slot_order AS generation,
+        first_value(r.id::text) OVER slot_order AS binding_id,
+        count(*) OVER (PARTITION BY r.slot) AS generations
+    FROM caller_rows r JOIN bound USING (slot)
     WINDOW slot_order AS (
-        PARTITION BY ts.tenant_id, ts.platform, coalesce(ts.channel_id, ''),
-                     ts.thread_id, ts.account_id
-        ORDER BY ts.created_at, ts.id
+        PARTITION BY r.slot ORDER BY r.status = 'live', r.created_at, r.id
     )
 ),
 slots AS (
@@ -119,6 +138,13 @@ INSERT INTO journal_session (session_id, tenant_id, binding_id)
 SELECT DISTINCT ON (ts.ma_session_id) ts.ma_session_id, ts.tenant_id, ts.binding_id
 FROM thread_sessions ts
 WHERE ts.binding_id IS NOT NULL
+  AND ts.ma_session_id NOT IN (
+      SELECT ma_session_id FROM thread_sessions
+      WHERE account_id IS NOT NULL
+      GROUP BY ma_session_id
+      HAVING count(DISTINCT (tenant_id, platform, coalesce(channel_id, ''), thread_id,
+                             account_id)) > 1
+  )
 ORDER BY ts.ma_session_id, ts.created_at, ts.id
 ON CONFLICT (session_id) DO NOTHING
 """

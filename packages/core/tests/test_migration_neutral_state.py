@@ -12,7 +12,9 @@ from alembic.operations import Operations
 from daimon.core.stores import mux_state
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
 from daimon.testing.factories import make_tenant
-from mux.contracts.ids import ChannelRef, ThreadRef
+from mux.contracts.ids import ChannelRef, ResourceRef, ThreadRef
+from mux.contracts.usage import UsageObservation
+from mux.errors import ScopeViolation
 from mux.state.lease import Slot
 from sqlalchemy import Connection, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -178,3 +180,80 @@ async def test_down_and_up_twice_keeps_thread_sessions(db_session: AsyncSession)
         db_session, tenant_id=tenant.id, platform="discord", thread_id="th", account_id=ACCOUNT_A
     )
     assert live is not None and live.id == row
+
+
+@pytest.mark.fresh_schema
+async def test_the_current_generation_is_the_row_the_legacy_reader_picks(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await _run(db_session, "downgrade")
+    live = await _legacy_row(
+        db_session, tenant.id, account_id=ACCOUNT_A, ma_session_id="s_live", created_at=T0
+    )
+    newer_dead = await _legacy_row(
+        db_session,
+        tenant.id,
+        account_id=ACCOUNT_A,
+        ma_session_id="s_dead",
+        created_at=T0 + timedelta(hours=1),
+        status="dead",
+    )
+    await _legacy_row(
+        db_session,
+        tenant.id,
+        account_id=ACCOUNT_B,
+        ma_session_id="s_retired",
+        created_at=T0,
+        status="retired",
+    )
+    await _run(db_session, "upgrade")
+
+    legacy = await get_live_thread_session(
+        db_session, tenant_id=tenant.id, platform="discord", thread_id="th", account_id=ACCOUNT_A
+    )
+    binding = await mux_state.get_binding(db_session, _slot(tenant.id, ACCOUNT_A))
+    assert legacy is not None and legacy.id == live
+    assert binding is not None and binding.native_refs["session"] == legacy.ma_session_id
+    assert binding.generation == 2
+    history = await db_session.scalar(
+        text("SELECT binding_generation FROM thread_sessions WHERE id = :id"), {"id": newer_dead}
+    )
+    assert history == 1
+    # No live row: no binding, just as the legacy reader finds nothing to resume.
+    assert await mux_state.get_binding(db_session, _slot(tenant.id, ACCOUNT_B)) is None
+
+
+@pytest.mark.fresh_schema
+async def test_a_session_two_callers_recorded_is_owned_by_neither(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session)
+    await _run(db_session, "downgrade")
+    await _legacy_row(
+        db_session, tenant.id, account_id=ACCOUNT_A, ma_session_id="s_shared", created_at=T0
+    )
+    await _legacy_row(
+        db_session,
+        tenant.id,
+        account_id=ACCOUNT_B,
+        ma_session_id="s_shared",
+        created_at=T0 + timedelta(minutes=1),
+    )
+    await _run(db_session, "upgrade")
+
+    for account in (ACCOUNT_A, ACCOUNT_B):
+        assert await mux_state.get_binding(db_session, _slot(tenant.id, account)) is None
+    assert await db_session.scalar(text("SELECT count(*) FROM journal_session")) == 0
+    observation = UsageObservation(
+        id="obs",
+        revision=1,
+        session=ResourceRef(
+            id="s_shared", kind="session", provider="anthropic", account_scope_id="ws"
+        ),
+        grain="model_request",
+        basis="cumulative",
+        output_tokens=1,
+        completeness="measured",
+        observed_at=T0,
+    )
+    with pytest.raises(ScopeViolation):
+        await mux_state.record_usage(db_session, "anything", observation)
