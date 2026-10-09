@@ -33,6 +33,7 @@ from daimon.core.config import (
     DatabaseSettings,
     McpSettings,
     Settings,
+    SupportSettings,
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
@@ -257,5 +258,20 @@ async def test_a_protected_teams_channel_refuses_tidying(
             message_id=activity,
             content="second draft",
             origin_context_id=origin,
+        )
+    assert world.teams.edits_and_deletes() == [], "nothing reaches Teams"
+
+
+async def test_the_teams_escalation_channel_and_its_threads_are_never_tidied(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(committing_sessionmaker)
+    auth, origin = await world.turn()
+    activity = await world.post(auth)
+    world.runtime.settings.support = SupportSettings(teams_escalation_channel_id=_CHANNEL)
+
+    with pytest.raises(ToolError, match="support-escalation channel"):
+        await _teams_delete_message_impl(
+            world.runtime, auth, channel_id=_THREAD, message_id=activity, origin_context_id=origin
         )
     assert world.teams.edits_and_deletes() == [], "nothing reaches Teams"

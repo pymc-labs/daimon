@@ -97,6 +97,19 @@ def test_escalation_is_disabled_when_no_channel_is_configured() -> None:
     assert SupportSettings().slack_escalation_channel_id is None, (
         "Slack escalation must be OFF by default too -- each platform needs its own channel"
     )
+    assert SupportSettings().teams_escalation_channel_id is None, "and Teams'"
+
+
+def test_the_teams_channel_must_be_a_teams_one() -> None:
+    """A Discord or Slack id would spend Teams credits on posts that always fail."""
+    from daimon.core.config import SupportSettings
+    from pydantic import ValidationError
+
+    teams = "19:ops@thread.tacv2"
+    assert SupportSettings(teams_escalation_channel_id=teams).teams_escalation_channel_id == teams
+    assert SupportSettings(teams_escalation_channel_id="").teams_escalation_channel_id is None
+    with pytest.raises(ValidationError, match="TEAMS_ESCALATION_CHANNEL_ID"):
+        SupportSettings(teams_escalation_channel_id="123456789012345678")
 
 
 def test_default_allowance_is_twenty_and_zero_still_disables() -> None:

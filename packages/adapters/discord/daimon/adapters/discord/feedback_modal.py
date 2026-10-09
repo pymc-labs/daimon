@@ -149,8 +149,8 @@ class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
 def support_channel_for(support: SupportSettings, tenant_id: uuid.UUID) -> str | None:
     """The Discord channel this tenant's submitted forms also go to, or None (the default).
 
-    Ask a human's `escalation_channel_id`, unless it names a Teams channel
-    (`19:…`), which the Discord bot cannot post in. Anything but a configured
+    Ask a human's `escalation_channel_id`, unless it still holds a Teams
+    channel (`19:…`) from before Teams had its own setting. Anything but a configured
     string channel and a literal True reads as off.
     """
     channel = cast(object, support.escalation_channel_id)
