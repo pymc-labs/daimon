@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+import pytest
 from anthropic.types.beta import FileMetadata
 from daimon.adapters.slack.output_delivery import deliver_session_outputs
 from daimon.core.output_delivery import MAX_BYTES_PER_FILE
@@ -180,7 +181,7 @@ async def test_delivery_posts_scope_notice_and_deletes_nothing_on_missing_scope(
     assert "files:write" in str(notices[0].kwargs), "the notice must name the missing scope"
     assert "reinstall" in str(notices[0].kwargs), "the notice must tell the admin to reinstall"
     assert deletes == [], "an aborted sweep must delete nothing"
-    assert "T_SCOPE:missing_scope" in notice_keys, (
+    assert "notice:T_SCOPE:C1:1.2:missing_scope" in notice_keys, (
         "the dedup key must be recorded after the notice posts"
     )
 
@@ -248,16 +249,22 @@ async def test_delivery_posts_storage_notice_and_deletes_nothing_on_storage_limi
     )
     assert "scope" not in notice_text, "the storage notice must not talk about scopes"
     assert deletes == [], "an aborted sweep must delete nothing"
-    assert "T_STORE:storage_limit_reached" in notice_keys, (
+    assert "notice:T_STORE:C1:1.2:storage_limit_reached" in notice_keys, (
         "the dedup key must be recorded after the notice posts"
     )
 
 
-async def test_delivery_posts_abort_notice_once_per_team_per_code(
+async def test_delivery_posts_abort_notice_once_per_thread_and_logs_once_per_workspace(
     fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A second delivery under the same abort code and team posts no second
-    notice — the shared notice_keys set dedups per team per code."""
+    """Each affected thread gets one notice while the workspace error logs once."""
+    import daimon.adapters.slack.output_delivery as delivery_module
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        delivery_module.log, "warning", lambda event, **kwargs: warnings.append(event)
+    )
     mock = fake_slack_web_client.mock
     mock.post(_GET_URL, payload={"ok": False, "error": "missing_scope"}, repeat=True)
 
@@ -297,20 +304,27 @@ async def test_delivery_posts_abort_notice_once_per_team_per_code(
         pass
 
     notice_keys: set[str] = set()
-    for _ in range(2):
+    for channel_id, thread_ts in (("C1", "1.2"), ("C1", "2.3"), ("C2", "2.3"), ("C1", "1.2")):
         await deliver_session_outputs(
             anthropic_client,
             fake_slack_web_client.client,
             session_id="sesn_1",
-            channel_id="C1",
-            thread_ts="1.2",
+            channel_id=channel_id,
+            thread_ts=thread_ts,
             notice_keys=notice_keys,
             team_id="T_ONCE",
             sleep=sleep,
         )
 
     notices = _post_message_calls(mock)
-    assert len(notices) == 1, "the abort notice must be posted once per team per code"
+    assert [
+        (call.kwargs["json"]["channel"], call.kwargs["json"]["thread_ts"]) for call in notices
+    ] == [
+        ("C1", "1.2"),
+        ("C1", "2.3"),
+        ("C2", "2.3"),
+    ]
+    assert warnings == ["slack.output_delivery.unavailable"]
 
 
 async def test_delivery_continues_after_bytes_post_failure_on_one_file(

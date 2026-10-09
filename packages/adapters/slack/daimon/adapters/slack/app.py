@@ -415,7 +415,7 @@ class SlackApp:
         # Tool-write confirmation cards awaiting a click (in-process, like the
         # cancel registry above).
         self._confirmations = SlackConfirmationCards()
-        # Output-delivery abort-notice dedup, keyed "{team_id}:{error_code}".
+        # Output-delivery notice dedup per thread and warning log dedup per workspace.
         self._delivery_notice_keys: set[str] = set()
         # Chains output sweeps per MA session so two never overlap.
         self._output_sweeps: dict[str, asyncio.Task[None]] = {}

@@ -29,7 +29,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 log = structlog.get_logger(__name__)
 
 # Workspace-wide, persistent failures: retrying per file (or per turn) is pure
-# noise, so these abort the sweep and produce one deduped notice per team.
+# noise, so these abort the sweep and produce one notice per affected thread.
 _ABORT_NOTICES: dict[str, str] = {
     "missing_scope": (
         "I couldn't attach the generated file because this app is missing the "
@@ -112,8 +112,7 @@ async def deliver_session_outputs(
     """Sweep the session's outputs into the thread, degrading on abort codes.
 
     ``notice_keys`` is the instance-level dedup set owned by ``SlackApp``,
-    keyed ``"{team_id}:{error_code}"`` — one abort notice per team per code
-    per process.
+    keyed per thread for notices and per workspace for the warning log.
     """
     post = _build_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)
     on_skip = _build_skip_notice(web_client, channel_id=channel_id, thread_ts=thread_ts)
@@ -123,19 +122,24 @@ async def deliver_session_outputs(
         )
     except OutputPostingUnavailable as exc:
         code = _abort_code(exc)
-        log.warning(
-            "slack.output_delivery.unavailable",
-            session_id=session_id,
-            team_id=team_id,
-            code=code,
-        )
         notice = _ABORT_NOTICES.get(code)
-        key = f"{team_id}:{code}"
-        if notice is None or key in notice_keys:
+        if notice is None:
+            return
+        log_key = f"log:{team_id}:{code}"
+        if log_key not in notice_keys:
+            log.warning(
+                "slack.output_delivery.unavailable",
+                session_id=session_id,
+                team_id=team_id,
+                code=code,
+            )
+            notice_keys.add(log_key)
+        notice_key = f"notice:{team_id}:{channel_id}:{thread_ts}:{code}"
+        if notice_key in notice_keys:
             return
         await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=channel_id,
             thread_ts=thread_ts,
             text=notice,
         )
-        notice_keys.add(key)
+        notice_keys.add(notice_key)
