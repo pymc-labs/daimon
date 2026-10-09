@@ -24,6 +24,7 @@ from daimon.adapters.discord.post_transport import (
 def clear_webhook_cache() -> None:
     _webhooks.clear()
     _unavailable_until.clear()
+    post_transport._permission_backoff.clear()  # pyright: ignore[reportPrivateUsage]
     _send_unavailable_until.clear()
     post_transport._creation_tasks.clear()  # pyright: ignore[reportPrivateUsage]
     post_transport._deferred_channels.clear()  # pyright: ignore[reportPrivateUsage]
@@ -379,7 +380,7 @@ async def test_webhook_400_cooldown_only_applies_to_that_agent_identity() -> Non
     assert (channel.id, "Writer", None) not in _send_unavailable_until
 
 
-async def test_webhook_limit_is_cached_for_ten_minutes() -> None:
+async def test_webhook_limit_is_cached_across_turns() -> None:
     client, channel, _ = _world()
     channel.create_webhook = AsyncMock(
         side_effect=discord.HTTPException(
@@ -816,12 +817,28 @@ def test_gaining_manage_webhooks_clears_that_guilds_back_off() -> None:
     guild.id = 123
     guild.get_channel.side_effect = {20: allowed, 21: denied}.get
     _unavailable_until.update({20: 9e9, 21: 9e9, 99: 9e9})
+    post_transport._permission_backoff.update({20, 21, 99})  # pyright: ignore[reportPrivateUsage]
 
     post_transport.clear_webhook_backoff(guild)
 
     assert set(_unavailable_until) == {21, 99}, (
         "only this guild's channels the bot can now manage leave the back-off"
     )
+
+
+def test_a_permission_event_leaves_rate_limit_and_cap_back_offs() -> None:
+    allowed = MagicMock(spec=discord.TextChannel)
+    allowed.permissions_for.return_value.manage_webhooks = True
+    guild = MagicMock(spec=discord.Guild)
+    guild.id = 123
+    guild.get_channel.return_value = allowed
+    _unavailable_until.update({30: 9e9, 31: 9e9})
+    post_transport._permission_backoff.discard(30)  # pyright: ignore[reportPrivateUsage]
+    post_transport._permission_backoff.discard(31)  # pyright: ignore[reportPrivateUsage]
+
+    post_transport.clear_webhook_backoff(guild)
+
+    assert set(_unavailable_until) >= {30, 31}, "a 429 or 30007 back-off waits out its time"
 
 
 async def test_permission_events_clear_the_back_off(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -41,3 +41,11 @@ def test_thread_webhook_selection_is_stable_over_sorted_ids() -> None:
     assert select_discord_webhook_id([33, 31, 32], 4) == 32
     assert select_discord_webhook_id([33, 31], 4) == 31
     assert select_discord_webhook_id([], 4) is None
+
+
+def test_a_long_escaped_name_keeps_a_full_chunk_inside_discords_limit() -> None:
+    labelled = fallback_name_prefix("_" * 80, "x" * 1900)
+    label = labelled.split("\n", 1)[0]
+    assert len(labelled) <= 2000
+    assert label.startswith("-# \\_") and label.endswith("\u2026")
+    assert not label[:-1].endswith("\\") or label[:-1].endswith("\\\\")
