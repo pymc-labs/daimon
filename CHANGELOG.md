@@ -239,6 +239,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`packages/mux` is now the provider-neutral managed-agent contract.** It
+  defines the ports, events, receipts, usage observations, error taxonomy and
+  per-provider profiles that Anthropic, OpenAI and Gemini drivers implement,
+  plus `resolve_default` (an unconfigured channel resolves to Anthropic
+  Managed Agents with per-caller threads) and a pure `admit` check. The old
+  `Capabilities`/`FLOOR`/`MuxEvent` scaffold is gone. Daimon does not call
+  `mux` yet, so nothing a user sees changes. See `docs/mux.md`.
 - Tool approval cards on Discord, Slack and Teams now name the action and consequence, show plain labelled inputs in Details, and collapse after a decision. Each blocked call gets its own card and confirmation event.
 - If a turn stops after an approval click but before its confirmation is sent, the answered card now shows Stopped.
 

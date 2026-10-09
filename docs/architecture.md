@@ -63,10 +63,10 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
 | `daimon.testing` | `packages/testing/` | Shared fixtures. |
-| `mux` | `packages/mux/` | A separate namespace, not part of `daimon`. See [its README](https://github.com/pymc-labs/daimon/blob/main/packages/mux/README.md). |
+| `mux` | `packages/mux/` | A separate namespace, not part of `daimon`: the provider-neutral managed-agent contract. Not called by Daimon yet. See [mux.md](mux.md). |
 | `notebook_host`, `report_host` | `apps/*/src/` | Standalone services that talk to Daimon over HTTP only. |
 
-None of that is convention. Eight `import-linter` contracts in the root
+None of that is convention. Twelve `import-linter` contracts in the root
 `pyproject.toml` are the authority, run as `uv run lint-imports` in pre-commit
 and CI:
 
@@ -78,6 +78,8 @@ and CI:
 | Core must not import testing | `daimon.core` → `daimon.testing` |
 | CLI admin commands and run must not import each other | `daimon.adapters.cli.commands` ⟂ `daimon.adapters.cli.run` |
 | Mux must not import daimon | `mux` → `daimon` |
+| Mux contracts and profiles import no provider SDK or driver | `mux.contracts`, `mux.profiles`, `mux.errors` → a provider SDK or `mux.drivers` |
+| Only mux.drivers.anthropic / openai / gemini imports its SDK (three contracts) | `mux` → `anthropic`, `openai` or `google`, except from that provider's driver |
 | notebook-host must not import daimon | `notebook_host` → `daimon` |
 | report-host must not import daimon | `report_host` → `daimon` |
 

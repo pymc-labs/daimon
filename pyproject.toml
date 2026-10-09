@@ -63,12 +63,48 @@ reportMissingImports = "error"
 
 [tool.importlinter]
 root_packages = ["daimon", "mux", "notebook_host", "report_host"]
+# External packages are in the graph so the mux contracts can forbid provider SDKs.
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Mux must not import daimon"
 type = "forbidden"
 source_modules = ["mux"]
 forbidden_modules = ["daimon"]
+
+# The provider-neutral layer: no SDK, and no driver that could bring one in.
+# Lane N2's mux.state joins source_modules when it lands.
+[[tool.importlinter.contracts]]
+name = "Mux contracts and profiles import no provider SDK or driver"
+type = "forbidden"
+source_modules = ["mux.contracts", "mux.profiles", "mux.errors"]
+forbidden_modules = ["anthropic", "openai", "google", "mux.drivers"]
+
+# Each SDK is imported by its own driver and nowhere else in mux. The ignores
+# name drivers that do not exist yet, so unmatched ignores stay silent.
+[[tool.importlinter.contracts]]
+name = "Only mux.drivers.anthropic imports the anthropic SDK"
+type = "forbidden"
+source_modules = ["mux"]
+forbidden_modules = ["anthropic"]
+ignore_imports = ["mux.drivers.anthropic -> anthropic", "mux.drivers.anthropic.** -> anthropic"]
+unmatched_ignore_imports_alerting = "none"
+
+[[tool.importlinter.contracts]]
+name = "Only mux.drivers.openai imports the openai SDK"
+type = "forbidden"
+source_modules = ["mux"]
+forbidden_modules = ["openai"]
+ignore_imports = ["mux.drivers.openai -> openai", "mux.drivers.openai.** -> openai"]
+unmatched_ignore_imports_alerting = "none"
+
+[[tool.importlinter.contracts]]
+name = "Only mux.drivers.gemini imports the google.genai SDK"
+type = "forbidden"
+source_modules = ["mux"]
+forbidden_modules = ["google"]
+ignore_imports = ["mux.drivers.gemini -> google", "mux.drivers.gemini.** -> google"]
+unmatched_ignore_imports_alerting = "none"
 
 [[tool.importlinter.contracts]]
 name = "Core must not import adapters"
