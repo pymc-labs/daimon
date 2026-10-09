@@ -911,6 +911,7 @@ async def bind_session_impl(
             anthropic=deps.anthropic,
             sessionmaker=deps.sessionmaker,
             tenant_id=tenant_id,
+            account_id=current.account_id,
             external_user_id=external_user_id,
             markup=deps.markup,
             channel_id=admission.budget_channel_id,

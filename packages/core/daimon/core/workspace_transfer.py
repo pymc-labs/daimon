@@ -401,6 +401,7 @@ async def transfer_workspace(
     now: Callable[[], datetime] = _utc_now,
     channel_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
+    account_id: uuid.UUID | None = None,
 ) -> TransferOutcome:
     """Walk the ladder for one replacement and report how far it got.
 
@@ -423,11 +424,26 @@ async def transfer_workspace(
     on `events.list`, a DB error), because those are bugs or outages the
     caller's boundary should see, not states to paper over.
     """
+    turn_scope = (
+        Scope(
+            tenant_id=str(tenant_id),
+            account_id=str(account_id),
+            principal_id="daimon",
+            authorization_id="workspace-checkpoint",
+        )
+        if account_id is not None
+        else None
+    )
     scope = session_scope(
-        tenant_id=tenant_id, account_id=None, call_site="workspace_transfer:transfer_workspace"
+        tenant_id=tenant_id,
+        account_id=account_id,
+        call_site="workspace_transfer:transfer_workspace",
     )
     try:
-        events = await replay_events(client, session_id=old_session_id)
+        if turn_scope is None:
+            events = await replay_events(client, session_id=old_session_id)
+        else:
+            events = await replay_events(client, session_id=old_session_id, scope=turn_scope)
     except anthropic.APIStatusError as err:
         if not _is_not_found(err):
             raise
@@ -469,6 +485,7 @@ async def transfer_workspace(
     state = await run_turn(
         anthropic=client,
         session_id=old_session_id,
+        scope=turn_scope,
         user_message=f"{controls}\n\n{prompt}",
         system_blocks=checkpoint_system_blocks,
         lifecycle=_NoOpLifecycle(),
@@ -690,6 +707,8 @@ class WorkspaceTransferRunner:
     """The channel the checkpoint turn's spend is attributed to."""
     from_agent_name: str | None = None
     """Override for the source agent's display name; defaults to the snapshot's."""
+    account_id: uuid.UUID | None = None
+    """The account from the caller's existing tenant authorization decision."""
 
     async def __call__(
         self,
@@ -711,6 +730,7 @@ class WorkspaceTransferRunner:
             old_session_id=old_session_id,
             old_snapshot=old_snapshot,
             tenant_id=self.tenant_id,
+            account_id=self.account_id,
             external_user_id=self.external_user_id,
             transfer_id=transfer_id,
             markup=self.markup,
@@ -740,7 +760,7 @@ class WorkspaceTransferRunner:
                 old_session_id,
                 scope=session_scope(
                     tenant_id=self.tenant_id,
-                    account_id=None,
+                    account_id=self.account_id,
                     call_site="workspace_transfer:WorkspaceTransferRunner",
                 ),
                 inline=_inline_transfer(outcome),
