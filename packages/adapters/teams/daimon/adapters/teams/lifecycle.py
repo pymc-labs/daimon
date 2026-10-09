@@ -2,7 +2,8 @@
 
 Like Slack's: the card is posted before session setup, edited at most every
 five seconds, and replaced by the first answer chunk; overflow chunks follow,
-the last with the feedback buttons; no usage footer. With a completion ping
+then a card with Slack's summary line, Ask a human and 👍/👎
+(`card.controls_card`). With a completion ping
 the card closes instead and the answer is posted fresh, so Teams notifies,
 leading with an @mention of `requester` when given. Teams streaming is unused:
 it works only in personal chats and stops after two minutes. Cancel clicks
@@ -18,17 +19,24 @@ import contextlib
 import time
 import uuid
 from collections.abc import Callable, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Protocol
 
 import httpx
 import structlog
 from anthropic.types import RawMessageStreamEvent
+from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
+    BetaManagedAgentsSpanModelUsage,
+)
 from daimon.adapters.teams import card
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.channel_budget import balance_footer
 from daimon.core.message_split import split_fenced
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
 from daimon.core.turn.notices import render_termination_notice
@@ -38,10 +46,12 @@ from daimon.core.turn.state import (
     extract_final_response,
     extract_sealed_responses,
 )
+from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import termination_reason
 from microsoft_teams.api import Account, MessageActivityInput, SentActivity
 from microsoft_teams.cards import Action, ExecuteAction
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
 
@@ -123,10 +133,21 @@ class TeamsTurnLifecycle:
         agent_name_prefix: str | None = None,
         ask_human: bool = False,
         direct_chat: bool = False,
+        agent_name: str | None = None,
+        model_id: str | None = None,
+        markup: Decimal = Decimal(1),
+        sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+        budget_channel_id: str | None = None,
     ) -> None:
         self._sender = sender
-        # Support is on: an Ask a human button follows the answer.
+        # Support is on: the controls below the answer offer Ask a human.
         self._ask_human = ask_human
+        # The summary line's agent, price and money left.
+        self._agent_name = agent_name
+        self._model_id = model_id
+        self._markup = markup
+        self._sessionmaker = sessionmaker
+        self._budget_channel_id = budget_channel_id
         self._ping = completion_ping and not unprompted
         self._requester = requester if self._ping else None
         self._agent_name_prefix = agent_name_prefix
@@ -155,11 +176,11 @@ class TeamsTurnLifecycle:
         self.answer_prefix_applied = False
         # The first answer message: the card itself unless a ping posted it fresh.
         self._answer_id: str | None = None
-        # Each answer message as on screen, id -> (text, is_last), for later edits.
-        self._shown: dict[str, tuple[str, bool]] = {}
+        # Each answer message's text as on screen, for later edits.
+        self._shown: dict[str, str] = {}
         # Shown messages that are notice cards, not answers: edited as cards,
-        # with their buttons and whether they carry the feedback buttons.
-        self._notices: dict[str, tuple[tuple[Action, ...], bool]] = {}
+        # with their buttons, whether they carry 👍/👎, and their summary line.
+        self._notices: dict[str, tuple[tuple[Action, ...], bool, str | None]] = {}
         # Edits of a shown answer, from the turn and the output sweep, one at a time.
         self._answer_edits = asyncio.Lock()
 
@@ -220,7 +241,9 @@ class TeamsTurnLifecycle:
         self._last_flush = now
         await self._send(self._status(), message_id=self._message_id)
 
-    async def close_with_notice(self, text: str, *, actions: Sequence[ExecuteAction] = ()) -> None:
+    async def close_with_notice(
+        self, text: str, *, actions: Sequence[ExecuteAction] = (), summary: str | None = None
+    ) -> None:
         """Terminal render for adapter-side bailouts. Never raises on a send error."""
         if self._terminal:
             return
@@ -229,25 +252,71 @@ class TeamsTurnLifecycle:
             log.info("teams.turn.unprompted_notice_dropped")
             return
         try:
-            await self._close(text, actions=tuple(actions))
+            await self._close(text, actions=tuple(actions), summary=summary)
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.notice_failed", exc_info=True)
 
     async def _close(
-        self, text: str, *, actions: tuple[Action, ...] = (), rated: bool = False
+        self,
+        text: str,
+        *,
+        actions: tuple[Action, ...] = (),
+        rated: bool = False,
+        summary: str | None = None,
     ) -> None:
         """Replace the card with a final notice; an edit that timed out is sent once more.
 
         `rated` adds the feedback buttons: a tool-only turn's result is an answer too.
         """
-        notice = card.notice_card(text, actions=actions)
+        notice = card.notice_card(text, actions=actions, summary=summary)
         notice = card.rated(notice) if rated else notice
         self._message_id = message_id = await self._edit(notice, self._message_id)
         self.final_message_id = self._answer_id = message_id
         self.card_closed = True
         # A tool-only or failed turn's notice still carries what is edited into it.
-        self._notices[message_id] = (actions, rated)
-        self._shown[message_id] = (text, True)
+        self._notices[message_id] = (actions, rated, summary)
+        self._shown[message_id] = text
+
+    async def _summary(self, state: TurnState, *, named_above: bool = False) -> str:
+        """Slack's summary line: the agent, the time, what was debited, the money left.
+
+        `named_above`: agent identity's bold name leads the answer just above it.
+        """
+        t = state.usage_totals
+        usage = BetaManagedAgentsSpanModelUsage(
+            input_tokens=t.input_tokens,
+            cache_creation_input_tokens=t.cache_creation_input_tokens,
+            cache_read_input_tokens=t.cache_read_input_tokens,
+            output_tokens=t.output_tokens,
+            speed="standard",
+        )
+        cost = cost_of(usage, MODEL_PRICING.get(self._model_id)) if self._model_id else None
+        if cost is not None:
+            # What the tenant is debited, markup included, so `used` matches `left`.
+            cost = float(debit_amount(cost, markup=self._markup))
+        return format_summary(
+            agent_name=None if named_above else self._agent_name,
+            elapsed_seconds=self._clock() - self._state.started_at,
+            cost=format_cost(cost),
+            left=await self._balance(),
+        )
+
+    async def _balance(self) -> str | None:
+        if self._sessionmaker is None or self._tenant_id is None:
+            return None
+        try:
+            async with self._sessionmaker() as session:
+                return await balance_footer(
+                    session,
+                    tenant_id=self._tenant_id,
+                    platform="teams",
+                    budget_channel_id=self._budget_channel_id,
+                    now=datetime.now(UTC),
+                )
+        except Exception:
+            # As on Slack: a balance read never costs the turn its answer or its close.
+            log.warning("turn.balance_footer_failed", exc_info=True)
+            return None
 
     def _answer_text(self, state: TurnState) -> str:
         sealed = extract_sealed_responses(state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS)
@@ -277,7 +346,8 @@ class TeamsTurnLifecycle:
                     text = f"{degraded}\n\n{text}"
                 # As on Slack: a cancelled turn carries no controls, a tool-only one does.
                 ask = (card.ask_human_action(),) if tool_only and self._ask_human else ()
-                await self._close(text, actions=ask, rated=tool_only)
+                summary = await self._summary(state)
+                await self._close(text, actions=ask, rated=tool_only, summary=summary)
                 return
             if self.answer_prefix is not None:
                 answer = f"{self.answer_prefix}\n\n{answer}"
@@ -287,14 +357,12 @@ class TeamsTurnLifecycle:
             if self._agent_name_prefix is not None:
                 answer = f"**{self._agent_name_prefix}**\n\n{answer}"
             chunks = split_fenced(answer, card.TEAMS_LIMIT)
-            last = len(chunks) - 1
             # A ping posts the answer fresh, so Teams notifies; the card is retired after.
             fresh = self._ping and self._message_id is not None
             current = self._message_id
             for index, chunk in enumerate(chunks):
-                is_last = index == last
                 mention = self._requester if index == 0 else None
-                message = card.answer_message(chunk, is_last=is_last, mention=mention)
+                message = card.answer_message(chunk, mention=mention)
                 if index == 0 and not fresh:
                     current = self._message_id = await self._edit(message, current)
                     self.card_closed = True
@@ -302,12 +370,11 @@ class TeamsTurnLifecycle:
                     current = await self._send(message, message_id=None)
                 if index == 0:
                     self._answer_id, replaced = current, True
-                self._shown[current] = (chunk, is_last)
+                self._shown[current] = chunk
             self.final_message_id = current
-            if fresh:  # retire before the best-effort button so a lost post can't strand it
+            if fresh:  # retire before the best-effort controls so a lost post can't strand it
                 await self._retire_card()
-            if self._ask_human:
-                await self._offer_ask_human()
+            await self._post_controls(state)
         except TEAMS_SEND_ERRORS as exc:
             log.error("teams.turn.answer_delivery_failed", exc_info=True)
             capture_exception_with_scope(exc)
@@ -332,12 +399,15 @@ class TeamsTurnLifecycle:
                 await self._send(failed, message_id=self._message_id)
                 self.card_closed = True
 
-    async def _offer_ask_human(self) -> None:
-        """Ask a human's button below the answer; best effort, the answer landed."""
+    async def _post_controls(self, state: TurnState) -> None:
+        """The summary line, Ask a human and 👍/👎 below the answer; best effort, it landed."""
         try:
-            await self._send(card.ask_human_card(), message_id=None)
+            named = self._agent_name_prefix is not None
+            summary = await self._summary(state, named_above=named)
+            controls = card.controls_card(summary, ask_human=self._ask_human)
+            await self._send(controls, message_id=None)
         except TEAMS_SEND_ERRORS:
-            log.warning("teams.turn.ask_human_failed", exc_info=True)
+            log.warning("teams.turn.controls_failed", exc_info=True)
 
     async def _retire_card(self) -> None:
         """Point the card at the answer posted below it; best effort, the answer landed."""
@@ -372,16 +442,16 @@ class TeamsTurnLifecycle:
         async with self._answer_edits:
             if message_id is None or (shown := self._shown.get(message_id)) is None:
                 return False
-            updated = change(shown[0])
+            updated = change(shown)
             if len(updated) > card.TEAMS_LIMIT:
                 return False
             if message_id in self._notices:
-                actions, rated = self._notices[message_id]
-                rendered = card.notice_card(updated, actions=actions)
+                actions, rated, summary = self._notices[message_id]
+                rendered = card.notice_card(updated, actions=actions, summary=summary)
                 rendered = card.rated(rendered) if rated else rendered
             else:
                 mention = self._requester if message_id == self._answer_id else None
-                rendered = card.answer_message(updated, is_last=shown[1], mention=mention)
+                rendered = card.answer_message(updated, mention=mention)
             try:
                 await self._edit(rendered, message_id)
             except _TIMEOUTS:
@@ -389,7 +459,7 @@ class TeamsTurnLifecycle:
             except TEAMS_SEND_ERRORS:
                 log.warning(events[1], exc_info=True)
                 return False
-            self._shown[message_id] = (updated, shown[1])
+            self._shown[message_id] = updated
             return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
@@ -403,7 +473,7 @@ class TeamsTurnLifecycle:
             )
         label = state.error.message if state.error is not None else str(err)
         text = f"❌ {label or 'error'}"
-        reason = request_id = None
+        reason = request_id = summary = None
         # The notice is words on the ❌ card, never a reason not to close it:
         # if building it fails, the card falls back to the raw error.
         try:
@@ -414,6 +484,7 @@ class TeamsTurnLifecycle:
             )
             if notice is not None:
                 text = card.termination_text(notice)
+            summary = await self._summary(state)
         except Exception:
             log.warning("turn.terminal_notice_failed", exc_info=True)
         log.warning(
@@ -422,7 +493,7 @@ class TeamsTurnLifecycle:
             reason=str(reason) if reason is not None else None,
             request_id=request_id,
         )
-        await self.close_with_notice(text)
+        await self.close_with_notice(text, summary=summary)
 
     async def on_reconnect(self, reason: ReconnectReason) -> None:
         return None

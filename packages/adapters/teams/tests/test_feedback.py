@@ -289,6 +289,7 @@ async def test_a_routed_form_says_so_and_is_posted_once_per_change_spending_no_c
     assert AAD_OBJECT_ID in first and IN_DIRECT_CHAT in first, "who, and where the answer is"
     assert "Agent `agent_fb`, session `sesn_fb`" in first
     assert "**Reasons:** Wrong or inaccurate" in first and first.endswith(CRITICISM)
+    assert "\n" not in first.replace("\n\n", ""), "a paragraph a line: Teams drops single breaks"
     assert "Something else" in changed, "a changed form is posted again; the same one is not"
     assert await _escalations(db_session_factory) == 0, "a routed form spends no support credit"
     assert CRITICISM not in str(logs), "the text never enters a log record"

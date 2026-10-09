@@ -970,6 +970,11 @@ class TeamsApp:
                 ),
                 ask_human=self._ask_human,
                 direct_chat=inbound.kind == "dm",
+                agent_name=admission.agent.name,
+                model_id=admission.agent.model.id,
+                markup=self.runtime.turn_deps.markup,
+                sessionmaker=self.runtime.sessionmaker,
+                budget_channel_id=admission.budget_channel_id,
             )
             holder.append(attempt)
             return attempt

@@ -56,7 +56,7 @@ def test_message_feedback_core_documents_the_per_platform_split() -> None:
 
 
 def test_teams_feedback_uses_the_native_custom_loop() -> None:
-    message = card.answer_message("done", is_last=True)
+    message = card.controls_card("Ada  12s", ask_human=False)
     assert message.channel_data is not None
     assert message.channel_data.feedback_loop is not None
     assert message.channel_data.feedback_loop.type == "custom", (

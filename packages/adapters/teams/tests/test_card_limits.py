@@ -68,6 +68,7 @@ from daimon.core.stores.domain import ChannelBudgetRow, CredentialRequestRow, Ro
 from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.notices import TerminationNotice
 from daimon.core.turn.state import ContentBlock, ToolUseBlock, TurnState
+from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import TerminationReason
 from microsoft_teams.api import (
     Account,
@@ -124,7 +125,7 @@ def _turn_state() -> card.CardState:
 
 def _answer() -> MessageActivityInput:
     chunks = split_fenced(f"```python\n{EMOJI * 10 * card.TEAMS_LIMIT}", card.TEAMS_LIMIT)
-    return card.answer_message(max(chunks, key=len), is_last=True)
+    return card.answer_message(max(chunks, key=len))
 
 
 def _termination() -> MessageActivityInput:
@@ -138,7 +139,13 @@ def _termination() -> MessageActivityInput:
         finished_tools=10**6,
         request_id=f"req_{'r' * 60}",
     )
-    return card.notice_card(card.termination_text(notice))
+    return card.notice_card(card.termination_text(notice), summary=_SUMMARY)
+
+
+# The longest summary line: a 64-character name, 99 hours, the widest cost and balance.
+_SUMMARY = format_summary(
+    agent_name=NAME, elapsed_seconds=99 * 3600.0, cost="$" + "9" * 12, left="$" + "9" * 15 + " left"
+)
 
 
 def _roster() -> AdaptiveCard:
@@ -375,6 +382,7 @@ def _confirmation(state: ConfirmationCardState) -> AdaptiveCard:
 MESSAGES: dict[str, Callable[[], MessageSource]] = {
     "status": lambda: card.status_card(_turn_state(), now=99 * 3600.0, cancel_key="k" * 64),
     "answer": _answer,
+    "controls": lambda: card.controls_card(_SUMMARY, ask_human=True),
     "termination_notice": _termination,
     "raw_error_notice": lambda: card.notice_card(f"❌ {EMOJI * 10_000}"),
     "interrupted_notice": lambda: card.notice_card(card.INTERRUPTED_NOTICE),
