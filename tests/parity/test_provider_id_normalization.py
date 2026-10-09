@@ -13,6 +13,10 @@ from daimon.testing.ma_transport import Json
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+def normalize_request(request: dict[str, Json]) -> Json:
+    return Normalizer(provider_requests=(request,)).normalize(request)
+
+
 @pytest.mark.parametrize(
     "prefix",
     (
@@ -44,7 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 def test_provider_handle_alias_is_shared_by_response_request_and_dedup_key(prefix: str) -> None:
     def capture(suffix: str) -> Json:
         identifier = f"{prefix}_{suffix}"
-        return Normalizer().normalize(
+        return normalize_request(
             {
                 "path": f"/v1/files/{identifier}/content",
                 "reply": {"id": identifier},
@@ -71,7 +75,7 @@ def test_provider_handle_alias_is_shared_by_response_request_and_dedup_key(prefi
 
 
 def test_distinct_handles_and_meaningful_path_segments_remain_distinct() -> None:
-    normalized = Normalizer().normalize(
+    normalized = normalize_request(
         {
             "path": "/v1/files/file_one/content",
             "reply": {"id": "file_two"},
@@ -88,13 +92,15 @@ def test_distinct_handles_and_meaningful_path_segments_remain_distinct() -> None
 
 
 def test_aliases_follow_first_capture_appearance_not_generation_or_lexical_order() -> None:
-    normalizer = Normalizer(runtime_ids=("file_A_generated_first", "file_Z_generated_second"))
-    assert normalizer.normalize(
-        {
-            "path": "/v1/files/file_Z_generated_second/content",
-            "reply": {"id": "file_A_generated_first"},
-        }
-    ) == {
+    request: dict[str, Json] = {
+        "path": "/v1/files/file_Z_generated_second/content",
+        "reply": {"id": "file_A_generated_first"},
+    }
+    normalizer = Normalizer(
+        runtime_ids=("file_A_generated_first", "file_Z_generated_second"),
+        provider_requests=(request,),
+    )
+    assert normalizer.normalize(request) == {
         "path": "/v1/files/<id:1>/content",
         "reply": {"id": "<id:2>"},
     }
@@ -150,7 +156,7 @@ def test_encoded_json_changes_only_id_tokens_preserving_wire_format_and_literal_
 
 
 def test_query_ids_and_error_references_share_aliases_without_changing_keys_or_prose() -> None:
-    assert Normalizer().normalize(
+    assert normalize_request(
         {
             "path": "/v1/sessions/sess_B",
             "query": [["session_id", "sess_A"], ["session_id", "sess_B"], ["scope", "session"]],
@@ -166,12 +172,138 @@ def test_query_ids_and_error_references_share_aliases_without_changing_keys_or_p
 
 
 def test_collection_names_and_url_query_keys_are_literal() -> None:
-    assert Normalizer().normalize(
+    assert normalize_request(
         {"url": "https://offline/v1/memory_stores?agent_id=agent_runtime"}
     ) == {"url": "https://offline/v1/memory_stores?agent_id=<id:1>"}
-    assert Normalizer().normalize(
+    assert normalize_request(
         {"url": "https://offline/v1/sessions/sess_B?session_id=sess_A&account_id=sess_B"}
     ) == {"url": "https://offline/v1/sessions/<id:1>?session_id=<id:2>&account_id=sess_B"}
+
+
+@pytest.mark.parametrize("platform", ("anthropic", "ma_http"))
+@pytest.mark.parametrize(
+    ("field", "template"),
+    (
+        ("path", "/notes/{handle}"),
+        ("path", "/v1/files/{handle}/content"),
+        ("url", "https://github.com/org/{handle}"),
+        ("url", "https://service.test/v1/files/{handle}/content?file_id={handle}"),
+    ),
+)
+def test_full_recorder_keeps_literal_resource_paths_and_repo_urls_sensitive(
+    platform: str, field: str, template: str
+) -> None:
+    def capture(handle: str) -> dict[str, Json]:
+        recorder = EffectRecorder()
+        recorder.record(
+            platform,
+            "request",
+            {
+                "method": "POST",
+                "path": "/v1/sessions/sess_fixed/resources",
+                "body": {field: template.format(handle=handle)},
+            },
+            result={"id": handle},
+        )
+        return json.loads(recorder.transcript())
+
+    first, second = capture("file_alpha"), capture("file_beta")
+    assert first != second, "literal content changes must remain visible when provider IDs rotate"
+    first_effect = cast(list[dict[str, Json]], first["effects"])[0]
+    second_effect = cast(list[dict[str, Json]], second["effects"])[0]
+    assert first_effect["result"] == second_effect["result"] == {"id": "<id:2>"}
+    first_payload = cast(dict[str, Json], first_effect["payload"])
+    second_payload = cast(dict[str, Json], second_effect["payload"])
+    assert first_payload["path"] == second_payload["path"] == "/v1/sessions/<id:1>/resources"
+    assert first_payload["body"] == {field: template.format(handle="file_alpha")}
+    assert second_payload["body"] == {field: template.format(handle="file_beta")}
+
+
+@pytest.mark.parametrize("with_response", (False, True))
+def test_full_recorder_configured_mcp_urls_never_become_provider_routes(
+    with_response: bool,
+) -> None:
+    def capture(handle: str) -> str:
+        recorder = EffectRecorder()
+        recorder.record(
+            "ma_http",
+            "request",
+            {
+                "method": "POST",
+                "path": "/v1/agents/agent_fixed",
+                "body": {
+                    "version": 1,
+                    "mcp_servers": [
+                        {"name": "configured", "url": f"https://service.test/v1/tools/{handle}"}
+                    ],
+                },
+            },
+            result={"id": "agent_fixed"} if with_response else None,
+        )
+        return recorder.transcript()
+
+    first, second = capture("agent_alpha"), capture("agent_beta")
+    assert first != second
+    assert "https://service.test/v1/tools/agent_alpha" in first
+    assert "https://service.test/v1/tools/agent_beta" in second
+
+
+def test_unmarked_paths_urls_and_configured_queries_are_literal() -> None:
+    value: dict[str, Json] = {
+        "path": "/v1/files/file_alpha/content",
+        "url": "https://service.test/v1/agents/agent_alpha",
+        "query": [["file_id", "file_alpha"]],
+        "reply": {"id": "file_alpha"},
+    }
+    normalizer = Normalizer()
+    normalized = cast(dict[str, Json], normalizer.normalize(value))
+    assert normalized["path"] == value["path"]
+    assert normalized["url"] == value["url"]
+    assert normalized["query"] == value["query"]
+    assert normalizer.provider_ids == {"file_alpha"}
+    assert normalizer.ids == {"file_alpha": "<id:1>"}
+
+
+def test_api_route_preserves_literal_secret_names_and_unknown_collection_paths() -> None:
+    request: dict[str, Json] = {
+        "url": "https://agent_alpha.test/v1/vaults/vlt_alpha/secrets/agent_alpha",
+        "body": {"agent_id": "agent_alpha"},
+    }
+    assert normalize_request(request) == {
+        "url": "https://agent_alpha.test/v1/vaults/<id:1>/secrets/agent_alpha",
+        "body": {"agent_id": "<id:2>"},
+    }
+    request = {
+        "path": "/v1/tools/agent_alpha",
+        "body": {"agent_id": "agent_alpha"},
+    }
+    assert normalize_request(request) == {
+        "path": "/v1/tools/agent_alpha",
+        "body": {"agent_id": "<id:1>"},
+    }
+
+
+def test_full_recorder_standalone_transport_routes_and_configured_body_urls_differ() -> None:
+    def capture(handle: str) -> dict[str, Json]:
+        return json.loads(
+            EffectRecorder().transcript(
+                requests=[
+                    {
+                        "method": "POST",
+                        "path": f"/v1/agents/{handle}",
+                        "query": [["agent_id", handle]],
+                        "body": {"url": f"https://service.test/v1/agents/{handle}"},
+                    }
+                ]
+            )
+        )
+
+    first, second = capture("agent_alpha"), capture("agent_beta")
+    assert first != second
+    requests = cast(list[dict[str, Json]], first["requests"])
+    assert requests[0]["path"] == "/v1/agents/<id:1>"
+    assert requests[0]["query"] == [["agent_id", "<id:1>"]]
+    assert requests[0]["body"] == {"url": "https://service.test/v1/agents/agent_alpha"}
 
 
 def snapshot(memory: str) -> SessionSnapshot:

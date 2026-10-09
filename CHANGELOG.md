@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Normalize offline oracle provider handles by first capture appearance, including SDK responses, URLs, deduplication keys and encoded SSE/control JSON; verify stored session fingerprints and hash their normalized inputs so unrelated ID generation cannot change goldens.
+- Normalize offline oracle provider handles by first capture appearance, including SDK responses, transport paths/query, deduplication keys and encoded SSE/control JSON; preserve literal filesystem paths and configured URLs even when they contain provider handles. Verify stored session fingerprints and hash their normalized inputs so unrelated ID generation cannot change goldens.
 - Discord agent posts and MCP tools now wait at most two seconds for a new channel webhook, then post through the bot with the agent name while creation continues in the background. Creation is deduplicated per channel, 429 retries respect a cooldown, and new channels create one webhook.
 - **The scheduler's usage sweep no longer re-replays every model call it has
   already metered.** It asks the API for `span.model_request_end` events only

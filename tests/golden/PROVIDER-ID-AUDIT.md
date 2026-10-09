@@ -4,6 +4,8 @@ All 33 scenarios were audited and re-recorded from unchanged integration `1bdf42
 
 Aliases follow first appearance in the ordered capture, never provider generation or lexical ID order. The audit covers memory stores/versions, vaults, environments, agents, sessions, skills, files, resources, tool uses and events, including offline fixture prefixes. Responses, pagination cursors, URL paths, deduplication keys, encoded SSE data and turn-control JSON share the same aliases. Caller/model fields, literal text and configured names stay exact. Encoded JSON changes only ID string tokens; whitespace, escapes, numeric encodings and timestamps remain byte-exact.
 
+Path/query aliases apply only to recorded MA transport envelopes, at the SDK collection's resource-ID positions. Request-body filesystem paths, repository URLs and configured MCP URLs remain literal, including values containing `/v1/` or a handle also found in a provider response. Vault secret names and paths under unknown collections stay literal. Full-recorder mutation regressions rotate colliding handles and prove that each changed literal path/URL still produces a different transcript, with and without provider responses.
+
 Verified session fingerprints are recomputed from the normalized effective configuration. An incorrect stored digest fails capture; changing model, skills, tools, repository or memory permissions remains visible. Provider IDs and derived fingerprints cannot choose database row order. Additive-column values remain literal and excluded from legacy comparison as documented in the README.
 
 Changed recordings (all changes are provider aliases or verified derived digests):

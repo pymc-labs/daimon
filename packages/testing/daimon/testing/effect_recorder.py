@@ -247,7 +247,9 @@ PROVIDER_ID = re.compile(
     r"vault|vlt|env|sevt|evt|outc|res|mem|ag|ses|toolu|tu|e|m|s)_[A-Za-z0-9_-]+(?![\w-])"
 )
 PROVIDER_ID_FIELDS = frozenset({"id", "first_id", "last_id", "agent"})
-PROVIDER_ROUTE_FIELDS = frozenset({"path", "url", "idempotency_key"})
+PROVIDER_COLLECTIONS = frozenset(
+    {"agents", "sessions", "environments", "skills", "files", "vaults", "memory_stores"}
+)
 SSE_DATA = re.compile(r"(?m)^(data: ?)([^\r\n]+)")
 TURN_CONTROLS = re.compile(r"(<turn_controls>\r?\n)([^\r\n]+)")
 JSON_STRING = re.compile(r'"(?:\\.|[^"\\])*"')
@@ -317,12 +319,48 @@ def json_value(value: object) -> Json:
 
 
 class Normalizer:
-    def __init__(self, *, epoch: datetime | None = None, runtime_ids: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        *,
+        epoch: datetime | None = None,
+        runtime_ids: Iterable[str] = (),
+        provider_requests: Iterable[dict[str, Json]] = (),
+    ) -> None:
         self.ids: dict[str, str] = {}
         self.epoch = epoch
         self.runtime_ids = set(runtime_ids)
         self.provider_ids: set[str] = set()
         self._normalizing = False
+        # Only the actual transport envelope owns an API path/query. Nested
+        # request bodies and configured URLs/paths remain literal even when
+        # they contain /v1/ or the same handle as a provider response.
+        self.provider_requests = tuple(provider_requests)
+        self._provider_request_ids = {id(request) for request in self.provider_requests}
+
+    @staticmethod
+    def _route_id_segments(path: str) -> dict[int, str]:
+        segments = path.split("/")
+        if len(segments) < 4 or segments[:2] != ["", "v1"]:
+            return {}
+        if segments[2] not in PROVIDER_COLLECTIONS:
+            return {}
+        identifiers = {3: segments[3]}
+        if len(segments) > 5 and (
+            (segments[2] == "sessions" and segments[4] in {"events", "resources"})
+            or (segments[2] == "memory_stores" and segments[4] == "versions")
+        ):
+            identifiers[5] = segments[5]
+        return identifiers
+
+    def _collect_route(self, value: str) -> None:
+        parsed = urlsplit(value)
+        self.provider_ids.update(
+            segment
+            for segment in self._route_id_segments(parsed.path).values()
+            if PROVIDER_ID.fullmatch(segment)
+        )
+        for name, item in parse_qsl(parsed.query, keep_blank_values=True):
+            self._collect_providers(item, field=name, identity=False)
 
     def _collect_providers(self, value: Json, *, field: str, identity: bool) -> None:
         identity = identity or field in IDENTITY_FIELDS
@@ -330,26 +368,23 @@ class Normalizer:
             return
         if isinstance(value, dict):
             for key, item in value.items():
-                self._collect_providers(item, field=key, identity=identity)
+                if id(value) in self._provider_request_ids and key in {"path", "url"}:
+                    if isinstance(item, str):
+                        self._collect_route(item)
+                elif id(value) in self._provider_request_ids and key == "query":
+                    if isinstance(item, list) and self._query_pairs(item):
+                        for pair in cast(list[list[Json]], item):
+                            self._collect_providers(
+                                pair[1], field=cast(str, pair[0]), identity=identity
+                            )
+                else:
+                    self._collect_providers(item, field=key, identity=identity)
         elif isinstance(value, list):
-            if field == "query" and self._query_pairs(value):
-                for pair in cast(list[list[Json]], value):
-                    self._collect_providers(pair[1], field=cast(str, pair[0]), identity=identity)
-                return
             for item in value:
                 self._collect_providers(item, field=field, identity=identity)
         elif isinstance(value, str):
             if _provider_id_field(field) and PROVIDER_ID.fullmatch(value):
                 self.provider_ids.add(value)
-            elif field in {"path", "url"} and "/v1/" in value:
-                # Collection names and query parameter names are not handles.
-                parsed = urlsplit(value)
-                segments = parsed.path.strip("/").split("/")
-                self.provider_ids.update(
-                    segment for segment in segments[2:] if PROVIDER_ID.fullmatch(segment)
-                )
-                for name, item in parse_qsl(parsed.query, keep_blank_values=True):
-                    self._collect_providers(item, field=name, identity=identity)
             for _, payload in self._json_fragments(value, field=field):
                 self._collect_providers(payload, field="", identity=False)
 
@@ -444,14 +479,15 @@ class Normalizer:
 
     def _route_references(self, value: str) -> str:
         path, separator, query = value.partition("?")
-        namespace = path.find("/v1/")
-        collection_end = path.find("/", namespace + 4) if namespace >= 0 else -1
-        if namespace < 0:
-            path = self._provider_references(path)
-        elif collection_end >= 0:
-            path = path[: collection_end + 1] + self._provider_references(
-                path[collection_end + 1 :]
-            )
+        parsed_path = urlsplit(path).path
+        identifiers = self._route_id_segments(parsed_path)
+        segments = parsed_path.split("/")
+        for index, identifier in identifiers.items():
+            segments[index] = self._provider_references(identifier)
+        normalized_path = "/".join(segments)
+        # Retain the exact authority/encoding; only known handle slots change.
+        if parsed_path:
+            path = path[: len(path) - len(parsed_path)] + normalized_path
         if not separator:
             return path
         pairs: list[str] = []
@@ -486,9 +522,7 @@ class Normalizer:
             or (field == "idempotency_key" and table == "task_continuations")
         ):
             return self._identifier(value)
-        if field in {"path", "url"}:
-            return self._route_references(value)
-        if field in PROVIDER_ROUTE_FIELDS:
+        if field == "idempotency_key":
             return self._provider_references(value)
         return value
 
@@ -531,34 +565,37 @@ class Normalizer:
                 ),
                 anchor,
             )
-            normalized: dict[str, Json] = {
-                key: self.normalize(
+            normalized: dict[str, Json] = {}
+            for key, item in value.items():
+                if not identity and id(value) in self._provider_request_ids:
+                    if key in {"path", "url"} and isinstance(item, str):
+                        normalized[key] = self._route_references(item)
+                        continue
+                    if key == "query" and isinstance(item, list) and self._query_pairs(item):
+                        normalized[key] = [
+                            [
+                                pair[0],
+                                self.normalize(
+                                    pair[1],
+                                    field=cast(str, pair[0]),
+                                    anchor=local_anchor,
+                                    table=table,
+                                ),
+                            ]
+                            for pair in cast(list[list[Json]], item)
+                        ]
+                        continue
+                normalized[key] = self.normalize(
                     item,
                     field=key,
                     identity=identity,
                     anchor=local_anchor,
                     table=key if key in DB_TABLES else table,
                 )
-                for key, item in value.items()
-            }
             self._error_message(value, normalized, field=field, identity=identity)
             self._fingerprints(value, normalized)
             return normalized
         if isinstance(value, list):
-            if field == "query" and self._query_pairs(value):
-                return [
-                    [
-                        pair[0],
-                        self.normalize(
-                            pair[1],
-                            field=cast(str, pair[0]),
-                            identity=identity,
-                            anchor=anchor,
-                            table=table,
-                        ),
-                    ]
-                    for pair in cast(list[list[Json]], value)
-                ]
             return [
                 self.normalize(item, field=field, identity=identity, anchor=anchor, table=table)
                 for item in value
@@ -778,7 +815,26 @@ class EffectRecorder:
                             identifier = row.get("id")
                             if isinstance(identifier, str):
                                 registered.add(identifier)
-        normalizer = Normalizer(epoch=epoch, runtime_ids=registered)
+        provider_requests: list[dict[str, Json]] = []
+        if isinstance(data, dict):
+            effects = data["effects"]
+            if isinstance(effects, list):
+                for effect in effects:
+                    if (
+                        isinstance(effect, dict)
+                        and effect.get("platform") in {"ma_http", "anthropic"}
+                        and effect.get("operation") == "request"
+                        and isinstance(payload := effect.get("payload"), dict)
+                    ):
+                        provider_requests.append(payload)
+            requests = data["requests"]
+            if isinstance(requests, list):
+                provider_requests.extend(
+                    request for request in requests if isinstance(request, dict)
+                )
+        normalizer = Normalizer(
+            epoch=epoch, runtime_ids=registered, provider_requests=provider_requests
+        )
         normalized = normalizer.normalize(data)
         if extensions is not None:
             # New fields must not consume legacy runtime-id numbers or alter dates.
