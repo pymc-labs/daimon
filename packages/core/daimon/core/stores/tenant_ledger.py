@@ -17,7 +17,7 @@ from typing import Any, cast
 
 from daimon.core._models import Tenant, TenantLedger
 from daimon.core.stores.domain import TenantLedgerRow
-from sqlalchemy import DateTime, func, select
+from sqlalchemy import DateTime, and_, func, or_, select
 from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
@@ -86,7 +86,13 @@ async def get_channel_spend(
     stmt = select(func.coalesce(-func.sum(TenantLedger.delta_usd), Decimal("0"))).where(
         TenantLedger.tenant_id == tenant_id,
         TenantLedger.channel_id == channel_id,
-        TenantLedger.delta_usd < Decimal("0"),
+        or_(
+            TenantLedger.delta_usd < Decimal("0"),
+            and_(
+                TenantLedger.reason.in_(("turn_debit", "checkpoint_debit")),
+                TenantLedger.idempotency_key.like("adjust:%"),
+            ),
+        ),
     )
     if since is not None:
         stmt = stmt.where(TenantLedger.occurred_at >= since)

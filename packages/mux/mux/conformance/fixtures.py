@@ -460,8 +460,117 @@ async def c11(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
 
 
 async def c12(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
-    return pending(
-        "C12", "N8 historical ledger identity and overlapping-grain billing bridge pending"
+    from collections.abc import Mapping
+    from decimal import Decimal
+    from typing import cast
+
+    # Optional host hook supplies database facts, never a pass/fail verdict.
+    # The reference has no host ledger and remains explicitly uncertified.
+    hook = getattr(t, "host_accounting_evidence", None)
+    if hook is None or store is None:
+        return pending("C12", "a host accounting evidence hook and StateStore are required")
+    require(callable(hook), "C12: host evidence hook must be callable")
+    evidence = await cast(Callable[[], Awaitable[object]], hook)()
+    require(isinstance(evidence, Mapping), "C12: host proof must supply accounting facts")
+    facts = cast(Mapping[str, object], evidence)
+
+    # A snapshot is (legacy usage rows, (ledger key, exact Decimal) rows).
+    # Usage tuples start (session, event, model, input, output). IDs/time and
+    # all other legacy columns must remain in the host's equality comparison.
+    def tuple_value(value: object) -> tuple[object, ...]:
+        require(isinstance(value, tuple), "C12: host accounting rows must be tuples")
+        return cast(tuple[object, ...], value)
+
+    def snapshot(
+        name: str,
+    ) -> tuple[tuple[tuple[object, ...], ...], tuple[tuple[str, Decimal], ...]]:
+        value = tuple_value(facts.get(name))
+        require(
+            len(value) == 2,
+            "C12: host snapshots must contain usage and ledger rows",
+        )
+        usage = tuple(tuple_value(row) for row in tuple_value(value[0]))
+        ledger = tuple(tuple_value(row) for row in tuple_value(value[1]))
+        require(
+            all(
+                len(row) == 12
+                and all(isinstance(v, str) and v for v in row[:3])
+                and all(type(v) is int and v >= 0 for v in row[3:7])
+                and row[9] is not None
+                and isinstance(row[10], datetime)
+                and row[11] is not None
+                for row in usage
+            )
+            and all(
+                len(row) == 2 and isinstance(row[0], str) and isinstance(row[1], Decimal)
+                for row in ledger
+            ),
+            "C12: host snapshots require real identities, counts and Decimal amounts",
+        )
+        return usage, cast(tuple[tuple[str, Decimal], ...], ledger)
+
+    history = snapshot("history_before")
+    require(
+        len(history[0]) == len(history[1]) == 1
+        and history[0][0][4] == 100
+        and history[1][0] == (f"turn:{history[0][0][0]}:{history[0][0][1]}", Decimal("-0.001000"))
+        and snapshot("history_after") == history,
+        "C12: replaying seeded historical usage must add zero rows and preserve the turn key",
+    )
+    corrected = snapshot("corrections")
+    require(
+        len(corrected[0]) == 1 and corrected[0][0][4] == 110,
+        "C12: the projected correction must account for exactly 110 units",
+    )
+    session_id, event_id = corrected[0][0][:2]
+    binding_id = facts.get("binding_id")
+    require(isinstance(binding_id, str) and binding_id, "C12: a durable binding is required")
+    require(
+        len(corrected[1]) == 3
+        and dict(corrected[1])
+        == {
+            f"turn:{session_id}:{event_id}": Decimal("-0.001000"),
+            f"adjust:{binding_id}:{event_id}:2": Decimal("-0.000200"),
+            f"adjust:{binding_id}:{event_id}:3": Decimal("0.000100"),
+        }
+        and facts.get("correction_channel_spend") == Decimal("0.001100"),
+        "C12: 100→120→110 must debit/refund once and leave channel spend at 110 units",
+    )
+    overlap = snapshot("overlap_before")
+    require(
+        overlap[0]
+        and overlap[1]
+        and snapshot("overlap_after") == overlap
+        and facts.get("aggregate_grains") == ("session", "turn")
+        and facts.get("aggregate_covers") == ((event_id,), (event_id,)),
+        "C12: overlapping session/turn totals must remain recorded without another charge",
+    )
+    crashed = snapshot("crash_before")
+    require(
+        len(crashed[0]) == len(crashed[1]) == 1
+        and crashed[0][0][4] == 100
+        and facts.get("projection_at_failure") == 120
+        and snapshot("crash_after_failure") == crashed
+        and facts.get("pending_before_failure") == facts.get("pending_after_failure") == 1,
+        "C12: failure between usage and debit must roll back both writes and the outbox claim",
+    )
+    restarted = snapshot("crash_after_restart")
+    crash_session, crash_event = crashed[0][0][:2]
+    require(
+        len(restarted[0]) == 1
+        and restarted[0][0][4] == 120
+        and len(restarted[1]) == 2
+        and dict(restarted[1])
+        == {
+            f"turn:{crash_session}:{crash_event}": Decimal("-0.001000"),
+            f"adjust:{binding_id}:{crash_event}:2": Decimal("-0.000200"),
+        }
+        and facts.get("pending_after_restart") == 0,
+        "C12: restart must apply the pending correction once with its exact stored key",
+    )
+    return passed(
+        "C12",
+        "host ledger: historical replay, signed corrections, overlap and crash/restart verified",
     )
 
 

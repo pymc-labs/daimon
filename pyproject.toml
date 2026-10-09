@@ -292,6 +292,7 @@ source_modules = [
     "daimon.core.turn_queue",
     "daimon.core.untrusted",
     "daimon.core.usage_recording",
+    "daimon.core.accounting_outbox",
     "daimon.core.usage_compat",
     "daimon.core.usage_sweep",
     "daimon.core.wizard",
