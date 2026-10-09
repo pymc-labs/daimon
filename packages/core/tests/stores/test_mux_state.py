@@ -198,6 +198,19 @@ async def test_an_append_that_waited_past_expiry_is_refused(
     assert await store.read_events(SESSION.id) == []
 
 
+async def test_fenced_writes_that_waited_on_the_lease_row_past_expiry_are_refused(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store, lease = await _setup(factory)
+    claim = store.claim_send(SCOPE, "k", now=NOW, fence=lease)
+    with pytest.raises(StaleFence):
+        await _behind(factory, "SELECT 1 FROM thread_lease FOR UPDATE", claim)
+    append = store.append_events(SESSION, [_entry("e1")], fence=lease, cursor="c", now=NOW)
+    with pytest.raises(StaleFence):
+        await _behind(factory, "SELECT 1 FROM thread_lease FOR UPDATE", append)
+    assert await store.read_events(SESSION.id) == []
+
+
 async def test_a_renewal_that_waited_past_expiry_is_refused(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -208,9 +208,12 @@ legacy reader is) that has a live `thread_sessions` row. Its current
 generation is the newest live row, the one Daimon resumes today, and the
 caller's other rows are earlier generations. A thread with no live row
 gets no binding. Rows with no account are not backfilled, and a session
-recorded by two callers is owned by neither. The migration only reads
-`thread_sessions`; its sole exclusive lock there is two instant nullable
-`ADD COLUMN`s, run last. It leaves `binding_id` and `binding_generation`
+recorded by two callers is owned by neither. The migration reads
+`thread_sessions` once, in one statement, and derives everything it writes
+from that snapshot. The steps that lock existing tables run last, so their
+locks last only until the commit: the tenant foreign keys (which block
+tenant writes) and two instant nullable `ADD COLUMN`s on `thread_sessions`.
+At 200,000 rows both are held for well under a second. It leaves `binding_id` and `binding_generation`
 NULL: `mux_state.link_legacy_thread_sessions(session, batch=2000)` fills
 backfilled rows a batch per call, skipping rows already linked, so it can
 be run, stopped and rerun at any time. Nothing in Daimon calls

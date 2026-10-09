@@ -1,8 +1,12 @@
 """0074 neutral state: backfill, existing thread_sessions readers, down/up twice."""
 
+import asyncio
 import importlib.util
+import threading
 import time
 import uuid
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -12,13 +16,21 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core.stores import mux_state
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
+from daimon.testing.db import (
+    _create_schema_with_tables,  # pyright: ignore[reportPrivateUsage]
+    _drop_schema,  # pyright: ignore[reportPrivateUsage]
+    _new_schema_name,  # pyright: ignore[reportPrivateUsage]
+    _require_test_dsn,  # pyright: ignore[reportPrivateUsage]
+    build_test_engine,
+)
 from daimon.testing.factories import make_tenant
 from mux.contracts.ids import ChannelRef, ResourceRef, ThreadRef
 from mux.contracts.usage import UsageObservation
 from mux.errors import ScopeViolation
 from mux.state.lease import Slot
 from sqlalchemy import Connection, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.pool import NullPool
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 ACCOUNT_A = uuid.uuid4()
@@ -317,46 +329,157 @@ async def test_one_slot_per_legacy_caller_thread_whatever_its_channels(
     assert (binding.native_refs["session"], binding.generation) == ("s_live", 3)
 
 
-@pytest.mark.slow
-@pytest.mark.fresh_schema
-async def test_the_exclusive_lock_on_thread_sessions_is_instant_at_200k_rows(
-    db_session: AsyncSession,
-) -> None:
-    tenant = await make_tenant(db_session)
-    await _run(db_session, "downgrade")
-    await db_session.execute(
-        text(
-            "INSERT INTO thread_sessions (tenant_id, platform, thread_id, account_id,"
-            " ma_session_id, channel_id, status, created_at)"
-            " SELECT :tenant, 'discord', 'th' || (n / 3), :account, 's' || n, 'chan',"
-            " CASE WHEN n % 3 = 2 THEN 'live' ELSE 'dead' END,"
-            " CAST(:t0 AS timestamptz) + n * interval '1 second'"
-            " FROM generate_series(1, 200000) AS n"
-        ),
-        {"tenant": tenant.id, "account": ACCOUNT_A, "t0": T0},
-    )
-    migration = _migration()
-    marks: dict[str, float] = {}
-    add_columns = migration.add_columns
+# Committed migrations on a private schema, with other connections acting meanwhile.
 
-    def timed_add_columns() -> None:
-        marks["lock"] = time.perf_counter()
-        add_columns()
-        marks["locked_step_done"] = time.perf_counter()
 
-    setattr(migration, "add_columns", timed_add_columns)  # noqa: B010 - a module, not a typed object
+@asynccontextmanager
+async def _private_schema() -> AsyncIterator[tuple[AsyncEngine, Callable[[], AsyncEngine]]]:
+    """A committed private schema, its pooled engine, and a factory for engines
+    another thread's event loop can use."""
+    url = _require_test_dsn()  # pyright: ignore[reportPrivateUsage]
+    schema = _new_schema_name("f")  # pyright: ignore[reportPrivateUsage]
+    engine = build_test_engine(url, schema)
+    try:
+        await _create_schema_with_tables(engine, schema)  # pyright: ignore[reportPrivateUsage]
+        try:
+            yield engine, lambda: build_test_engine(url, schema, poolclass=NullPool)
+        finally:
+            await _drop_schema(engine, schema)  # pyright: ignore[reportPrivateUsage]
+    finally:
+        await engine.dispose()
 
+
+async def _migrate(engine: AsyncEngine, migration: ModuleType, step: str) -> None:
     def apply(sync_conn: Connection) -> None:
         with Operations.context(MigrationContext.configure(sync_conn)):
-            marks["start"] = time.perf_counter()
-            migration.upgrade()
-            marks["end"] = time.perf_counter()
+            getattr(migration, step)()
 
-    await (await db_session.connection()).run_sync(apply)
-    # ACCESS EXCLUSIVE on thread_sessions is taken by the last step and held
-    # until the commit that follows the migration.
-    held = marks["end"] - marks["lock"]
-    print(f"200k rows: upgrade {marks['end'] - marks['start']:.2f}s, lock held {held:.3f}s")
-    assert held < 0.5
-    assert marks["end"] - marks["locked_step_done"] < 0.05
-    assert await db_session.scalar(text("SELECT count(*) FROM provider_binding")) > 0
+    async with engine.connect() as conn:
+        await conn.run_sync(apply)
+        await conn.commit()
+
+
+async def _seed(engine: AsyncEngine, rows: int) -> uuid.UUID:
+    tenant_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO tenants (id, platform, external_id) VALUES (:id, 'discord', :ext)"),
+            {"id": tenant_id, "ext": f"mux-{tenant_id}"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO thread_sessions (tenant_id, platform, thread_id, account_id,"
+                " ma_session_id, channel_id, status, created_at)"
+                " SELECT :tenant, 'discord', 'th' || (n / 3), :account, 's' || n, 'chan',"
+                " CASE WHEN n % 3 = 2 THEN 'live' ELSE 'dead' END,"
+                " CAST(:t0 AS timestamptz) + n * interval '1 second'"
+                " FROM generate_series(1, :rows) AS n"
+            ),
+            {"tenant": tenant_id, "account": ACCOUNT_A, "t0": T0, "rows": rows},
+        )
+    return tenant_id
+
+
+async def test_a_legacy_write_during_the_backfill_cannot_split_its_snapshot() -> None:
+    migration = _migration()
+    async with _private_schema() as (engine, thread_engine):
+        await _migrate(engine, migration, "downgrade")
+        tenant_id = await _seed(engine, 30)
+        capture = migration.capture
+
+        def capture_then_write() -> None:
+            capture()
+
+            async def legacy_writer() -> None:
+                # A new caller thread, and a newer live row in a captured one.
+                writer_engine = thread_engine()
+                async with writer_engine.begin() as conn:
+                    await conn.execute(
+                        text(
+                            "INSERT INTO thread_sessions (tenant_id, platform, thread_id,"
+                            " account_id, ma_session_id, channel_id, status)"
+                            " VALUES (:t, 'discord', 'th_new', :a, 's_new', 'chan', 'live'),"
+                            " (:t, 'discord', 'th1', :a, 's_newer', 'chan', 'live')"
+                        ),
+                        {"t": tenant_id, "a": ACCOUNT_B},
+                    )
+                    await conn.execute(
+                        text(
+                            "INSERT INTO thread_sessions (tenant_id, platform, thread_id,"
+                            " account_id, ma_session_id, channel_id, status)"
+                            " VALUES (:t, 'discord', 'th1', :a, 's_newer_a', 'chan', 'live')"
+                        ),
+                        {"t": tenant_id, "a": ACCOUNT_A},
+                    )
+                await writer_engine.dispose()
+
+            # The migration's connection is mid-transaction; commit from another.
+            writer = threading.Thread(target=lambda: asyncio.run(legacy_writer()))
+            writer.start()
+            writer.join()
+
+        setattr(migration, "capture", capture_then_write)  # noqa: B010 - patching a module
+        await _migrate(engine, migration, "upgrade")
+
+        async with AsyncSession(engine) as session:
+            assert await session.scalar(text("SELECT count(*) FROM thread_sessions")) == 33
+            # Exactly the 10 captured threads are bound; the late rows are not.
+            assert await session.scalar(text("SELECT count(*) FROM provider_binding_slot")) == 10
+            unowned = await session.scalar(
+                text(
+                    "SELECT count(*) FROM journal_session j LEFT JOIN provider_binding_slot s"
+                    " USING (binding_id) WHERE s.binding_id IS NULL"
+                )
+            )
+            assert unowned == 0
+            sessions = set(await session.scalars(text("SELECT session_id FROM journal_session")))
+            assert not sessions & {"s_new", "s_newer", "s_newer_a"}
+
+
+@pytest.mark.slow
+async def test_locks_on_existing_tables_last_only_to_the_commit_at_200k_rows() -> None:
+    migration = _migration()
+    async with _private_schema() as (engine, _):
+        await _migrate(engine, migration, "downgrade")
+        tenant_id = await _seed(engine, 200_000)
+        marks: dict[str, float] = {}
+        finish = migration.finish
+
+        def timed_finish() -> None:
+            marks["locks_taken"] = time.perf_counter()
+            finish()
+
+        setattr(migration, "finish", timed_finish)  # noqa: B010 - patching a module
+        done = asyncio.Event()
+        worst: dict[str, float] = {"read": 0.0, "tenant_write": 0.0}
+
+        async def probe(kind: str, sql: str) -> None:
+            while not done.is_set():
+                started = time.perf_counter()
+                async with engine.begin() as conn:
+                    # Waiting over a second on any lock the migration holds raises
+                    # LockNotAvailable and fails the test; host-load slowness does not.
+                    await conn.execute(text("SET LOCAL lock_timeout = '1s'"))
+                    await conn.execute(text(sql), {"t": tenant_id})
+                worst[kind] = max(worst[kind], time.perf_counter() - started)
+                await asyncio.sleep(0.02)
+
+        probes = [
+            asyncio.create_task(probe("read", "SELECT 1 FROM thread_sessions LIMIT 1")),
+            asyncio.create_task(
+                probe("tenant_write", "UPDATE tenants SET external_id = external_id WHERE id = :t")
+            ),
+        ]
+        started = time.perf_counter()
+        await _migrate(engine, migration, "upgrade")
+        committed = time.perf_counter()
+        done.set()
+        await asyncio.gather(*probes)
+
+        held = committed - marks["locks_taken"]
+        print(
+            f"200k rows: upgrade {committed - started:.2f}s; locks on tenants and"
+            f" thread_sessions held {held:.3f}s through the commit; worst concurrent"
+            f" read {worst['read']:.3f}s, tenant write {worst['tenant_write']:.3f}s"
+        )
+        assert held < 1.0

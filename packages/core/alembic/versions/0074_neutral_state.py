@@ -23,9 +23,14 @@ slot owns it, so it takes no journal appends and no usage, and a thread
 whose live session is ambiguous gets no binding. The host resolves it by
 binding explicitly.
 
-Locking. The backfill only reads `thread_sessions`. Its only ACCESS
-EXCLUSIVE lock is the two nullable `ADD COLUMN`s (no default, so no rewrite),
-run last so the lock is held only until the commit right after. The new
+Locking and consistency. The backfill reads `thread_sessions` once, in
+one statement (one snapshot), into a temp table; everything it writes
+derives from that. A row a legacy writer commits meanwhile is simply not
+backfilled, like any row written after the migration. The steps that lock
+existing tables run last, so their locks are held only until the commit:
+the tenant FKs (SHARE ROW EXCLUSIVE on `tenants`) and the two nullable
+`ADD COLUMN`s (ACCESS EXCLUSIVE on `thread_sessions`; no default, no
+rewrite). The new
 columns stay NULL here; `daimon.core.stores.mux_state.link_legacy_thread_sessions`
 fills them in short batches, idempotently, whenever it is run.
 
@@ -45,9 +50,8 @@ depends_on: str | None = None
 
 
 def _tenant() -> sa.Column[uuid.UUID]:
-    return sa.Column(
-        "tenant_id", sa.UUID(), sa.ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
+    """The tenant column. Its FK to `tenants` is added last (see `finish`)."""
+    return sa.Column("tenant_id", sa.UUID(), nullable=False)
 
 
 def _slot_columns() -> list[sa.Column[str]]:
@@ -65,7 +69,8 @@ def _binding_fk() -> sa.ForeignKey:
 
 _SLOT = ("tenant_id", "platform", "channel_id", "thread_id", "account_id")
 
-_ROWS = """
+_CAPTURE = """
+CREATE TEMP TABLE neutral_state_source ON COMMIT DROP AS
 WITH caller_rows AS (
     SELECT
         ts.id, ts.tenant_id, ts.platform, ts.thread_id, ts.account_id::text AS account_id,
@@ -104,16 +109,17 @@ rows AS (
     FROM caller_rows r JOIN bound USING (slot)
     WINDOW slot_order AS (PARTITION BY r.slot ORDER BY r.status = 'live', r.created_at, r.id)
 )
+SELECT rows.*, rows.ma_session_id IN (SELECT ma_session_id FROM ambiguous) AS ambiguous_session
+FROM rows
 """
+"""One statement, so one snapshot: everything the backfill writes derives from it."""
 
-_BINDINGS = (
-    _ROWS
-    + """,
-slots AS (
+_BINDINGS = """
+WITH slots AS (
     INSERT INTO provider_binding_slot
         (binding_id, tenant_id, platform, channel_id, thread_id, account_id, generation)
     SELECT binding_id, tenant_id, platform, channel_id, thread_id, account_id, generations
-    FROM rows WHERE generation = 1
+    FROM neutral_state_source WHERE generation = 1
     RETURNING binding_id
 )
 INSERT INTO provider_binding
@@ -141,20 +147,28 @@ SELECT
     ),
     r.id,
     r.created_at
-FROM rows r JOIN slots s ON s.binding_id = r.binding_id
+FROM neutral_state_source r JOIN slots s ON s.binding_id = r.binding_id
 """
-)
 
-_SESSIONS = (
-    _ROWS
-    + """
+_SESSIONS = """
 INSERT INTO journal_session (session_id, tenant_id, binding_id)
 SELECT DISTINCT ON (r.ma_session_id) r.ma_session_id, r.tenant_id, r.binding_id
-FROM rows r
-WHERE r.ma_session_id NOT IN (SELECT ma_session_id FROM ambiguous)
+FROM neutral_state_source r
+WHERE NOT r.ambiguous_session
 ORDER BY r.ma_session_id, r.created_at, r.id
 ON CONFLICT (session_id) DO NOTHING
 """
+
+_TENANT_TABLES = (
+    "channel_config_revision",
+    "provider_binding_slot",
+    "provider_binding",
+    "thread_lease",
+    "operation",
+    "journal_session",
+    "journal",
+    "usage_observation",
+    "accounting_outbox",
 )
 
 
@@ -284,19 +298,35 @@ def upgrade() -> None:
         ["created_at"],
         postgresql_where=sa.text("applied_at IS NULL"),
     )
-    backfill()
-    add_columns()
+    capture()
+    derive()
+    finish()
 
 
-def backfill() -> None:
-    """Fill the new tables. Reads `thread_sessions`; locks nothing a turn needs."""
+def capture() -> None:
+    """Snapshot the legacy rows once. Reads `thread_sessions`; blocks no writer."""
+    op.get_bind().execute(sa.text(_CAPTURE))
+
+
+def derive() -> None:
+    """Fill the new tables from the snapshot only, never from a second read."""
     connection = op.get_bind()
     connection.execute(sa.text(_BINDINGS))
     connection.execute(sa.text(_SESSIONS))
+    connection.execute(sa.text("DROP TABLE neutral_state_source"))
 
 
-def add_columns() -> None:
-    """The only ACCESS EXCLUSIVE on `thread_sessions`: instant, and the last step."""
+def finish() -> None:
+    """The steps that lock existing tables, last, so they are held only to the commit.
+
+    The tenant FKs take SHARE ROW EXCLUSIVE on `tenants` (blocking tenant
+    writes); the nullable ADD COLUMNs take ACCESS EXCLUSIVE on `thread_sessions`.
+    Validating the FKs scans only the new tables.
+    """
+    for table in _TENANT_TABLES:
+        op.create_foreign_key(
+            f"{table}_tenant_id_fkey", table, "tenants", ["tenant_id"], ["id"], ondelete="CASCADE"
+        )
     op.add_column("thread_sessions", sa.Column("binding_id", sa.Text(), nullable=True))
     op.add_column("thread_sessions", sa.Column("binding_generation", sa.Integer(), nullable=True))
 
