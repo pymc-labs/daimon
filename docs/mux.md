@@ -207,3 +207,9 @@ The manual `tests/judge` harness grades recorded
 transcripts separately from conformance, using a fixed 12-task rubric and
 structured `codex exec` output. Replay repetitions default to three. API-key
 authentication is refused; normal pytest never invokes the judge.
+
+`tests/baselines` contains lead-run, read-only
+14-day telemetry SQL, a baseline JSON converter requiring the deployed SDK pin
+and export date, and an offline paired M0 replay benchmark. First-token latency
+is explicitly unavailable in the current telemetry schema. The benchmark remains
+pending until N4 supplies the legacy/mux transport adapter; pending never passes.
