@@ -36,6 +36,8 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.skills import resolve_refs
 from daimon.core.errors import DaimonError
 from daimon.core.ma import update_agent_with_version_retry
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import create_agent, update_agent
 from daimon.core.specs import AgentSpec, SkillRef, dump_agent_spec
 
 # Skill seeded from the defaults tree (its SKILL.md lands in a later plan)
@@ -132,6 +134,10 @@ async def ensure_reader_variant(
     MA — fails loudly rather than silently falling back to a different
     agent.
     """
+    backend_scope = resource_scope(
+        tenant_id=str(tenant_id),
+        account_id=str(account_id),
+    )
     source_ma = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=source_name)
     if source_ma is None:
         raise DaimonError(f"agent {source_name!r} not found")
@@ -209,10 +215,10 @@ async def ensure_reader_variant(
     match = matches[0] if matches else None
 
     if match is None:
-        return await anthropic.beta.agents.create(
-            **dump_agent_spec(reader_spec),
-            skills=resolved_skills,
-            metadata=metadata,
+        return await create_agent(
+            anthropic,
+            {**dump_agent_spec(reader_spec), "skills": resolved_skills, "metadata": metadata},
+            scope=backend_scope,
         )
 
     if (
@@ -226,12 +232,16 @@ async def ensure_reader_variant(
         return match
 
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
-        return await anthropic.beta.agents.update(
+        return await update_agent(
+            anthropic,
             fresh.id,
+            payload={
+                **dump_agent_spec(reader_spec),
+                "skills": resolved_skills,
+                "metadata": cast("dict[str, str | None]", metadata),
+            },
             version=fresh.version,
-            **dump_agent_spec(reader_spec),
-            skills=resolved_skills,
-            metadata=cast("dict[str, str | None]", metadata),
+            scope=backend_scope,
         )
 
-    return await update_agent_with_version_retry(anthropic, match.id, _apply)
+    return await update_agent_with_version_retry(anthropic, match.id, _apply, scope=backend_scope)

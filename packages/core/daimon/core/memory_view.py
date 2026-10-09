@@ -9,6 +9,7 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_compat import list_memory_entries, read_memory
 from daimon.core.rule_views import is_memory_hidden
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
@@ -16,6 +17,7 @@ from daimon.core.stores.agent_memory_stores import get_memory_store_id
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
+from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -71,19 +73,27 @@ async def get_channel_memory_store(
     return None if store_id is None else (config.agent_name, store_id)
 
 
-async def list_memory_paths(anthropic: AsyncAnthropic, store_id: str) -> list[str]:
+async def list_memory_paths(
+    anthropic: AsyncAnthropic, store_id: str, *, scope: Scope | None = None
+) -> list[str]:
     """Every memory path in the store, sorted."""
-    page = await anthropic.beta.memory_stores.memories.list(store_id, path_prefix="/")
+    backend_scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.memory_view:list_memory_paths"
+    )
+    page = list_memory_entries(anthropic, store_id, path_prefix="/", scope=backend_scope)
     return sorted([item.path async for item in page if item.type == "memory"])
 
 
-async def get_memory_content(anthropic: AsyncAnthropic, store_id: str, path: str) -> str | None:
+async def get_memory_content(
+    anthropic: AsyncAnthropic, store_id: str, path: str, *, scope: Scope | None = None
+) -> str | None:
     """The memory at exactly `path`, or None when there is none."""
-    page = await anthropic.beta.memory_stores.memories.list(store_id, path_prefix="/")
+    backend_scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.memory_view:get_memory_content"
+    )
+    page = list_memory_entries(anthropic, store_id, path_prefix="/", scope=backend_scope)
     async for item in page:
         if item.type == "memory" and item.path == path:
-            memory = await anthropic.beta.memory_stores.memories.retrieve(
-                item.id, memory_store_id=store_id, view="full"
-            )
+            memory = await read_memory(anthropic, store_id, item.id, scope=backend_scope)
             return memory.content or ""
     return None

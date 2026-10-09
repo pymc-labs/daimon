@@ -522,6 +522,7 @@ mirroring and rollback; vault discovery retains its existing exact-name inventor
 check. Tenantless established creation uses a named legacy host capability.
 Workspace export/restore remain unsupported lifecycle methods and fail explicitly. The driver keeps no operation cache
 and makes no request during construction.
+
 ## Accounting observations
 
 The Anthropic usage driver converts each model-request end event into one
@@ -759,3 +760,32 @@ written evidence and reconstructed normalized text before export and replay.
 Replay feeds a caller-supplied offline event fake and recomputes fixture checks;
 PENDING never certifies. Native HTTP/SSE codec certification is separate work.
 See `packages/mux/mux/conformance/README.md` for the APIs and limitations.
+
+## Persistent memory and resource identity reads
+
+Persistent memory provisioning, orphan cleanup, archival and memory command
+reads use `anthropic.memory_stores@1`. The driver preserves the SDK's memory
+beta header, prefix entries, pagination stop rules and selected full-content
+reads. Warm provisioning performs no provider request. A lost binding race or
+failed insert deletes only the newly created orphan; agent archival clears its
+binding even when the provider reports the store missing. Session archival
+does not archive or delete shared memory.
+
+Resolver reads retain partial native SDK environment snapshots when configuration
+is omitted or null; admission still reads metadata and archive state without an
+additional request. Resolver reads keep the host's existing TTL caches and in-flight coordination;
+the driver introduces no cache or replay layer. Owned resolver, setup, report
+reader and OAuth/token attachment callers pass their tenant scope through
+reads, writes and version-conflict retries. Memory command and MCP attachment
+helpers accept explicit scopes while retaining named legacy authorization
+seams for existing adapter callers without scope arguments. Conditional memory
+writes are unsupported and fail before provider I/O.
+
+M0 memory listing/content reads and environment identity retrieval preserve the
+SDK's partial native response snapshots through operation-specific driver
+extensions (`anthropic.memory_stores@1` native reads/walks and
+`anthropic.environment_reads@1`). The compatibility edge reconstructs SDK records without requiring
+unused paths, identifiers, configuration or timestamps. Prefix and unknown list
+rows retain their original discriminator and pagination behavior. Tenant and
+account checks still run before requests, and environment metadata checks still
+run after the existing response. Neutral resource records remain validated.

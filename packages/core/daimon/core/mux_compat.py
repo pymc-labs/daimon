@@ -11,12 +11,18 @@ from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from anthropic import AnthropicError, AsyncAnthropic
+from anthropic._models import construct_type
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
+    BetaManagedAgentsMemoryStore,
     FileMetadata,
     SkillCreateResponse,
     SkillListResponse,
+)
+from anthropic.types.beta.memory_stores.beta_managed_agents_memory import BetaManagedAgentsMemory
+from anthropic.types.beta.memory_stores.beta_managed_agents_memory_list_item import (
+    BetaManagedAgentsMemoryListItem,
 )
 from anthropic.types.beta.skills import VersionCreateResponse, VersionListResponse
 from daimon.core.mux_backend import managed_agents, resource_ref
@@ -36,6 +42,9 @@ from mux.contracts.resources import (
 )
 from mux.drivers.anthropic.resources._secrets import CredentialFileUpload
 from mux.drivers.anthropic.resources.artifacts import Artifacts as NativeArtifacts
+from mux.drivers.anthropic.resources.environments import EnvironmentReads
+from mux.drivers.anthropic.resources.memory_stores import MemoryStores as NativeMemoryStores
+from mux.drivers.anthropic.resources.memory_stores import StoreCreate
 from mux.drivers.anthropic.resources.walk import ResourceWalk
 from mux.errors import ProviderError
 
@@ -752,3 +761,88 @@ async def archive_session(client: AsyncAnthropic, session_id: str, *, scope: Sco
             scope, resource_ref(backend, "session", session_id, scope=scope), key=str(uuid4())
         )
     )
+
+
+def _memory_port(
+    client: AsyncAnthropic, store_id: str | None, *, scope: Scope
+) -> tuple[AnthropicManagedAgents, NativeMemoryStores]:
+    backend = managed_agents(
+        client,
+        scope=scope,
+        resources=frozenset({("memory_store", store_id)}) if store_id is not None else frozenset(),
+    )
+    return backend, backend.extension(
+        NativeMemoryStores, namespace="anthropic.memory_stores", version=1
+    )
+
+
+async def create_memory_store(
+    client: AsyncAnthropic, payload: Mapping[str, object], *, scope: Scope
+) -> BetaManagedAgentsMemoryStore:
+    _backend, port = _memory_port(client, None, scope=scope)
+    record = await legacy_call(
+        port.create_native(scope, StoreCreate.model_validate(payload), key=str(uuid4()))
+    )
+    return BetaManagedAgentsMemoryStore.model_construct(_fields_set=None, **_mapping(record.native))
+
+
+async def list_memory_entries(
+    client: AsyncAnthropic, store_id: str, *, path_prefix: str, scope: Scope
+) -> AsyncIterator[BetaManagedAgentsMemoryListItem]:
+    backend, port = _memory_port(client, store_id, scope=scope)
+    async for entry in legacy_iter(
+        port.walk_native(
+            scope,
+            resource_ref(backend, "memory_store", store_id, scope=scope),
+            path_prefix=path_prefix,
+        )
+    ):
+        yield cast(
+            BetaManagedAgentsMemoryListItem,
+            construct_type(type_=BetaManagedAgentsMemoryListItem, value=entry.native),
+        )
+
+
+async def read_memory(
+    client: AsyncAnthropic, store_id: str, memory_id: str, *, scope: Scope
+) -> BetaManagedAgentsMemory:
+    backend, port = _memory_port(client, store_id, scope=scope)
+    record = await legacy_call(
+        port.read_native(
+            scope, resource_ref(backend, "memory_store", store_id, scope=scope), memory_id
+        )
+    )
+    return BetaManagedAgentsMemory.model_construct(_fields_set=None, **record.native)
+
+
+async def delete_memory_store(client: AsyncAnthropic, store_id: str, *, scope: Scope) -> None:
+    backend, port = _memory_port(client, store_id, scope=scope)
+    await legacy_call(
+        port.delete(
+            scope, resource_ref(backend, "memory_store", store_id, scope=scope), key=str(uuid4())
+        )
+    )
+
+
+async def archive_memory_store(client: AsyncAnthropic, store_id: str, *, scope: Scope) -> None:
+    backend, port = _memory_port(client, store_id, scope=scope)
+    await legacy_call(
+        port.archive(
+            scope, resource_ref(backend, "memory_store", store_id, scope=scope), key=str(uuid4())
+        )
+    )
+
+
+async def retrieve_environment(
+    client: AsyncAnthropic, environment_id: str, *, scope: Scope
+) -> BetaEnvironment:
+    backend = managed_agents(
+        client, scope=scope, resources=frozenset({("environment", environment_id)})
+    )
+    port = backend.extension(EnvironmentReads, namespace="anthropic.environment_reads", version=1)
+    record = await legacy_call(
+        port.retrieve_native(
+            scope, resource_ref(backend, "environment", environment_id, scope=scope)
+        )
+    )
+    return BetaEnvironment.model_construct(_fields_set=None, **record.native)

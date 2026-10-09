@@ -50,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discord, Slack, Teams and scheduler agent operations now consume tenant-scoped neutral resource ports.
 - Preserve original credential JSON key order and redact alternate quote-escaped secret echoes; verify `.env` upload filename, media type and bytes at the host call site.
 
+- Route persistent memory, resolver reads, setup identity reads and report reader/MCP attachment writes through resource ports with unchanged request and cleanup behavior.
+- Preserve partial memory and environment identity responses accepted by the SDK, including ignored prefix rows and missing unused fields.
+
 - Advertise closed session create, resource-mount and update configuration namespaces for backend admission.
 - Expose scoped workspace session enumeration through the native SDK paginator,
   preserving full native records and pagination stop rules for billing sweeps.

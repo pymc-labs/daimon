@@ -236,6 +236,9 @@ async def complete_mcp_oauth_flow(
                 url=flow.mcp_server_url,
                 replace_allowed=decision.replace_allowed,
                 before_update=still_allowed,
+                scope=resource_scope(
+                    tenant_id=str(flow.tenant_id), account_id=str(flow.account_id)
+                ),
             )
         except McpOAuthWriteRefusedError:
             await _withdraw_grant(
