@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import cast
 
-from mux.conformance.runner import Adapter, Scenario
+from mux.conformance.runner import Adapter, Scenario, SendEvidence
 from mux.contracts.actions import InputEvent, NativeInput, UserMessage
 from mux.contracts.admission import Admission, admit
 from mux.contracts.config import ConfigRevision
@@ -87,6 +87,8 @@ class Transport:
         self.history: list[Event] = []
         self.deletions: list[ResourceRef] = []
         self.uploads: list[SkillUpload] = []
+        self.sends: list[SendEvidence] = []
+        self.reconciliations: list[SendEvidence] = []
         self.store = MemoryStateStore()
         self.scope = Scope(
             tenant_id="tenant", account_id="account", principal_id="human", authorization_id="auth"
@@ -162,6 +164,21 @@ class Transport:
     @property
     def skill_uploads(self) -> tuple[SkillUpload, ...]:
         return tuple(self.uploads)
+
+    @property
+    def upstream_sends(self) -> tuple[SendEvidence, ...]:
+        return tuple(self.sends)
+
+    @property
+    def reconciled_sends(self) -> tuple[SendEvidence, ...]:
+        return tuple(self.reconciliations)
+
+    def reconcile_send(self, key: str) -> SendReceipt | None:
+        observed = next((send for send in self.sends if send.key == key), None)
+        if observed is None:
+            return None
+        self.reconciliations.append(observed)
+        return observed.receipt
 
     def restart_store(
         self, store: StateStore, *, crash: Mapping[str, CrashPoint] | None = None
@@ -290,7 +307,9 @@ class ReferenceEvents(UnsupportedPort):
                         },
                     )
                 )
-        return SendReceipt(operation_id=key, status="processed", input_ids=(key,), turn_id=key)
+        receipt = SendReceipt(operation_id=key, status="processed", input_ids=(key,), turn_id=key)
+        self.t.sends.append(SendEvidence(key, receipt))
+        return receipt
 
     @staticmethod
     def _receipt(record: OperationRecord) -> SendReceipt:

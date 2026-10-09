@@ -264,8 +264,11 @@ and C13 binding races against a fresh restartable store. Missing store adapters
 stay pending; host queue/attribution, historical billing, backend selection,
 wake generation and outcome-row probes remain pending until their adapters land.
 These offline oracle results certify no provider or host integration.
-Recovery requires the owning slot's active lease and persisted receipt evidence;
-unbound sessions cannot acquire journal ownership through an append. Yielding
+Recovery requires the owning slot's active lease and independent acceptance
+evidence: prior durable acknowledgement or a native response read during replay.
+The replay's own writes cannot establish that evidence, and ambiguous intent
+cannot yield an unsupported queued or processed receipt. Unbound sessions cannot
+acquire journal ownership through an append, including a refused one. Yielding
 race tests exercise send claiming, and a later same-count usage revision checks
 that stale replay preserved the latest accounted state.
 

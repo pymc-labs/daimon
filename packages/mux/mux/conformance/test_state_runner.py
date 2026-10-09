@@ -7,7 +7,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
@@ -15,7 +15,7 @@ from mux.conformance.fixtures import FIXTURES
 from mux.conformance.reference import NOW, ReferenceDriver, ReferenceEvents, Transport, create
 from mux.conformance.runner import Adapter, Registry, run
 from mux.contracts.actions import InputEvent, UserMessage
-from mux.contracts.errors import BindingConflict
+from mux.contracts.errors import BindingConflict, ScopeViolation
 from mux.contracts.events import TextPart
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
@@ -144,6 +144,127 @@ class WrongProcessedEvidence(ImmediateProcessed):
         )
 
 
+class InventOnTakeover(ReferenceEvents):
+    takeover_status: Literal["accepted", "processed"] = "processed"
+
+    async def _durable_send(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        events: Sequence[InputEvent],
+        *,
+        key: str,
+        expected_turn: str | None,
+    ) -> SendReceipt:
+        successor = next(
+            (
+                state.active
+                for state in self.t.store.data.leases.values()
+                if state.active is not None and state.active.holder == "successor"
+            ),
+            None,
+        )
+        record = await self.t.store.get_operation(scope, key)
+        if (
+            successor is not None
+            and record is not None
+            and record.operation.status in ("sent", "accepted")
+        ):
+            record = await self.t.store.advance_operation(
+                scope,
+                key,
+                self.takeover_status,
+                now=NOW + timedelta(minutes=5, seconds=1),
+                fence=successor,
+                resource=session,
+                result={"input_ids": [key], "turn_id": key},
+            )
+            return self._receipt(record)
+        return await super()._durable_send(
+            scope, session, events, key=key, expected_turn=expected_turn
+        )
+
+
+class InventSentResponseOnTakeover(InventOnTakeover):
+    async def _durable_send(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        events: Sequence[InputEvent],
+        *,
+        key: str,
+        expected_turn: str | None,
+    ) -> SendReceipt:
+        if key == "crash-1":
+            return await ReferenceEvents._durable_send(
+                self, scope, session, events, key=key, expected_turn=expected_turn
+            )
+        return await super()._durable_send(
+            scope, session, events, key=key, expected_turn=expected_turn
+        )
+
+
+class InventQueuedOnTakeover(InventOnTakeover, AcceptedOnly):
+    takeover_status: Literal["accepted", "processed"] = "accepted"
+
+
+class ReconcileOnTakeover(ReferenceEvents):
+    reconciled_status: Literal["accepted", "processed"] = "processed"
+
+    async def _durable_send(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        events: Sequence[InputEvent],
+        *,
+        key: str,
+        expected_turn: str | None,
+    ) -> SendReceipt:
+        successor = next(
+            (
+                state.active
+                for state in self.t.store.data.leases.values()
+                if state.active is not None and state.active.holder == "successor"
+            ),
+            None,
+        )
+        record = await self.t.store.get_operation(scope, key)
+        if (
+            successor is not None
+            and record is not None
+            and record.operation.status in ("sent", "accepted")
+        ):
+            observed = self.t.reconcile_send(key)
+            if observed is not None:
+                record = await self.t.store.advance_operation(
+                    scope,
+                    key,
+                    self.reconciled_status,
+                    now=NOW + timedelta(minutes=5, seconds=1),
+                    fence=successor,
+                    resource=session,
+                    result={"input_ids": list(observed.input_ids), "turn_id": observed.turn_id},
+                )
+                return self._receipt(record)
+        return await super()._durable_send(
+            scope, session, events, key=key, expected_turn=expected_turn
+        )
+
+
+class ReconcileAcceptedOnTakeover(ReconcileOnTakeover, AcceptedOnly):
+    reconciled_status: Literal["accepted", "processed"] = "accepted"
+
+
+class SentAsQueued(ReferenceEvents):
+    @staticmethod
+    def _receipt(record: OperationRecord) -> SendReceipt:
+        if record.operation.status == "sent":
+            return SendReceipt(
+                operation_id=record.operation.id, status="queued", input_ids=("guess",)
+            )
+        return ReferenceEvents._receipt(record)
+
+
 class ForgetRestart(RestartableVariant):
     def restart(self, *, crash: Mapping[str, CrashPoint] | None = None) -> ForgetRestart:
         return type(self)(self.data if crash is not None else None, crash=crash)
@@ -202,6 +323,31 @@ class AppendAdopts(RestartableVariant):
     ) -> JournalAppend:
         self.data.session_slots.setdefault(session.id, fence.slot)
         return await super().append_events(session, entries, fence=fence, cursor=cursor, now=now)
+
+
+class RefuseButAdopt(RestartableVariant):
+    async def append_events(
+        self,
+        session: ResourceRef,
+        entries: Sequence[JournalEntry],
+        *,
+        fence: Lease,
+        cursor: str,
+        now: datetime,
+    ) -> JournalAppend:
+        if session.id not in self.data.session_slots:
+            self.data.session_slots[session.id] = fence.slot
+            raise ScopeViolation(session.id, "scripted refusal with leaked ownership")
+        return await super().append_events(session, entries, fence=fence, cursor=cursor, now=now)
+
+
+class AccountBlindFence(RestartableVariant):
+    def _fenced(
+        self, staged: MemoryStateData, target: Slot | None, fence: Lease | None, now: datetime
+    ) -> None:
+        if fence is not None and target is not None and fence.slot.thread == target.thread:
+            fence = fence.model_copy(update={"slot": target})
+        super()._fenced(staged, target, fence, now)
 
 
 class YieldingStore(RestartableVariant):
@@ -362,12 +508,21 @@ MUTANTS: dict[str, tuple[str, Callable[[], Adapter]]] = {
     "lost_restart": ("C04", lambda: variant(store=ForgetRestart)),
     "invent_completion": ("C04", lambda: variant(events=InventCompletion)),
     "wrong_processed_evidence": ("C04", lambda: variant(events=WrongProcessedEvidence)),
+    "invent_on_takeover": ("C04", lambda: variant(events=InventOnTakeover)),
+    "invent_queued_on_takeover": ("C04", lambda: variant(events=InventQueuedOnTakeover)),
+    "sent_as_queued": ("C04", lambda: variant(events=SentAsQueued)),
+    "invent_sent_response_on_takeover": (
+        "C04",
+        lambda: variant(events=InventSentResponseOnTakeover),
+    ),
     "partial_journal": ("C04", lambda: variant(store=PartialJournal)),
     "lost_cursor": ("C04", lambda: variant(store=LoseCursor)),
     "stale_fence": ("C04", lambda: variant(store=IgnoreFence)),
     "fence_optional": ("C04", lambda: variant(store=FenceOptional)),
     "foreign_fence": ("C04", lambda: variant(store=ForeignFenceOK)),
     "append_adopts": ("C04", lambda: variant(store=AppendAdopts)),
+    "refuse_but_adopt": ("C04", lambda: variant(store=RefuseButAdopt)),
+    "account_blind_fence": ("C04", lambda: variant(store=AccountBlindFence)),
     "racy_claim": ("C03", lambda: variant(store=RacyClaim)),
     "lease_loss_unsent": ("C04", lambda: variant(store=LeaseLossMeansUnsent)),
     "null_zero": ("C07", lambda: variant(store=NullIsZero)),
@@ -397,7 +552,16 @@ async def test_missing_state_adapter_stays_pending(fixture: str) -> None:
 
 
 @pytest.mark.parametrize("fixture", ["C03", "C04"])
-@pytest.mark.parametrize("events", [QueuedAcknowledgement, AcceptedOnly, ImmediateProcessed])
+@pytest.mark.parametrize(
+    "events",
+    [
+        QueuedAcknowledgement,
+        AcceptedOnly,
+        ImmediateProcessed,
+        ReconcileOnTakeover,
+        ReconcileAcceptedOnTakeover,
+    ],
+)
 async def test_contract_valid_acknowledgements(fixture: str, events: type[ReferenceEvents]) -> None:
     a = variant(events=events)
     result = await FIXTURES[fixture](a.driver, a.store, a.transport)
@@ -419,7 +583,13 @@ async def check_optimized_matrix() -> None:
     if any(r.status == "fail" for r in results):
         raise RuntimeError("valid reference failed under optimized Python")
     await check_yielding_claim()
-    for events in (QueuedAcknowledgement, AcceptedOnly, ImmediateProcessed):
+    for events in (
+        QueuedAcknowledgement,
+        AcceptedOnly,
+        ImmediateProcessed,
+        ReconcileOnTakeover,
+        ReconcileAcceptedOnTakeover,
+    ):
         for fixture in ("C03", "C04"):
             adapter = variant(events=events)
             result = await FIXTURES[fixture](adapter.driver, adapter.store, adapter.transport)

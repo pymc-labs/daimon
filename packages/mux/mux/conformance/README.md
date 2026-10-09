@@ -78,9 +78,14 @@ No Postgres implementation or host integration is certified by the memory oracle
   append. A committed send claim requires reconciliation even when no I/O is seen.
   Lease takeover preserves prior uncertain/accepted intents and never permits a
   blind resend of them. Missing and foreign-slot leases are refused; an append
-  cannot establish ownership of a session no persisted binding names. Recovery
-  accepts accepted-only acknowledgements and immediate processed commits;
-  processed receipts require matching persisted input and turn identity.
+  cannot establish ownership of a session no persisted binding names, even
+  after an earlier refused append. Same-thread leases from another account
+  are foreign too. Recovery accepts accepted-only acknowledgements, immediate
+  processed commits, and native reconciliation after takeover. Queued and
+  processed receipts require matching committed input identity, supported by
+  the pre-replay record or a native response read during that replay. A write
+  made by the replay cannot manufacture its own evidence. The never-sent claim
+  stays unknown; a queued receipt without acceptance evidence fails.
 - C07 takes normalized usage null → 100 → 120 → 110 through the actual store,
   preserving signed deltas, binding ownership, prior revisions and outbox rows.
   Replays add nothing. A higher same-count revision then requires zero delta
@@ -98,3 +103,13 @@ seed the scenario's binding; C13 seeds an unbound slot. The reference routes onl
 C03/C04 sends through durable intent and claiming; its other ports remain partial.
 Broken send/store variants and the valid/pending matrix run under normal and
 optimized Python. They must fail on fixture diagnostics, not incidental exceptions.
+
+`upstream_sends` records actual scripted acceptance responses by idempotency key,
+before local receipt persistence. `reconciled_sends` records native responses
+actually read during recovery. Both contain `SendEvidence` and remain independent
+of the driver's operation records and returned receipts. C04 snapshots the
+pre-replay operation and reconciliation log, then checks the post-replay record
+for consistency; only prior durable acknowledgement or a new matching native
+observation supports acknowledged recovery. Already-durable processed receipts
+remain valid. The reference's `reconcile_send` reads its retained upstream log,
+records that observation, and returns no receipt for a key never sent.

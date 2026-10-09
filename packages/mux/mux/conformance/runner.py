@@ -8,6 +8,7 @@ from typing import Literal, Protocol
 
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
+from mux.contracts.receipts import SendReceipt
 from mux.contracts.resources import Session, SessionSpec, SkillUpload
 from mux.state.memory import CrashPoint
 from mux.state.store import StateStore
@@ -32,6 +33,12 @@ class Scenario:
     shared_resources: tuple[ResourceRef, ...] = ()
 
 
+@dataclass(frozen=True)
+class SendEvidence:
+    key: str
+    receipt: SendReceipt
+
+
 class ScriptedTransport(Protocol):
     """Driver-specific adapter seeds native responses, never returns a verdict.
 
@@ -52,6 +59,16 @@ class ScriptedTransport(Protocol):
     def deleted_resources(self) -> tuple[ResourceRef, ...]: ...
     @property
     def skill_uploads(self) -> tuple[SkillUpload, ...]: ...
+    @property
+    def upstream_sends(self) -> tuple[SendEvidence, ...]:
+        """Actual scripted acceptance responses, independent of local records."""
+        ...
+
+    @property
+    def reconciled_sends(self) -> tuple[SendEvidence, ...]:
+        """Native responses actually read by recovery, never invented from the store."""
+        ...
+
     def restart_store(
         self, store: StateStore, *, crash: Mapping[str, CrashPoint] | None = None
     ) -> StateStore:

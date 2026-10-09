@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
 from datetime import UTC, datetime, timedelta
 
-from mux.conformance.runner import ConformanceFailure, Result, ScriptedTransport, require
+from mux.conformance.runner import (
+    ConformanceFailure,
+    Result,
+    ScriptedTransport,
+    SendEvidence,
+    require,
+)
 from mux.contracts.actions import UserMessage
 from mux.contracts.errors import BindingConflict, OperationConflict, ScopeViolation
 from mux.contracts.events import Event, NativeProvenance, TextPart
@@ -53,21 +59,56 @@ def entry(
     )
 
 
-def recovered_receipt(record: OperationRecord, receipt: SendReceipt) -> None:
+def recovered_receipt(
+    record: OperationRecord,
+    after: OperationRecord,
+    receipt: SendReceipt,
+    key: str,
+    t: ScriptedTransport,
+    reconciled: Sequence[SendEvidence],
+) -> None:
     ids = record.result.get("input_ids")
+    require(
+        receipt.operation_id == record.operation.id == after.operation.id,
+        "C04: recovery changed operation identity",
+    )
+    if after.operation.status in ("sent", "outcome_unknown"):
+        require(receipt.status == "outcome_unknown", "C04: ambiguous intent must stay unknown")
     if record.operation.status == "processed":
         require(
             isinstance(ids, list) and bool(ids),
             "C04: processed recovery requires durable input identity",
         )
-    if receipt.status == "processed":
+    if receipt.status in ("queued", "processed"):
+        allowed = ("processed",) if receipt.status == "processed" else ("accepted", "processed")
+
+        def matches(native: SendEvidence) -> bool:
+            return (
+                native.key == key
+                and native.receipt.status
+                in (("processed",) if receipt.status == "processed" else ("queued", "processed"))
+                and native.receipt.input_ids == receipt.input_ids
+                and (receipt.turn_id is None or native.receipt.turn_id == receipt.turn_id)
+            )
+
+        committed_ids = after.result.get("input_ids")
         require(
-            record.operation.status == "processed"
-            and isinstance(ids, list)
-            and bool(ids)
-            and tuple(ids) == receipt.input_ids
-            and record.result.get("turn_id") == receipt.turn_id,
-            "C04: processed recovery requires matching durable receipt evidence",
+            after.operation.status in allowed
+            and isinstance(committed_ids, list)
+            and bool(receipt.input_ids)
+            and tuple(committed_ids) == receipt.input_ids
+            and (receipt.turn_id is None or after.result.get("turn_id") == receipt.turn_id)
+            and any(matches(native) for native in t.upstream_sends)
+            and (
+                (
+                    record.operation.status in allowed
+                    and isinstance(ids, list)
+                    and tuple(ids) == receipt.input_ids
+                    and (receipt.turn_id is None or record.result.get("turn_id") == receipt.turn_id)
+                )
+                or any(matches(native) for native in reconciled)
+            ),
+            "C04: acknowledged recovery requires prior durable or native reconciliation evidence",
         )
     else:
         require(
@@ -183,6 +224,7 @@ async def c04(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
         require(
             t.mutation_count == before + sends, "C04: crash changed the expected upstream effects"
         )
+        observations = len(t.reconciled_sends)
         replay = await ma.events.send(
             s.scope, s.session.ref, (UserMessage(content=(TextPart(text=key),)),), key=key
         )
@@ -196,7 +238,10 @@ async def c04(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
             )
             require(t.mutation_count == before + 1, "C04: recovered pending intent must send once")
         else:
-            recovered_receipt(record, replay)
+            after = await store.get_operation(s.scope, key)
+            if after is None:
+                raise ConformanceFailure("C04: recovery lost durable operation evidence")
+            recovered_receipt(record, after, replay, key, t, t.reconciled_sends[observations:])
             require(
                 t.mutation_count == before + sends, "C04: ambiguous/accepted recovery resent input"
             )
@@ -277,14 +322,23 @@ async def c04(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
         "C04: lease takeover must preserve earlier uncertain/accepted intent",
     )
     writes = t.mutation_count
-    for key in uncertain_keys:
+    for key, persisted in zip(uncertain_keys, uncertain, strict=True):
+        if persisted is None:
+            raise ConformanceFailure("C04: takeover lost durable operation evidence")
+        observations = len(t.reconciled_sends)
         replay = await ma.events.send(
             s.scope, s.session.ref, (UserMessage(content=(TextPart(text=key),)),), key=key
         )
-        persisted = await store.get_operation(s.scope, key)
-        if persisted is None:
+        after = await store.get_operation(s.scope, key)
+        if after is None:
             raise ConformanceFailure("C04: takeover lost durable operation evidence")
-        recovered_receipt(persisted, replay)
+        recovered_receipt(persisted, after, replay, key, t, t.reconciled_sends[observations:])
+        if key == "crash-1":
+            require(
+                replay.status in ("queued", "outcome_unknown")
+                and not any(native.key == key for native in t.upstream_sends),
+                "C04: never-sent claim must remain uncertain after takeover",
+            )
     require(t.mutation_count == writes, "C04: lease takeover triggered a blind resend")
     before_events = tuple(await store.read_events(s.session.ref.id))
     before_projection = await store.projection(s.session.ref.id)
@@ -363,18 +417,36 @@ async def c04(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
         ),
         "C04: foreign-slot worker committed a journal append",
     )
-    orphan = s.session.ref.model_copy(update={"id": "unowned-session"})
+    account_slot = slot.model_copy(update={"account_id": "other-account"})
+    await store.acquire_lease(account_slot, holder="successor", turn_id="root", now=NOW, ttl=TTL)
+    account_fence = await store.acquire_lease(
+        account_slot, holder="successor", turn_id="root", now=later, ttl=TTL
+    )
     await refused(
         ScopeViolation,
-        store.append_events(
-            orphan,
-            (entry(orphan, "orphan-entry", "agent.message", {"item_id": "orphan", "content": []}),),
-            fence=successor,
-            cursor="orphan",
-            now=later,
-        ),
-        "C04: append established journal ownership",
+        store.claim_send(s.scope, "stale", now=later, fence=account_fence),
+        "C04: another account's lease claimed a send in the same thread",
     )
+    orphan = s.session.ref.model_copy(update={"id": "unowned-session"})
+    for _ in range(2):
+        await refused(
+            ScopeViolation,
+            store.append_events(
+                orphan,
+                (
+                    entry(
+                        orphan,
+                        "orphan-entry",
+                        "agent.message",
+                        {"item_id": "orphan", "content": []},
+                    ),
+                ),
+                fence=successor,
+                cursor="orphan",
+                now=later,
+            ),
+            "C04: rejected append established journal ownership",
+        )
     require(
         not await store.read_events(orphan.id) and await store.projection(orphan.id) is None,
         "C04: rejected unowned append changed journal or projection",
