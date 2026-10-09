@@ -1,4 +1,4 @@
-"""Opening notices cover Discord's internal wait through thread-create 429s."""
+"""A slow thread opening is acknowledged with a reaction, never a channel message."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -6,66 +6,77 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 from daimon.adapters.discord.bot import (
+    THREAD_OPENING_REACTION,
     _open_thread_with_notice,  # pyright: ignore[reportPrivateUsage]
 )
 
 
-def _message() -> tuple[discord.Message, AsyncMock]:
+def _message() -> MagicMock:
     message = MagicMock(spec=discord.Message)
-    notice = MagicMock(spec=discord.Message)
-    notice.edit = AsyncMock()
-    message.reply = AsyncMock(return_value=notice)
-    return message, notice.edit
+    message.reply = AsyncMock()
+    message.add_reaction = AsyncMock()
+    message.remove_reaction = AsyncMock()
+    message.guild = MagicMock(spec=discord.Guild)
+    return message
 
 
-async def test_slow_creation_posts_notice_then_links_thread() -> None:
-    message, edit = _message()
+async def test_slow_creation_reacts_then_clears_the_reaction() -> None:
+    message = _message()
     release = asyncio.Event()
     thread = MagicMock(spec=discord.Thread)
-    thread.id = 123
 
     async def opening() -> discord.Thread:
         await release.wait()
         return thread
 
-    pending = asyncio.create_task(
-        _open_thread_with_notice(message, opening(), guild_id="456", after_s=0.01)
-    )
+    pending = asyncio.create_task(_open_thread_with_notice(message, opening(), after_s=0.01))
     await asyncio.sleep(0.03)
-    assert isinstance(message.reply, AsyncMock)
-    message.reply.assert_awaited_once()
+    message.add_reaction.assert_awaited_once_with(THREAD_OPENING_REACTION)
+    message.remove_reaction.assert_not_awaited()
     assert not pending.done()
     release.set()
     assert await pending is thread
-    assert isinstance(message.reply, AsyncMock)
-    message.reply.assert_awaited_once()
-    edit.assert_awaited_once_with(
-        content="Your chat is ready: https://discord.com/channels/456/123"
-    )
+    message.remove_reaction.assert_awaited_once_with(THREAD_OPENING_REACTION, message.guild.me)
+    message.reply.assert_not_awaited()
 
 
-async def test_fast_creation_has_no_notice() -> None:
-    message, edit = _message()
+async def test_fast_creation_has_no_reaction() -> None:
+    message = _message()
     thread = MagicMock(spec=discord.Thread)
 
     async def opening() -> discord.Thread:
         return thread
 
-    assert await _open_thread_with_notice(message, opening(), guild_id="456", after_s=1) is thread
-    assert isinstance(message.reply, AsyncMock)
+    assert await _open_thread_with_notice(message, opening(), after_s=1) is thread
+    message.add_reaction.assert_not_awaited()
+    message.remove_reaction.assert_not_awaited()
     message.reply.assert_not_awaited()
-    edit.assert_not_awaited()
 
 
-async def test_failed_creation_changes_notice_to_retry_guidance() -> None:
-    message, edit = _message()
+async def test_failed_creation_clears_the_reaction_and_propagates() -> None:
+    message = _message()
 
     async def opening() -> discord.Thread:
         await asyncio.sleep(0.02)
         raise RuntimeError("thread creation failed")
 
     with pytest.raises(RuntimeError, match="thread creation failed"):
-        await _open_thread_with_notice(message, opening(), guild_id="456", after_s=0)
-    edit.assert_awaited_once_with(
-        content="I couldn't open your chat. Please try mentioning me again."
+        await _open_thread_with_notice(message, opening(), after_s=0)
+    message.add_reaction.assert_awaited_once_with(THREAD_OPENING_REACTION)
+    message.remove_reaction.assert_awaited_once_with(THREAD_OPENING_REACTION, message.guild.me)
+    message.reply.assert_not_awaited()
+
+
+async def test_reaction_failure_still_opens_the_thread() -> None:
+    message = _message()
+    message.add_reaction.side_effect = discord.HTTPException(
+        MagicMock(status=403), "Missing Access"
     )
+    thread = MagicMock(spec=discord.Thread)
+
+    async def opening() -> discord.Thread:
+        return thread
+
+    assert await _open_thread_with_notice(message, opening(), after_s=0) is thread
+    message.remove_reaction.assert_not_awaited()
+    message.reply.assert_not_awaited()
