@@ -46,8 +46,11 @@ from daimon.core.mcp_vault import (
     ensure_agent_mcp_vault,
     hold_agent_vault_lock,
 )
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import create_credential, list_credentials, update_credential
 from daimon.core.stores import agent_mcp_credentials as cred_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
+from mux.contracts.ids import Scope
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -192,6 +195,7 @@ async def mirror_credentials_into_vault(
     *,
     vault_id: str,
     credentials: tuple[ResolvedMcpCredential, ...],
+    scope: Scope | None = None,
 ) -> None:
     """Bring ``vault_id`` in line with the agent's stored credentials.
 
@@ -237,9 +241,12 @@ async def mirror_credentials_into_vault(
     replacing the agent's token), so the slot is re-read once and decided
     again. A second 404 propagates.
     """
+    scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.agent_mcp_credentials:mirror_credentials_into_vault"
+    )
     if not credentials:
         return
-    existing_by_url, held_by_grant = await _read_vault_slots(client, vault_id=vault_id)
+    existing_by_url, held_by_grant = await _read_vault_slots(client, vault_id=vault_id, scope=scope)
     for cred in credentials:
         key = _url_key(cred.mcp_server_url)
         try:
@@ -249,6 +256,7 @@ async def mirror_credentials_into_vault(
                 cred=cred,
                 found=existing_by_url.get(key),
                 held_by_grant=key in held_by_grant,
+                scope=scope,
             )
         except anthropic.NotFoundError:
             # The credential listed at this URL was deleted before the update
@@ -260,24 +268,30 @@ async def mirror_credentials_into_vault(
                 vault_id=vault_id,
                 mcp_server_url=cred.mcp_server_url,
             )
-            fresh_by_url, fresh_grants = await _read_vault_slots(client, vault_id=vault_id)
+            fresh_by_url, fresh_grants = await _read_vault_slots(
+                client, vault_id=vault_id, scope=scope
+            )
             await _mirror_one(
                 client,
                 vault_id=vault_id,
                 cred=cred,
                 found=fresh_by_url.get(key),
                 held_by_grant=key in fresh_grants,
+                scope=scope,
             )
 
 
 async def _read_vault_slots(
-    client: AsyncAnthropic, *, vault_id: str
+    client: AsyncAnthropic,
+    *,
+    vault_id: str,
+    scope: Scope,
 ) -> tuple[dict[str, tuple[str, str | None]], set[str]]:
     """One list call: static credentials by URL key (id, stamped version), and
     the URL keys a person's `mcp_oauth` grant holds."""
     existing_by_url: dict[str, tuple[str, str | None]] = {}
     held_by_grant: set[str] = set()
-    async for existing in client.beta.vaults.credentials.list(vault_id=vault_id):
+    async for existing in list_credentials(client, vault_id, scope=scope):
         if existing.auth.type == "mcp_oauth":
             held_by_grant.add(_url_key(existing.auth.mcp_server_url))
             continue
@@ -298,20 +312,25 @@ async def _mirror_one(
     cred: ResolvedMcpCredential,
     found: tuple[str, str | None] | None,
     held_by_grant: bool,
+    scope: Scope,
 ) -> None:
     """Skip, create or update one URL, per the cases `mirror_credentials_into_vault` lists."""
     if held_by_grant:
         return
     if found is None:
         try:
-            await client.beta.vaults.credentials.create(
-                vault_id=vault_id,
-                auth={
-                    "type": "static_bearer",
-                    "mcp_server_url": cred.mcp_server_url,
-                    "token": cred.token,
+            await create_credential(
+                client,
+                vault_id,
+                {
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": cred.mcp_server_url,
+                        "token": cred.token,
+                    },
+                    "metadata": {METADATA_VERSION_KEY: cred.version},
                 },
-                metadata={METADATA_VERSION_KEY: cred.version},
+                scope=scope,
             )
         except anthropic.ConflictError:
             log.info(
@@ -323,12 +342,15 @@ async def _mirror_one(
     credential_id, stamped_version = found
     if stamped_version == cred.version:
         return
-    await client.beta.vaults.credentials.update(
+    await update_credential(
+        client,
+        vault_id,
         credential_id,
-        vault_id=vault_id,
-        # Token only: MA rejects an update body carrying mcp_server_url.
-        auth={"type": "static_bearer", "token": cred.token},
-        metadata={METADATA_VERSION_KEY: cred.version},
+        {
+            "auth": {"type": "static_bearer", "token": cred.token},
+            "metadata": {METADATA_VERSION_KEY: cred.version},
+        },
+        scope=scope,
     )
 
 
@@ -387,9 +409,15 @@ async def sync_agent_mcp_credentials(
         public_url=public_url,
         now=now,
         session_factory=sessionmaker,
+        scope=resource_scope(tenant_id=str(tenant_id), account_id=str(account_id)),
     )
     async with hold_agent_vault_lock(sessionmaker, account_id=account_id, agent_id=agent_id):
-        await mirror_credentials_into_vault(client, vault_id=vault_id, credentials=credentials)
+        await mirror_credentials_into_vault(
+            client,
+            vault_id=vault_id,
+            credentials=credentials,
+            scope=resource_scope(tenant_id=str(tenant_id), account_id=str(account_id)),
+        )
 
 
 async def resolve_hidden_mcp_server_names(

@@ -426,3 +426,17 @@ The vault administration branch adds two explicit platform call sites: the
 workspace orphan-vault janitor and stale-admin-credential operator sweep. Their
 existing inventories span accounts; tenant provisioning and rotation use tenant
 scopes. The construction inventory test includes both operator paths.
+
+Vault bootstrap, external-token writes, OAuth replacement, credential mirroring
+and `.env` uploads also use these ports. Public helpers accept an explicit host
+scope; established callers without tenant context use a named
+`Scope.legacy_host_authorized` capability. Owned callers with tenant context
+forward it through credential writes, retries, rollback and file upload. Vault
+name discovery retains its workspace inventory and exact account/agent name
+predicate before the host knows a vault ID. Its named legacy capability and
+remaining caller seams are recorded in the sprint follow-up inventory.
+
+The SDK's DEBUG request-options logs are redacted within credential I/O, including
+escaped values and exception text. The logging filter holds no credential values;
+request-local material is cleared and its context reset after I/O. Operation keys
+remain pass-through, including repeated keys, with no driver journal or deduplication.

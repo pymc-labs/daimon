@@ -127,6 +127,7 @@ async def connect_mcp_server_with_token(
             token=token,
             now=now,
             session_factory=sessionmaker,
+            scope=resource_scope(tenant_id=str(tenant_id), account_id=str(account_id)),
         )
     except Exception as err:
         raise McpTokenWriteFailedError(type(err).__name__) from err

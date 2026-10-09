@@ -1,6 +1,10 @@
 """Resolve credential references for one request; keep errors free of values."""
 
+import json
+import logging
+import traceback
 from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from typing import cast
 
 import httpx
@@ -12,6 +16,36 @@ from mux.drivers.anthropic.schemas import NativeConfig
 from mux.errors import ProviderError, ScopeViolation
 
 SecretResolver = Callable[[Scope, str], str]
+
+# The SDK logs request options at DEBUG, including resolved auth values. Keep
+# their redaction local to this request, including concurrent/nested requests.
+# The filter holds no material; the context is reset and cleared after I/O.
+_active_materials: ContextVar[list[str] | None] = ContextVar(
+    "anthropic_credential_materials", default=None
+)
+
+
+class _CredentialLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        materials = _active_materials.get()
+        if not materials:
+            return True
+        variants = list(materials)
+        for material in materials:
+            variants.extend((repr(material)[1:-1], json.dumps(material)[1:-1]))
+        record.msg = _redact(record.getMessage(), variants)
+        record.args = ()
+        if record.exc_info:
+            record.exc_text = cast(
+                str, _redact("".join(traceback.format_exception(*record.exc_info)), variants)
+            )
+            record.exc_info = None
+        elif record.exc_text:
+            record.exc_text = cast(str, _redact(record.exc_text, variants))
+        return True
+
+
+logging.getLogger("anthropic._base_client").addFilter(_CredentialLogFilter())
 
 
 class CredentialFileUpload(NativeConfig):
@@ -76,6 +110,7 @@ async def credential_request[T](
     send: Callable[[dict[str, object]], Awaitable[T]],
 ) -> T:
     values: list[str] = []
+    material_context = _active_materials.set(values)
     kwargs: dict[str, object] = config.model_dump(mode="python", exclude_unset=True)
     error: ProviderError | None = None
 
@@ -123,6 +158,7 @@ async def credential_request[T](
         error = normalize_error(safe)
         error.__cause__ = safe
     finally:
+        _active_materials.reset(material_context)
         kwargs.clear()
         values.clear()
         pending = None

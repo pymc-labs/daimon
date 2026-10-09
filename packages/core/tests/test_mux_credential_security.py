@@ -1,5 +1,6 @@
 """Credential material stays in the host and one SDK request, never public DTOs/errors."""
 
+import logging
 import traceback
 from collections import deque
 
@@ -195,3 +196,55 @@ async def test_env_file_failure_drops_multipart_secret_request_and_redacts_echo(
     assert material not in "".join(traceback.format_exception(failure.value))
     assert len(sdk.requests) == 1
     sdk.assert_consumed()
+
+
+async def test_same_key_sends_twice_and_sdk_debug_logs_never_keep_material(caplog):
+    # A newline also exercises the SDK's repr-escaped request-options log.
+    material = "dummy-log-secret\nsecond-line"
+    reference = "opaque-log-secret"
+    config = CredentialCreate.model_validate(
+        {
+            "auth": {
+                "type": "static_bearer",
+                "mcp_server_url": "https://example.test/mcp",
+                "token_ref": reference,
+            }
+        }
+    )
+    response = {
+        "id": "credential",
+        "type": "vault_credential",
+        "vault_id": "vault",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "auth": {"type": "static_bearer", "mcp_server_url": "https://example.test/mcp"},
+    }
+    sdk = ScriptedTransport(
+        deque(
+            [
+                ScriptedReply(
+                    "POST", "/v1/vaults/vault/credentials", httpx.Response(200, json=response)
+                )
+                for _ in range(2)
+            ]
+        )
+    )
+    caplog.set_level(logging.DEBUG, logger="anthropic._base_client")
+    async with sdk.client() as client:
+        backend = managed_agents(client, scope=SCOPE, secrets=lambda scope, ref: material)
+        port = backend.extension(Vaults, namespace="anthropic.vaults", version=1)
+        vault = resource_ref(backend, "vault", "vault", scope=SCOPE)
+        for _ in range(2):
+            await port.create_credential(SCOPE, vault, config, key="same-key")
+    assert len(sdk.requests) == 2
+    sdk.assert_consumed()
+    assert "Request options:" in caplog.text
+    assert "[redacted]" in caplog.text
+    for displayed in (caplog.text, repr(caplog.records), repr(config)):
+        assert material not in displayed
+        assert repr(material)[1:-1] not in displayed
+        assert "dummy-log-secret" not in displayed
+    # Credential I/O must leave no logger context or retained request material.
+    from mux.drivers.anthropic.resources._secrets import _active_materials
+
+    assert _active_materials.get() is None

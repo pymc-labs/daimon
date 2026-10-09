@@ -29,6 +29,15 @@ from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_r
 )
 from daimon.core.mcp_auth import mint_jwt
 from daimon.core.mcp_server_url import same_mcp_url
+from daimon.core.mux_compat import (
+    create_credential,
+    create_vault,
+    delete_credential,
+    list_credentials,
+    list_vaults,
+    update_credential,
+)
+from mux.contracts.ids import Scope
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -40,7 +49,10 @@ LOCK_NAMESPACE = "mcp_vault"
 
 
 async def _find_vault_by_name(
-    client: AsyncAnthropic, *, display_name: str
+    client: AsyncAnthropic,
+    *,
+    display_name: str,
+    scope: Scope | None = None,
 ) -> BetaManagedAgentsVault | None:
     """Return the oldest vault whose ``display_name`` matches, or ``None``.
 
@@ -48,7 +60,10 @@ async def _find_vault_by_name(
     MA API — so more than one vault can share a name; the oldest is always
     the canonical one (shared list-then-filter logic for both callers below).
     """
-    matching = [v async for v in client.beta.vaults.list() if v.display_name == display_name]
+    scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.mcp_vault:_find_vault_by_name"
+    )
+    matching = [v async for v in list_vaults(client, scope=scope) if v.display_name == display_name]
     if not matching:
         return None
     return min(matching, key=lambda v: v.created_at)
@@ -135,6 +150,7 @@ async def _ensure_agent_mcp_vault_locked(
     public_url: str,
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
+    scope: Scope,
 ) -> str:
     """Core get-or-create body, assuming the caller already holds the
     per-(account_id, agent_id) advisory lock for this transaction.
@@ -157,7 +173,7 @@ async def _ensure_agent_mcp_vault_locked(
         # credential per URL, so creating next to an `mcp_oauth` grant would be
         # a 409 on every session create with nothing to heal it.
         has_matching_url = False
-        async for cred in client.beta.vaults.credentials.list(vault_id=oldest.id):
+        async for cred in list_credentials(client, oldest.id, scope=scope):
             if isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse):
                 continue
             if same_server_url(cred.auth.mcp_server_url, public_url):
@@ -167,43 +183,54 @@ async def _ensure_agent_mcp_vault_locked(
                 if cred.auth.type == "static_bearer" and (cred.metadata or {}).get(
                     "daimon_chat_identity"
                 ) != str(agent_id):
-                    await client.beta.vaults.credentials.update(
+                    await update_credential(
+                        client,
+                        oldest.id,
                         cred.id,
-                        vault_id=oldest.id,
-                        auth={
-                            "type": "static_bearer",
-                            "token": mint_jwt(
-                                account_id=account_id,
-                                chat_agent_id=agent_id,
-                                slack_turn_context_id=slack_turn_context_id,
-                                secret=jwt_secret,
-                                now=now,
-                            ),
+                        {
+                            "auth": {
+                                "type": "static_bearer",
+                                "token": mint_jwt(
+                                    account_id=account_id,
+                                    chat_agent_id=agent_id,
+                                    slack_turn_context_id=slack_turn_context_id,
+                                    secret=jwt_secret,
+                                    now=now,
+                                ),
+                            },
+                            "metadata": {
+                                **(cred.metadata or {}),
+                                "daimon_chat_identity": str(agent_id),
+                            },
                         },
-                        metadata={**(cred.metadata or {}), "daimon_chat_identity": str(agent_id)},
+                        scope=scope,
                     )
                 break
         url_mismatch = not has_matching_url
         if url_mismatch:
             # No credential for the current URL yet — create fresh.
-            await client.beta.vaults.credentials.create(
-                vault_id=oldest.id,
-                metadata={"daimon_chat_identity": str(agent_id)},
-                auth={
-                    "type": "static_bearer",
-                    "mcp_server_url": public_url,
-                    "token": mint_jwt(
-                        account_id=account_id,
-                        chat_agent_id=agent_id,
-                        slack_turn_context_id=slack_turn_context_id,
-                        secret=jwt_secret,
-                        now=now,
-                    ),
+            await create_credential(
+                client,
+                oldest.id,
+                {
+                    "metadata": {"daimon_chat_identity": str(agent_id)},
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": public_url,
+                        "token": mint_jwt(
+                            account_id=account_id,
+                            chat_agent_id=agent_id,
+                            slack_turn_context_id=slack_turn_context_id,
+                            secret=jwt_secret,
+                            now=now,
+                        ),
+                    },
                 },
+                scope=scope,
             )
         return oldest.id
 
-    vault = await client.beta.vaults.create(display_name=display_name)
+    vault = await create_vault(client, display_name, scope=scope)
     token = mint_jwt(
         account_id=account_id,
         chat_agent_id=agent_id,
@@ -211,14 +238,18 @@ async def _ensure_agent_mcp_vault_locked(
         secret=jwt_secret,
         now=now,
     )
-    await client.beta.vaults.credentials.create(
-        vault_id=vault.id,
-        metadata={"daimon_chat_identity": str(agent_id)},
-        auth={
-            "type": "static_bearer",
-            "mcp_server_url": public_url,
-            "token": token,
+    await create_credential(
+        client,
+        vault.id,
+        {
+            "metadata": {"daimon_chat_identity": str(agent_id)},
+            "auth": {
+                "type": "static_bearer",
+                "mcp_server_url": public_url,
+                "token": token,
+            },
         },
+        scope=scope,
     )
     return vault.id
 
@@ -243,6 +274,7 @@ async def ensure_agent_mcp_vault(
     now: dt.datetime,
     session_factory: async_sessionmaker[AsyncSession],
     slack_turn_context_id: uuid.UUID | None = None,
+    scope: Scope | None = None,
 ) -> str:
     """Return the ``ma_vault_id`` for this agent's daimon-mcp vault.
 
@@ -283,6 +315,9 @@ async def ensure_agent_mcp_vault(
     empty-match check and each create a vault — MA has no server-side
     uniqueness constraint on ``display_name`` to fall back on.
     """
+    scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.mcp_vault:ensure_agent_mcp_vault"
+    )
     async with session_factory() as session, session.begin():
         await _lock_vault_namespace(session, account_id=account_id, agent_id=agent_id)
         return await _ensure_agent_mcp_vault_locked(
@@ -293,6 +328,7 @@ async def ensure_agent_mcp_vault(
             public_url=public_url,
             now=now,
             slack_turn_context_id=slack_turn_context_id,
+            scope=scope,
         )
 
 
@@ -302,6 +338,7 @@ async def add_github_copilot_credential(
     vault_id: str,
     token: str,
     in_place: bool = False,
+    scope: Scope | None = None,
 ) -> None:
     """Create or replace the GitHub Copilot MCP `static_bearer` credential.
 
@@ -323,8 +360,11 @@ async def add_github_copilot_credential(
     left in place and nothing is created: their sign-in outranks the agent's
     PAT, and the slot is taken anyway.
     """
+    scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.mcp_vault:add_github_copilot_credential"
+    )
     existing: list[str] = []
-    async for cred in client.beta.vaults.credentials.list(vault_id=vault_id):
+    async for cred in list_credentials(client, vault_id, scope=scope):
         if isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse):
             continue
         if not same_server_url(cred.auth.mcp_server_url, GITHUB_COPILOT_MCP_URL):
@@ -335,24 +375,30 @@ async def add_github_copilot_credential(
     if not in_place:
         # Collect first: deleting while the list paginates can skip an entry.
         for credential_id in existing:
-            await client.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
+            await delete_credential(client, vault_id, credential_id, scope=scope)
         existing = []
     if existing:
-        await client.beta.vaults.credentials.update(
+        await update_credential(
+            client,
+            vault_id,
             existing[0],
-            vault_id=vault_id,
-            auth={"type": "static_bearer", "token": token},
+            {"auth": {"type": "static_bearer", "token": token}},
+            scope=scope,
         )
         for duplicate_id in existing[1:]:
-            await client.beta.vaults.credentials.delete(duplicate_id, vault_id=vault_id)
+            await delete_credential(client, vault_id, duplicate_id, scope=scope)
     else:
-        await client.beta.vaults.credentials.create(
-            vault_id=vault_id,
-            auth={
-                "type": "static_bearer",
-                "mcp_server_url": GITHUB_COPILOT_MCP_URL,
-                "token": token,
+        await create_credential(
+            client,
+            vault_id,
+            {
+                "auth": {
+                    "type": "static_bearer",
+                    "mcp_server_url": GITHUB_COPILOT_MCP_URL,
+                    "token": token,
+                }
             },
+            scope=scope,
         )
 
 
@@ -367,6 +413,7 @@ async def add_external_mcp_credential(
     mcp_server_url: str,
     token: str,
     session_factory: async_sessionmaker[AsyncSession],
+    scope: Scope | None = None,
 ) -> None:
     """Create or replace a `static_bearer` credential in the caller's
     per-agent vault for an external (user-supplied) MCP server.
@@ -389,6 +436,9 @@ async def add_external_mcp_credential(
     it shares the vault get-or-create race with that function and must
     serialize against it, not just against itself.
     """
+    scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.mcp_vault:add_external_mcp_credential"
+    )
     display_name = f"daimon-mcp:{account_id}:{agent_id}"
     async with session_factory() as session, session.begin():
         await _lock_vault_namespace(session, account_id=account_id, agent_id=agent_id)
@@ -408,23 +458,28 @@ async def add_external_mcp_credential(
                 jwt_secret=jwt_secret,
                 public_url=public_url,
                 now=now,
+                scope=scope,
             )
 
         # Collect first: deleting while the list paginates can skip an entry.
         stale = [
             cred.id
-            async for cred in client.beta.vaults.credentials.list(vault_id=vault_id)
+            async for cred in list_credentials(client, vault_id, scope=scope)
             if not isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse)
             and same_server_url(cred.auth.mcp_server_url, mcp_server_url)
         ]
         for credential_id in stale:
-            await client.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
+            await delete_credential(client, vault_id, credential_id, scope=scope)
 
-        await client.beta.vaults.credentials.create(
-            vault_id=vault_id,
-            auth={
-                "type": "static_bearer",
-                "mcp_server_url": mcp_server_url,
-                "token": token,
+        await create_credential(
+            client,
+            vault_id,
+            {
+                "auth": {
+                    "type": "static_bearer",
+                    "mcp_server_url": mcp_server_url,
+                    "token": token,
+                }
             },
+            scope=scope,
         )
