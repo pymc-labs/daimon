@@ -490,7 +490,13 @@ async def _create_agent_impl(
     )
     if outcome.anthropic_id is None:
         raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
-    queue_agent_face(runtime.session_factory, tenant_id=auth.tenant_id, agent_name=spec.name)
+    queue_agent_face(
+        runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        agent_name=spec.name,
+        metadata=None,  # managed=False above: only the default name can make it built-in
+        default_agent_name=runtime.deployment_default.agent_name,
+    )
     await _record_creation_channel(runtime, auth, outcome.anthropic_id, origin)
     ma_agent = await runtime.client.beta.agents.retrieve(outcome.anthropic_id)
     # agents.create succeeded — always return AgentInfo even if sync fails.
@@ -910,6 +916,7 @@ async def _fork_agent_impl(
             new_name=new_name,
             public_url=str(public_url) if public_url is not None else None,
             subject=mcp_subject(auth, is_admin=auth.is_admin),
+            default_agent_name=runtime.deployment_default.agent_name,
         )
     except DaimonError as exc:
         raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc

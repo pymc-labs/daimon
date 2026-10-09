@@ -300,7 +300,13 @@ async def run_new_agent_submission(
             return
 
         log.info("slack.agent_setup.new_agent.created", team_id=team_id, agent_name=name)
-        queue_agent_face(runtime.sessionmaker, tenant_id=tenant_id, agent_name=name)
+        queue_agent_face(
+            runtime.sessionmaker,
+            tenant_id=tenant_id,
+            agent_name=name,
+            metadata=None,  # create_blank_agent is never managed
+            default_agent_name=runtime.deployment_default.agent_name,
+        )
 
         is_admin = await resolve_is_admin(web_client, user_id=user_id)
         caller = await channel_admin_caller(

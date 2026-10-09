@@ -561,7 +561,7 @@ async def test_create_agent_impl_calls_ma_create(
     monkeypatch.setattr(
         agents_mod,
         "queue_agent_face",
-        lambda _factory, *, tenant_id, agent_name: queued.append((tenant_id, agent_name)),
+        lambda _factory, *, tenant_id, agent_name, **_: queued.append((tenant_id, agent_name)),
     )
 
     created: list[dict[str, Any]] = []
@@ -1019,7 +1019,7 @@ async def test_fork_agent_impl_creates_ma_agent_from_source_spec(
     monkeypatch.setattr(
         agent_fork,
         "queue_agent_face",
-        lambda _factory, *, tenant_id, agent_name: queued.append((tenant_id, agent_name)),
+        lambda _factory, *, tenant_id, agent_name, **_: queued.append((tenant_id, agent_name)),
     )
 
     retrieved: list[str] = []
@@ -5707,3 +5707,36 @@ async def test_member_cannot_repoint_a_server_on_someones_personal_default_agent
                 skills=None,
             )
     assert updates == [], "the server must not be repointed"
+
+
+async def test_create_agent_impl_renders_no_face_for_the_deployment_default(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default agent posts with the platform app's own icon, so it gets no face."""
+    from daimon.core import agent_identity
+
+    rendered: list[str] = []
+
+    async def generate(*_args: object, agent_name: str, **_kwargs: object) -> None:
+        rendered.append(agent_name)
+
+    monkeypatch.setattr(agent_identity, "get_or_create_avatar", generate)
+    tenant_id = uuid.uuid4()
+    agent = ma_agent(id="ag_new", name="daimon").model_dump(mode="json")
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
+    router.add("POST", r"/v1/agents", lambda _req, _m: httpx.Response(200, json=agent))
+    router.add("GET", r"/v1/agents/([^/]+)", lambda _req, _m: httpx.Response(200, json=agent))
+    runtime = _runtime(
+        build_fake_anthropic(router.dispatch),
+        session_factory=db_session_factory,
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+    )
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+
+    await _create_agent_impl(runtime, auth, AgentSpec(name="daimon", model="claude-opus-4-5"))
+
+    assert (tenant_id, "daimon") not in agent_identity._face_tasks  # pyright: ignore[reportPrivateUsage]
+    assert rendered == []

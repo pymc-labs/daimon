@@ -1037,6 +1037,8 @@ async def channels_rule_set(
             rt.sessionmaker,
             tenant_id=tenant_id,
             agent_name=change.agent_name,
+            metadata=None,  # a copy is never managed
+            default_agent_name=rt.deployment_default.agent_name,
             timeout_s=FACE_WAIT_S,
         )
     status = "now" if change.changed else "already"

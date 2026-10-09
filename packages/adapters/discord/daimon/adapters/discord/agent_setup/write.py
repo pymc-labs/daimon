@@ -120,7 +120,13 @@ async def create_blank_agent(
         managed=False,
     )
     if outcome.anthropic_id is not None:
-        queue_agent_face(runtime.sessionmaker, tenant_id=tenant_id, agent_name=name)
+        queue_agent_face(
+            runtime.sessionmaker,
+            tenant_id=tenant_id,
+            agent_name=name,
+            metadata=None,  # managed=False above: only the default name can make it built-in
+            default_agent_name=runtime.deployment_default.agent_name,
+        )
     return outcome
 
 

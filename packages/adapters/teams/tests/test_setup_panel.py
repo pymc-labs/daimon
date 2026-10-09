@@ -248,7 +248,7 @@ async def test_create_rejects_a_bad_name_then_creates_an_unrouted_agent(
     monkeypatch.setattr(
         setup_panel,
         "queue_agent_face",
-        lambda _factory, *, tenant_id, agent_name: queued.append((tenant_id, agent_name)),
+        lambda _factory, *, tenant_id, agent_name, **_: queued.append((tenant_id, agent_name)),
     )
     state = _ma_state()
     form = {"action": "agent_create", "purpose": "Scout leads", "model": DEFAULT_AGENT_MODEL}

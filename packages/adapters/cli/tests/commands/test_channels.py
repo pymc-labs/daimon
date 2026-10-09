@@ -755,7 +755,12 @@ async def test_rule_set_waits_for_the_copys_face(
     awaited: list[tuple[uuid.UUID, str, float]] = []
 
     async def ensure(
-        _factory: object, *, tenant_id: uuid.UUID, agent_name: str, timeout_s: float
+        _factory: object,
+        *,
+        tenant_id: uuid.UUID,
+        agent_name: str,
+        timeout_s: float,
+        **_: object,
     ) -> bool:
         awaited.append((tenant_id, agent_name, timeout_s))
         return True

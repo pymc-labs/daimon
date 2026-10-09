@@ -486,6 +486,7 @@ async def test_fork_agent_copies_the_source_under_a_new_name(
             new_name=new_name,
             public_url=None,
             subject=ADMIN,
+            default_agent_name=None,
         )
 
     with pytest.raises(DaimonError, match="Only a workspace or server admin"):
@@ -497,6 +498,7 @@ async def test_fork_agent_copies_the_source_under_a_new_name(
             new_name="nope",
             public_url=None,
             subject=Subject(),
+            default_agent_name=None,
         )
     await fork("team-alpha")
     agents = await list_agents_by_tenant(client, tenant_id=tenant.id)
@@ -637,6 +639,7 @@ async def test_fork_agent_leaves_off_credentialed_servers_and_copies_its_own_ski
         new_name="team-alpha",
         public_url=None,
         subject=ADMIN,
+        default_agent_name=None,
     )
 
     assert [server.name for server in copy.agent.mcp_servers] == ["docs"], (
@@ -743,6 +746,7 @@ async def test_fork_agent_returns_the_copy_when_its_final_reread_fails(
         new_name="team-alpha",
         public_url=None,
         subject=ADMIN,
+        default_agent_name=None,
     )
 
     assert copy.agent.id in state.agents, "the copy that exists is the one returned"

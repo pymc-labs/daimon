@@ -521,7 +521,7 @@ async def test_run_new_agent_queues_its_face_once_it_exists(
     monkeypatch.setattr(
         submit_mod,
         "queue_agent_face",
-        lambda _factory, *, tenant_id, agent_name: queued.append((tenant_id, agent_name)),
+        lambda _factory, *, tenant_id, agent_name, **_: queued.append((tenant_id, agent_name)),
     )
     client_fake: Any = fake_slack_web_client
     runtime = _build_runtime_with_db(db_session_factory, fernet_key=Fernet.generate_key().decode())

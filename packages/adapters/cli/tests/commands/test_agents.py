@@ -1431,7 +1431,12 @@ async def test_agents_create_and_fork_wait_for_the_new_agents_face(
     awaited: list[tuple[uuid.UUID, str, float]] = []
 
     async def ensure(
-        _factory: object, *, tenant_id: uuid.UUID, agent_name: str, timeout_s: float
+        _factory: object,
+        *,
+        tenant_id: uuid.UUID,
+        agent_name: str,
+        timeout_s: float,
+        **_: object,
     ) -> bool:
         awaited.append((tenant_id, agent_name, timeout_s))
         return True

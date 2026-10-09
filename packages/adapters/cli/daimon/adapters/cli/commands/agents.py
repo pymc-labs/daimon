@@ -304,7 +304,12 @@ async def agents_create(
         managed=False,
     )
     await ensure_agent_face(
-        rt.sessionmaker, tenant_id=tenant_id, agent_name=spec.name, timeout_s=FACE_WAIT_S
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        agent_name=spec.name,
+        metadata=None,  # managed=False above: only the default name can make it built-in
+        default_agent_name=rt.deployment_default.agent_name,
+        timeout_s=FACE_WAIT_S,
     )
     console.print(f"[green]✓ created agent {spec.name!r}[/green]")
 
@@ -499,9 +504,15 @@ async def agents_fork(
         public_url=public_url,
         # The CLI is the deployment operator.
         subject=Subject(is_admin=True),
+        default_agent_name=rt.deployment_default.agent_name,
     )
     await ensure_agent_face(
-        rt.sessionmaker, tenant_id=tenant_id, agent_name=dst, timeout_s=FACE_WAIT_S
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        agent_name=dst,
+        metadata=copy.agent.metadata,
+        default_agent_name=rt.deployment_default.agent_name,
+        timeout_s=FACE_WAIT_S,
     )
     console.print(f"[green]✓ forked agent {src!r} → {dst!r}[/green]")
     if copy.copied_skills:

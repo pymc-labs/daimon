@@ -310,7 +310,7 @@ async def test_create_blank_agent_queues_the_new_agents_face(
     monkeypatch.setattr(
         write_mod,
         "queue_agent_face",
-        lambda _factory, *, tenant_id, agent_name: queued.append((tenant_id, agent_name)),
+        lambda _factory, *, tenant_id, agent_name, **_: queued.append((tenant_id, agent_name)),
     )
     runtime = _runtime_with_settings(build_stub_anthropic(), tenant_id=tenant_id, public_url=None)
 

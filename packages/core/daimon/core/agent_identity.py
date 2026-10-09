@@ -120,14 +120,22 @@ async def resolve_agent_identity(
 
 
 def queue_agent_face(
-    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_name: str
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    metadata: Mapping[str, str] | None,
+    default_agent_name: str | None,
 ) -> asyncio.Task[None] | None:
     """Start rendering a new agent's face in the background; never raises.
 
     Every creation path calls this once the agent exists, so its first card or
     answer already has the face. The render is the one `resolve_agent_identity`
     would start, so it shares the single flight and the back-off after failures.
+    A built-in agent gets none: it posts with the platform app's own icon.
     """
+    if is_builtin_agent(name=agent_name, metadata=metadata, default_agent_name=default_agent_name):
+        return None
     try:
         return _schedule_face(sessionmaker, tenant_id=tenant_id, agent_name=agent_name)
     except Exception as exc:
@@ -140,6 +148,8 @@ async def ensure_agent_face(
     *,
     tenant_id: uuid.UUID,
     agent_name: str,
+    metadata: Mapping[str, str] | None,
+    default_agent_name: str | None,
     timeout_s: float,
 ) -> bool:
     """Render a new agent's face and wait at most `timeout_s`; True once it is stored.
@@ -148,7 +158,13 @@ async def ensure_agent_face(
     the process exits. Never raises: a failed or slow render leaves the face
     to the agent's first post.
     """
-    task = queue_agent_face(sessionmaker, tenant_id=tenant_id, agent_name=agent_name)
+    task = queue_agent_face(
+        sessionmaker,
+        tenant_id=tenant_id,
+        agent_name=agent_name,
+        metadata=metadata,
+        default_agent_name=default_agent_name,
+    )
     if task is None:
         return False
     done, _ = await asyncio.wait({task}, timeout=timeout_s)

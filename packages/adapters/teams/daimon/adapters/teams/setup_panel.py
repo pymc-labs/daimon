@@ -545,7 +545,13 @@ class SetupPanel:
         if error is not None or created_id is None:
             return dialog("New agent", cards.new_agent_form(_models(), values, error))
         log.info("teams.agent_setup.created", tenant_id=str(actor.tenant_id), agent_name=name)
-        queue_agent_face(self._runtime.sessionmaker, tenant_id=actor.tenant_id, agent_name=name)
+        queue_agent_face(
+            self._runtime.sessionmaker,
+            tenant_id=actor.tenant_id,
+            agent_name=name,
+            metadata=None,  # create_blank_agent is never managed
+            default_agent_name=self._runtime.deployment_default.agent_name,
+        )
         caller = await channel_admin_caller(
             self._runtime, tenant_id=actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin
         )
