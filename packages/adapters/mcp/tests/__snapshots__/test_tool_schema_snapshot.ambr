@@ -2637,8 +2637,9 @@
         Use ``list_agent_keys`` for stored key names. Configuration does not prove
         the answering session's access. Returns server names/URLs and skills; custom
         skills have a display name (null if deleted), Anthropic skills have a readable id.
-        For an admin on an editable agent, ``system`` is the full system prompt;
-        null means withheld (non-admin caller, or Daimon/defaults-managed agent).
+        For a caller who may replace it (an admin, or a channel admin of the agent's
+        channels) on an editable agent, ``system`` is the full system prompt; null
+        means withheld (anyone else, or a Daimon/defaults-managed agent).
         Pass this turn's ``origin_context_id`` so its channel counts.
       ''',
       'parameters': dict({

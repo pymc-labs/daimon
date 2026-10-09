@@ -737,6 +737,41 @@ async def test_channel_admin_update_tool_changes_own_agent_but_refuses_another_t
     assert world.state.agents["agent_shared"]["system"] is None
 
 
+async def test_channel_admin_reads_only_the_prompt_they_may_replace(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """get_agent shows the prompt to whoever update_agent lets replace it, so a team
+    edits its agent's prompt instead of overwriting it blind."""
+    world, runtime = await _world(committing_sessionmaker)
+    for agent_id, prompt in (("agent_local", "Forked"), ("agent_shared", "Shared")):
+        world.state.agents[agent_id]["metadata"]["daimon_account"] = str(world.account_id)
+        world.state.agents[agent_id]["system"] = f"{prompt} instructions"
+    async with committing_sessionmaker.begin() as session:
+        await set_channel_admins(
+            session,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            channel_id=ROOM,
+            role_ids=[],
+            user_ids=["444444444444444444"],
+            actor_account_id=None,
+        )
+    member = world.auth(admin=False, executing="agent_local")
+    channel_admin = replace(member, administered_channel_ids=frozenset({ROOM}))
+
+    own = await _get_agent_impl(runtime, channel_admin, "local", "agent_local")
+    assert own.system == "Forked instructions", "their own agent's prompt is theirs to read"
+    assert (await _get_agent_impl(runtime, member, "local", "agent_local")).system is None
+    with pytest.raises(ToolError, match="missing or changed"):
+        await _get_agent_impl(runtime, channel_admin, "shared", "agent_shared")
+
+    outside = replace(world.auth(admin=False), administered_channel_ids=frozenset({ROOM}))
+    shared = await _get_agent_impl(runtime, outside, "shared", "agent_shared")
+    assert shared.system is None, "another channel's agent stays withheld"
+    admin = await _get_agent_impl(runtime, world.auth(), "shared", "agent_shared")
+    assert admin.system == "Shared instructions", "an admin reads it as before"
+
+
 async def test_an_own_agent_creates_no_agent(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

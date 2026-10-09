@@ -118,10 +118,11 @@ class AgentInfo(BaseModel):
     skills: list[AgentSkillInfo]
     sync_warnings: list[SyncRepoFailure] | None = None
     system: str | None = None
-    """Set only by ``get_agent``, and only for an admin caller on an agent chat
-    tools may edit: the full system prompt (``""`` when it has none). ``None``
-    means withheld, not empty — a non-admin caller, or a defaults-managed or
-    system agent."""
+    """Set only by ``get_agent``, and only for a caller who may replace it (an
+    admin, or a channel admin who holds the agent) on an agent chat tools may
+    edit: the full system prompt (``""`` when it has none). ``None`` means
+    withheld, not empty — a caller who may not replace it, or a
+    defaults-managed or system agent."""
     applies: str | None = None
     """Set only by ``update_agent`` when it changed ``model`` and/or ``system``:
     person-facing confirmation that the change reaches this conversation on
@@ -372,13 +373,36 @@ async def _get_agent_impl(
         location_channel_id=origin_channel_id(origin),
     )
     info = await _build_agent_info(runtime.client, agent, tenant_id=auth.tenant_id)
-    # The prompt is readable only by callers who could replace it on any agent:
-    # admins, on agents chat tools may edit at all. A defaults-managed or system
-    # agent's prompt stays withheld even from admins — the edit path is a fork,
-    # and the fork's own prompt is then readable.
-    if auth.is_admin and _system_agent_rejection(agent) is None:
+    # The prompt is readable only by callers who could replace it: admins, and a
+    # channel admin who passes `update_agent`'s own gates for a prompt change, so
+    # a team can edit its agent's prompt instead of overwriting it blind. A
+    # defaults-managed or system agent's prompt stays withheld even from admins —
+    # the edit path is a fork, and the fork's own prompt is then readable.
+    if _system_agent_rejection(agent) is None and await _may_replace_prompt(
+        runtime, auth, name=name, agent=agent
+    ):
         info = info.model_copy(update={"system": agent.system or ""})
     return info
+
+
+async def _may_replace_prompt(
+    runtime: McpRuntime, auth: AuthIdentity, *, name: str, agent: BetaManagedAgentsAgent
+) -> bool:
+    """Whether ``auth`` is an admin, or a channel admin `update_agent` would let replace
+    ``agent``'s prompt. A member without a grant still never reads it, even on an
+    agent nobody else uses."""
+    if auth.is_admin:
+        return True
+    if not auth.administered_channel_ids:
+        return False
+    try:
+        await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
+        await reachability.require_admin_for_reachable_agent(
+            runtime, auth, agent_name=name, agent=agent
+        )
+    except ToolError:
+        return False
+    return True
 
 
 def _reject_unknown_model(model: str) -> None:
@@ -979,8 +1003,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Use ``list_agent_keys`` for stored key names. Configuration does not prove
         the answering session's access. Returns server names/URLs and skills; custom
         skills have a display name (null if deleted), Anthropic skills have a readable id.
-        For an admin on an editable agent, ``system`` is the full system prompt;
-        null means withheld (non-admin caller, or Daimon/defaults-managed agent).
+        For a caller who may replace it (an admin, or a channel admin of the agent's
+        channels) on an editable agent, ``system`` is the full system prompt; null
+        means withheld (anyone else, or a Daimon/defaults-managed agent).
         Pass this turn's ``origin_context_id`` so its channel counts."""
         return await _get_agent_impl(
             runtime,
