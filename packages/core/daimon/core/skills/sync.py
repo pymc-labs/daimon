@@ -18,8 +18,12 @@ are tenant-isolated and distinct across guilds sharing one MA Workspace.
 Seeded skills (`defaults/skills/**`) share that exact title shape, so a
 same-named import would push a new version onto the seeded skill. The
 reconciler's fingerprint would still match the defaults tree and skip it on
-every later `defaults apply`, making the overwrite permanent. Those names are
-refused instead.
+every later `defaults apply`, making the overwrite permanent. So an import
+never writes to a seeded skill. One carrying exactly the seeded content (an
+agent repo that vendors the default, as client agent repos do with
+`pymc-artifact-style`) is already in the library: it is reported SKIPPED with
+the seeded skill's id, so the caller attaches it like any other import. One
+that differs is refused, since the change belongs in `defaults/`.
 
 Any other library skill may already be attached to agents that answer for
 everyone, so only an admin import may push a new version onto it. A member's
@@ -29,7 +33,7 @@ same-named import is refused and must be renamed.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -39,6 +43,7 @@ from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import DaimonError
 from daimon.core.skill_zip import build_skill_zip
 from daimon.core.skills.discover import DiscoveredSkill
+from daimon.core.stores.domain import SeededSkillRow
 
 _log = structlog.get_logger(__name__)
 
@@ -60,7 +65,7 @@ async def sync_skills(
     skills: list[DiscoveredSkill],
     *,
     tenant_id: uuid.UUID,
-    seeded_skill_names: frozenset[str],
+    seeded_skills: Mapping[str, SeededSkillRow],
     is_admin: bool,
 ) -> list[ResourceOutcome]:
     """Create or update each skill in *skills* on MA.
@@ -83,16 +88,17 @@ async def sync_skills(
 
     Any exception raised while processing a single skill is caught; a
     ``FAILED`` outcome is recorded and the batch continues with the next skill.
-    A skill named in ``seeded_skill_names`` is recorded as ``FAILED`` without
-    touching MA, and so is a non-admin import that matches an existing library
-    skill (see the module docstring).
+    A skill named in ``seeded_skills`` never writes to MA: with the seeded
+    content it is ``SKIPPED`` and carries the seeded skill's id, otherwise it is
+    ``FAILED``. A non-admin import that matches an existing library skill is
+    ``FAILED`` too (see the module docstring).
 
     Args:
         client: Anthropic SDK client for MA API calls.
         skills: Discovered skills to sync.
         tenant_id: Owning tenant — determines the canonical title prefix.
-        seeded_skill_names: This tenant's seeded skill names
-            (``list_seeded_skill_names``), which an import may not reuse.
+        seeded_skills: This tenant's seeded skill fingerprints by name
+            (``list_seeded_skills``), which an import may match but not replace.
         is_admin: Whether the importer may push a new version onto an existing
             library skill.
 
@@ -102,24 +108,9 @@ async def sync_skills(
     """
     outcomes: list[ResourceOutcome] = []
     for skill in skills:
-        if skill.spec.name in seeded_skill_names:
-            _log.warning("sync.seeded_skill_refused", name=skill.spec.name)
-            outcomes.append(
-                ResourceOutcome(
-                    kind="skill",
-                    name=skill.spec.name,
-                    action=Action.FAILED,
-                    error=(
-                        f"skill name {skill.spec.name!r} belongs to a default skill and "
-                        f"cannot be replaced by an import. Rename the skill (e.g. "
-                        f"{skill.spec.name}-2) and re-sync."
-                    ),
-                    refusal=(
-                        f"`{skill.spec.name}` is a default skill's name. "
-                        f"{_rename_hint(skill.spec.name)}"
-                    ),
-                )
-            )
+        seeded = seeded_skills.get(skill.spec.name)
+        if seeded is not None:
+            outcomes.append(await _match_seeded(client, skill, seeded, tenant_id=tenant_id))
             continue
         try:
             canonical = tenant_scoped_display_title(tenant_id=tenant_id, name=skill.spec.name)
@@ -192,6 +183,72 @@ async def sync_skills(
                 )
             )
     return outcomes
+
+
+async def _match_seeded(
+    client: AsyncAnthropic,
+    skill: DiscoveredSkill,
+    seeded: SeededSkillRow,
+    *,
+    tenant_id: uuid.UUID,
+) -> ResourceOutcome:
+    """SKIPPED with the seeded id when the import is the seeded content, else FAILED."""
+    name = skill.spec.name
+    try:
+        pkg = build_skill_zip(skill.skill_dir, name=name)
+        pkg.path.unlink(missing_ok=True)
+        canonical = tenant_scoped_display_title(tenant_id=tenant_id, name=name)
+        ma_match = await find_skill_by_display_title(client, canonical, on_truncation="raise")
+    except Exception as err:
+        _log.warning("sync.skill_failed", name=name, error=str(err))
+        return ResourceOutcome(kind="skill", name=name, action=Action.FAILED, error=str(err))
+    # The fingerprint only vouches for the skill id it was recorded against,
+    # as in `reconcile_skill`.
+    if (
+        ma_match is not None
+        and ma_match.id == seeded.anthropic_id
+        and pkg.content_hash == seeded.content_hash
+    ):
+        _log.info("sync.seeded_skill_matched", name=name, skill_id=ma_match.id)
+        return ResourceOutcome(
+            kind="skill", name=name, action=Action.SKIPPED, anthropic_id=ma_match.id
+        )
+    _log.warning("sync.seeded_skill_refused", name=name)
+    return ResourceOutcome(
+        kind="skill",
+        name=name,
+        action=Action.FAILED,
+        error=(
+            f"skill name {name!r} belongs to a default skill and differs from it, so an "
+            f"import cannot replace it. Change defaults/skills/{name} instead, or rename "
+            f"the skill (e.g. {name}-2) and re-sync."
+        ),
+        refusal=(
+            f"`{name}` is a default skill's name, and this copy differs from the default. "
+            f"{_rename_hint(name)}"
+        ),
+    )
+
+
+def in_library(outcome: ResourceOutcome) -> bool:
+    """Whether an import left `outcome`'s skill in the library, ready to attach.
+
+    A SKIPPED import is a seeded skill the repo carries unchanged.
+    """
+    return outcome.anthropic_id is not None and outcome.action in (
+        Action.CREATED,
+        Action.UPDATED,
+        Action.SKIPPED,
+    )
+
+
+def library_skill_ids(outcomes: Sequence[ResourceOutcome]) -> list[str]:
+    """The sorted ids of every skill `outcomes` left in the library (see `in_library`)."""
+    return sorted(
+        outcome.anthropic_id
+        for outcome in outcomes
+        if outcome.anthropic_id is not None and in_library(outcome)
+    )
 
 
 def summarize_failed_imports(outcomes: Sequence[ResourceOutcome]) -> str | None:

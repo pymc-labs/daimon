@@ -32,11 +32,22 @@ async def load_seeded_skill(
 
 
 async def list_seeded_skill_names(session: AsyncSession, *, tenant_id: uuid.UUID) -> frozenset[str]:
-    """Names of every skill `defaults apply` has seeded into this tenant."""
+    """Names of every skill `defaults apply` has seeded into this tenant.
+
+    The pinned adapter snapshots in `test_credential_submit_equivalence` import it.
+    """
     result = await session.execute(
         select(SeededSkill.name).where(SeededSkill.tenant_id == tenant_id)
     )
     return frozenset(result.scalars())
+
+
+async def list_seeded_skills(
+    session: AsyncSession, *, tenant_id: uuid.UUID
+) -> dict[str, SeededSkillRow]:
+    """Every skill `defaults apply` has seeded into this tenant, by name."""
+    result = await session.execute(select(SeededSkill).where(SeededSkill.tenant_id == tenant_id))
+    return {orm.name: SeededSkillRow.model_validate(orm) for orm in result.scalars()}
 
 
 async def record_seeded_skill(

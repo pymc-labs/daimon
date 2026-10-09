@@ -191,7 +191,7 @@ async def test_apply_prunes_seeded_rows_for_skills_no_longer_in_the_tree(
     """
     from anthropic.types.beta import SkillListResponse
     from daimon.core.ma_identity import derive_tenant_uuid
-    from daimon.core.stores.seeded_skills import list_seeded_skill_names, record_seeded_skill
+    from daimon.core.stores.seeded_skills import list_seeded_skills, record_seeded_skill
 
     _write_tree(tmp_path)
     (tmp_path / "skills" / "eda").mkdir(parents=True)
@@ -237,13 +237,13 @@ async def test_apply_prunes_seeded_rows_for_skills_no_longer_in_the_tree(
 
     await apply_defaults(db_session_factory, client, tmp_path, dry_run=True, run_preflight=False)
     async with db_session_factory() as session:
-        assert await list_seeded_skill_names(session, tenant_id=tenant_id) == {
+        assert set(await list_seeded_skills(session, tenant_id=tenant_id)) == {
             "eda",
             "retired",
         }, "a dry run writes nothing"
 
     await apply_defaults(db_session_factory, client, tmp_path, dry_run=False, run_preflight=False)
     async with db_session_factory() as session:
-        assert await list_seeded_skill_names(session, tenant_id=tenant_id) == {"eda"}, (
+        assert set(await list_seeded_skills(session, tenant_id=tenant_id)) == {"eda"}, (
             "only the retired row goes"
         )

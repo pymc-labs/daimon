@@ -36,7 +36,7 @@ from daimon.core.defaults.ma_index import (
     list_skills_lenient,
 )
 from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_display_title
-from daimon.core.defaults.report import Action, ResourceOutcome
+from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.errors import DaimonError
 from daimon.core.github_app_auth import build_app_jwt, get_installation_id_for_repo
@@ -45,12 +45,13 @@ from daimon.core.github_repo_auth import InstallationLookup, resolve_skill_sync_
 from daimon.core.ma import delete_skill_and_versions, update_agent_with_version_retry
 from daimon.core.skills.fetch import GitHubFetchError
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.skills.sync import library_skill_ids
 from daimon.core.stores.agent_repo_binding import get_bindings_for_repo
 from daimon.core.stores.agent_skill_repo_credentials import (
     list_skill_repo_credentials_for_repo,
 )
 from daimon.core.stores.domain import RepoProofKind
-from daimon.core.stores.seeded_skills import list_seeded_skill_names, load_seeded_skill
+from daimon.core.stores.seeded_skills import list_seeded_skills, load_seeded_skill
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, SecretStr
@@ -335,7 +336,7 @@ async def _sync_impl(
         _reject_system_agent(agent)
         expected_ma_agent_id = agent.id
     async with runtime.session_factory() as session:
-        seeded_skill_names = await list_seeded_skill_names(session, tenant_id=auth.tenant_id)
+        seeded_skills = await list_seeded_skills(session, tenant_id=auth.tenant_id)
     async with httpx.AsyncClient(timeout=30.0) as http:
         token = await _resolve_sync_token(runtime, auth, url, http)
         try:
@@ -346,7 +347,7 @@ async def _sync_impl(
                 branch=branch,
                 path=path,
                 tenant_id=auth.tenant_id,
-                seeded_skill_names=seeded_skill_names,
+                seeded_skills=seeded_skills,
                 # `_require_admin` above.
                 is_admin=True,
                 token=token,
@@ -378,11 +379,7 @@ async def _sync_impl(
         except DaimonError as exc:
             raise ToolError(str(exc)) from exc
 
-    registry_ids = {
-        outcome.anthropic_id
-        for outcome in outcomes
-        if outcome.anthropic_id is not None and outcome.action in (Action.CREATED, Action.UPDATED)
-    }
+    registry_ids = set(library_skill_ids(outcomes))
     attach_note = ""
     if agent_name is not None and registry_ids:
         attach_note = " " + await _attach_synced_skills(

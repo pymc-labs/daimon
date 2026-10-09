@@ -180,8 +180,11 @@ What that means in practice when you edit a seeded skill:
   skill on their side, your version wins. There is no prompt and no
   `--force`; the only trace is a structured log line.
 - **Someone changes a seeded skill outside `defaults/`.** Chat tools refuse
-  to: a library import under a seeded name fails, and `delete_skill` refuses a
-  seeded skill. An edit made straight on the provider still survives apply,
+  to: a library import under a seeded name with different content fails, and
+  `delete_skill` refuses a seeded skill. An import whose content matches the
+  fingerprint (an agent repo that vendors the default unchanged) writes
+  nothing and counts as imported, so `sync_skills(agent_name=...)` attaches
+  the seeded skill. An edit made straight on the provider still survives apply,
   because the fingerprint still matches. Daimon never reads the live content
   back, so it genuinely cannot tell that install apart from an untouched one,
   and `verify` calls it in sync.

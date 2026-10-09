@@ -72,7 +72,7 @@ from daimon.core.credential_submit import (
 from daimon.core.credential_submit import env_name_refusal as _env_name_refusal
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.defaults.report import Action, ResourceOutcome
+from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
     EnvEntry,
@@ -105,7 +105,7 @@ from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
 )
 from daimon.core.skills.pipeline import run_skill_sync
-from daimon.core.skills.sync import summarize_failed_imports
+from daimon.core.skills.sync import in_library, library_skill_ids, summarize_failed_imports
 from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores.agent_files import (
@@ -1165,11 +1165,7 @@ async def _attach_skills_to_requested_agent(
     the time this runs, so a failure here is partial and both halves must
     be reported truthfully.
     """
-    skill_ids = sorted(
-        outcome.anthropic_id
-        for outcome in outcomes
-        if outcome.anthropic_id is not None and outcome.action in (Action.CREATED, Action.UPDATED)
-    )
+    skill_ids = library_skill_ids(outcomes)
     if not skill_ids:
         return SkillAttachOutcome(
             note="Nothing new to attach.", attached=False, agent_name=None, skill_count=0
@@ -1414,7 +1410,7 @@ async def run_skill_repo_credential_submission(
         )
         is_token_stored = True
         async with runtime.sessionmaker.begin() as session:
-            seeded_skill_names = await write_skill_repo_submit(
+            seeded_skills = await write_skill_repo_submit(
                 session, row=consumed, ma_secret_ref=ma_secret_ref, proof=proof
             )
         outcomes = await run_skill_sync(
@@ -1424,7 +1420,7 @@ async def run_skill_repo_credential_submission(
             branch=branch,
             path=path,
             tenant_id=consumed.tenant_id,
-            seeded_skill_names=seeded_skill_names,
+            seeded_skills=seeded_skills,
             is_admin=await resolve_is_admin(client, user_id=user_id),
             token=value,
         )
@@ -1460,7 +1456,7 @@ async def run_skill_repo_credential_submission(
         )
         return
 
-    imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
+    imported = [o for o in outcomes if in_library(o)]
     failure_detail = summarize_failed_imports(outcomes)
     if not imported:
         # Nothing reached the library (an empty repo, or every skill refused

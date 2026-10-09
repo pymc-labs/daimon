@@ -438,7 +438,7 @@ async def test_sync_impl_passes_the_tenant_seeded_names_to_the_sync(
             path="",
         )
 
-    assert mock_sync.call_args.kwargs["seeded_skill_names"] == frozenset({"eda"})
+    assert set(mock_sync.call_args.kwargs["seeded_skills"]) == {"eda"}
     assert mock_sync.call_args.kwargs["is_admin"] is True, "the tool is admin-only"
 
 
@@ -847,6 +847,81 @@ async def test_sync_impl_attaches_to_the_named_agent_and_preserves_its_existing_
     assert "attached nothing" not in result.summary, (
         "an attach did happen here, so the no-agent_name disclaimer must not fire"
     )
+
+
+@pytest.mark.parametrize("already_attached", [False, True])
+async def test_sync_impl_attaches_a_seeded_skill_the_repo_carries_unchanged(
+    tmp_path: Path,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    already_attached: bool,
+) -> None:
+    """A set-up that syncs a repo copy of a default skill reports it attached.
+
+    cnn-agent's SETUP.md syncs `pymc-artifact-style`, which is also a seeded
+    default; the import used to fail and the set-up stopped not ready. A fresh
+    agent gets the seeded skill attached; one that already has it (a re-run)
+    keeps it once.
+    """
+    tenant_id = uuid.uuid4()
+    outcomes = [
+        ResourceOutcome(
+            kind="skill", name="pymc-artifact-style", action=Action.SKIPPED, anthropic_id="sk_seed"
+        ),
+    ]
+    attached = ["sk_existing", "sk_seed"] if already_attached else ["sk_existing"]
+    updates: list[dict[str, Any]] = []
+
+    def on_agents_list(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        return list_response(
+            [_agent_json(agent_id="ag_1", tenant_id=tenant_id, skill_ids=attached)]
+        )
+
+    def on_agent_get(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        return httpx.Response(
+            200, json=_agent_json(agent_id="ag_1", tenant_id=tenant_id, skill_ids=attached)
+        )
+
+    def on_agent_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = json.loads(req.content)
+        updates.append(body)
+        attached[:] = [s["skill_id"] for s in body["skills"]]
+        return httpx.Response(
+            200, json=_agent_json(agent_id="ag_1", tenant_id=tenant_id, skill_ids=attached)
+        )
+
+    router = MARouter()
+    router.add("GET", r"/v1/skills", lambda _req, _m: list_response([]))
+    router.add("GET", r"/v1/agents$", on_agents_list)
+    router.add("GET", r"/v1/agents/ag_1$", on_agent_get)
+    router.add("POST", r"/v1/agents/ag_1$", on_agent_update)
+
+    with (
+        patch("daimon.core.skills.pipeline.fetch_repo") as mock_fetch,
+        patch("daimon.core.skills.pipeline.discover_skills"),
+        patch("daimon.core.skills.pipeline.sync_skills", return_value=outcomes),
+    ):
+        from daimon.core.skills.fetch import FetchResult
+
+        cleanup_dir = tmp_path / "cleanup"
+        cleanup_dir.mkdir()
+        (tmp_path / "skills" / "pymc-artifact-style").mkdir(parents=True)
+        mock_fetch.return_value = FetchResult(path=tmp_path, cleanup_dir=cleanup_dir)
+        result = await _sync_impl(
+            _runtime(build_fake_anthropic(router.dispatch), sessionmaker),
+            AuthIdentity(
+                account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+            ),
+            url="https://github.com/pymc-labs/cnn-agent",
+            branch="main",
+            path="skills/pymc-artifact-style",
+            agent_name="agent",
+        )
+
+    assert "Attached to 'agent'." in result.summary, "SETUP.md reads this as success"
+    assert "FAILED" not in result.summary, "nothing reads as a failure"
+    assert attached.count("sk_seed") == 1, "the seeded skill is attached exactly once"
+    assert "sk_existing" in attached, "the agent's other skills survive"
+    assert result.attached_count == 1, "the seeded skill counts as attached"
 
 
 async def test_sync_impl_refuses_a_seeded_agent_before_importing(

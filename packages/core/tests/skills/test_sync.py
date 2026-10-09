@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +18,11 @@ from anthropic.types.beta import SkillListResponse
 from anthropic.types.beta.skills import VersionCreateResponse
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.report import Action, ResourceOutcome
+from daimon.core.skill_zip import build_skill_zip
 from daimon.core.skills.discover import DiscoveredSkill
-from daimon.core.skills.sync import summarize_failed_imports, sync_skills
+from daimon.core.skills.sync import library_skill_ids, summarize_failed_imports, sync_skills
 from daimon.core.specs import SkillSpec
+from daimon.core.stores.domain import SeededSkillRow
 from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
 
@@ -92,7 +95,7 @@ async def test_sync_creates_new_skill(tmp_path: Path) -> None:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sync_skills(
-        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
+        client, [skill], tenant_id=_TENANT_A, seeded_skills={}, is_admin=True
     )
 
     assert len(outcomes) == 1, "should return one outcome"
@@ -130,7 +133,7 @@ async def test_sync_updates_existing_skill(tmp_path: Path) -> None:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sync_skills(
-        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
+        client, [skill], tenant_id=_TENANT_A, seeded_skills={}, is_admin=True
     )
 
     assert len(outcomes) == 1, "should return one outcome"
@@ -148,7 +151,7 @@ async def test_sync_refuses_a_member_replacing_an_existing_library_skill(tmp_pat
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sync_skills(
-        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=False
+        client, [skill], tenant_id=_TENANT_A, seeded_skills={}, is_admin=False
     )
 
     assert [o.action for o in outcomes] == [Action.FAILED], "a member may not replace it"
@@ -166,7 +169,7 @@ async def test_sync_records_failed_outcome_on_error(tmp_path: Path) -> None:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sync_skills(
-        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
+        client, [skill], tenant_id=_TENANT_A, seeded_skills={}, is_admin=True
     )
 
     assert len(outcomes) == 1, "should return one outcome"
@@ -222,7 +225,7 @@ async def test_sync_continues_after_failure(tmp_path: Path) -> None:
         client,
         [skill_a, skill_b],
         tenant_id=_TENANT_A,
-        seeded_skill_names=frozenset(),
+        seeded_skills={},
         is_admin=True,
     )
 
@@ -237,9 +240,7 @@ async def test_sync_empty_list_returns_empty(tmp_path: Path) -> None:
     router = MARouter()
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcomes = await sync_skills(
-        client, [], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
-    )
+    outcomes = await sync_skills(client, [], tenant_id=_TENANT_A, seeded_skills={}, is_admin=True)
 
     assert outcomes == [], "empty skill list should produce empty outcomes"
 
@@ -291,7 +292,7 @@ async def test_sync_creates_distinct_skills_when_two_tenants_sync_same_named_ski
 
     skill_a = _skill(tmp_path / "a", name="brainstorming")
     outcomes_a = await sync_skills(
-        client_a, [skill_a], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
+        client_a, [skill_a], tenant_id=_TENANT_A, seeded_skills={}, is_admin=True
     )
 
     assert len(outcomes_a) == 1, "tenant A sync should produce one outcome"
@@ -308,7 +309,7 @@ async def test_sync_creates_distinct_skills_when_two_tenants_sync_same_named_ski
 
     skill_b = _skill(tmp_path / "b", name="brainstorming")
     outcomes_b = await sync_skills(
-        client_b, [skill_b], tenant_id=_TENANT_B, seeded_skill_names=frozenset(), is_admin=True
+        client_b, [skill_b], tenant_id=_TENANT_B, seeded_skills={}, is_admin=True
     )
 
     assert len(outcomes_b) == 1, "tenant B sync should produce one outcome"
@@ -351,7 +352,7 @@ async def test_sync_records_failed_outcome_when_list_is_truncated(tmp_path: Path
     client = AsyncAnthropic(api_key="test", http_client=http_client, max_retries=0)
 
     outcomes = await sync_skills(
-        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
+        client, [skill], tenant_id=_TENANT_A, seeded_skills={}, is_admin=True
     )
 
     assert len(outcomes) == 1, "should return one outcome"
@@ -387,7 +388,7 @@ async def test_sync_fails_when_agent_scoped_skill_takes_the_mount_name(tmp_path:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sync_skills(
-        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
+        client, [skill], tenant_id=_TENANT_A, seeded_skills={}, is_admin=True
     )
 
     assert len(outcomes) == 1, "should return one outcome"
@@ -401,26 +402,34 @@ async def test_sync_fails_when_agent_scoped_skill_takes_the_mount_name(tmp_path:
     )
 
 
-async def test_sync_refuses_a_seeded_skill_name_without_touching_ma(tmp_path: Path) -> None:
-    """A same-named import must not push a version onto a seeded skill.
+def _seeded_row(
+    skill: DiscoveredSkill, *, anthropic_id: str, content_hash: str | None = None
+) -> SeededSkillRow:
+    if content_hash is None:
+        pkg = build_skill_zip(skill.skill_dir, name=skill.spec.name)
+        pkg.path.unlink()
+        content_hash = pkg.content_hash
+    return SeededSkillRow(
+        tenant_id=_TENANT_A,
+        name=skill.spec.name,
+        content_hash=content_hash,
+        anthropic_id=anthropic_id,
+        updated_at=datetime(2026, 9, 29, tzinfo=UTC),
+    )
 
-    The reconciler's fingerprint would still match the defaults tree, so
-    `defaults apply` would skip the overwritten skill forever. Other skills in
-    the batch still sync.
-    """
-    seeded = _skill(tmp_path, "eda")
-    other = _skill(tmp_path, "brainstorming")
-    seeded_canonical = tenant_scoped_display_title(tenant_id=_TENANT_A, name="eda")
+
+def _seeded_router(seeded_canonical: str) -> tuple[MARouter, list[str]]:
+    """A library holding the seeded `eda` skill; records any write, and creates others."""
     router = MARouter()
     router.add(
         "GET",
         r"/v1/skills",
         lambda req, _m: list_response([_skill_row("sk_eda", seeded_canonical)]),
     )
-    version_posts: list[str] = []
+    writes: list[str] = []
 
     def on_version_create(req: httpx.Request, _m: object) -> httpx.Response:
-        version_posts.append(req.url.path)
+        writes.append(req.url.path)
         return httpx.Response(500)
 
     router.add("POST", r"/v1/skills/sk_eda/versions", on_version_create)
@@ -440,21 +449,84 @@ async def test_sync_refuses_a_seeded_skill_name_without_touching_ma(tmp_path: Pa
             ).model_dump(mode="json"),
         ),
     )
+    return router, writes
+
+
+async def test_sync_matches_a_repo_copy_of_the_seeded_skill(tmp_path: Path) -> None:
+    """A repo vendoring the default unchanged (cnn-agent's `pymc-artifact-style`)
+    is already in the library: SKIPPED with the seeded id, so the caller attaches it.
+
+    Before this, the import failed and the agent's set-up reported not ready.
+    """
+    seeded = _skill(tmp_path, "eda")
+    canonical = tenant_scoped_display_title(tenant_id=_TENANT_A, name="eda")
+    router, writes = _seeded_router(canonical)
+    client = build_fake_anthropic_http(router.dispatch)
+
+    outcomes = await sync_skills(
+        client,
+        [seeded],
+        tenant_id=_TENANT_A,
+        seeded_skills={"eda": _seeded_row(seeded, anthropic_id="sk_eda")},
+        is_admin=True,
+    )
+
+    assert writes == [], "the seeded skill is never written by an import"
+    assert outcomes[0].action is Action.SKIPPED, "the same content is not a failure"
+    assert outcomes[0].anthropic_id == "sk_eda", "it carries the seeded id to attach"
+    assert library_skill_ids(outcomes) == ["sk_eda"], "callers attach it like an import"
+    assert summarize_failed_imports(outcomes) is None, "nothing is reported as not imported"
+
+
+async def test_sync_refuses_a_changed_copy_of_a_seeded_skill(tmp_path: Path) -> None:
+    """A same-named import with different content must not push a version onto
+    the seeded skill.
+
+    The reconciler's fingerprint would still match the defaults tree, so
+    `defaults apply` would skip the overwritten skill forever. Other skills in
+    the batch still sync.
+    """
+    seeded = _skill(tmp_path, "eda")
+    other = _skill(tmp_path, "brainstorming")
+    canonical = tenant_scoped_display_title(tenant_id=_TENANT_A, name="eda")
+    router, writes = _seeded_router(canonical)
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sync_skills(
         client,
         [seeded, other],
         tenant_id=_TENANT_A,
-        seeded_skill_names=frozenset({"eda"}),
+        seeded_skills={"eda": _seeded_row(seeded, anthropic_id="sk_eda", content_hash="old")},
         is_admin=True,
     )
 
-    assert version_posts == [], "no version may be pushed onto the seeded skill"
-    assert outcomes[0].action is Action.FAILED, "the seeded name is refused"
-    assert "default skill" in (outcomes[0].error or ""), "the refusal says why"
+    assert writes == [], "no version may be pushed onto the seeded skill"
+    assert outcomes[0].action is Action.FAILED, "a changed copy is refused"
+    assert "defaults/skills/eda" in (outcomes[0].error or ""), "the error names where to change it"
+    assert "differs from the default" in (outcomes[0].refusal or ""), "the refusal says why"
     assert "ask again to import" in (outcomes[0].refusal or ""), "chat users get their remedy"
     assert outcomes[1].action is Action.CREATED, "the rest of the batch still syncs"
+    assert library_skill_ids(outcomes) == ["sk_new"], "only the imported skill attaches"
+
+
+async def test_sync_refuses_a_seeded_match_on_another_skill_id(tmp_path: Path) -> None:
+    """The fingerprint vouches only for the id it was recorded against."""
+    seeded = _skill(tmp_path, "eda")
+    canonical = tenant_scoped_display_title(tenant_id=_TENANT_A, name="eda")
+    router, writes = _seeded_router(canonical)
+    client = build_fake_anthropic_http(router.dispatch)
+
+    outcomes = await sync_skills(
+        client,
+        [seeded],
+        tenant_id=_TENANT_A,
+        seeded_skills={"eda": _seeded_row(seeded, anthropic_id="sk_recreated")},
+        is_admin=True,
+    )
+
+    assert writes == [], "nothing is written"
+    assert outcomes[0].action is Action.FAILED, "an unvouched skill is not matched"
+    assert library_skill_ids(outcomes) == [], "nothing attaches"
 
 
 def test_summarize_failed_imports_explains_only_refusals() -> None:

@@ -8,7 +8,7 @@ thing standing between "a `defaults/skills/**` edit reaches every install" and
 from __future__ import annotations
 
 from daimon.core.stores.seeded_skills import (
-    list_seeded_skill_names,
+    list_seeded_skills,
     load_seeded_skill,
     prune_seeded_skills,
     record_seeded_skill,
@@ -68,8 +68,8 @@ async def test_fingerprints_do_not_leak_across_tenants(db_session: AsyncSession)
     assert await load_seeded_skill(db_session, tenant_id=two.id, name="brainstorming") is None
 
 
-async def test_list_seeded_skill_names_is_scoped_to_the_tenant(db_session: AsyncSession) -> None:
-    """Library imports read this to refuse seeded names, so a neighbour's must not count."""
+async def test_list_seeded_skills_is_scoped_to_the_tenant(db_session: AsyncSession) -> None:
+    """Library imports read this to fence seeded names, so a neighbour's must not count."""
     one = await make_tenant(db_session, workspace_id="guild-1")
     two = await make_tenant(db_session, workspace_id="guild-2")
     for name in ("brainstorming", "eda"):
@@ -77,11 +77,11 @@ async def test_list_seeded_skill_names_is_scoped_to_the_tenant(db_session: Async
             db_session, tenant_id=one.id, name=name, content_hash="h", anthropic_id=f"sk_{name}"
         )
 
-    names_one = await list_seeded_skill_names(db_session, tenant_id=one.id)
-    names_two = await list_seeded_skill_names(db_session, tenant_id=two.id)
+    names_one = set(await list_seeded_skills(db_session, tenant_id=one.id))
+    names_two = set(await list_seeded_skills(db_session, tenant_id=two.id))
 
-    assert names_one == frozenset({"brainstorming", "eda"}), "every seeded name is listed"
-    assert names_two == frozenset(), "another tenant's seeded skills are not this tenant's"
+    assert names_one == {"brainstorming", "eda"}, "every seeded name is listed"
+    assert names_two == set(), "another tenant's seeded skills are not this tenant's"
 
 
 async def test_prune_keeps_present_names_and_other_tenants(db_session: AsyncSession) -> None:
@@ -94,7 +94,7 @@ async def test_prune_keeps_present_names_and_other_tenants(db_session: AsyncSess
 
     await prune_seeded_skills(db_session, tenant_id=tenant.id, present_names={"kept"})
 
-    assert await list_seeded_skill_names(db_session, tenant_id=tenant.id) == {"kept"}
-    assert await list_seeded_skill_names(db_session, tenant_id=other.id) == {"removed"}, (
+    assert set(await list_seeded_skills(db_session, tenant_id=tenant.id)) == {"kept"}
+    assert set(await list_seeded_skills(db_session, tenant_id=other.id)) == {"removed"}, (
         "pruning is per tenant"
     )

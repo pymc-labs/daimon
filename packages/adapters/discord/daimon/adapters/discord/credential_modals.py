@@ -135,7 +135,7 @@ from daimon.core.credential_submit import (
 from daimon.core.credential_submit import env_name_refusal as _env_name_refusal
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.defaults.report import Action, ResourceOutcome
+from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
     MAX_ENV_FILE_BYTES,
@@ -171,7 +171,7 @@ from daimon.core.posted_controls import (
     card_text,
 )
 from daimon.core.skills.pipeline import run_skill_sync
-from daimon.core.skills.sync import summarize_failed_imports
+from daimon.core.skills.sync import in_library, library_skill_ids, summarize_failed_imports
 from daimon.core.stores import credential_requests
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
@@ -1092,7 +1092,7 @@ class SkillRepoModal(discord.ui.Modal):
                 # every sync falls back to an anonymous 404 that asks for the
                 # credential again.
                 async with self._runtime.sessionmaker.begin() as session:
-                    seeded_skill_names = await write_skill_repo_submit(
+                    seeded_skills = await write_skill_repo_submit(
                         session, row=consumed_row, ma_secret_ref=ma_secret_ref, proof=proof
                     )
                 outcomes = await run_skill_sync(
@@ -1102,7 +1102,7 @@ class SkillRepoModal(discord.ui.Modal):
                     branch=branch,
                     path=path,
                     tenant_id=consumed_row.tenant_id,
-                    seeded_skill_names=seeded_skill_names,
+                    seeded_skills=seeded_skills,
                     is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # see refuse_if_shared_and_not_admin_for_request
                     token=pat,
                 )
@@ -1141,7 +1141,7 @@ class SkillRepoModal(discord.ui.Modal):
                 await self._render_import_failed(interaction, consumed_row, repo=owner_repo)
             return
 
-        imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
+        imported = [o for o in outcomes if in_library(o)]
         failure_detail = summarize_failed_imports(outcomes)
         if not imported:
             # Nothing reached the library (an empty repo, or every skill
@@ -1255,12 +1255,7 @@ class SkillRepoModal(discord.ui.Modal):
         not an option, because the import has already succeeded by the time
         this runs and both halves must be reported truthfully.
         """
-        skill_ids = sorted(
-            outcome.anthropic_id
-            for outcome in outcomes
-            if outcome.anthropic_id is not None
-            and outcome.action in (Action.CREATED, Action.UPDATED)
-        )
+        skill_ids = library_skill_ids(outcomes)
         if not skill_ids:
             return None
         agent = await find_agent_by_derived_uuid(
