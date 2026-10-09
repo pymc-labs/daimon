@@ -146,9 +146,15 @@ its budget window against the budget's limit; see
 [channel budgets](#channel-budgets). A DM moved with `/dm` counts toward the
 channel it came from. A turn with no channel (an older DM, an MCP turn from
 a key not minted in a channel) and a channel with no budget are never gated.
-On Discord and Slack, a finished turn shows the remaining active channel
-budget on its status card. A channel without an active budget shows the
-tenant's prepaid balance when one exists.
+On Discord and Slack, a finished turn ends with one summary line: the agent,
+the turn's time, its tokens, its cost and the money left, for example
+`daimon · 16s · 22.5k in / 669 out · $0.017 · $43.08 left`, under the turn's
+last message: the last chunk of a long answer or, on Discord, a file posted
+after it. The money left is the active channel budget's remainder
+(`$3.75 of channel budget left`); a channel without an active budget shows the
+tenant's prepaid balance (`$43.08 left`) when one exists. An unpriced
+model drops the cost, and an operator-funded tenant outside a budgeted channel
+drops the money left.
 
 A denial raises `AdmissionDenied` carrying only the reason literal
 (`balance_depleted`, `cap_exceeded` or `channel_budget_exceeded`); the wording

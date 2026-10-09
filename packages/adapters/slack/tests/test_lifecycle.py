@@ -79,6 +79,7 @@ from daimon.core.turn.state import (
     TurnState,
     UsageTotals,
 )
+from daimon.core.turn.status_lines import SUMMARY_SEP as SEP
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing import ma_model_usage
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
@@ -162,7 +163,7 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     )
     await lc.post_initial()
     await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
-    assert _block_text(_last_update_blocks(fake_slack_web_client)).endswith("Balance: $12.50 left")
+    assert _block_text(_last_update_blocks(fake_slack_web_client)).endswith(f"{SEP}$12.50 left")
 
     async with db_session_factory() as s, s.begin():
         await set_funding_mode(s, tenant_id=tenant.id, funding_mode="operator_funded")
@@ -806,6 +807,25 @@ async def test_terminal_success_overflow_posts_and_widens_final_ts(
     overflow_posts = _post_count(fake_slack_web_client) - initial_posts
     assert overflow_posts >= 1, "overflow chunks must be posted as new chat.postMessage calls"
     assert lc.final_ts is not None, "final_ts must be set after overflow"
+
+
+async def test_long_answer_carries_the_summary_on_its_last_message(
+    fake_slack_web_client: Any,
+) -> None:
+    """The summary line closes the answer: it rides the last chunk, not the first."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="x" * 24000)]))
+
+    first = _last_update_blocks(fake_slack_web_client)
+    assert not any(block["type"] == "context" for block in first), "the first chunk is bare"
+    posts = fake_slack_web_client.mock.requests.get(("POST", _POST_URL), [])
+    last = posts[-1].kwargs["json"]["blocks"]
+    contexts = [block for block in last if block["type"] == "context"]
+    assert contexts, "the last chunk carries the summary"
+    assert contexts[0]["elements"][0]["text"].startswith(f"test-agent{SEP}"), "the summary line"
 
 
 async def test_terminal_success_bounds_notification_text_on_long_answers(
@@ -1822,9 +1842,9 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
         await lc.post_initial()
         await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
         footers[channel] = _block_text(_last_update_blocks(fake_slack_web_client))
-    assert footers["C1"].endswith("Balance: $3.75 of channel budget left"), "the budget's remainder"
+    assert footers["C1"].endswith(f"{SEP}$3.75 of channel budget left"), "the budget's remainder"
     for channel in ("C2", "C3", None):
-        assert footers[channel].endswith("Balance: $11.25 left"), (
+        assert footers[channel].endswith(f"{SEP}$11.25 left"), (
             f"{channel}: an inactive or missing budget shows the tenant balance"
         )
 

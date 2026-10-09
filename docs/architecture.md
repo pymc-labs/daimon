@@ -812,7 +812,13 @@ per-MA-session-chained sweep of downloadable session files through
 `daimon.core.output_delivery`. It posts each file into the conversation thread
 before deleting its MA listing entry. Failed posts stay listed for a later
 sweep. Discord uses the guild's upload limit, skips oversize files with an
-in-thread notice, and checks the channel's writers before posting.
+in-thread notice, and checks the channel's writers before posting. A file
+Daimon already attached in the thread after the turn's card (the agent sent it
+itself), with the same name and size, is cleared from the listing without a
+second post. Once the sweep ends, the answer's summary line moves onto the
+turn's last post if that is a plain message the bot posted after the answer,
+so it always closes the turn. A long answer carries it on its last chunk on
+both platforms.
 
 Reconnection is two loops for two failure modes. The outer loop handles
 eventless cycles — the server closes cleanly roughly every ten minutes by

@@ -9,6 +9,7 @@ from daimon.core.turn.status_lines import (
     format_draft,
     format_duration,
     format_headline,
+    format_summary,
     format_tool_lines,
     has_running_tool,
 )
@@ -32,6 +33,50 @@ def _call(
         input=input or {},
         mcp_server_name=server,
         status=status,
+    )
+
+
+def test_format_summary_is_the_old_one_line_footer() -> None:
+    line = format_summary(
+        agent_name="daimon",
+        elapsed_seconds=16.7,
+        tokens_in=22_500,
+        tokens_out=669,
+        cost="$0.017",
+        left="$43.08 left",
+    )
+    assert line == "daimon · 16s · 22.5k in / 669 out · $0.017 · $43.08 left"
+
+
+def test_format_summary_keeps_plain_seconds_past_a_minute() -> None:
+    line = format_summary(
+        agent_name="Ada", elapsed_seconds=194, tokens_in=0, tokens_out=0, cost=None, left=None
+    )
+    assert line == "Ada · 194s · 0 in / 0 out"
+
+
+def test_format_summary_drops_missing_fields_with_their_separator() -> None:
+    assert (
+        format_summary(
+            agent_name=None,
+            elapsed_seconds=5,
+            tokens_in=320,
+            tokens_out=12_000,
+            cost=None,
+            left=None,
+        )
+        == "5s · 320 in / 12k out"
+    )
+    assert (
+        format_summary(
+            agent_name="",
+            elapsed_seconds=5,
+            tokens_in=1500,
+            tokens_out=1,
+            cost=None,
+            left="$1.00 of channel budget left",
+        )
+        == "5s · 1.5k in / 1 out · $1.00 of channel budget left"
     )
 
 

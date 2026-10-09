@@ -17,7 +17,6 @@ from daimon.adapters.slack.blockkit import (
     EmbedEvent,
     State,
     TurnPhase,
-    _fmt_tokens,
     to_blocks,
     to_fallback_text,
     to_interrupted_blocks,
@@ -222,26 +221,25 @@ class TestToBlocks:
         blocks = to_blocks(state, now=12.0)
         context_blocks = _find_blocks_by_type(blocks, "context")
         assert context_blocks, "DONE state must produce a context block"
-        summary_text = context_blocks[-1]["elements"][0]["text"]
-        assert context_blocks[-2]["elements"][0]["text"] == "Atlas"
+        assert len(context_blocks) == 1, "one summary line, no separate name or Details block"
+        summary_text = context_blocks[0]["elements"][0]["text"]
+        assert summary_text == "Atlas · 12s · 1.5k in / 320 out · $0.04 · $12.50 left"
         customized = to_blocks(replace(state, header_customized=True), now=12.0)
-        assert "Atlas" not in str(customized[-2:])
-        assert summary_text == (
-            "*Details*\nTime: 12s\nCost: $0.04\nTokens: 1.5k in / 320 out\nBalance: $12.50 left"
-        )
+        assert (
+            customized[-1]["elements"][0]["text"] == "12s · 1.5k in / 320 out · $0.04 · $12.50 left"
+        ), "a customized header already names the agent"
 
-    def test_done_with_visible_answer_starts_with_details(self) -> None:
+    def test_done_with_visible_answer_is_one_summary_line(self) -> None:
         state = _make_state(phase=TurnPhase.DONE, agent_name="Atlas", started_at=0.0)
         blocks = to_blocks(state, now=12.0, answer_visible=True)
-        assert [block["type"] for block in blocks] == ["context", "context"]
-        assert blocks[0]["elements"][0]["text"] == "Atlas"
-        assert blocks[1]["elements"][0]["text"].startswith("*Details*\nTime: 12s")
+        assert [block["type"] for block in blocks] == ["context"]
+        assert blocks[0]["elements"][0]["text"] == "Atlas · 12s · 0 in / 0 out"
 
         customized = to_blocks(
             replace(state, header_customized=True), now=12.0, answer_visible=True
         )
         assert [block["type"] for block in customized] == ["context"]
-        assert customized[0]["elements"][0]["text"].startswith("*Details*\nTime: 12s")
+        assert customized[0]["elements"][0]["text"] == "12s · 0 in / 0 out"
 
     def test_error_state_summary_context_has_cross_emoji_and_reason(self) -> None:
         """ERROR state's summary context block carries the cross emoji + the reason."""
@@ -253,8 +251,7 @@ class TestToBlocks:
         context_blocks = _find_blocks_by_type(blocks, "context")
         assert context_blocks, "ERROR state must produce a context block"
         summary_text = context_blocks[-1]["elements"][0]["text"]
-        assert summary_text == "*Details*\nTime: 5s\nTokens: 0 in / 0 out"
-        assert context_blocks[-2]["elements"][0]["text"] == "Atlas"
+        assert summary_text == "Atlas · 5s · 0 in / 0 out"
         assert blocks[0]["text"]["text"] == "Something went wrong."
 
     def test_error_uses_notice_next_step_once(self) -> None:
@@ -280,8 +277,7 @@ class TestToBlocks:
         assert sections[1]["text"]["text"] == "Mention me to try again."
         assert "Model usage limit reached." in sections[2]["text"]["text"]
         assert "`rid: test`" in sections[2]["text"]["text"]
-        assert "Cost: $0.05" in blocks[-1]["elements"][0]["text"]
-        assert "Balance: $9.95" in blocks[-1]["elements"][0]["text"]
+        assert blocks[-1]["elements"][0]["text"].endswith(" · $0.05 · $9.95")
 
     def test_no_block_contains_color_key(self) -> None:
         """No block dict anywhere must contain a 'color' key."""
@@ -293,12 +289,6 @@ class TestToBlocks:
         blocks = to_blocks(state, now=5.0)
         for block in blocks:
             assert "color" not in block, f"block {block!r} must not contain a 'color' key"
-
-    def test_fmt_tokens_humanizes(self) -> None:
-        assert _fmt_tokens(320) == "320", "sub-1000 counts render verbatim"
-        assert _fmt_tokens(1500) == "1.5k", "1500 humanizes to 1.5k"
-        assert _fmt_tokens(0) == "0", "zero renders as 0"
-        assert _fmt_tokens(12000) == "12k", "whole-thousand strips trailing .0"
 
 
 # ---------------------------------------------------------------------------
