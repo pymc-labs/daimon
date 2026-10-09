@@ -6,6 +6,8 @@ from typing import cast
 
 import anthropic
 import structlog
+from daimon.adapters.discord.agent_setup.avatar import upload_agent_avatar
+from daimon.adapters.discord.agent_setup.github_new_repo import send_pending_notice
 from daimon.adapters.discord.agent_setup.hydrate import load_roster_state
 from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.checks import (
@@ -53,8 +55,17 @@ class AgentSetupCog(commands.Cog):
         name="agent-setup",
         description="See your agents, who answers where, and make changes",
     )
+    @app_commands.describe(
+        agent="Agent whose picture to change (fallback: use with avatar)",
+        avatar="Picture file, up to 2 MB (fallback: use with agent)",
+    )
     @require_registered_guild
-    async def agent_setup(self, interaction: BotInteraction) -> None:
+    async def agent_setup(
+        self,
+        interaction: BotInteraction,
+        agent: str | None = None,
+        avatar: discord.Attachment | None = None,
+    ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         rid = generate_request_id()
         try:
@@ -72,6 +83,25 @@ class AgentSetupCog(commands.Cog):
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
+            if agent is not None or avatar is not None:
+                if not agent or avatar is None:
+                    await interaction.edit_original_response(
+                        content="Choose an agent and picture file.",
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    return
+                message, _ = await upload_agent_avatar(
+                    interaction,
+                    runtime,
+                    tenant_id=tenant_id,
+                    agent_name=agent,
+                    attachment=avatar,
+                )
+                await interaction.edit_original_response(
+                    content=message,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
             state = await load_roster_state(
                 runtime, interaction, tenant_id=tenant_id, is_admin=is_admin
             )
@@ -83,5 +113,7 @@ class AgentSetupCog(commands.Cog):
                 ).bind_render_interaction(interaction, panel=state),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+            if is_admin:
+                await send_pending_notice(runtime, interaction, tenant_id=tenant_id)
         except (DaimonError, anthropic.APIError, discord.HTTPException) as exc:
             await interaction.followup.send(render_error(exc, request_id=rid), ephemeral=True)

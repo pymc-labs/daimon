@@ -51,6 +51,7 @@ from daimon.adapters.slack.agent_setup.state import (
 )
 from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.agent_identity import identity_enabled_for
 from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.constants import DEFAULT_AGENT_MODEL
@@ -374,6 +375,11 @@ async def run_new_agent_submission(
                     attribution=attributions.get(details.created_by_account_id)
                     if details.created_by_account_id
                     else None,
+                    avatar_editable=(
+                        identity_enabled_for(runtime.settings, "slack", meta.team_id)
+                        and not details.daimon_managed
+                        and details.name != runtime.deployment_default.agent_name
+                    ),
                 ),
             )
 

@@ -63,7 +63,10 @@ jobs:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SA }}
 
+      # The runner image ships gcloud; installing another copy cost ~20s.
       - uses: google-github-actions/setup-gcloud@v2
+        with:
+          skip_install: true
 
       - name: Assert soaked image exists for this SHA
         env:

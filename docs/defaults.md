@@ -51,8 +51,9 @@ An environment is a named cloud config — a package manifest and a networking
 policy — and nothing else. It is not an image, not a set of env vars and not a
 tool list. `defaults/environments/default.yaml` is the whole shape: a `config`
 block whose `packages` names `pip`, `apt`, `npm` and friends.
+The default environment installs the `gh` CLI as an apt package.
 
-There is one daimon-specific behaviour authors need to know.
+There is one Daimon-specific behaviour authors need to know.
 `EnvironmentSpec` fills in every package ecosystem with an explicit empty list
 whenever `config` is present. Upstream's environment update merges per field,
 so an absent `packages` key would preserve whatever is already there and
@@ -65,7 +66,7 @@ remove it.
 A skill is a directory: `SKILL.md` with YAML frontmatter, plus whatever
 `references/`, `scripts/` or data files it needs. Only `name` and
 `description` are required in the frontmatter and only those two are
-interpreted; other keys are preserved but mean nothing to daimon.
+interpreted; other keys are preserved but mean nothing to Daimon.
 
 `packages/core/daimon/core/skill_zip.py` packages the directory. It rewrites
 every path under a top-level directory matching the skill name (the provider
@@ -154,7 +155,7 @@ as a deploy gate.
 The provider offers nothing to compare skill content against: skills carry no
 metadata, the version counter is opaque, no endpoint returns a version's
 bytes, and the folder name is pinned to the manifest name so it cannot carry a
-digest either. daimon therefore keeps its own record, in the `seeded_skills`
+digest either. Daimon therefore keeps its own record, in the `seeded_skills`
 table — `(tenant, skill name) → content hash, provider skill id`.
 
 The hash is not a hash of the zip file. A zip carries real timestamps, so two
@@ -181,7 +182,7 @@ What that means in practice when you edit a seeded skill:
 - **Someone changes a seeded skill outside `defaults/`.** Chat tools refuse
   to: a library import under a seeded name fails, and `delete_skill` refuses a
   seeded skill. An edit made straight on the provider still survives apply,
-  because the fingerprint still matches. daimon never reads the live content
+  because the fingerprint still matches. Daimon never reads the live content
   back, so it genuinely cannot tell that install apart from an untouched one,
   and `verify` calls it in sync.
 - **No fingerprint row, but the skill exists.** A new version is pushed
@@ -198,7 +199,7 @@ tools. The CLI's `--defaults-root` flag is separate and defaults to the same
 relative path.
 
 One indirect setting changes what gets seeded rather than from where:
-`DAIMON_MCP__PUBLIC_URL` is what merges daimon's own MCP server and its
+`DAIMON_MCP__PUBLIC_URL` is what merges Daimon's own MCP server and its
 toolset into each seeded agent, so an apply run without it produces agents
 that differ from a deployed one. Both are in
 [configuration.md](configuration.md).

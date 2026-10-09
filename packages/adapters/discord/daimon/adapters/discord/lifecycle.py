@@ -39,6 +39,7 @@ from daimon.adapters.discord.embed import (
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
+from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.ops_alerts import alert_ops
@@ -61,7 +62,7 @@ import discord
 log = structlog.get_logger()
 
 SendFn = Callable[..., Awaitable[discord.Message]]
-EditFn = Callable[..., Awaitable[None]]
+EditFn = Callable[..., Awaitable[discord.Message | None]]
 DeleteFn = Callable[[discord.Message], Awaitable[None]]
 
 _DEBOUNCE_S = 10.0
@@ -105,7 +106,19 @@ def build_discord_embed(data: EmbedData) -> discord.Embed:
     )
     if data.footer is not None:
         embed.set_footer(text=data.footer)
+    if data.notice is not None:
+        embed.add_field(name="Notice", value=data.notice[:1024], inline=False)
+    if data.details is not None:
+        embed.add_field(name="Details", value=data.details, inline=False)
     return embed
+
+
+def _split_with_name_prefix(text: str, agent_name: str) -> list[str]:
+    """Keep the fallback sender label attached to the first answer chunk."""
+    prefix = fallback_name_prefix(agent_name, "")
+    chunks = split_for_discord_safe(text, limit=1900 - len(prefix))
+    chunks[0] = prefix + chunks[0]
+    return chunks
 
 
 class DiscordTurnLifecycle:
@@ -131,6 +144,7 @@ class DiscordTurnLifecycle:
         send: SendFn,
         edit: EditFn,
         agent_name: str,
+        fallback_active: Callable[[], bool] | None = None,
         model_id: str,
         cancel_view: discord.ui.View | None = None,
         requester_id: int | None = None,
@@ -142,6 +156,7 @@ class DiscordTurnLifecycle:
         delete: DeleteFn | None = None,
         unprompted: bool = False,
         on_first_post: Callable[[discord.Message], Awaitable[None]] | None = None,
+        on_replacement: Callable[[discord.Message], Awaitable[None]] | None = None,
         request_id: Callable[[], str] = bound_request_id,
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         tenant_id: uuid.UUID | None = None,
@@ -166,6 +181,8 @@ class DiscordTurnLifecycle:
         # the push notification.
         self._unprompted = unprompted
         self._agent_name = agent_name
+        self._fallback_active = fallback_active
+        self._name_prefix_sent = False
         self._model_id = model_id
         self._clock = clock
         self._state = EmbedState(
@@ -182,10 +199,12 @@ class DiscordTurnLifecycle:
         # into the real answer, so a recovered turn looks like a normal one.
         self._message_ref: discord.Message | None = adopt_message_ref
         self._card_message_ref: discord.Message | None = adopt_message_ref
+        self._card_discard_failed = False
         self._last_flush: float = 0.0
         self._terminal: bool = False
         self._cancel_view = cancel_view
         self._on_first_post = on_first_post
+        self._on_replacement = on_replacement
         self._first_post_attempted: bool = False
         self._persisted_sealed_indices: set[int] = set()
         self._was_answered: bool = False
@@ -258,6 +277,18 @@ class DiscordTurnLifecycle:
             kwargs["silent"] = True
         return await self._send(**kwargs)
 
+    async def _edit_message(
+        self,
+        message: discord.Message | None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> None:
+        assert message is not None
+        replacement = await self._edit(message, **kwargs)
+        if isinstance(replacement, discord.Message) and replacement.id != message.id:
+            self._message_ref = replacement
+            if self._on_replacement is not None:
+                await self._on_replacement(replacement)
+
     def _build_embeds(self, now: float) -> list[discord.Embed]:
         """Render the one status embed: headline, tool lines and the latest draft."""
         return [build_discord_embed(to_embed_data(self._state, now=now))]
@@ -288,7 +319,7 @@ class DiscordTurnLifecycle:
             self._on_first_post = None
         elif now - self._last_flush >= _DEBOUNCE_S:
             # Debounce elapsed — edit
-            await self._edit(
+            await self._edit_message(
                 self._message_ref, embeds=self._build_embeds(now), view=self._cancel_view
             )
             self._last_flush = now
@@ -300,10 +331,10 @@ class DiscordTurnLifecycle:
 
         Reconstructs a per-turn ``BetaManagedAgentsSpanModelUsage`` from the four
         cache-split totals and prices it through the same ``cost_of`` the billing
-        ledger uses, so the footer cost matches the ledger to the cent. The
+        ledger uses, so the Details cost matches the ledger to the cent. The
         displayed input count stays merged (input + cache_creation + cache_read);
         only the cost math is stage-split, inside ``cost_of``. An unpriced model
-        yields ``cost_of`` -> None -> ``cost_str`` None -> footer omits the cost.
+        yields ``cost_of`` -> None -> ``cost_str`` None -> Details omits the cost.
         """
         t = state.usage_totals
         usage = BetaManagedAgentsSpanModelUsage(
@@ -347,7 +378,7 @@ class DiscordTurnLifecycle:
             self._message_ref = await self._send_message(embeds=[embed], view=None)
             self._card_message_ref = self._message_ref
         else:
-            await self._edit(self._message_ref, embeds=[embed], view=None)
+            await self._edit_message(self._message_ref, embeds=[embed], view=None)
 
     async def _persist_sealed_responses(self, state: TurnState) -> None:
         """Post sealed answers (text blocks a later tool call made immutable)
@@ -360,7 +391,19 @@ class DiscordTurnLifecycle:
             if index in self._persisted_sealed_indices:
                 continue
             self._persisted_sealed_indices.add(index)
-            for chunk in split_for_discord_safe(text):
+            use_name_prefix = (
+                self._fallback_active is not None
+                and self._fallback_active()
+                and not self._name_prefix_sent
+            )
+            if use_name_prefix:
+                self._name_prefix_sent = True
+            chunks = (
+                _split_with_name_prefix(text, self._agent_name)
+                if use_name_prefix
+                else split_for_discord_safe(text)
+            )
+            for chunk in chunks:
                 await self._send_message(
                     content=chunk, allowed_mentions=discord.AllowedMentions.none()
                 )
@@ -385,18 +428,27 @@ class DiscordTurnLifecycle:
         cancelled = state.termination == TerminationReason.INTERRUPTED
         if cancelled:
             if not response_text:
-                await self._edit(
-                    self._message_ref, content="Turn cancelled.", embed=None, view=None
+                await self._edit_message(
+                    self._message_ref,
+                    content="Stopped.\nSend a message to start again.",
+                    embed=None,
+                    view=None,
                 )
                 log.info("turn.terminal_success", has_text=False, cancelled=True)
                 return
-            response_text = f"{response_text}\n\nTurn cancelled."
+            response_text = f"{response_text}\n\nStopped.\nSend a message to start again."
         if not response_text:
             # If tools ran but no final text, leave done embed visible.
             # If content is entirely empty, show "Turn cancelled."
             has_tool_activity = any(isinstance(block, ToolUseBlock) for block in state.content)
             if has_tool_activity:
                 self._was_answered = True
+                done_data = dataclasses.replace(
+                    to_embed_data(self._state, now=self._clock()), description="Done."
+                )
+                await self._edit_message(
+                    self._message_ref, embed=build_discord_embed(done_data), view=None
+                )
                 # #79: a tool-only turn has no reply to hang the notice under,
                 # so a dropped server is named on its own line.
                 tool_only_notice = render_degraded_notice(state.mcp_failures)
@@ -406,7 +458,12 @@ class DiscordTurnLifecycle:
                     )
                 log.info("turn.terminal_success", has_text=False, tool_only=True)
                 return
-            await self._edit(self._message_ref, content="Turn cancelled.", embed=None, view=None)
+            await self._edit_message(
+                self._message_ref,
+                content="Stopped.\nSend a message to start again.",
+                embed=None,
+                view=None,
+            )
             log.info("turn.terminal_success", has_text=False)
             return
 
@@ -419,6 +476,13 @@ class DiscordTurnLifecycle:
         degraded_notice = render_degraded_notice(state.mcp_failures)
         if degraded_notice is not None:
             response_text = f"{response_text}\n\n{degraded_notice}"
+        use_name_prefix = (
+            self._fallback_active is not None
+            and self._fallback_active()
+            and not self._name_prefix_sent
+        )
+        if use_name_prefix:
+            self._name_prefix_sent = True
         notify = (
             self._notify_on_completion
             and self._requester_id is not None
@@ -439,7 +503,11 @@ class DiscordTurnLifecycle:
         response_text, table_files = await render_discord_tables(
             response_text, enabled=self._render_tables
         )
-        chunks = split_for_discord_safe(response_text)
+        chunks = (
+            _split_with_name_prefix(response_text, self._agent_name)
+            if use_name_prefix
+            else split_for_discord_safe(response_text)
+        )
 
         async def deliver_first(content: str, files: list[discord.File]) -> None:
             if notify:
@@ -449,7 +517,7 @@ class DiscordTurnLifecycle:
                     **({"files": files} if files else {}),
                 )
             else:
-                await self._edit(
+                await self._edit_message(
                     self._message_ref,
                     content=content,
                     view=None,
@@ -463,7 +531,11 @@ class DiscordTurnLifecycle:
             if not table_files:
                 raise
             log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
-            chunks = split_for_discord_safe(original_response_text)
+            chunks = (
+                _split_with_name_prefix(original_response_text, self._agent_name)
+                if use_name_prefix
+                else split_for_discord_safe(original_response_text)
+            )
             await deliver_first(chunks[0], [])
         self._revealed_first_chunk = chunks[0]
         # Overflow: subsequent chunks posted as new messages
@@ -488,10 +560,19 @@ class DiscordTurnLifecycle:
         """
         if self._revealed_first_chunk is None or self._message_ref is None:
             return False
-        updated = f"{notice}\n\n{self._revealed_first_chunk}"
+        first_chunk = self._revealed_first_chunk
+        prefix = fallback_name_prefix(self._agent_name, "")
+        if (
+            self._fallback_active is not None
+            and self._fallback_active()
+            and first_chunk.startswith(prefix)
+        ):
+            updated = f"{prefix}{notice}\n\n{first_chunk[len(prefix) :]}"
+        else:
+            updated = f"{notice}\n\n{first_chunk}"
         if len(split_for_discord_safe(updated)) > 1:
             return False
-        await self._edit(
+        await self._edit_message(
             self._message_ref,
             content=updated,
             view=None,
@@ -563,9 +644,16 @@ class DiscordTurnLifecycle:
             return
         try:
             await self._delete(self._message_ref)
-        except discord.HTTPException:
-            # Already gone, or no permission: a stale embed beats failing a
-            # turn that otherwise ended cleanly.
+        except discord.NotFound as err:
+            # 10008 means the message is gone. 10015 means the webhook is gone,
+            # while its message and pending button may still be visible.
+            if err.code != 10008:
+                self._card_discard_failed = True
+                log.info("turn.embed_discard_failed", exc_info=True)
+        except (discord.HTTPException, discord.ClientException):
+            # Keep the durable intent so a later recovery pass can resolve a
+            # card whose pending button may still be visible.
+            self._card_discard_failed = True
             log.info("turn.embed_discard_failed", exc_info=True)
         self._message_ref = None
 
@@ -582,6 +670,11 @@ class DiscordTurnLifecycle:
     def card_message_id(self) -> str | None:
         """Original status card ID, used to retire its durable intent."""
         return str(self._card_message_ref.id) if self._card_message_ref is not None else None
+
+    @property
+    def card_discard_failed(self) -> bool:
+        """Whether deleting an unprompted turn's pending card failed."""
+        return self._card_discard_failed
 
     @property
     def final_message_id(self) -> str | None:

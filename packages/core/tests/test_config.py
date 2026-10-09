@@ -11,6 +11,7 @@ from daimon.core.config import (
     AnthropicSettings,
     ArtifactsSettings,
     DatabaseSettings,
+    DiscordSettings,
     HubSettings,
     McpSettings,
     Settings,
@@ -19,6 +20,54 @@ from daimon.core.config import (
     load_settings,
 )
 from pydantic import HttpUrl, PostgresDsn, SecretStr, ValidationError
+
+
+def test_discord_stale_card_age_exceeds_turn_ceiling_and_attempts_are_bounded() -> None:
+    from daimon.core.turn.ceiling import TURN_CEILING_S
+
+    defaults = DiscordSettings(bot_token=SecretStr("test"))
+    assert defaults.turn_card_unrecoverable_after_s == 86400
+    assert defaults.turn_card_unrecoverable_after_attempts == 3
+    with pytest.raises(ValidationError):
+        DiscordSettings(
+            bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=int(TURN_CEILING_S) + 899
+        )
+    with pytest.raises(ValidationError):
+        DiscordSettings(bot_token=SecretStr("test"), turn_card_unrecoverable_after_attempts=1)
+    assert (
+        DiscordSettings(
+            bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=int(TURN_CEILING_S) + 900
+        ).turn_card_unrecoverable_after_s
+        == int(TURN_CEILING_S) + 900
+    )
+
+
+def test_agent_identity_switch_is_off_by_default_and_reads_nested_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_AGENT_IDENTITY__ENABLED", raising=False)
+    assert not load_settings(_env_file=None).agent_identity.enabled
+    monkeypatch.setenv("DAIMON_AGENT_IDENTITY__ENABLED", "true")
+    assert load_settings(_env_file=None).agent_identity.enabled
+
+
+def test_agent_identity_workspace_exclusions_read_json_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS", raising=False)
+    monkeypatch.delenv("DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS", raising=False)
+    default = load_settings(_env_file=None).agent_identity
+    assert default.excluded_discord_guild_ids == []
+    assert default.excluded_slack_team_ids == []
+    monkeypatch.setenv("DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS", '[123, " 456 "]')
+    monkeypatch.setenv("DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS", '[" T123 "]')
+    configured = load_settings(_env_file=None).agent_identity
+    assert configured.excluded_discord_guild_ids == ["123", "456"]
+    assert configured.excluded_slack_team_ids == ["T123"]
 
 
 def test_load_settings_parses_nested_delimiter_when_env_provided(
@@ -891,3 +940,25 @@ def test_slack_settings_history_page_limit_rejects_above_slack_maximum() -> None
 
     with pytest.raises(ValidationError):
         SlackSettings(signing_secret="s" * 32, app_token="xapp-test", history_page_limit=1001)
+
+
+def test_feedback_to_support_is_off_by_default_and_reads_a_per_tenant_map(monkeypatch):
+    import uuid
+
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    on = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
+    off = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000002")
+    assert load_settings(_env_file=None).support.routes_feedback(on) is False
+    monkeypatch.setenv(
+        "DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT",
+        '{"AAAAAAAA-0000-0000-0000-000000000001": true, '
+        '"aaaaaaaa-0000-0000-0000-000000000002": false}',
+    )
+    support = load_settings(_env_file=None).support
+    assert support.routes_feedback(on) is True
+    assert support.routes_feedback(off) is False
+    assert support.routes_feedback(uuid.uuid4()) is False
+    monkeypatch.setenv("DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT", '{"typo": true}')
+    with pytest.raises(ValidationError):
+        load_settings(_env_file=None)

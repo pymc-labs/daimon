@@ -12,12 +12,11 @@ send.
 `tool_calls_for` turns the blocked ids into `ToolCall`s from the folded
 state, and `build_decision_events` sends each call's own allow/deny.
 
-The two decider builders are the policy shells over
+The decider builders are the policy shells over
 `daimon.core.tool_safety.decide_tool_call`. `unattended_decider` never waits
 on anyone; `interactive_decider` hands `ask` verdicts to the adapter's
 `ConfirmationHook`. Neither does I/O of its own — the hook is the only thing
-that talks to a platform, and a hook that raises counts as a refusal.
-"""
+that talks to a platform, and a hook that raises counts as a refusal."""
 
 from __future__ import annotations
 
@@ -28,6 +27,7 @@ import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsUserToolConfirmationEventParams
 from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event import StopReason
 from daimon.core.confirmation import (
+    ApprovedConfirmation,
     ConfirmationHook,
     no_confirmation_surface,
     prompt_for_tool_call,
@@ -247,15 +247,21 @@ def interactive_decider(
             call, requester_platform_user_id=requester_platform_user_id, now=now()
         )
         try:
-            answer = await confirm(prompt)
+            response = await confirm(prompt)
         except Exception as err:
             # Named boundary: the hook is adapter code talking to a chat API;
             # whatever it raises, the write must not run.
             log.warning("tool_safety.confirm_failed", tool=call.key, error=str(err))
-            answer = "denied"
+            response = "denied"
+        answer = response.answer if isinstance(response, ApprovedConfirmation) else response
         log.info("tool_safety.answered", tool=call.key, answer=answer)
         if answer == "approved":
-            return ToolConfirmationResult(allow=True)
+            return ToolConfirmationResult(
+                allow=True,
+                retire_unsent=response.retire_unsent
+                if isinstance(response, ApprovedConfirmation)
+                else None,
+            )
         return ToolConfirmationResult(allow=False, deny_message=_answer_message(call, answer))
 
     return _decide
@@ -311,6 +317,8 @@ def _publish_only(decide: ToolCallDecider, *, trusted_servers: frozenset[str]) -
     refused, as `RequireApproval` would have ended the turn before it ran."""
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
+        if _is_unseen(call):
+            return _unseen_refusal(call)
         if is_publish_call(call, trusted_servers):
             return await decide(call)
         return ToolConfirmationResult(

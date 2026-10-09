@@ -18,7 +18,7 @@ from daimon.core.channel_tidy import (
 from daimon.core.stores.agent_posts import get_post, list_posts_in, mark_deleted, record_post
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_tenant
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def _actor(tenant_id: uuid.UUID, agent_id: uuid.UUID, turn: str) -> TidyActor:
@@ -203,3 +203,142 @@ async def test_account_erasure_clears_tidy_hmacs_and_prune_removes_old_posts(
         db_session, tenant_id=tenant.id, older_than=datetime.now(UTC) + timedelta(seconds=1)
     )
     assert removed == 1, "post records expire with the audit retention"
+
+
+async def test_a_turn_post_names_its_agent_requester_and_turn_and_settles_with_it(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.channel_tidy import record_turn_post
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.turn_card_intents import (
+        create_turn_card_intent,
+        record_turn_card_message,
+        retire_turn_card_intent,
+        turn_card_intent_is_active,
+    )
+
+    async with db_session_factory.begin() as s:
+        tenant = await make_tenant(s)
+        intent = await create_turn_card_intent(
+            s, tenant_id=tenant.id, platform="discord", thread_id="444", turn_token=uuid.uuid4()
+        )
+        await record_turn_card_message(s, id=intent.id, message_id="1000")
+    await record_turn_post(
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="discord",
+        ma_agent_id="ag_x",
+        channel_id="444",
+        message_id="1000",
+        requester_platform_user_id="42",
+        source="turn",
+        turn_card_intent_id=intent.id,
+        parent_channel_id="222",
+    )
+    await record_turn_post(
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="discord",
+        ma_agent_id="ag_x",
+        channel_id="222",
+        message_id="444",
+        requester_platform_user_id="42",
+        source="auto_thread",
+    )
+    async with db_session_factory() as s:
+        card = await get_post(
+            s, tenant_id=tenant.id, platform="discord", channel_id="444", message_id="1000"
+        )
+        thread = await get_post(
+            s, tenant_id=tenant.id, platform="discord", channel_id="222", message_id="444"
+        )
+        assert card is not None and thread is not None, "both are recorded"
+        agent = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_x")
+        assert (card.agent_id, card.source, card.kind, card.turn_card_intent_id) == (
+            agent,
+            "turn",
+            "message",
+            intent.id,
+        ), "a card names the turn's agent and the turn"
+        assert (thread.source, thread.kind, thread.requester_platform_user_id) == (
+            "auto_thread",
+            "thread",
+            "42",
+        ), "an auto-opened thread names who opened it"
+        assert await turn_card_intent_is_active(s, id=intent.id), "the turn is still running"
+    async with db_session_factory.begin() as s:
+        await retire_turn_card_intent(s, id=intent.id, expected_message_id="1000")
+    async with db_session_factory() as s:
+        assert not await turn_card_intent_is_active(s, id=intent.id), "a retired turn is over"
+        assert not await turn_card_intent_is_active(s, id=uuid.uuid4()), "a pruned turn is over"
+
+
+async def test_a_turn_post_that_cannot_be_recorded_does_not_fail_the_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.channel_tidy import record_turn_post
+
+    # No such tenant: the insert fails its foreign key and is logged, not raised.
+    await record_turn_post(
+        db_session_factory,
+        tenant_id=uuid.uuid4(),
+        platform="discord",
+        ma_agent_id="ag_x",
+        channel_id="444",
+        message_id="1000",
+        requester_platform_user_id="42",
+        source="turn",
+        turn_card_intent_id=uuid.uuid4(),
+    )
+
+
+async def test_slack_turn_post_records_channel_and_thread_root(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.channel_tidy import record_turn_post
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    intent_id = uuid.uuid4()
+    await record_turn_post(
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="slack",
+        ma_agent_id="ag_ada",
+        channel_id="C123",
+        message_id="1700000001.000001",
+        thread_ts="1700000000.000000",
+        requester_platform_user_id="U123",
+        source="turn",
+        turn_card_intent_id=intent_id,
+    )
+    async with db_session_factory() as session:
+        post = await get_post(
+            session,
+            tenant_id=tenant.id,
+            platform="slack",
+            channel_id="C123",
+            message_id="1700000001.000001",
+        )
+    assert post is not None
+    assert post.thread_ts == "1700000000.000000"
+    assert post.parent_channel_id is None
+    assert post.turn_card_intent_id == intent_id
+
+
+async def test_a_turn_post_must_name_its_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.channel_tidy import record_turn_post
+
+    with pytest.raises(ValueError, match="must name its turn"):
+        await record_turn_post(
+            db_session_factory,
+            tenant_id=uuid.uuid4(),
+            platform="discord",
+            ma_agent_id="ag_x",
+            channel_id="444",
+            message_id="1000",
+            requester_platform_user_id="42",
+            source="turn",
+        )

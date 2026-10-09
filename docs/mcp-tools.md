@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 115 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 118 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -154,7 +154,7 @@ Shared channel MCP tools with per-platform dispatch.
 | `search_messages` | Discord callers, Slack callers, Teams callers | Search messages with server-side filters. |
 | `send_direct_message` | Discord callers, Slack callers, Teams callers | Privately message one human member of the current server/workspace. |
 | `send_message` | Discord callers, Slack callers, Teams callers | Post a message to a channel. |
-| `set_display_identity` | Discord callers | Change how daimon appears in this Discord server: its display name, its avatar, or both. |
+| `set_display_identity` | Discord callers | Change how Daimon appears in this Discord server: its display name, its avatar, or both. |
 
 ## `cli_token`
 
@@ -176,6 +176,14 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 | `request_repo_binding` | Discord callers, Slack callers, Teams callers | Let an agent read a GitHub working repo or repository, public or private. |
 | `request_skill_repo_token` | Discord callers, Slack callers, Teams callers | The skills repo is private: collect a GitHub token to import its skills. |
 
+## `enable_files`
+
+`enable_channel_files`: the agent asks for the Teams Enable files card.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `enable_channel_files` | Teams callers | Post the Enable files card in this Teams channel, right after your reply. |
+
 ## `environments`
 
 Environment tools: list / get / create / update / archive.
@@ -196,13 +204,29 @@ GitHub App install-link tool: post_github_app_install_link.
 | --- | --- | --- |
 | `post_github_app_install_link` | Discord callers, Slack callers, Teams callers | Install the GitHub App: post a link inviting the user to grant repository access. |
 
-## `here`
+## `github_connect`
 
-Current-place status tool, sharing the slash commands' fixed card.
+Private, agent-bound GitHub setup from an active conversation.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `where_am_i` | all callers | Return the fixed /here card with structured facts and rendered text. |
+| `github_connect` | Discord callers, Slack callers | Connect this agent to GitHub when someone asks to set up GitHub. |
+
+## `github_requests`
+
+Turn-bound GitHub access requests and private admin delivery.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `request_github_access` | Discord callers, Slack callers, Teams callers | Ask for GitHub access needed to finish this person's current request. |
+
+## `here`
+
+Current-place status tool with short text and complete structured facts.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `where_am_i` | all callers | Return short /here text and full structured facts. |
 
 ## `media`
 
@@ -221,7 +245,7 @@ Notebook MCP tools.
 | --- | --- | --- |
 | `create_attachment_upload_url` | all callers | Mint a one-time upload URL for a raw data file in a notebook/blog workspace. |
 | `create_notebook_upload_url` | all callers | Mint a one-time upload URL for a marimo notebook. |
-| `delete_notebook` | all callers | Un-publish a notebook or blog you published (frees its host port). |
+| `delete_notebook` | all callers | Un-publish a notebook or blog you published (deletes it from the host). |
 | `list_notebooks` | all callers | List what you've published — scratch notebooks and permanent blogs alike. |
 
 ## `promo_codes`
@@ -365,10 +389,10 @@ Channel tidy tools: edit_message, delete_message, archive_thread, delete_thread.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `archive_thread` | Discord callers | Archive a Discord thread you opened with create_thread. |
-| `delete_message` | Discord callers, Slack callers | Delete one message you posted with send_message or create_thread. |
-| `delete_thread` | Discord callers, Slack callers | Remove your own messages from a thread you opened with create_thread. |
-| `edit_message` | Discord callers, Slack callers | Replace the text of a message you posted with send_message or create_thread. |
+| `archive_thread` | Discord callers | Archive a Discord thread you opened, with create_thread or from a mention. |
+| `delete_message` | Discord callers, Slack callers, Teams callers | Delete one message you posted, or on Discord one of your replies or status cards. |
+| `delete_thread` | Discord callers, Slack callers | Remove your own messages from a thread you opened. |
+| `edit_message` | Discord callers, Slack callers, Teams callers | Replace the text of a message you posted. |
 
 ## `time`
 
@@ -407,7 +431,7 @@ post_wizard: the agent-facing tool that posts a multi-step form.
 
 ## Hub login mounts: `hub`
 
-Tool surface for the hub mounts: every daimon a logged-in person can reach.
+Tool surface for the hub mounts: every Daimon a logged-in person can reach.
 
 A second surface, separate from the tools above: one app per platform, mounted at
 `/discord/mcp` and `/slack/mcp` behind that platform's OAuth login, and present only
@@ -417,11 +441,11 @@ visibility tags, so a logged-in caller sees all of them; each takes a `daimon_id
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `ask` | all callers | Ask a daimon one question and wait up to about two minutes for its answer. |
+| `ask` | all callers | Ask a Daimon one question and wait up to about two minutes for its answer. |
 | `continue_turn` | all callers | Send a follow-up on an existing session without waiting. |
-| `describe_daimon` | all callers | Describe one daimon: role, skills, repo, environment, platform and workspace. |
+| `describe_daimon` | all callers | Describe one Daimon: role, skills, repo, environment, platform and workspace. |
 | `get_session` | all callers | Status of one session. |
-| `list_daimons` | all callers | List every daimon you can reach on this platform, across all your workspaces. |
+| `list_daimons` | all callers | List every Daimon you can reach on this platform, across all your workspaces. |
 | `list_events` | all callers | A session's transcript. |
-| `list_my_sessions` | all callers | Sessions you started with this daimon, for resuming with ``handle``. |
+| `list_my_sessions` | all callers | Sessions you started with this Daimon, for resuming with ``handle``. |
 | `start_turn` | all callers | Start a turn without waiting. |

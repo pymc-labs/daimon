@@ -17,6 +17,8 @@ import discord
 import jwt as pyjwt
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.adapters.discord.agent_setup import details_view as details_view_mod
+from daimon.adapters.discord.agent_setup import hydrate as hydrate_mod
 from daimon.adapters.discord.agent_setup import mcp_access as mcp_access_mod
 from daimon.adapters.discord.agent_setup.budget import (
     LAYOUT_COMPONENT_BUDGET,
@@ -26,7 +28,9 @@ from daimon.adapters.discord.agent_setup.details_view import (
     SHOW_FEWER_LABEL,
     SHOW_MORE_LABEL,
     DetailsView,
+    PictureUploadModal,
     build_details_container,
+    picture_details_embed,
 )
 from daimon.adapters.discord.agent_setup.mcp_access import coding_tools_refusal
 from daimon.adapters.discord.agent_setup.state import PanelState
@@ -46,6 +50,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import AnsweringPlace, DeploymentDefault
 from daimon.core.setup_conversations import setup_target_label, shared_keys_sentence
+from daimon.core.stores.agent_avatars import AvatarRow
 from daimon.core.stores.domain import AccountRow, TenantRow
 from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
 from daimon.testing import ma_agent
@@ -133,8 +138,11 @@ def _state(
 def _make_runtime(
     sessionmaker: Any = None, *, settings: Any = None, anthropic: AsyncAnthropic | None = None
 ) -> DiscordRuntime:
+    if settings is None:
+        settings = MagicMock()
+        settings.agent_identity.enabled = True
     return DiscordRuntime(
-        settings=settings if settings is not None else MagicMock(),
+        settings=settings,
         anthropic=anthropic if anthropic is not None else build_stub_anthropic(),
         sessionmaker=sessionmaker if sessionmaker is not None else MagicMock(),
         notebook_rate_limiter=RateLimiter(max_requests=999),
@@ -147,6 +155,7 @@ def _make_runtime(
 
 def _mcp_settings() -> MagicMock:
     settings = MagicMock()
+    settings.agent_identity.enabled = True
     settings.mcp.public_url = _PUBLIC_URL
     secret = MagicMock()
     secret.get_secret_value.return_value = _JWT_SECRET
@@ -199,6 +208,285 @@ def _find_button(view: discord.ui.LayoutView, label: str) -> discord.ui.Button[A
         if isinstance(item, discord.ui.Button) and item.label == label:
             return item
     raise AssertionError(f"No button labeled {label!r}")
+
+
+def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID) -> None:
+    details = _details()
+    state = _state(details, account_id=account_id, is_admin=True)
+    state.avatar_urls[details.name] = "https://mcp.example.com/avatars/token/abcdef123456.png"
+    container = build_details_container(
+        state, details, expanded_detail=None, is_admin=True, attribution=None, identity_enabled=True
+    )
+    assert any(isinstance(item, discord.ui.Thumbnail) for item in _walk(container))
+    assert "Shown next to this agent's messages." in _container_text(container)
+    assert {item.label for item in _walk(container) if isinstance(item, discord.ui.Button)} >= {
+        "Change",
+        "Use default",
+        "Details",
+    }
+
+    member = build_details_container(
+        state,
+        details,
+        expanded_detail=None,
+        is_admin=False,
+        attribution=None,
+        identity_enabled=True,
+    )
+    assert not any(
+        isinstance(item, discord.ui.Button) and item.label in {"Change", "Use default", "Details"}
+        for item in _walk(member)
+    )
+    built_in = build_details_container(
+        state,
+        details,
+        expanded_detail=None,
+        is_admin=True,
+        attribution=None,
+        is_builtin=True,
+        identity_enabled=True,
+    )
+    assert "**Picture**" not in _container_text(built_in)
+
+    disabled = build_details_container(
+        state,
+        details,
+        expanded_detail=None,
+        is_admin=True,
+        attribution=None,
+        identity_enabled=False,
+    )
+    assert "**Picture**" not in _container_text(disabled)
+    assert not any(isinstance(item, discord.ui.Thumbnail) for item in _walk(disabled))
+    assert not any(
+        isinstance(item, discord.ui.Button) and item.label in {"Change", "Use default", "Details"}
+        for item in _walk(disabled)
+    )
+
+
+async def test_picture_upload_refreshes_live_panel_without_expiring_it(
+    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    details = _details()
+    state = _state(details, account_id=account_id)
+    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
+    panel_interaction = _admin_interaction()
+    view.bind_render_interaction(panel_interaction, panel=state)
+    modal = PictureUploadModal(view)
+    attachment = MagicMock(spec=discord.Attachment)
+    modal.file_input._values = [attachment]
+    avatar = AvatarRow(token="new-token", sha256="abcdef123456more", png=b"", source="upload")
+    monkeypatch.setattr(
+        details_view_mod,
+        "upload_agent_avatar",
+        AsyncMock(return_value=("Picture changed.", avatar)),
+    )
+    interaction = _admin_interaction()
+
+    await modal.on_submit(interaction)
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    panel_interaction.edit_original_response.assert_awaited_once()
+    refreshed = panel_interaction.edit_original_response.await_args.kwargs["view"]
+    assert isinstance(refreshed, DetailsView)
+    assert any(isinstance(item, discord.ui.Thumbnail) for item in _walk(refreshed))
+    await view.on_timeout()
+    assert panel_interaction.edit_original_response.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "panel_error",
+    [
+        discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Webhook"),
+        discord.HTTPException(
+            MagicMock(status=401, reason="Unauthorized"),
+            {"code": 50027, "message": "Invalid Webhook Token"},
+        ),
+    ],
+)
+async def test_picture_upload_ignores_missing_live_panel(
+    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch, panel_error: discord.HTTPException
+) -> None:
+    details = _details()
+    state = _state(details, account_id=account_id)
+    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
+    panel_interaction = _admin_interaction()
+    panel_interaction.edit_original_response.side_effect = panel_error
+    view.bind_render_interaction(panel_interaction, panel=state)
+    modal = PictureUploadModal(view)
+    modal.file_input._values = [MagicMock(spec=discord.Attachment)]
+    avatar = AvatarRow(token="new-token", sha256="abcdef123456more", png=b"", source="upload")
+    monkeypatch.setattr(
+        details_view_mod,
+        "upload_agent_avatar",
+        AsyncMock(return_value=("Picture changed.", avatar)),
+    )
+
+    await modal.on_submit(_admin_interaction())
+
+    panel_interaction.edit_original_response.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("message", "retry"),
+    [
+        ("Agent pictures are turned off.", False),
+        ("Only admins can change this agent's picture. Ask an admin to change it.", False),
+        ("This agent is no longer available.", False),
+        ("We couldn't read that file. Upload it again.", True),
+    ],
+)
+async def test_picture_upload_retry_owns_modal_response(
+    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch, message: str, retry: bool
+) -> None:
+    details = _details()
+    state = _state(details, account_id=account_id)
+    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
+    panel_interaction = _admin_interaction()
+    view.bind_render_interaction(panel_interaction, panel=state)
+    modal = PictureUploadModal(view)
+    modal.file_input._values = [MagicMock(spec=discord.Attachment)]
+    monkeypatch.setattr(
+        details_view_mod, "upload_agent_avatar", AsyncMock(return_value=(message, None))
+    )
+    interaction = _admin_interaction()
+
+    await modal.on_submit(interaction)
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    retry_view = interaction.edit_original_response.await_args.kwargs["view"]
+    assert (retry_view is not None) is retry
+    if retry:
+        assert retry_view._render_interaction is interaction
+        await retry_view.on_timeout()
+        assert interaction.edit_original_response.await_count == 2
+        expired = interaction.edit_original_response.await_args.kwargs
+        assert expired["view"] is None
+        assert isinstance(expired["embed"], discord.Embed)
+        assert expired["embed"].title == "Panel expired."
+        panel_interaction.edit_original_response.assert_not_awaited()
+
+
+async def test_picture_retry_timeout_ignores_missing_response(account_id: uuid.UUID) -> None:
+    state = _state(_details(), account_id=account_id)
+    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
+    interaction = _admin_interaction()
+    interaction.edit_original_response.side_effect = discord.NotFound(
+        MagicMock(status=404, reason="Not Found"), "Unknown Webhook"
+    )
+    retry_view = details_view_mod.PictureRetryView(view)
+    retry_view.bind_render_interaction(interaction, panel=None)
+
+    await retry_view.on_timeout()
+
+    interaction.edit_original_response.assert_awaited_once()
+
+
+@pytest.mark.parametrize("excluded", [False, True])
+async def test_load_details_for_skips_avatar_with_identity_off_or_guild_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+    excluded: bool,
+) -> None:
+    details = _details()
+    state = _state(details, account_id=uuid.uuid4())
+    session = AsyncMock()
+    sessionmaker = MagicMock()
+    sessionmaker.return_value.__aenter__ = AsyncMock(return_value=session)
+    sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
+    settings = _mcp_settings()
+    settings.agent_identity.enabled = excluded
+    if excluded:
+        settings.agent_identity.excluded_discord_guild_ids = ["2001"]
+    runtime = _make_runtime(sessionmaker, settings=settings)
+    monkeypatch.setattr(hydrate_mod, "load_agent_details", AsyncMock(return_value=details))
+    avatar_lookup = AsyncMock()
+    monkeypatch.setattr(hydrate_mod, "resolve_agent_identity", avatar_lookup)
+
+    result = await hydrate_mod.load_details_for(
+        runtime, state=state, agent=_roster_agent(details.name)
+    )
+
+    assert result is details
+    assert state.avatar_urls[details.name] is None
+    avatar_lookup.assert_not_awaited()
+
+
+async def test_load_details_for_queues_picture_without_generating_in_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    details = _details()
+    state = _state(details, account_id=uuid.uuid4())
+    session = AsyncMock()
+    sessionmaker = MagicMock()
+    sessionmaker.return_value.__aenter__ = AsyncMock(return_value=session)
+    sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
+    runtime = _make_runtime(sessionmaker, settings=_mcp_settings())
+    monkeypatch.setattr(hydrate_mod, "load_agent_details", AsyncMock(return_value=details))
+    lookup = AsyncMock(return_value=MagicMock(avatar_url=None))
+    monkeypatch.setattr(hydrate_mod, "resolve_agent_identity", lookup)
+
+    result = await hydrate_mod.load_details_for(
+        runtime, state=state, agent=_roster_agent(details.name)
+    )
+
+    assert result is details
+    assert lookup.await_args.kwargs["background_sessionmaker"] is sessionmaker
+
+
+def test_managed_agent_details_hide_avatar_controls_even_if_roster_flag_is_false(
+    account_id: uuid.UUID,
+) -> None:
+    details = _details().model_copy(update={"daimon_managed": True})
+    state = _state(details, account_id=account_id, is_admin=True)
+    view = DetailsView(state, runtime=_make_runtime(settings=_mcp_settings()), allowed_user_id=42)
+    assert "**Picture**" not in _container_text(view.children[0])
+
+
+async def test_reset_avatar_button_updates_detail_image(
+    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.adapters.discord.agent_setup import details_view as details_module
+    from daimon.core.stores.agent_avatars import AvatarRow
+
+    details = _details()
+    state = _state(details, account_id=account_id)
+    runtime = _make_runtime(settings=_mcp_settings())
+    view = DetailsView(state, runtime=runtime, allowed_user_id=42)
+    restored = AvatarRow(token="new-token", sha256="abcdef1234567890", png=b"", source="default")
+    reset = AsyncMock(return_value=("Restored", restored))
+    monkeypatch.setattr(details_module, "reset_agent_avatar", reset)
+    view.swap_to = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+    interaction = _admin_interaction()
+
+    reset_button = _find_button(view, "Use default")
+    assert reset_button.custom_id == "agent-setup:avatar-reset"
+    await reset_button.callback(interaction)
+    reset.assert_not_awaited()
+    confirmation = view.swap_to.await_args.args[1]  # pyright: ignore[reportUnknownMemberType]
+    assert "Use the default picture?" in _container_text(confirmation.children[0])
+    confirmation.swap_to = AsyncMock()
+    await _find_button(confirmation, "Use default").callback(interaction)
+    reset.assert_awaited_once()
+    assert state.avatar_urls[details.name].endswith("/avatars/new-token/abcdef123456.png")  # type: ignore[union-attr]
+    confirmation.swap_to.assert_awaited_once()
+
+
+async def test_change_picture_opens_file_modal(account_id: uuid.UUID) -> None:
+    details = _details()
+    state = _state(details, account_id=account_id, is_admin=True)
+    view = DetailsView(state, runtime=_make_runtime(settings=_mcp_settings()), allowed_user_id=42)
+    interaction = _admin_interaction()
+    interaction.response.send_modal = AsyncMock()
+
+    await _find_button(view, "Change").callback(interaction)
+
+    modal = interaction.response.send_modal.await_args.args[0]
+    assert isinstance(modal, PictureUploadModal)
+    assert isinstance(modal.file_input, discord.ui.FileUpload)
+    assert modal.file_input.required
+    assert picture_details_embed().to_dict()["fields"][0]["value"] == (
+        "Anyone who sees a message can open the picture."
+    )
 
 
 # ---------------------------------------------------------------------------

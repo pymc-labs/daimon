@@ -6,8 +6,9 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import httpx
@@ -47,6 +48,7 @@ from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.testing.factories import make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
+from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
@@ -66,6 +68,36 @@ _ROOT_SHARE_IN_C1 = {"C1": [{"ts": "1690000000.000100"}]}
 _FULL_MEMBER = {"ok": True, "user": {"id": "U_CALLER", "is_restricted": False}}
 
 
+@pytest.mark.asyncio
+async def test_post_message_passes_agent_header_and_falls_back_only_for_customize_scope() -> None:
+    client = AsyncWebClient(token="xoxb-agent-identity-test")
+    _send._NO_CUSTOMIZE_SCOPE.clear()  # pyright: ignore[reportPrivateUsage]
+    with aioresponses() as mock:
+        mock.post(
+            _CHAT_POST_MESSAGE,
+            payload={"ok": False, "error": "missing_scope", "needed": "chat:write.customize"},
+        )  # pyright: ignore[reportUnknownMemberType]
+        mock.post(_CHAT_POST_MESSAGE, payload={"ok": True, "ts": "1.000001"}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        await _send._post_message(  # pyright: ignore[reportPrivateUsage]
+            client,
+            channel_id="C1",
+            content="hello",
+            thread_ts="1.000000",
+            identity_kwargs={"username": "Ada", "icon_url": "https://example.test/ada.png"},
+        )
+        await _send._post_message(  # pyright: ignore[reportPrivateUsage]
+            client,
+            channel_id="C1",
+            content="again",
+            thread_ts="1.000000",
+            identity_kwargs={"username": "Ada"},
+        )
+    posts = mock.requests[_POST_KEY]
+    assert posts[0].kwargs["json"]["username"] == "Ada"
+    assert posts[0].kwargs["json"]["icon_url"] == "https://example.test/ada.png"
+    assert all("username" not in post.kwargs["json"] for post in posts[1:])
+
+
 def _auth(**overrides: object) -> AuthIdentity:
     base: dict[str, object] = {
         "account_id": uuid.uuid4(),
@@ -77,6 +109,24 @@ def _auth(**overrides: object) -> AuthIdentity:
     }
     base.update(overrides)
     return AuthIdentity(**base)  # type: ignore[arg-type]  # test kwargs are shape-correct
+
+
+@pytest.mark.parametrize("excluded", [False, True])
+async def test_identity_off_or_excluded_skips_slack_agent_lookup(
+    monkeypatch: pytest.MonkeyPatch, excluded: bool
+) -> None:
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(
+            agent_identity=SimpleNamespace(
+                enabled=excluded,
+                excluded_slack_team_ids=["T_TEST"] if excluded else [],
+            )
+        )
+    )
+    lookup = AsyncMock()
+    monkeypatch.setattr(_send, "find_agent_by_derived_uuid", lookup)
+    assert await _send._agent_identity_kwargs(runtime, _auth()) is None  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+    lookup.assert_not_awaited()
 
 
 _FILE_PROXY_SECRET = "file-proxy-secret"

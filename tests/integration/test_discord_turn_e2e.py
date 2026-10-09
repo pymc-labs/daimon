@@ -12,6 +12,7 @@ content kwarg.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -53,6 +55,7 @@ def _make_runtime(
     which uses AsyncMock — here run_turn is exercised for real.
     """
     settings = MagicMock()
+    settings.agent_identity.enabled = True
     settings.mcp = McpSettings()
     settings.billing.markup = Decimal("1.0")
     settings.billing.signup_credit = Decimal("0")
@@ -125,6 +128,7 @@ def _make_thread_message(*, guild_id: int = 123456) -> discord.Message:
     message_ref = MagicMock()
     message_ref.id = 42
     message_ref.edit = AsyncMock()
+    message_ref.add_reaction = AsyncMock()
     thread.send = AsyncMock(return_value=message_ref)
 
     message.channel = thread
@@ -189,7 +193,17 @@ async def test_discord_mention_delivers_agent_reply_via_edit(
         id=_SESSION_ID, agent_id=_AGENT_ID_2, environment_id=_ENV_ID
     )
 
-    await bot.on_message(message)
+    tracked_intents: list[uuid.UUID] = []
+    original_track = bot._track_live_turn_card  # pyright: ignore[reportPrivateUsage]
+
+    def track_live(intent_id: uuid.UUID) -> None:
+        original_track(intent_id)
+        assert intent_id in bot._live_turn_card_intent_ids  # pyright: ignore[reportPrivateUsage]
+        tracked_intents.append(intent_id)
+
+    with patch.object(bot, "_track_live_turn_card", side_effect=track_live):
+        await bot.on_message(message)
+    assert len(tracked_intents) == 1
 
     # Assertion: the final agent text arrives via message_ref.edit(content=...)
     # not via a fresh thread.send (verified lifecycle.py:215-220).
@@ -198,6 +212,6 @@ async def test_discord_mention_delivers_agent_reply_via_edit(
         "expected at least one message_ref.edit call with content kwarg "
         "(terminal success should edit the thinking embed)"
     )
-    assert edit_calls[-1].kwargs["content"] == _AGENT_TEXT, (
-        "terminal success edits the embed message to the agent's final text"
+    assert edit_calls[-1].kwargs["content"] == fallback_name_prefix("test-agent", _AGENT_TEXT), (
+        "terminal success edits the embed message to the agent's labelled final text"
     )

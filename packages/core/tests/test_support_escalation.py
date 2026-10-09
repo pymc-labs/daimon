@@ -120,9 +120,10 @@ def test_shared_copy_names_the_remaining_count() -> None:
     """Discord and Slack render the same words from core."""
     from daimon.core.support_escalation import OUT_OF_CREDITS, offer_text, received_text
 
-    assert "You have 7 support request(s) left" in offer_text(remaining=7)
-    assert "You have 3 left." in received_text(remaining=3)
-    assert "used all your human-support requests" in OUT_OF_CREDITS
+    assert offer_text(remaining=7) == "Need help with this answer?\n7 requests left"
+    assert offer_text(remaining=1) == "Need help with this answer?\n1 request left"
+    assert received_text(remaining=3) == "Request sent. Someone will reply."
+    assert OUT_OF_CREDITS == "You have no help requests left. Contact us."
 
 
 def test_support_credits_are_not_the_billing_ledger() -> None:

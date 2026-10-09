@@ -13,11 +13,12 @@ from microsoft_teams.cards import AdaptiveCard, CardElement, Fact, FactSet, Text
 COMMAND_HELP = {
     "new": "Start a fresh conversation",
     "setup": "See your agents, who answers where, and make changes",
+    "here": "Who answers where you send it, what it can read and which credentials it has",
     "routines": "Show and manage this organisation's scheduled routines",
     "memory": "List what the agent remembers; add a path to read one memory",
     "privacy": "See, export or delete what {bot} stores about you",
     "billing": "Your usage this month (admins see a per-member breakdown and top-ups)",
-    "support": "Ask a person for help",
+    "support": "Ask a person",
     "help": "This list",
 }
 

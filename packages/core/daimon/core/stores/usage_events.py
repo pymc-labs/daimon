@@ -62,6 +62,16 @@ async def record(
     await session.flush()
 
 
+async def list_event_ids_for_session(
+    session: AsyncSession, *, managed_session_id: str
+) -> frozenset[str]:
+    """Event ids already recorded for one managed session (unique-key index scan)."""
+    result = await session.execute(
+        select(UsageEvent.event_id).where(UsageEvent.managed_session_id == managed_session_id)
+    )
+    return frozenset(result.scalars().all())
+
+
 async def _select_rows(
     session: AsyncSession,
     *,

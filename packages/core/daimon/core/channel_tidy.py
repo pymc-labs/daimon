@@ -1,10 +1,11 @@
-"""Volume limits and audit rows for the channel tidy tools.
+"""Volume limits, audit rows and turn-post recording for the channel tidy tools.
 
 An agent may edit or delete only messages and threads it posted itself
-(`daimon.core.stores.agent_posts`). Every edit, delete or archive writes one
-`security_audit_events` row with the target's ids, a keyed HMAC of the text
-it replaced and the turn it ran in, never the text. The row is written and
-committed before the platform call, so no change happens unaudited; a
+(`daimon.core.stores.agent_posts`). The channel tools record their own posts;
+a chat adapter records what a turn posts with `record_turn_post`. Every edit,
+delete or archive writes one `security_audit_events` row with the target's
+ids, a keyed HMAC of the text it replaced and the turn it ran in, never the
+text. The row is written and committed before the platform call, so no change happens unaudited; a
 platform failure afterwards adds an `error` row.
 
 Limits count those `allowed` rows per agent: `PER_TURN_LIMIT` in one turn
@@ -17,6 +18,7 @@ cannot both slip under a limit.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import uuid
@@ -24,9 +26,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
+import structlog
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores.agent_posts import PostSource, record_post
 from daimon.core.stores.security_audit import append_event, count_tidy_events
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+log = structlog.get_logger(__name__)
 
 PER_TURN_LIMIT = 10
 PER_HOUR_LIMIT = 40
@@ -38,6 +45,7 @@ TURN_WINDOW = timedelta(hours=24)
 TidyOperation = Literal["message.edit", "message.delete", "thread.archive", "thread.delete"]
 
 _LOCK_NAMESPACE = "daimon:channel_tidy:"
+RECORD_TIMEOUT_S = 5.0
 
 
 class TidyLimitReached(Exception):
@@ -212,3 +220,56 @@ async def _append(
         # append_event drops rows for a tenant that no longer exists. A tidy
         # action must never run without its row, so stop here.
         raise RuntimeError("security audit row was not written: tenant not found")
+
+
+async def record_turn_post(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    ma_agent_id: str,
+    channel_id: str,
+    message_id: str,
+    requester_platform_user_id: str,
+    source: PostSource,
+    turn_card_intent_id: uuid.UUID | None = None,
+    parent_channel_id: str | None = None,
+    thread_ts: str | None = None,
+) -> None:
+    """Record a message (`turn`) or thread (`auto_thread`) an adapter posted for a turn.
+
+    The agent is the turn's own (`derive_agent_uuid`, the `chat_agent_id` its
+    MCP token carries), so only that agent can tidy it. An `auto_thread` row
+    is `kind='thread'` with the parent channel as `channel_id` and the thread
+    id as `message_id`. A Slack turn post carries its root in `thread_ts`.
+    The post has already gone out, so a failure, or a write
+    slower than `RECORD_TIMEOUT_S` (it sits between a send and the turn using
+    its message), is logged and swallowed; the cost is that this one post
+    cannot be tidied.
+    """
+    if source == "turn" and turn_card_intent_id is None:
+        raise ValueError("a turn post must name its turn (turn_card_intent_id)")
+    try:
+        async with asyncio.timeout(RECORD_TIMEOUT_S), sessionmaker.begin() as session:
+            await record_post(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=channel_id,
+                message_id=message_id,
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
+                kind="thread" if source == "auto_thread" else "message",
+                parent_channel_id=parent_channel_id,
+                thread_ts=thread_ts,
+                source=source,
+                requester_platform_user_id=requester_platform_user_id,
+                turn_card_intent_id=turn_card_intent_id,
+            )
+    except Exception as exc:  # the post is out; never fail the turn over its record
+        log.warning(
+            "channel_tidy.turn_record_failed",
+            tenant_id=str(tenant_id),
+            platform=platform,
+            source=source,
+            error_type=type(exc).__name__,
+        )

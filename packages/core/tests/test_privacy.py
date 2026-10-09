@@ -18,6 +18,7 @@ from daimon.core._models import (
     AgentGithubBinding,
     Base,
     CliPrincipal,
+    GitHubIssuedToken,
     GitHubUserLink,
     McpToken,
     MessageFeedback,
@@ -34,7 +35,9 @@ from daimon.core.privacy import (
 from daimon.core.purge import PurgeReport, purge_account
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
 from daimon.core.stores import credential_requests as credential_requests_store
+from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_credentials as github_credentials_store
+from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
@@ -85,12 +88,36 @@ async def test_account_purge_deletes_github_user_after_last_link(
                 verified_via="discord_oauth",
             )
         )
+    token_ids: list[uuid.UUID] = []
+    for account in (first, second):
+        token = await github_issued_tokens_store.create_pending(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id=uuid.uuid4(),
+            session_id="privacy-test",
+            installation_id=77,
+            repo_ids=[101],
+            permissions={"contents": "read"},
+            grant_versions={"grant:101": 1, "authorization:101": 1},
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+            requester_account_id=account.id,
+            github_user_id=101,
+            link_generation=1,
+        )
+        token_ids.append(token.token_id)
     await db_session.commit()
 
     first_preview = await collect_purge_preview(sm=db_session_factory, account_id=first.id)
     assert first_preview.github_user_links.count == 0
     first_report = await purge_account(sm=db_session_factory, account_id=first.id)
     assert first_report.db.github_user_links == 0
+    async with db_session_factory() as session:
+        first_token = await session.get(GitHubIssuedToken, token_ids[0])
+        second_token = await session.get(GitHubIssuedToken, token_ids[1])
+        assert first_token is not None
+        assert first_token.requester_account_id is None and first_token.github_user_id is None
+        assert second_token is not None
+        assert second_token.requester_account_id == second.id and second_token.github_user_id == 101
 
     second_preview = await collect_purge_preview(sm=db_session_factory, account_id=second.id)
     assert second_preview.github_user_links.count == 1
@@ -124,6 +151,7 @@ async def test_collect_purge_preview_returns_zero_counts_when_account_has_no_dat
     assert preview.user_skills.example is None, "example must be None when count==0"
     assert preview.github_credentials.count == 0, "no github_credentials seeded"
     assert preview.github_credentials.example is None
+    assert preview.github_connect_requests.count == 0
     assert preview.github_oauth_states.count == 0, "no github_oauth_states seeded"
     assert preview.github_oauth_states.example is None
 
@@ -756,6 +784,27 @@ async def test_a_vote_in_a_tenant_without_a_principal_is_erased_by_a_purge_run_t
     assert remaining == 0, "no residue may survive the documented remediation path"
 
 
+async def test_github_connect_request_is_previewed_and_purged(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await github_connect_store.record_connect_request(
+        db_session,
+        tenant_id=tenant.id,
+        requester_account_id=account.id,
+        agent_id=uuid.uuid4(),
+        agent_name="ResearchBot",
+    )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    assert preview.github_connect_requests.count == 1
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+    assert report.db.github_connect_requests == 1
+
+
 async def test_collect_purge_preview_matches_purge_account_coverage_field_for_field() -> None:
     """If `PurgeReport` grows a new int field, `PurgePreview` MUST mirror it.
 
@@ -778,6 +827,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "accounts": "account",
         "user_skills": "user_skills",
         "github_credentials": "github_credentials",
+        "github_connect_requests": "github_connect_requests",
         "github_user_links": "github_user_links",
         "github_oauth_states": "github_oauth_states",
         "mcp_tokens": "mcp_tokens",
@@ -790,6 +840,8 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "message_feedback": "message_feedback",
         "support_escalations": "support_escalations",
         "channel_admins": "channel_admins",
+        "agent_post_requesters": "agent_post_requesters",
+        "platform_user_names": "platform_user_names",
     }
 
     uncovered = report_fields - set(mapping.keys())
@@ -830,6 +882,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "user_config": "account_id PK/FK -> accounts.id",
         "user_skills": "principal_id",
         "github_credentials": "principal_id",
+        "github_connect_requests": "requester_account_id FK -> accounts.id",
         "agent_github_binding": "principal_id",
         "mcp_tokens": "account_id FK -> accounts.id",
         "wizard_session": "account_id FK -> accounts.id",
@@ -868,6 +921,10 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # A tenant-wide channel skill; the only accounts.id FK is the admin
             # who added it, added_by_account_id with ON DELETE SET NULL.
             "channel_skills",
+            # An avatar belongs to the tenant's agent, not the uploader. The
+            # nullable uploader reference is severed by ON DELETE SET NULL;
+            # tenant deletion cascades to the avatar itself.
+            "agent_avatars",
             # Tenant/agent-scoped, no account/principal column — "purge account X"
             # is undefined for them; deferred to a future tenant-purge path.
             "agent_files",
@@ -883,12 +940,29 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Repo authorization and grants belong to the tenant. Their nullable
             # creator references are erased by ON DELETE SET NULL.
             "tenant_github_repos",
+            # An invitation is single-use and disappears with its requesting
+            # account; its encrypted flow rows cascade from the invitation.
+            "github_connect_invitations",
             "agent_github_grants",
+            # Drafts belong to the tenant; deleting an account clears the
+            # nullable actor reference and leaves the pending repo choice.
+            "agent_github_grant_drafts",
+            # A request is personal to the asker and cascades with their account.
+            "github_access_requests",
+            # A recipient's private card row cascades with their account.
+            "github_access_request_deliveries",
+            # Browser link attempts last ten minutes and cascade with the account.
+            "github_personal_link_intents",
             # The account link is removed by ON DELETE CASCADE. A token's
-            # requester reference is erased by SET NULL; its recorded link
+            # requester reference is erased by SET NULL and its GitHub user ID
+            # is explicitly cleared; its recorded link
             # generation then fails the inventory sweeper's link check.
             "account_github_links",
             "github_issued_tokens",
+            # The vault belongs to a tenant session. Erasure clears its requester
+            # FK; the scheduler then retires the orphaned session and vault
+            # instead of renewing its tokens as a headless requester.
+            "github_app_session_vaults",
         }
     )
 

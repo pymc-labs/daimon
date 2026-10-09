@@ -78,6 +78,8 @@ bots:
             description: Start a fresh conversation.
           - title: setup
             description: See your agents and who answers where.
+          - title: here
+            description: Who answers here and what it can read.
           - title: routines
             description: Show and manage scheduled routines.
           - title: memory
@@ -87,7 +89,7 @@ bots:
           - title: billing
             description: Usage this month and top-ups.
           - title: support                 # answered only when human support is configured
-            description: Ask a person for help.
+            description: Ask a person.
     supportsFiles: true                 # files shared in 1:1 chats, file consent cards
     isNotificationOnly: false
 permissions:

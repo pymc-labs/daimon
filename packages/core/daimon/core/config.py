@@ -405,6 +405,39 @@ class DiscordSettings(BaseModel):
             "with a retry notice; continuation wakes keep their existing admission path."
         ),
     )
+    turn_card_unrecoverable_after_s: int = Field(
+        default=86400,
+        ge=1,
+        description=(
+            "Minimum age in seconds before Discord can retire a card after definite "
+            "recovery failure or repeated failed recovery passes. Must be at least the turn "
+            "ceiling plus 15 minutes. Recovery runs at startup and periodically, "
+            "and deletes a known "
+            "pending card when the bot has Manage Messages permission."
+        ),
+    )
+    turn_card_unrecoverable_after_attempts: int = Field(
+        default=3,
+        ge=2,
+        description=(
+            "Failed Discord card recovery passes required before an aged intent can "
+            "be retired without a definite platform failure. Count persists across restarts."
+        ),
+    )
+
+    @field_validator("turn_card_unrecoverable_after_s")
+    @classmethod
+    def _stale_card_age_exceeds_turn_ceiling(cls, age_s: int) -> int:
+        # Import after config is initialized: turn.__init__ imports admission,
+        # which imports config, so a module-level import would form a cycle.
+        from daimon.core.turn.ceiling import TURN_CEILING_S
+
+        if age_s < TURN_CEILING_S + 15 * 60:
+            raise ValueError(
+                "turn card unrecoverable age must be at least turn ceiling plus 15 minutes"
+            )
+        return age_s
+
     health_port: int = Field(
         default=8081,
         description=(
@@ -417,13 +450,14 @@ class DiscordSettings(BaseModel):
         default=(),
         description=(
             "Discord user ids of automated QA bots allowed to start turns by "
-            "mention. Bot-authored mentions are rejected by default; these are "
-            "allow-listed so a harness can drive the mention path end-to-end "
-            "without a human. Several are supported because admin-gated tools "
+            "mention or reply to a recorded agent post. Bot-authored messages "
+            "are rejected by default; these are allow-listed so a harness can "
+            "drive addressed turns end-to-end without a human. Several are "
+            "supported because admin-gated tools "
             "need a caller holding Manage Server while the refusal paths need "
             "one without it. Leave empty outside test deployments -- an "
             "allow-listed bot spends real credit. As a tuple field this must "
-            'be set as a JSON array, e.g. \'["123","456"]\'. daimon\'s own id '
+            'be set as a JSON array, e.g. \'["123","456"]\'. Daimon\'s own id '
             "is refused at the gate even if listed."
         ),
     )
@@ -579,7 +613,7 @@ class TeamsSettings(BaseModel):
         description=(
             "Externally reachable base URL of the Teams service (the Bot "
             "Framework messaging endpoint without /api/messages). Enables the "
-            "admin sign-in that grants daimon a team's SharePoint site; its "
+            "admin sign-in that grants Daimon a team's SharePoint site; its "
             "callback is <public_url>/oauth/teams/files/callback, which must be "
             "a Web redirect URI on the app registration."
         ),
@@ -1035,7 +1069,8 @@ class SupportSettings(BaseModel):
             "Channel id where human-support requests from Discord and Teams are "
             "posted: a Discord channel id, or a Teams channel id (`19:…`) that the "
             "Teams bot posts in. Teams requests reach a Discord channel only when "
-            "the Discord bot token is also set. Unset (the default) disables the "
+            "the Discord bot token is also set; a Teams channel turns Ask a human off "
+            "on Discord, which cannot post there. Unset (the default) disables the "
             "escalate affordance on Discord and Teams — a request that reaches "
             "nobody is worse than no button at all. A channel rather than operator "
             "DMs: it survives one person's DMs being closed, and it leaves a shared "
@@ -1046,7 +1081,7 @@ class SupportSettings(BaseModel):
         default=None,
         description=(
             "Slack channel id where human-support requests from Slack are "
-            "posted. Unset (the default) disables the Ask a human button on "
+            "posted. Unset (the default) disables the Ask the team button on "
             "Slack. Slack requests never go to the Discord channel, nor Discord "
             "requests here. The bot must be a member of the channel."
         ),
@@ -1058,7 +1093,7 @@ class SupportSettings(BaseModel):
             "for a deployment installed in several workspaces: every workspace's "
             "requests are posted with that workspace's bot token. Unset posts with "
             "the requesting workspace's own token, which suits a single-workspace "
-            "install. daimon must be installed in the named workspace."
+            "install. Daimon must be installed in the named workspace."
         ),
     )
     credits_per_user: int = Field(
@@ -1070,6 +1105,24 @@ class SupportSettings(BaseModel):
             "the two are deliberately separate ledgers. 0 disables escalation."
         ),
     )
+    feedback_to_support: dict[uuid.UUID, bool] = Field(
+        default_factory=dict[uuid.UUID, bool],
+        description=(
+            "Per-tenant switch, keyed by tenant UUID: true also posts every submitted "
+            '\N{THUMBS DOWN SIGN} "What went wrong?" form (the reasons, the text, the '
+            "person, the agent and a link to the answer) to the channel Ask a human "
+            "posts to: DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID for Slack, "
+            "DAIMON_SUPPORT__ESCALATION_CHANNEL_ID for Discord (a Discord channel) and "
+            "Teams (a Teams or Discord channel). "
+            "Missing/false (the default) keeps the form in the database only. The form "
+            "tells the person their answers are shared when it is on. Spends no "
+            "support credit. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a JSON object."
+        ),
+    )
+
+    def routes_feedback(self, tenant_id: uuid.UUID) -> bool:
+        """Whether this tenant's submitted 👎 forms also go to the support channel."""
+        return self.feedback_to_support.get(tenant_id) is True
 
 
 class ThreadNamingSettings(BaseModel):
@@ -1157,13 +1210,53 @@ class DirectMessagePolicy(BaseModel):
         )
 
 
+class AgentIdentitySettings(BaseModel):
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable per-agent display names and avatars on Slack and Discord, agent name "
+            "prefixes on Teams, and reply-to-agent routing on Discord. Off by default; "
+            "set DAIMON_AGENT_IDENTITY__ENABLED=true after platform setup is ready."
+        ),
+    )
+    excluded_discord_guild_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Discord guild IDs where agent identity stays off when enabled globally. "
+            "Set DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS to a JSON array of IDs. "
+            "Default: [] (no guilds excluded)."
+        ),
+    )
+    excluded_slack_team_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Slack workspace team IDs where agent identity stays off when enabled globally. "
+            "Set DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS to a JSON array of IDs. "
+            "Default: [] (no workspaces excluded)."
+        ),
+    )
+
+    @field_validator("excluded_discord_guild_ids", "excluded_slack_team_ids", mode="before")
+    @classmethod
+    def _stringify_workspace_ids(cls, value: object) -> object:
+        if isinstance(value, list):
+            entries = cast(list[object], value)
+            if all(isinstance(item, (str, int)) and not isinstance(item, bool) for item in entries):
+                normalized: list[str] = []
+                for item in entries:
+                    normalized.append(str(item).strip())
+                return normalized
+            return entries
+        return value
+
+
 class Settings(BaseSettings):
     security_audit_retention_days: int = Field(
         default=90,
         ge=0,
         description=(
             "Security audit retention age in days, default 90. Operators must schedule "
-            "daimon audit prune TENANT_UUID for each tenant (for example daily). "
+            "`daimon audit prune TENANT_UUID` for each tenant (for example daily). "
             "The command deletes older events. Set 0 to explicitly retain events forever; "
             "privacy erasure and tenant deletion still apply."
         ),
@@ -1222,6 +1315,7 @@ class Settings(BaseSettings):
     ops: OpsSettings = Field(default_factory=OpsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
+    agent_identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
     discord: DiscordSettings | None = None
     thread_participation: ThreadParticipationSettings = Field(
         default_factory=ThreadParticipationSettings,

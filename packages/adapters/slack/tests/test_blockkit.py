@@ -10,6 +10,7 @@ pattern. No DB required.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Literal
 
 from daimon.adapters.slack.blockkit import (
@@ -144,13 +145,13 @@ class TestToBlocks:
     def test_running_state_leads_with_the_headline(self) -> None:
         state = _make_state(phase=TurnPhase.THINKING, started_at=100.0)
         sections = _find_blocks_by_type(to_blocks(state, now=112.0), "section")
-        assert sections[0]["text"]["text"] == "*Thinking* · 12s", (
+        assert sections[0]["text"]["text"] == "*Working on it…*", (
             "the first section is the bold state word and the elapsed time"
         )
 
     def test_fallback_text_is_the_headline_in_plain_words(self) -> None:
         state = _make_state(phase=TurnPhase.TOOL_RUNNING, started_at=1.0)
-        assert to_fallback_text(state, now=66.0) == "Working · 1m 5s", (
+        assert to_fallback_text(state, now=66.0) == "Working on it…", (
             "notifications read the headline, not an internal phase name"
         )
 
@@ -171,11 +172,20 @@ class TestToBlocks:
         )
         blocks = to_blocks(state, now=66.0)
         sections = _find_blocks_by_type(blocks, "section")
-        assert sections[0]["text"]["text"] == "*Working* · 1m 5s", "a running call reads working"
-        assert sections[1]["text"]["text"] == "```\n✔️ Read a file\n🖋️ Q&amp;A sync\n```", (
-            "tool lines are fenced and entity-escaped"
+        assert sections[0]["text"]["text"] == "*Working on it…*"
+        contexts = _find_blocks_by_type(blocks, "context")
+        assert contexts[0]["elements"][0]["text"] == (
+            "*Details*\n`✔️ Read a file`\n`🖋️ Q&amp;A sync`"
         )
-        assert not _find_blocks_by_type(blocks, "context"), "no context block while running"
+
+    def test_tool_line_markdown_stays_in_inline_code(self) -> None:
+        state = _make_state(
+            phase=TurnPhase.TOOL_RUNNING,
+            tool_lines=("🔍 Search *issue* <#123>",),
+        )
+        blocks = to_blocks(state, now=None)
+        contexts = _find_blocks_by_type(blocks, "context")
+        assert contexts[0]["elements"][0]["text"] == ("*Details*\n`🔍 Search *issue* &lt;#123&gt;`")
 
     def test_running_state_with_text_preview_has_quoted_escaped_draft(
         self,
@@ -198,21 +208,40 @@ class TestToBlocks:
 
     def test_done_state_has_cost_footer_context_block(self) -> None:
         """DONE state produces a trailing context block with the cost/usage summary."""
-        state = _make_state(
-            phase=TurnPhase.DONE,
-            agent_name="Atlas",
-            started_at=0.0,
-            usage_in=1500,
-            usage_out=320,
-            cost_str="$0.04",
+        state = replace(
+            _make_state(
+                phase=TurnPhase.DONE,
+                agent_name="Atlas",
+                started_at=0.0,
+                usage_in=1500,
+                usage_out=320,
+                cost_str="$0.04",
+            ),
+            balance_str="$12.50 left",
         )
         blocks = to_blocks(state, now=12.0)
         context_blocks = _find_blocks_by_type(blocks, "context")
         assert context_blocks, "DONE state must produce a context block"
         summary_text = context_blocks[-1]["elements"][0]["text"]
-        assert "Atlas" in summary_text, "footer must contain agent_name"
-        assert "12s" in summary_text, "footer must contain elapsed time"
-        assert "$0.04" in summary_text, "footer must contain cost_str when set"
+        assert context_blocks[-2]["elements"][0]["text"] == "Atlas"
+        customized = to_blocks(replace(state, header_customized=True), now=12.0)
+        assert "Atlas" not in str(customized[-2:])
+        assert summary_text == (
+            "*Details*\nTime: 12s\nCost: $0.04\nTokens: 1.5k in / 320 out\nBalance: $12.50 left"
+        )
+
+    def test_done_with_visible_answer_starts_with_details(self) -> None:
+        state = _make_state(phase=TurnPhase.DONE, agent_name="Atlas", started_at=0.0)
+        blocks = to_blocks(state, now=12.0, answer_visible=True)
+        assert [block["type"] for block in blocks] == ["context", "context"]
+        assert blocks[0]["elements"][0]["text"] == "Atlas"
+        assert blocks[1]["elements"][0]["text"].startswith("*Details*\nTime: 12s")
+
+        customized = to_blocks(
+            replace(state, header_customized=True), now=12.0, answer_visible=True
+        )
+        assert [block["type"] for block in customized] == ["context"]
+        assert customized[0]["elements"][0]["text"].startswith("*Details*\nTime: 12s")
 
     def test_error_state_summary_context_has_cross_emoji_and_reason(self) -> None:
         """ERROR state's summary context block carries the cross emoji + the reason."""
@@ -224,10 +253,35 @@ class TestToBlocks:
         context_blocks = _find_blocks_by_type(blocks, "context")
         assert context_blocks, "ERROR state must produce a context block"
         summary_text = context_blocks[-1]["elements"][0]["text"]
-        assert "❌" in summary_text, "error summary must contain the cross emoji"
-        assert "rate limited" in summary_text, (
-            "error summary must contain the error event's label as the reason"
+        assert summary_text == "*Details*\nTime: 5s\nTokens: 0 in / 0 out"
+        assert context_blocks[-2]["elements"][0]["text"] == "Atlas"
+        assert blocks[0]["text"]["text"] == "Something went wrong."
+
+    def test_error_uses_notice_next_step_once(self) -> None:
+        state = replace(
+            _make_state(phase=TurnPhase.ERROR),
+            notice="Model usage limit reached.\n*Next:* Add credit.\n`rid: test`",
         )
+        blocks = to_blocks(state, now=5.0)
+        section_texts = [block["text"]["text"] for block in blocks if block["type"] == "section"]
+        assert section_texts[1] == "Add credit."
+        assert "*Next:*" not in section_texts[2]
+        assert "Model usage limit reached." in section_texts[2]
+        assert "`rid: test`" in section_texts[2]
+
+    def test_empty_notice_next_step_keeps_retry_text_and_metrics(self) -> None:
+        state = replace(
+            _make_state(phase=TurnPhase.ERROR, cost_str="$0.05"),
+            notice="Model usage limit reached.\n*Next:* \n`rid: test`",
+            balance_str="$9.95",
+        )
+        blocks = to_blocks(state, now=12.0)
+        sections = _find_blocks_by_type(blocks, "section")
+        assert sections[1]["text"]["text"] == "Mention me to try again."
+        assert "Model usage limit reached." in sections[2]["text"]["text"]
+        assert "`rid: test`" in sections[2]["text"]["text"]
+        assert "Cost: $0.05" in blocks[-1]["elements"][0]["text"]
+        assert "Balance: $9.95" in blocks[-1]["elements"][0]["text"]
 
     def test_no_block_contains_color_key(self) -> None:
         """No block dict anywhere must contain a 'color' key."""
@@ -255,7 +309,7 @@ class TestToBlocks:
 class TestToInterruptedBlocks:
     def test_returns_exactly_one_section_block_with_mrkdwn_text(self) -> None:
         blocks = to_interrupted_blocks()
-        assert len(blocks) == 1, "the frozen card is a single block, nothing else"
+        assert len(blocks) == 2, "restart title and retry step are separate blocks"
         assert blocks[0]["type"] == "section", (
             "the house pattern for a whole-card notice is section"
         )
@@ -270,11 +324,8 @@ class TestToInterruptedBlocks:
         # Literal, not imported from the Discord adapter -- import-linter's
         # independence contract forbids cross-adapter imports, and the point
         # of this test is that the two hand-kept literals stay in sync.
-        discord_copy = (
-            "❌ This turn was interrupted by a restart and cannot be "
-            "resumed. Nothing was lost on your side — mention me again to retry."
-        )
+        discord_copy = "Stopped: Daimon restarted.\nMention me to try again."
         blocks = to_interrupted_blocks()
-        assert blocks[0]["text"]["text"] == discord_copy, (
+        assert "\n".join(block["text"]["text"] for block in blocks) == discord_copy, (
             "Slack's retirement copy must be byte-identical to Discord's"
         )

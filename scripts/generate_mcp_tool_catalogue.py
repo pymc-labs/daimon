@@ -299,7 +299,7 @@ def _header(total: int, hub_total: int) -> list[str]:
         "# MCP tool catalogue",
         "",
         *_wrap(
-            f"The {total} tools daimon's MCP server registers, plus the {hub_total} on the "
+            f"The {total} tools Daimon's MCP server registers, plus the {hub_total} on the "
             "hub login mounts. Generated from the live registry by "
             "`scripts/generate_mcp_tool_catalogue.py` — edit the tool's docstring, not "
             "this page. CI fails when the two disagree."

@@ -21,9 +21,17 @@ from daimon.adapters.discord.agent_setup.scope_default import (
     resolve_account_display,
 )
 from daimon.adapters.discord.agent_setup.state import PanelState, ThreadContext
+from daimon.adapters.discord.checks import channel_admin_caller
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
+from daimon.core.agent_identity import (
+    identity_enabled_for,
+    is_builtin_agent,
+    resolve_agent_identity,
+)
 from daimon.core.answering_map import AnsweringMap, load_answering_map
+from daimon.core.channel_admins import load_administered_channel_ids
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -141,6 +149,16 @@ async def load_roster_state(
             ),
         )
         cascade = await list_guild_propagations(session, tenant_id=tenant_id)
+        managed_channels = (
+            await load_administered_channel_ids(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                caller=channel_admin_caller(interaction.user),
+            )
+            if not is_admin
+            else frozenset[str]()
+        )
         binding = (
             await get_binding(
                 session,
@@ -175,6 +193,7 @@ async def load_roster_state(
         guild_account_id=derive_guild_account_uuid(tenant_id),
         default_mcp_url=public_mcp_url(runtime),
         is_admin=is_admin,
+        can_manage_github_agents=is_admin or bool(managed_channels),
         guild_id=interaction.guild_id,
         channel_id=int(channel_id),
         channel_name=channel_name,
@@ -200,7 +219,7 @@ async def load_details_for(
     that was true when the panel opened is not the same as a claim that is true.
     """
     async with runtime.sessionmaker() as session:
-        return await load_agent_details(
+        details = await load_agent_details(
             session,
             runtime.anthropic,
             tenant_id=_tenant_id(state),
@@ -214,6 +233,25 @@ async def load_details_for(
             is_admin=state.is_admin,
             channel_label=_channel_label(state),
         )
+        state.avatar_urls[agent.name] = None
+        if identity_enabled_for(
+            runtime.settings, "discord", state.guild_id
+        ) and not is_builtin_agent(
+            name=details.name,
+            metadata={MA_METADATA_KEY_MANAGED: "true"} if details.daimon_managed else None,
+            default_agent_name=runtime.deployment_default.agent_name,
+        ):
+            identity = await resolve_agent_identity(
+                session,
+                tenant_id=_tenant_id(state),
+                agent_name=agent.name,
+                is_builtin=False,
+                public_base_url=runtime.settings.mcp.app_root_url,
+                enabled=True,
+                background_sessionmaker=runtime.sessionmaker,
+            )
+            state.avatar_urls[agent.name] = identity.avatar_url
+        return details
 
 
 async def load_answering_map_for(runtime: DiscordRuntime, *, state: PanelState) -> AnsweringMap:

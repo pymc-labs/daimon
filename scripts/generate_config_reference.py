@@ -322,7 +322,7 @@ def _app_section(
             "",
             *_wrap(
                 f"A standalone service in `{Path(relative_path).parents[2]}`, deployed and "
-                "configured separately from the daimon processes. It is not part of "
+                "configured separately from the Daimon processes. It is not part of "
                 "`docker-compose.yml`."
             ),
         ]
@@ -334,9 +334,9 @@ def _app_section(
             [
                 "",
                 *_wrap(
-                    f"This service shares the `{prefix}` prefix with a block on daimon's "
+                    f"This service shares the `{prefix}` prefix with a block on Daimon's "
                     f"own Settings, so {names} appear twice on this page — once for the "
-                    "service and once for the daimon side that calls it. They are read "
+                    "service and once for the Daimon side that calls it. They are read "
                     "by different processes; a single shared env file would set both."
                 ),
             ]
@@ -372,7 +372,7 @@ def _billing_section() -> Section:
 
 def _compose_section() -> Section:
     intro = _wrap(
-        "Interpolated by `docker-compose.yml` itself; no daimon process reads "
+        "Interpolated by `docker-compose.yml` itself; no Daimon process reads "
         "them. They exist so the compose file can build "
         "`DAIMON_DATABASE__URL` for every service from one password."
     )
@@ -390,14 +390,14 @@ def _header(sections: typing.Sequence[Section]) -> list[str]:
         "# Configuration reference",
         "",
         *_wrap(
-            "Every environment variable daimon reads. Generated from the settings "
+            "Every environment variable Daimon reads. Generated from the settings "
             "models themselves by `scripts/generate_config_reference.py` — edit the "
             "`Field(description=...)` in the model, not this page. CI fails when the "
             "two disagree."
         ),
         "",
         *_wrap(
-            "Values come from the process environment and, for the daimon processes, "
+            "Values come from the process environment and, for the Daimon processes, "
             "from a `.env` file in the working directory. `.env.example` lists the "
             "same `DAIMON_*` variables in copy-paste form; this page adds the types, "
             "the defaults and the two standalone services. Nested blocks use `__` as "

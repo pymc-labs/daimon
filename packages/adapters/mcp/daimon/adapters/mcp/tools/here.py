@@ -1,4 +1,4 @@
-"""Current-place status tool, sharing the slash commands' fixed card."""
+"""Current-place status tool with short text and complete structured facts."""
 
 from __future__ import annotations
 
@@ -20,8 +20,13 @@ from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.adapters.mcp.tools.slack._read import (
     _slack_list_channels_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.teams._directory import split_thread
+from daimon.adapters.mcp.tools.teams._read import (
+    _teams_list_channels_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.here_card import HereCard, load_here_card
+from daimon.core.teams_threads import conversation_of
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
@@ -81,6 +86,11 @@ async def _require_thread_in_channel(
         messages = cast(list[dict[str, Any]], response.get("messages") or [])
         if not messages or str(messages[0].get("ts")) != thread_id:
             raise ToolError("thread does not belong to this channel")
+    elif auth.platform == "teams":
+        # A Teams thread id names its channel: `19:…;messageid=<root>`.
+        channel, root = split_thread(conversation_of(thread_id))
+        if channel != channel_id or root is None:
+            raise ToolError("thread does not belong to this channel")
 
 
 async def _where_am_i_impl(
@@ -103,8 +113,12 @@ async def _where_am_i_impl(
         visible = {row.id for row in await _slack_list_channels_impl(runtime, auth)}
         if channel_id not in visible:
             raise ToolError("missing channel access")
+    elif auth.platform == "teams":
+        visible = {row.id for row in await _teams_list_channels_impl(runtime, auth)}
+        if channel_id not in visible:
+            raise ToolError("missing channel access")
     else:
-        raise ToolError("/here is available for Discord and Slack channel turns")
+        raise ToolError("/here is available for Discord, Slack and Teams channel turns")
     if thread_id is not None:
         await _require_thread_in_channel(runtime, auth, channel_id, thread_id)
     github = runtime.settings.github
@@ -129,9 +143,10 @@ async def _where_am_i_impl(
             # to everyone there. Admin-only views belong in private surfaces.
             is_admin=False,
             caller_account_id=auth.account_id,
-            resolve_setter_display=lambda external_id: _setter_display_name(
-                runtime, auth, external_id
-            ),
+            # Teams has no live name lookup here; the card then uses the stored name.
+            resolve_setter_display=None
+            if auth.platform == "teams"
+            else lambda external_id: _setter_display_name(runtime, auth, external_id),
             visible_channel_ids=visible,
             bot_can_view=None,
             caller_can_view=True,
@@ -143,13 +158,13 @@ def register_here_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def where_am_i(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, channel_id: str | None = None, thread_id: str | None = None
     ) -> HereCard:
-        """Return the fixed /here card with structured facts and rendered text.
+        """Return short /here text and full structured facts.
         Use this when someone asks which agent you are, who answers here, whether
         you can see a channel, which channel or agent rule applies, whether
         publishing needs approval, or whose token or sign-in you hold. Never
         guess these facts from the conversation. Pass the parent channel id
         from turn controls and the current thread id when present. A bound
-        coding token can omit channel_id. Discord and Slack channel turns only.
-        Unknown visibility is reported as unknown.
+        coding token can omit channel_id. Discord, Slack and Teams channel turns
+        only. Unknown visibility is reported as unknown.
         """
         return await _where_am_i_impl(runtime, await _auth(ctx), channel_id, thread_id)

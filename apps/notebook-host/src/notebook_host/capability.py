@@ -32,6 +32,10 @@ class CapabilityClaims(BaseModel):
     # The bot's tenant id. A host without per-notebook origins serves only
     # listed tenants (``admin._admit_tenant``); tokens without one predate this.
     tenant: str | None = None
+    # How long a read-only scratch notebook is kept, as asked by the agent.
+    # Clamped to ``max_notebook_ttl_seconds``. None (tokens from an older bot)
+    # falls back to ``subprocess_ttl_seconds``.
+    notebook_ttl_seconds: int | None = None
 
 
 def _unb64(s: str) -> bytes:

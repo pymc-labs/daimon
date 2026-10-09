@@ -93,7 +93,12 @@ Put any margin in `DAIMON_BILLING__MARKUP` (below), not in the table, because
 reports read the table as provider cost.
 
 Opus 5.5 is priced at $4 input, $20 output, $5 five-minute cache write, and
-$0.20 cache read per million tokens; Sonnet 5.5 at $2, $10, $2.50 and $0.20.
+$0.20 cache read per million tokens; Sonnet 5.5 at $2, $10, $2.50 and $0.10.
+`AGENT_PRICING_CHECKED_ON` records the day every row was last checked against
+`AGENT_PRICING_SOURCE`. `test_pricing.py` pins each row, so a price edit fails
+until the test table and the date move with it, and
+`uv run pytest -m contract packages/core/tests/test_pricing.py` compares the
+rows with the live pricing page.
 The four-field ledger cannot distinguish one-hour cache writes, which
 Anthropic prices at $8 (Opus 5.5) and $4 (Sonnet 5.5) per million tokens; it
 currently treats all cache writes as five-minute writes.
@@ -173,8 +178,8 @@ Two boundaries of the design worth stating plainly:
   override) times one turn's cost. Discord's optional process-wide limit refuses
   excess guild mentions and DMs before `admit()`. An MCP `start_turn` session is
   worse. Its spend
-  reaches the ledger only when the scheduler's usage sweep next runs (after
-  the tick's routine fires, which can take up to the 45-minute turn ceiling).
+  reaches the ledger only when the scheduler's usage sweep next reads the
+  session: up to two sweep passes plus one tick interval later.
   Until then the gate reads a balance that leaves out earlier headless turns,
   and MCP turns have no concurrency cap. The overdraft is therefore bounded
   by what a tenant can start between two sweeps, not by N concurrent turns.
@@ -248,9 +253,13 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
 Members can read a channel's budget with `get_channel_budget`; listing,
 setting and clearing are for server admins only, never a channel's own admins
 (`daimon.core.authz`, `SET_CHANNEL_BUDGET`); each change is recorded in `security_audit_events`, from the CLI too. `/billing` in a channel with a budget
-shows `this channel: $spent of $limit (window)`. An admin's `/billing` also
-lists the five most used budgets on that platform (active ones first, by
-share of the limit spent) with a count of the rest.
+(`billing` typed in one on Teams, answered in the 1:1 chat)
+shows it in a **This channel** section under the credit, worded from its
+window (`$1.20 of $5.00 used this month`, `… used since 2026-07-01`, `$5.00
+budget from 2026-07-01` before it starts). An admin's `/billing` also lists,
+under **Channel budgets** after the top spenders, the five most used budgets
+on that platform (active ones first, by share of the limit spent) with a count
+of the rest.
 
 What a budget does not cover:
 
@@ -398,8 +407,12 @@ many tenants may redeem it. Each tenant redeems a code at most once.
   credited twice.
 
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
-timed credit only changes what the ledger holds. `/billing` shows live timed
-credit and when it ends. Admins redeem from `/billing` on Discord or Slack,
+timed credit only changes what the ledger holds. `/billing` shows the balance
+as `$62.40` `total credit left`, a total that already includes live timed credit,
+and under it `Includes $25.00 that expires. It's used first.` (everything left in
+timed credit). Below zero (an operator-funded tenant) it reads `No credit left`
+and `$3.10 spent beyond it`, still with that line. **Expiry dates** lists each
+timed credit with its end date, soonest first (five, then a count of the rest). Admins redeem from `/billing` on Discord or Slack,
 `billing` on Teams, or with the admin-only MCP tool `redeem_promo_code`. Refusals are one of
 `invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
 `already_redeemed` and `throttled`; five refusals in 15 minutes pause a
@@ -429,6 +442,7 @@ none back. No operator token can open a top-up: `/billing/checkout` answers 403.
 | `promo_redemptions` | one row per code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`). |
 | `promo_redeem_failures` | refused redemption attempts per tenant, for the throttle. |
 | `channel_budgets` | per-channel spend limits and their windows; no row means no limit. |
+| `platform_user_names`, `platform_channel_names` | the last name each platform sent for a person (display name and handle) or a channel, so `/billing` can name them when the platform does not answer; see [What you can see](#what-you-can-see). |
 
 These tables are declared in `packages/core/daimon/core/_models.py` with stores
 beside them in `packages/core/daimon/core/stores/`. Ledger reasons in use:
@@ -439,16 +453,20 @@ after their Stripe events.
 
 **The sweep.** An MCP `start_turn` creates a session and sends a message but
 never drives the stream, so the inline hook never fires for it.
-`packages/core/daimon/core/usage_sweep.py` closes that hole: each scheduler
-tick it lists Managed Agents sessions, skips any without a `daimon_tenant`
-stamp, belonging to a tenant this deployment does not own, or stamped
-`daimon_billing_exempt`, and replays the rest's `span.model_request_end`
-events through the same recorder. After a successful pass, it skips event
+`packages/core/daimon/core/usage_sweep.py` closes that hole. On its own
+scheduler loop, pausing the tick interval between passes, it lists Managed
+Agents sessions, skips any without a `daimon_tenant` stamp, belonging to a
+tenant this deployment does not own, or stamped `daimon_billing_exempt`, and replays the rest's `span.model_request_end`
+events through the same recorder. It requests only that event type and skips
+events already in `usage_events` before writing, so a session that is fully
+metered costs one query and a read of its model calls, not a write per call.
+After a successful pass, it skips event
 reads for sessions last updated before that pass started minus 15 minutes.
 The watermark stays in scheduler memory; startup and hourly passes read all
 stamped sessions, and a failed pass leaves the watermark in place. It is safe to run
 against already-metered sessions precisely because the idempotency grain is
-the same.
+the same. A call with a `usage_events` row counts as metered, because the
+recorder writes that row and its debit in one transaction.
 
 The sweep and the live recorder race for each model call, and the first
 commit wins. The amount is the same either way, because both price at the
@@ -473,7 +491,8 @@ and logs `usage_sweep.exempt_skipped` with `tenant_id`, `managed_session_id`,
 which prices at zero as in the recorder), `model_calls`, the four token
 counts, `cost_usd` (the raw price) and `would_be_debit_usd` (with
 `DAIMON_BILLING__MARKUP` applied). Each pass ends with one
-`usage_sweep.completed` line carrying `recorded`, `exempt_sessions`,
+`usage_sweep.completed` line carrying `recorded` (calls written in that
+pass), `exempt_sessions`,
 `exempt_model_calls`, `exempt_cost_usd` and `exempt_would_be_debit_usd`.
 
 Nothing is written to the database for these sessions. An exempt session is
@@ -513,10 +532,69 @@ usage line on any platform. Teams cards show no summary.
 
 `/billing` on Discord and Slack, and `billing` on Teams, is the reporting surface, always over the
 current calendar month, built from
-`packages/core/daimon/core/stores/usage_events.py`. A member sees their own
-spend, turn count and cap plus the tenant balance; an admin additionally sees
-tenant totals and a per-member breakdown. Admin-only figures are not fetched
-for a non-admin rather than fetched and hidden.
+`packages/core/daimon/core/stores/usage_events.py`, in the same words on every
+platform. A member sees their own use against their cap and the credit left,
+with "Ask an admin to add credit."; an admin sees the month's spend and how
+many people spent it, the credit left, the **Top spenders** (five, then a
+count) and the **Channel budgets**, with the actions **Add credit** and
+**Redeem code** (while a code is redeemable) and a **Look up a person**
+picker that re-checks admin and shows one person's spend this month (on Teams,
+the people picker over the organisation's directory). Both get **Expiry dates** while the credit includes timed credit:
+a private reply on Discord, a pushed view on Slack, an expanding section on
+Teams. Admin-only figures are not fetched for a non-admin rather than fetched
+and hidden. On Discord the panel's accent is red with no credit left or the
+viewer over their cap, and amber while timed credit expires within a week.
+
+The top spenders are shown by name, never as a ping and never as an id. Each
+shown person is named in this order, all lookups side by side under one short
+timeout:
+
+1. **The platform's name for them now.** Discord takes the member cache, else
+   one member fetch (no privileged intent), within 1.5 seconds. Slack calls
+   `users.info` (display name, else real name) within 2 seconds and shows it as
+   escaped plain text. Teams looks the person up on the rosters of the teams
+   the bot is installed in, within 2 seconds.
+2. **The name stored when we last saw them.** Whenever an adapter already holds
+   a name it is kept in `platform_user_names`, one row per (tenant, platform,
+   user), for anyone with an account in that tenant
+   (`packages/core/daimon/core/platform_names.py`). The name joins a bounded
+   in-process queue (5,000 people; a later name replaces a queued one, and
+   past the cap new ones are dropped and logged) that one background task
+   writes 50 rows at a time, so it never delays or fails a turn and a burst
+   of new people holds one database connection. The names come from the
+   author of a Discord
+   mention and the user of any Discord interaction (server display name and
+   username), the `user_profile` on a Slack message and the username on a
+   Slack slash command or click, the sender of every Teams message and card
+   click, and every name a panel lookup returns. Someone who left the server,
+   is in no installed team, or whose lookup failed or timed out gets this one.
+3. **Their account's own name**, on Discord only, for someone with no stored
+   name: `fetch_user` answers for people who left (global name, else
+   username). Slack's `users.info` already answers for deactivated people.
+4. **Never named to us at all**: Discord writes a `<@id>` mention, which the
+   client shows as their name and which pings nobody (the panel is ephemeral
+   and sent with no allowed mentions); Slack writes a `<@U…>` mention, which a
+   modal shows as the name (the panel is only ever a modal); Teams says
+   `Name unavailable`, since an `<at>` mention there would notify them.
+
+Names are escaped: markdown and mentions on Discord, `&`, `<` and `>` on Slack,
+markdown and tags on Teams. Discord and Slack show channel budgets as channel
+mentions, which the client names. Teams shows each channel's name: from the
+channel listings of the installed teams, else the name stored from the last
+message there (`platform_channel_names`), else `General` for a team's own
+channel, else `Channel name unavailable`; never the `19:…` id.
+
+The panel has no `·` separators: the admin subtitle is two lines (`October
+2026`, `$48.17 spent by 9 people`), an expiry date reads `$20.00 on Oct 12`,
+and a top-up amount is `$10` with `about 100 turns` under it.
+
+A privacy deletion removes the person's stored name with the rest of their
+records, in every tenant their account has a principal in, and drops any name
+of theirs still queued. A name is only written while the person has a
+principal there, and the deletion removes it after the principal, so a write
+racing the deletion, from any process, cannot bring it back; someone with no
+account has no stored name, so `/privacy` saying "no data on file" stays true.
+Deleting a tenant removes its stored names.
 
 Two things those numbers are not. They are pre-markup, as above. And tenant
 aggregates exclude rows with no platform user attached, so spend recovered by

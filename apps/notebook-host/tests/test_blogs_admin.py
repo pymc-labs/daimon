@@ -86,7 +86,8 @@ def test_put_blog_spawns_run_mode_and_registers(
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["slug"] == "pre-radar"
-    assert "expires_at" not in body, "blogs are permanent — no expires_at"
+    assert body["expires_at"] is None, "blogs are permanent — no expiry"
+    assert body["permanent"] is True
     assert calls[0][3] == "run", "blog publish must spawn in run mode"
     registry = load_blogs(tmp_path / "blogs.json")
     assert "pre-radar" in registry, "a published blog must be recorded in the registry"

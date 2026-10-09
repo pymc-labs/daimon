@@ -30,12 +30,13 @@ from daimon.core.errors import SlackOAuthError
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.slack_customize_scope import clear_missing_customize_scope
 from daimon.core.slack_oauth import (
-    SLACK_BOT_SCOPES,
     SLACK_USER_SCOPES,
     build_authorize_url,
     exchange_code,
     mint_state,
+    slack_bot_scopes,
     verify_state,
 )
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
@@ -63,7 +64,7 @@ _FONTS_PRECONNECT = (
     '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
     '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
     "family=Bricolage+Grotesque:wght@400;600&amp;"
-    "family=Hanken+Grotesk:wght@400;600&amp;"
+    "family=Hanken+Grotesk:wght@400;600;700&amp;"
     "family=Spline+Sans+Mono:wght@400&amp;"
     'display=swap">'
 )
@@ -293,6 +294,13 @@ def _page(
 </body>
 </html>"""
     return HTMLResponse(doc, status_code=status)
+
+
+def render_branded_page(
+    *, title: str, state_bar: str, body_html: str, status: int = 200
+) -> HTMLResponse:
+    """Public page renderer shared by browser authorization flows."""
+    return _page(title=title, state_bar=state_bar, body_html=body_html, status=status)
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +553,7 @@ def build_oauth_slack_routes(
             client_id=cfg.client_id,
             redirect_url=cfg.redirect_url,
             state=state,
-            scopes=SLACK_BOT_SCOPES,
+            scopes=slack_bot_scopes(identity_enabled=settings.agent_identity.enabled),
         )
         return _install_landing_html(
             authorize_url=authorize_url,
@@ -689,6 +697,7 @@ def build_oauth_slack_routes(
                 expires_at=expires_at,
                 refresh_token=encrypted_refresh,
             )
+        clear_missing_customize_scope(result.access_token)
         # A reinstall after an uninstall finds its tenant soft-archived, and
         # provision_tenant leaves an existing row alone. Clear it only after
         # the token is stored: teardown locks the tenant row and skips when

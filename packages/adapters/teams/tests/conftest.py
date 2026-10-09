@@ -7,7 +7,7 @@ import functools
 import json
 import re
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from decimal import Decimal
 from pathlib import Path
@@ -27,7 +27,7 @@ from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
-from daimon.core.turn.state import TextBlock, TurnState
+from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing import (
     build_fake_anthropic,
     ma_session,
@@ -75,6 +75,17 @@ CODE_BLOCK = {
         "startLineNumber": {"type": "number"},
     },
     "required": ["type", "codeSnippet"],
+    "additionalProperties": False,
+}
+# Teams' people picker, outside the Adaptive Cards 1.5 schema:
+# https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/people-picker
+DATA_QUERY = {
+    "type": "object",
+    "properties": {
+        "type": {"enum": ["Data.Query"]},
+        "dataset": {"enum": ["graph.microsoft.com/users"]},
+    },
+    "required": ["type", "dataset"],
     "additionalProperties": False,
 }
 MAX_ACTIVITY_BYTES = 26_000  # a margin under Teams' 28 KB
@@ -239,6 +250,10 @@ class TeamsApiFake:
     posted: int = 0
     channels: dict[str, str] = dataclasses.field(default_factory=dict[str, str])
     """Every team's standard channels, by id, as its conversation listing names them."""
+    names: dict[str, str] = dataclasses.field(default_factory=dict[str, str])
+    """Roster names by Entra object id; a member lookup answers with the person's name."""
+    absent: set[str] = dataclasses.field(default_factory=set[str])
+    """Entra object ids no roster has: a member lookup answers 404."""
 
     async def send(
         self,
@@ -268,13 +283,18 @@ class TeamsApiFake:
             details = {"id": team.group(1), "aadGroupId": TEAM_GROUP_ID}
             return httpx.Response(200, json=details, request=request)
         if context.method == "GET" and "/members/" in context.url:
+            aad_object_id = httpx.URL(context.url).path.rsplit("/", 1)[-1]
+            if aad_object_id in self.absent:
+                return httpx.Response(404, json={}, request=request)
             # As Teams answers for one of our own members.
             member = {
                 "id": "29:member",
-                "aadObjectId": httpx.URL(context.url).path.rsplit("/", 1)[-1],
+                "aadObjectId": aad_object_id,
                 "tenantId": ENTRA_TENANT_ID,
                 "userRole": "user",
             }
+            if aad_object_id in self.names:
+                member["name"] = self.names[aad_object_id]
             return httpx.Response(200, json=member, request=request)
         if context.method == "POST" and httpx.URL(context.url).path.endswith("/v3/conversations"):
             return httpx.Response(200, json={"id": DIRECT_CHAT_ID}, request=request)
@@ -294,6 +314,7 @@ class TeamsApiFake:
 def card_validator() -> Draft6Validator:
     schema = json.loads(CARD_SCHEMA.read_text())
     schema["definitions"]["ImplementationsOf.Element"]["anyOf"].append(CODE_BLOCK)
+    schema["definitions"]["Input.ChoiceSet"]["properties"]["choices.data"] = DATA_QUERY
     return Draft6Validator(schema)
 
 
@@ -370,6 +391,7 @@ def build_teams_runtime(
     Outbound HTTP never reaches the network: it answers 404 unless given.
     """
     settings = MagicMock()
+    settings.agent_identity.enabled = False
     settings.teams = teams or teams_settings()
     settings.crypto.keys = ()
     settings.mcp.public_url = None
@@ -452,13 +474,18 @@ async def post_activity(service: TeamsHttpService, payload: dict[str, object]) -
 
 
 @contextmanager
-def patched_turns(answer: str = "On it.") -> Iterator[list[dict[str, Any]]]:
-    """Admission patched and every MA turn answering `answer`; yields each turn's kwargs."""
+def patched_turns(
+    answer: str = "On it.", *, tools: Sequence[ToolUseBlock] = ()
+) -> Iterator[list[dict[str, Any]]]:
+    """Admission patched and every MA turn calling `tools`, then answering `answer`.
+
+    Yields each turn's kwargs.
+    """
     turns: list[dict[str, Any]] = []
 
     async def fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
         turns.append(kwargs)
-        state = TurnState(content=[TextBlock(kind="text", text=answer)])
+        state = TurnState(content=[*tools, TextBlock(kind="text", text=answer)])
         await lifecycle.on_terminal_success(state)
         return state
 

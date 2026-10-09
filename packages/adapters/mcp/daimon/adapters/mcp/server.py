@@ -19,7 +19,7 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.adapters.mcp.artifacts import build_artifact_store
-from daimon.adapters.mcp.auth.group_members import GroupLookups
+from daimon.adapters.mcp.auth.group_members import DiscordMembers, GroupLookups
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
@@ -36,6 +36,8 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
     production_tenant_resolver,
 )
 from daimon.adapters.mcp.middleware.session_header import StripSessionIdMiddleware
+from daimon.adapters.mcp.oauth_github import build_oauth_github_routes
+from daimon.adapters.mcp.oauth_github_personal import build_personal_link_routes
 from daimon.adapters.mcp.oauth_mcp import build_oauth_mcp_routes
 from daimon.adapters.mcp.oauth_slack import build_oauth_slack_routes
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -61,7 +63,10 @@ from daimon.adapters.mcp.tools.channel_skills import register_channel_skill_tool
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
+from daimon.adapters.mcp.tools.enable_files import register_enable_files_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
+from daimon.adapters.mcp.tools.github_connect import register_github_connect_tools
+from daimon.adapters.mcp.tools.github_requests import register_github_request_tools
 from daimon.adapters.mcp.tools.here import register_here_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
@@ -96,6 +101,7 @@ from daimon.core.observability import init_sentry
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
+from daimon.core.stores.agent_avatars import get_avatar_by_token
 from fastmcp import FastMCP
 from fastmcp.server.auth.auth import TokenVerifier
 from fastmcp.server.transforms import Visibility
@@ -108,7 +114,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse
+from starlette.responses import PlainTextResponse, Response
 
 if TYPE_CHECKING:
     from stripe._http_client import HTTPClient as StripeHTTPClient
@@ -156,6 +162,29 @@ def _build_readyz(
         return PlainTextResponse("ready")
 
     return readyz
+
+
+def _build_avatar_route(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> Callable[[Request], Awaitable[Response]]:
+    async def avatar(req: Request) -> Response:
+        token = req.path_params["token"]
+        sha12 = req.path_params["sha12"]
+        size_arg = req.query_params.get("size")
+        if size_arg is not None and size_arg not in ("128", "512"):
+            return Response(status_code=400)
+        size = int(size_arg) if size_arg is not None else None
+        async with sessionmaker() as session:
+            png = await get_avatar_by_token(session, token=token, sha12=sha12, size=size)
+        if png is None:
+            return Response(status_code=404)
+        return Response(
+            png,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
+    return avatar
 
 
 def create_mcp_app(
@@ -226,8 +255,16 @@ def create_mcp_app(
         if effective_settings.teams is not None
         else None
     )
+    discord = effective_settings.discord
     group_lookups = GroupLookups(
-        sessionmaker=effective_sessionmaker, fernet=fernet, teams_client=teams_client
+        sessionmaker=effective_sessionmaker,
+        fernet=fernet,
+        teams_client=teams_client,
+        discord=DiscordMembers(
+            discord.bot_token.get_secret_value(), httpx.AsyncClient(timeout=10.0)
+        )
+        if discord is not None
+        else None,
     )
 
     effective_auth = auth
@@ -376,6 +413,8 @@ def create_mcp_app(
     register_setup_target_tools(mcp, runtime)
     register_task_continuity_tools(mcp, runtime)  # hand off a task / start fresh
     register_github_app_tools(mcp, runtime)
+    register_github_connect_tools(mcp, runtime)
+    register_github_request_tools(mcp, runtime)
     register_wizard_tools(mcp, runtime)
     skills.register_skill_tools(mcp, runtime)
     register_skill_upload_tools(mcp, runtime)
@@ -387,6 +426,7 @@ def create_mcp_app(
     register_cli_token_tool(mcp, runtime)
     if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):
         register_channel_tools(mcp, runtime)
+        register_enable_files_tools(mcp)  # tagged `teams`; the Teams adapter posts the card
         if effective_settings.discord is not None or effective_settings.slack is not None:
             register_tidy_tools(mcp, runtime)  # edit/delete the agent's own posts
     else:
@@ -452,6 +492,11 @@ def create_mcp_app(
     )
     app.add_route("/healthz", _healthz, methods=["GET"])
     app.add_route("/readyz", _build_readyz(effective_sessionmaker), methods=["GET"])
+    app.add_route(
+        "/avatars/{token}/{sha12}.png",
+        _build_avatar_route(effective_sessionmaker),
+        methods=["GET"],
+    )
     if effective_billing_config is not None:
         app.add_route(
             "/webhooks/stripe",
@@ -529,6 +574,47 @@ def create_mcp_app(
         app.add_route("/oauth/mcp/callback", mcp_oauth_callback, methods=["GET"])
     else:
         log.info("mcp oauth disabled", reason="no crypto keys or public url")
+
+    github_connect_cfg = effective_settings.github_app
+    if (
+        fernet is not None
+        and effective_settings.mcp.app_root_url is not None
+        and github_connect_cfg.app_id is not None
+        and github_connect_cfg.app_slug is not None
+        and github_connect_cfg.private_key is not None
+        and github_connect_cfg.client_id is not None
+        and github_connect_cfg.client_secret is not None
+    ):
+        github_connect, github_callback, github_setup, github_confirm = build_oauth_github_routes(
+            settings=effective_settings,
+            sessionmaker=effective_sessionmaker,
+            fernet=fernet,
+        )
+        personal_start, personal_platform_callback, personal_github_callback = (
+            build_personal_link_routes(
+                settings=effective_settings,
+                sessionmaker=effective_sessionmaker,
+                fernet=fernet,
+                runtime=runtime,
+            )
+        )
+
+        async def combined_github_callback(request: Request) -> Response:
+            personal_response = await personal_github_callback(request)
+            return (
+                personal_response
+                if personal_response is not None
+                else await github_callback(request)
+            )
+
+        app.add_route("/oauth/github/connect/{token}", github_connect, methods=["GET"])
+        app.add_route("/oauth/github/callback", combined_github_callback, methods=["GET"])
+        app.add_route("/oauth/github/setup", github_setup, methods=["GET"])
+        app.add_route("/oauth/github/confirm", github_confirm, methods=["GET", "POST"])
+        app.add_route(
+            "/oauth/github/link/platform-callback", personal_platform_callback, methods=["GET"]
+        )
+        app.add_route("/oauth/github/link/{token}", personal_start, methods=["GET"])
 
     mount_hub_apps(
         app,

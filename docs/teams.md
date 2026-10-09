@@ -1,18 +1,21 @@
 # Teams adapter
 
-daimon on Microsoft Teams answers in 1:1 chats and in channel threads where
+Daimon on Microsoft Teams answers in 1:1 chats and in channel threads where
 it is @mentioned. It reads the thread it is asked about, works with files,
 runs routines, and has the same agents, memory and billing as on Discord and
 Slack. This page covers how it behaves and where it differs. To set it up
 (Entra, Azure Bot, the app package and the Teams admin center), follow
 [Microsoft Teams in the self-hosting guide](self-hosting.md#microsoft-teams-optional).
 
+Teams uses one bot identity for every agent. Answers from an agent other than
+the built-in one start with its bold name on the first message chunk.
+
 ### Ingress is HTTP, not a dial-out
 
 Discord (gateway) and Slack (Socket Mode) dial out; Teams does not. The
 adapter runs a FastAPI listener on `DAIMON_TEAMS__PORT` (default `3978`). The
 Microsoft SDK owns `POST /api/messages` and validates the Bot Framework JWT
-before daimon code runs; tokens from any other issuer (such as Entra ID) are
+before Daimon code runs; tokens from any other issuer (such as Entra ID) are
 refused with 401 first. The same listener serves `/healthz` and `/readyz`,
 and, with `DAIMON_TEAMS__PUBLIC_URL` set, `GET /oauth/teams/files/callback`
 (below); a reverse proxy in front must pass that path too.
@@ -42,7 +45,9 @@ is supported; government and China clouds use other Bot Framework hosts.
   read, the bot says so instead of starting a turn. A followed thread also
   gets unprompted replies (below).
 - **Private and shared channels** work like standard ones once the app is in
-  them. The package declares `supportsChannelFeatures: tier1` (manifest
+  them, except that Teams sends the bot only the private channel posts that
+  @mention it: there a Reply on a bot message needs a mention too, and a
+  followed thread gets no unprompted replies. The package declares `supportsChannelFeatures: tier1` (manifest
   1.25), but adding the app to a team does not add it to these channels: each
   one's owner adds it from the channel.
 - **Group chats** get a short refusal.
@@ -53,19 +58,40 @@ is supported; government and China clouds use other Bot Framework hosts.
 
 A turn shows one status card, edited in place, with a Cancel button only the
 author can use. The answer replaces the card, split across messages when long,
-with Teams' thumbs up/down feedback on the last one. Messages sent while a turn
+with feedback controls on the last one (below). Messages sent while a turn
 runs are queued and run as one follow-up per author. Work an agent hands off
 (`hand_off_task`) runs right after the turn that queued it; if admission
 refuses that work, it is dropped without a notice, as on Slack. Retried
 deliveries are deduplicated in memory only, so a retry that lands after a
 restart runs again.
 
+### Feedback and Ask a human
+
+The last part of an answer carries Teams' thumbs up/down. 👍 records the vote;
+👎 opens a "What went wrong?" form with optional reasons and text, at least one
+required. When support is set up the answer also has an Ask a person button
+that opens the `support` form for it, spending a credit, and the post links
+to the answer; asking again about the same answer spends nothing. A turn that only ran tools gets both on its finished card; a
+cancelled turn gets neither. Only people who could start a turn at that
+answer can vote or ask. With `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` on, each
+submitted 👎 form is posted once to the support channel without spending a
+credit, and the form says it is shared. Feedback text is never logged.
+
+Support requests route as on Slack and Discord. One asked from a channel with
+channel admins goes to those admins in 1:1 chats first, then to the
+organisation's admins, and to the support channel only when no chat landed;
+each recipient must be allowed by the DM policy and be on the channel's team
+roster. A request asked from a channel is open to those who could start a
+turn there. When the channel is read only from inside (`readers: inside`),
+the form warns that the note leaves it, and the request and any routed 👎
+form say so, so whoever picks it up answers in the channel.
+
 ### People from another organisation
 
 Two kinds of people count as from another organisation: a shared channel's
 external participants, who join through B2B direct connect and stay in their
 home tenant, and guests (Entra B2B guest accounts in ours), who can be in
-standard and private channels and 1:1 chats. daimon answers them only inside
+standard and private channels and 1:1 chats. Daimon answers them only inside
 a channel kept to its own agents (`readers: own`) and its threads. Anywhere else an addressed message gets
 one line saying so and runs no turn, and their unmentioned replies are never
 judged for a followed thread. Their turns run as a member (never an admin or
@@ -75,7 +101,9 @@ included), commands go to the agent as plain text, and the agent sees
 conversation's tools: reading, searching and posting in it, files into it,
 their own sessions and timers, and signing in to an MCP server the agent
 already has. Anything else, including tools added later, returns a tool
-error the agent relays. Files can't be saved in a shared channel.
+error the agent relays. Files are saved in a shared channel this
+organisation hosts once an admin turned them on there (below); one hosted by
+another organisation keeps its files on that organisation's site.
 
 A sender is placed from these signals, cheapest first: a foreign tenant on
 the activity (`channelData.tenant.id`, `from.tenantId`,
@@ -108,18 +136,21 @@ details and Teams has no message only its sender sees. One typed in a channel
 is answered in the sender's 1:1 chat, opened if needed, with a short pointer
 in the channel; `new` there says each post is its own conversation. A message
 is a command only when it is the bare word (or `memory /<path>`); anything
-longer goes to the agent. None of them runs an agent turn.
+longer goes to the agent. A message that is exactly a command word runs the
+command, so a reply of just `here` shows the status card rather than reaching
+the agent. None of them runs an agent turn.
 
 | Command | Does |
 | --- | --- |
 | `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
 | `help` | List the commands. |
-| `setup` | Agents, their details and who answers where; create an agent, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
+| `setup` | Agents, their details and who answers where; create an agent, add a skill to one, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
+| `here` | The status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
-| `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
-| `privacy` | See, export or delete what daimon stores about you. |
-| `billing` | Your usage this month and recent credit grants; admins also see totals, top spenders and top-ups, and redeem promo codes. |
-| `support` | Ask a person for help: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked. |
+| `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. Typed in a channel whose readers are limited, it says so instead, since the answer would leave the channel. |
+| `privacy` | See, export or delete what Daimon stores about you. |
+| `billing` | Your usage this month and the credit left, with when timed credit expires, and, typed in a channel with a budget, that budget; admins also see the month's spend, the top spenders and channel budgets, add credit, redeem promo codes and look up one person's spend with the people picker. |
+| `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`) or, with the Discord bot configured, a Discord one. The post links to where it was asked; one from a channel with channel admins goes to them first (above). |
 
 A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
 setup conversation for the chosen agent, with its own session. The chat's
@@ -138,8 +169,10 @@ group ID in `role_ids` to admit that team's owners), channel budgets
 work as on Discord and Slack. Who answers where lists each channel's
 environment, and its **Channel settings** dialog changes one channel picked
 there, since the panel lives in the 1:1 chat: its environment (server admins,
-or that channel's admins), and its permissions (readers and writers) and admins by
-Entra object ID (server admins only). Channel rules work as on Discord and Slack,
+or that channel's admins), and its permissions (readers and writers), admins by
+Entra object ID and channel skills (server admins only). Channel skills are
+extra skills for whatever agent answers in that channel, added by name,
+`agent/name` or skill id and removed by ticking them, as on Discord and Slack. Channel rules work as on Discord and Slack,
 with `set_channel_rule` or `daimon channels rule set`. A thread (`;messageid=`)
 counts as its channel, and a channel's own agents send nothing to 1:1 chats. The
 CLI can't read channel names, so a copy it makes is named from the channel id.
@@ -207,11 +240,13 @@ consent above) a followed thread stays mention-only.
   OneDrive. Offers live in memory, so a restart drops them and the next turn
   that uses a tool offers the file again.
 - **Channels.** Teams sends the bot only a channel message's text, so the bot
-  reads each message it answers from Graph and passes its images to the agent. Files live in the team's SharePoint site, which no
-  team-scoped permission reaches: they work only in teams whose site an admin
-  granted (below). There, a shared file from that site (never another one)
-  reaches the agent as a short-lived download link, and each file the agent
-  writes is uploaded to the channel's Files tab (never overwriting) and linked
+  reads each message it answers from Graph and passes its images to the agent.
+  Files live in SharePoint: a standard channel's on the team's site, a private
+  or shared channel's on a site of its own. No team-scoped permission reaches
+  either, so files work only in channels whose site an admin granted (below).
+  There, a shared file from that site (never another one, so not the team's
+  in a private or shared channel whose own site is granted) reaches the agent
+  as a short-lived download link, and each file the agent writes is uploaded to the channel's Files tab (never overwriting) and linked
   below its answer, or in one message when the answer has no room (never
   after an unprompted answer); a failed upload is only logged.
   Elsewhere, or when Graph refuses, the agent is told the shared file's name
@@ -221,6 +256,10 @@ consent above) a followed thread stays mention-only.
   workspace. The turn context tells the agent which case applies
   (`files="available"` or `"unavailable"`), learned per channel from the last
   folder lookup or upload and rechecked every 10 minutes while unavailable.
+  Where they are unavailable, `files_hint` tells the agent, asked for a file or
+  to turn files on, to call `enable_channel_files` first rather than offer an
+  artifact, report or notebook; the bot posts the Enable files card (below)
+  after that answer, for a Daimon admin who asked.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and
@@ -230,12 +269,18 @@ A shared `.md` or `.zip` can become a skill: `add_skill(attachment_url=…)`
 takes its download link only over https from a SharePoint, OneDrive or Graph
 host, sends no token, refuses a redirect off those hosts, and checks the
 file's name before reading its capped body, with the usual preview and
-confirmation card.
+confirmation card. **Add skill** on an agent's Details in `setup` takes a
+pasted SKILL.md (up to 4,000 characters; a dialog has no file input), shows
+what it holds, and adds it on a second Send as the agent's own skill, under
+Discord's and Slack's rule: an admin for any agent, a channel admin for one
+that answers only in their channels, anyone for one nobody else uses. The
+panel is outside every channel, so a pinned agent needs an admin of every
+channel it is pinned to.
 
 ### Channel files (optional)
 
 Grant the app `Sites.Selected`, which reaches only the sites granted to it,
-then grant each team's site. The manifest does not change and no restart is
+then grant each channel's site. The manifest does not change and no restart is
 needed.
 
 1. Entra portal → App registrations → the bot's app → API permissions → Add
@@ -245,12 +290,17 @@ needed.
    (the messaging endpoint without `/api/messages`). Same app →
    Authentication → Add a platform → Web → redirect URI
    `<DAIMON_TEAMS__PUBLIC_URL>/oauth/teams/files/callback`.
-3. When a daimon admin shares a file in a team whose site is not granted,
-   the bot posts an **Enable files** card (at most every 15 minutes per team).
-   A SharePoint or global admin clicks it and signs in once (the first in the
-   organisation must be a global admin, who consents for everyone); the Teams service
-   then grants the app write on that team's site, and its next message sees
-   the files.
+3. When a Daimon admin asks Daimon to turn files on in a channel (or for a
+   file there), or shares a file it cannot open, the bot posts an **Enable
+   files** card (unasked, at most every 15 minutes per channel). A SharePoint
+   or global admin who is a member of the channel clicks it and signs in once,
+   granting the delegated `Sites.FullControl.All` and `Files.Read.All` (the
+   first in the organisation must be a global admin, who consents for
+   everyone). The Teams service finds the channel's Files folder with that
+   sign-in, grants the app write on the site holding it (the team's, or a
+   private or shared channel's own) and stores the folder; the channel's next
+   message sees the files. A new channel's Files tab must be opened once
+   first; until then the channel has no folder to find.
 
 Or grant a site by hand as a SharePoint or global admin holding
 `Sites.FullControl.All`:
@@ -264,10 +314,10 @@ POST https://graph.microsoft.com/v1.0/sites/{site-id}/permissions
 ```
 
 The group id is in the team's link (team → ⋯ → Get link to team → `groupId=`).
-
-Standard channels only: private and shared channels keep files in a site of
-their own, where outputs are not uploaded. Removing the site permission
-(`DELETE /sites/{site-id}/permissions/{id}`) returns the team to names only.
+This covers the team's standard channels only: the app cannot look up a
+private or shared channel's folder, so those need the card. Removing the site
+permission (`DELETE /sites/{site-id}/permissions/{id}`) returns its channels to
+names only.
 
 ### Keys and sign-ins
 
@@ -295,25 +345,34 @@ registration:
   works. The caller must be on the channel's roster; a private or shared
   channel is read only from a turn inside it. Graph has no message search for
   an app, so `search_messages` scans recent posts, bounded, and says when it
-  stopped short. A 1:1 chat cannot be read back.
+  stopped short. A 1:1 chat cannot be read back. A message's files come with
+  a download link where the channel's site is granted and the file is in the
+  channel's own Files folder, else by name: the site grant ignores
+  SharePoint's per-file permissions, so a file from a restricted library or
+  folder elsewhere on the site is never linked. The link lasts about an hour
+  and anyone holding it can fetch the file, so only messages the read returns
+  get one.
 - **Posting.** `send_message` and `create_thread` (up to 6,000 characters,
   only into a conversation the requester belongs to). Files ride along: in a
   channel whose site is granted they are saved to its Files tab and linked; in
-  a 1:1 chat they are offered with a file consent card.
+  a 1:1 chat they are offered with a file consent card. An agent can edit or
+  delete what it posted (`edit_message`, `delete_message`); closing a thread
+  (`delete_thread`, `archive_thread`) is not on Teams.
 - **`send_direct_message`** opens a 1:1 chat with someone who shares a team
-  with the caller and daimon, named by Entra object ID.
+  with the caller and Daimon, named by Entra object ID.
 - **`post_wizard`** posts its form as an Adaptive Card that only the asker can
   fill in (no step images); Submit starts their turn.
 - Task handoff and fresh starts, timers (`create_timer`, `list_timers`,
   `cancel_timer`), routines that post to a channel or thread (below),
-  `bind_public_repo` and the GitHub App install link. A handoff is asked of
-  the agent; the Hand over button that Discord and Slack show when a channel's
-  agent changed under a thread is not on Teams, where the notice says to start
-  a new conversation.
+  `bind_public_repo` and the GitHub App install link. When a channel's agent
+  changed under a conversation, its notice carries a Hand over button, as on
+  Discord and Slack; a refused click is answered only to the clicker.
 
 With tool safety on (`DAIMON_TOOL_SAFETY__ENABLED`), an attached tool's write
 waits on an Approve/Deny card in the conversation that only the requester can
-answer.
+answer. It shows the action, its consequence and the requester's name, with a
+**Details** expander for the inputs. Each call gets its own card; answered,
+expired and stopped cards lose their buttons.
 
 Nothing app-only lists the teams an app is in, so the adapter records each
 team when the app is added or anyone writes there; an older install shows up
@@ -357,5 +416,5 @@ different agent posts a notice instead of running. A deployment with
 ### Not supported
 
 Group chats, reactions, `/dm` conversations, files in channels whose site is
-not granted or in private and shared channels. Removing the app does not
+not granted or that another organisation hosts. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.

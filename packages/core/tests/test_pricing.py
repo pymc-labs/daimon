@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import re
+
+import httpx
+import pytest
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
 from daimon.core.constants import ALLOWED_MODEL_IDS
 from daimon.core.pricing import (
+    AGENT_MODEL_PRICING,
+    AGENT_PRICING_CHECKED_ON,
+    AGENT_PRICING_SOURCE,
     MODEL_PRICING,
     TOOL_MODEL_PRICING,
     ModelRates,
@@ -54,8 +61,8 @@ def test_model_pricing_includes_opus_sonnet_haiku() -> None:
         input=4.0, output=20.0, cache_write=5.0, cache_read=0.20
     ), "opus 5.5 must be metered at the published standard five-minute cache rates"
     assert MODEL_PRICING["claude-sonnet-5-5"] == ModelRates(
-        input=2.0, output=10.0, cache_write=2.50, cache_read=0.20
-    ), "sonnet 5.5 must be metered at the published standard five-minute cache rates"
+        input=2.0, output=10.0, cache_write=2.50, cache_read=0.10
+    ), "sonnet 5.5 cache reads fell to $0.10 on 2026-10-07"
     assert "claude-opus-5" in MODEL_PRICING, "opus 5 must be priced and selectable"
     assert "claude-opus-4-8" in MODEL_PRICING, "opus 4.8 must be priced and selectable"
     assert "claude-opus-4-7" in MODEL_PRICING, "opus 4.7 must be priced"
@@ -146,3 +153,62 @@ def test_cost_of_gemini_catalog_name_returns_none() -> None:
     assert cost_of(usage, MODEL_PRICING.get("gemini-3-pro-image")) is None, (
         "the catalog name 'gemini-3-pro-image' must not be a MODEL_PRICING key"
     )
+
+
+# The published list price of every agent model, as read from
+# AGENT_PRICING_SOURCE on the date below. Changing a row in pricing.py without
+# changing it here fails, so a price edit always comes with a fresh check.
+_PUBLISHED_AGENT_PRICES_2026_10_08: dict[str, ModelRates] = {
+    "claude-opus-5-5": ModelRates(input=4.0, output=20.0, cache_write=5.0, cache_read=0.20),
+    "claude-opus-5": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
+    "claude-opus-4-8": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
+    "claude-opus-4-7": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
+    "claude-sonnet-5-5": ModelRates(input=2.0, output=10.0, cache_write=2.50, cache_read=0.10),
+    "claude-sonnet-5": ModelRates(input=2.0, output=10.0, cache_write=2.50, cache_read=0.20),
+    "claude-sonnet-4-6": ModelRates(input=3.0, output=15.0, cache_write=3.75, cache_read=0.30),
+    "claude-haiku-4-5": ModelRates(input=1.0, output=5.0, cache_write=1.25, cache_read=0.10),
+}
+
+
+def test_agent_rows_match_the_dated_price_list() -> None:
+    assert AGENT_PRICING_CHECKED_ON == "2026-10-08", (
+        "re-check every row against the pricing page, then move this date and the table name"
+    )
+    assert AGENT_MODEL_PRICING == _PUBLISHED_AGENT_PRICES_2026_10_08, (
+        "an agent price changed: check it against AGENT_PRICING_SOURCE and update both tables"
+    )
+
+
+def _display_name(model_id: str) -> str:
+    """`claude-sonnet-5-5` -> `Claude Sonnet 5.5`, the pricing page's row label."""
+    _, family, *version = model_id.split("-")
+    return f"Claude {family.capitalize()} {'.'.join(version)}"
+
+
+def _money(cell: str) -> float:
+    match = re.search(r"\$([0-9.]+)", cell)
+    assert match is not None, f"no dollar amount in pricing cell {cell!r}"
+    return float(match.group(1))
+
+
+@pytest.mark.contract
+def test_agent_rows_match_the_live_pricing_page() -> None:
+    """Opt-in: fails when Anthropic changes a price Daimon bills at."""
+    page = httpx.get(f"{AGENT_PRICING_SOURCE}.md", follow_redirects=True, timeout=30).text
+    published: dict[str, ModelRates] = {}
+    for line in page.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        # The model table comes first: name, input, 5m write, 1h write, cache read, output.
+        if len(cells) != 6 or not cells[1].startswith("$") or cells[0] in published:
+            continue
+        published[cells[0]] = ModelRates(
+            input=_money(cells[1]),
+            output=_money(cells[5]),
+            cache_write=_money(cells[2]),
+            cache_read=_money(cells[4]),
+        )
+    for model_id, rates in AGENT_MODEL_PRICING.items():
+        name = _display_name(model_id)
+        assert published.get(name) == rates, (
+            f"{model_id} is billed at {rates}, the pricing page lists {published.get(name)}"
+        )

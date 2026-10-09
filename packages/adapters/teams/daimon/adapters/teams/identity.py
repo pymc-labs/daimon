@@ -132,7 +132,7 @@ def foreign_tenant(sender: Account, channel_data: ChannelData | None, *, ours: s
     return None
 
 
-def _thread_id(conversation_id: str, activity_id: str) -> str:
+def channel_thread_id(conversation_id: str, activity_id: str) -> str:
     # Teams puts the thread root in the id; a root post without it is its own root.
     if ";messageid=" in conversation_id:
         return conversation_id
@@ -242,7 +242,7 @@ def parse_inbound(
         conversation_id = channel_id = conversation.id
         team = channel = None
     else:
-        conversation_id = _thread_id(conversation.id, activity.id)
+        conversation_id = channel_thread_id(conversation.id, activity.id)
         channel_id = conversation_id.split(";", 1)[0]
     channel_name = channel.name if channel is not None else None
     if team is not None and channel_id == team.id:

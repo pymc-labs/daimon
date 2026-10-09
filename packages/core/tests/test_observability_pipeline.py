@@ -254,9 +254,9 @@ def test_redaction_is_linear_on_adversarial_text(name: str) -> None:
     _redact_secret_text(text)
     elapsed = time.perf_counter() - started
 
-    # ~100 ms target (each case runs in <=50 ms locally); headroom for loaded CI
-    # hosts. The previous scan took >60 s on the unclosed-list case.
-    assert elapsed < 0.25, f"{name}: {elapsed:.3f}s"
+    # Each case takes <=50 ms locally, but shared CI runners can pause the
+    # process mid-scan. The previous nonlinear scan took >60 s.
+    assert elapsed < 1.0, f"{name}: {elapsed:.3f}s"
 
 
 def test_text_over_the_size_cap_is_truncated_and_still_redacted() -> None:

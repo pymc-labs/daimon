@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.slack.tool_confirmation import SlackConfirmationCards
-from daimon.core.confirmation import ConfirmationPrompt, prompt_for_tool_call
+from daimon.core.confirmation import ApprovedConfirmation, ConfirmationPrompt, prompt_for_tool_call
 from daimon.core.posted_controls.confirmation import NOT_YOURS_MESSAGE
 from daimon.core.tool_safety import ToolCall
 from slack_sdk.web.async_client import AsyncWebClient
@@ -36,16 +36,20 @@ def _click(action_id: str, user: str) -> dict[str, Any]:
     return {"actions": [{"action_id": action_id}], "user": {"id": user}}
 
 
-async def _post(cards: SlackConfirmationCards, client: MagicMock) -> tuple[asyncio.Task[Any], str]:
+async def _post(
+    cards: SlackConfirmationCards,
+    client: MagicMock,
+    prompt: ConfirmationPrompt | None = None,
+) -> tuple[asyncio.Task[Any], str]:
     hook = cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9")
-    waiting = asyncio.create_task(hook(_prompt()))
+    waiting = asyncio.create_task(hook(prompt or _prompt()))
     while not client.chat_postMessage.await_count:
         await asyncio.sleep(0)
     await asyncio.sleep(0)
     kwargs = client.chat_postMessage.await_args.kwargs
     assert kwargs["channel"] == "C1"
     assert kwargs["thread_ts"] == "1699.9"
-    (actions,) = [b for b in kwargs["blocks"] if b["type"] == "actions"]
+    (actions,) = [b for b in kwargs["attachments"][0]["blocks"] if b["type"] == "actions"]
     approve_id = actions["elements"][0]["action_id"]
     return waiting, approve_id
 
@@ -57,17 +61,22 @@ async def test_the_requesters_approve_answers_approved_and_edits_the_card() -> N
 
     await cards.handle_click(_click(approve_id, "U2"))
     client.chat_postEphemeral.assert_awaited_once_with(
-        channel="C1", user="U2", text=NOT_YOURS_MESSAGE
+        channel="C1",
+        user="U2",
+        text=NOT_YOURS_MESSAGE.format(requester="<@U1>"),
+        mrkdwn=False,
+        parse="none",
     )
     assert not waiting.done(), "a stranger's click answers nothing"
 
     await cards.handle_click(_click(approve_id, "U1"))
 
-    assert await asyncio.wait_for(waiting, timeout=1) == "approved"
+    result = await asyncio.wait_for(waiting, timeout=1)
+    assert isinstance(result, ApprovedConfirmation) and result.answer == "approved"
     update = client.chat_update.await_args.kwargs
     assert update["ts"] == "1700.1"
-    assert update["text"].startswith("✅ Approved")
-    assert not [b for b in update["blocks"] if b["type"] == "actions"]
+    assert update["text"].startswith("Approved")
+    assert not [b for b in update["attachments"][0]["blocks"] if b["type"] == "actions"]
 
 
 async def test_the_requesters_deny_answers_denied() -> None:
@@ -80,6 +89,65 @@ async def test_the_requesters_deny_answers_denied() -> None:
     assert await asyncio.wait_for(waiting, timeout=1) == "denied"
 
 
+@pytest.mark.parametrize(
+    ("value", "safe"),
+    [
+        (
+            "<!channel> <!here> <@U123> & <@U456>",
+            "&lt;!channel&gt; &lt;!here&gt; &lt;@U123&gt; &amp; &lt;@U456&gt;",
+        ),
+        ("<https://example.test/path|text>", "&lt;https://example.test/path|text&gt;"),
+        ("*x* `x` ```x``` rest", "*x* `x` ```x``` rest"),
+    ],
+)
+async def test_tool_words_are_literal_in_card_fallback_and_private_details(
+    value: str, safe: str
+) -> None:
+    prompt = _prompt().model_copy(
+        update={
+            "title": f'Publish "{value}"?',
+            "consequence": f"Sharing {value} is public.",
+            "detail_lines": (f"File: {value}",),
+        }
+    )
+    cards = SlackConfirmationCards()
+    client = _client()
+    waiting, approve_id = await _post(cards, client, prompt)
+    kwargs = client.chat_postMessage.await_args.kwargs
+    assert kwargs["mrkdwn"] is False and kwargs["parse"] == "none"
+    assert kwargs["text"] == f'Publish "{safe}"?\nSharing {safe} is public.'
+    assert kwargs["attachments"][0]["blocks"][0]["text"] == {
+        "type": "plain_text",
+        "text": prompt.title,
+    }
+    assert kwargs["attachments"][0]["blocks"][1]["text"] == {
+        "type": "plain_text",
+        "text": prompt.consequence,
+    }
+
+    await cards.handle_click(_click(approve_id.replace(":approve", ":details"), "U2"))
+    details = client.chat_postEphemeral.await_args.kwargs
+    assert details["text"] == f"File: {safe}"
+    assert details["mrkdwn"] is False and details["parse"] == "none"
+    waiting.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await waiting
+
+
+async def test_approved_card_can_retire_stopped_before_allow_is_sent() -> None:
+    cards = SlackConfirmationCards()
+    client = _client()
+    waiting, approve_id = await _post(cards, client)
+    await cards.handle_click(_click(approve_id, "U1"))
+
+    result = await asyncio.wait_for(waiting, timeout=1)
+    assert isinstance(result, ApprovedConfirmation)
+    await result.retire_unsent()
+
+    assert client.chat_update.await_count == 2
+    assert client.chat_update.await_args.kwargs["text"].startswith("Stopped")
+
+
 async def test_an_unanswered_card_expires_and_is_retired() -> None:
     cards = SlackConfirmationCards()
     client = _client()
@@ -88,7 +156,7 @@ async def test_an_unanswered_card_expires_and_is_retired() -> None:
     answer = await hook(_prompt(expires_in=timedelta(milliseconds=10)))
 
     assert answer == "expired"
-    assert client.chat_update.await_args.kwargs["text"].startswith("⌛")
+    assert client.chat_update.await_args.kwargs["text"].startswith("Expired")
 
 
 async def test_a_cancelled_wait_retires_the_card_and_ignores_late_clicks() -> None:
@@ -100,7 +168,7 @@ async def test_a_cancelled_wait_retires_the_card_and_ignores_late_clicks() -> No
     with contextlib.suppress(asyncio.CancelledError):
         await waiting
 
-    assert client.chat_update.await_args.kwargs["text"].startswith("🛡️ Denied")
+    assert client.chat_update.await_args.kwargs["text"].startswith("Stopped")
     await cards.handle_click(_click(approve_id, "U1"))
     assert client.chat_update.await_count == 1, "a late click changes nothing"
 
@@ -212,3 +280,33 @@ async def test_a_stalled_slack_retire_cannot_hold_the_turn_past_its_budget(
     assert elapsed < 1.5, f"took {elapsed:.2f}s"
     await asyncio.sleep(0)
     assert not [t for t in asyncio.all_tasks() if t.get_name() == "turn.decide_blocked"]
+
+
+async def test_upload_card_has_color_and_private_details() -> None:
+    cards = SlackConfirmationCards()
+    client = _client()
+    prompt = _prompt().model_copy(
+        update={
+            "title": 'Upload "cg_meme.csv" to notebook "memecoin-scan"?',
+            "consequence": "Anyone with the notebook's link can open these files.",
+        }
+    )
+    hook = cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9")
+    waiting = asyncio.create_task(hook(prompt))
+    while not client.chat_postMessage.await_count:
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    attachment = client.chat_postMessage.await_args.kwargs["attachments"][0]
+    assert attachment["color"] == "#FEE75C"
+    actions = next(block for block in attachment["blocks"] if block["type"] == "actions")
+    assert [button["text"]["text"] for button in actions["elements"]] == [
+        "Approve",
+        "Deny",
+        "Details",
+    ]
+    await cards.handle_click(_click(actions["elements"][2]["action_id"], "U2"))
+    assert client.chat_postEphemeral.await_args.kwargs["text"] == "\n".join(prompt.detail_lines)
+    assert not waiting.done()
+    await cards.handle_click(_click(actions["elements"][0]["action_id"], "U1"))
+    assert isinstance(await waiting, ApprovedConfirmation)
+    assert client.chat_update.await_args.kwargs["attachments"][0]["color"] == "#57F287"

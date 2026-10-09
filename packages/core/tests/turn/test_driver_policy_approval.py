@@ -14,7 +14,7 @@ from typing import cast
 
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
+from daimon.core.confirmation import ApprovedConfirmation, ConfirmationAnswer, ConfirmationPrompt
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     OPEN_TOOL_SAFETY,
@@ -42,6 +42,7 @@ from .conftest import (
     make_mcp_tool_use,
     make_requires_action,
     make_status_idle,
+    make_tool_confirmation,
 )
 
 _EXEMPT = BillingExempt(reason="cli-operator-run")
@@ -169,9 +170,8 @@ async def test_chat_write_shows_a_card_and_runs_only_after_confirm() -> None:
 
     assert len(prompts) == 1, "the write must surface as one card"
     prompt = prompts[0]
-    assert prompt.title == "Approve a write to linear?"
-    assert ("Tool", "create_issue") in prompt.fields
-    assert prompt.detail is not None and '"title": "Bug"' in prompt.detail
+    assert prompt.title == 'Create issue "Bug"?'
+    assert "Title: Bug" in prompt.detail_lines
     assert prompt.requester_platform_user_id == "U1"
     assert not turn.done(), "the turn waits on the card"
     assert _confirmations(fa) == [], "nothing is confirmed before the click"
@@ -349,6 +349,12 @@ async def test_with_safety_off_asking_before_publishing_runs_no_other_held_call(
     assert not held.allow, "a tool the agent's own definition holds still never runs"
     publish = ToolCall(tool_use_id="t2", server_name=DAIMON_SERVER_NAME, tool_name="publish_report")
     assert not (await posture.decide(publish)).allow, "no card to press: the publish is refused"
+    unseen = await posture.decide(
+        ToolCall(tool_use_id="t3", server_name="unknown", tool_name="unknown")
+    )
+    assert not unseen.allow
+    assert "unknown/unknown" not in str(unseen.deny_message), "names no fake tool to the agent"
+    assert "call the tool again" in str(unseen.deny_message)
 
 
 def _replay_script(fa: FakeAnthropic) -> None:
@@ -600,3 +606,196 @@ async def test_a_stalled_denial_send_cannot_hold_the_turn_past_its_budget(
     assert elapsed < 1.5, f"cleanup must stay within its budget, took {elapsed:.2f}s"
     assert not [t for t in asyncio.all_tasks() if t.get_name() == "turn.decide_blocked"]
     assert all(e["result"] != "allow" for e in _confirmations(fa))
+
+
+async def test_ma_repeating_the_pause_while_the_card_is_up_does_not_end_the_turn() -> None:
+    """Production 2026-10-08: MA paused on a publish call, ran the batch's
+    other tool, and paused again on the same id while the card was up. The
+    repeat, read after Approve, ended the turn as "sent but not accepted"
+    though MA then ran the call. It is a duplicate until MA echoes the allow."""
+    fa = FakeAnthropic()
+    pause = make_requires_action(event_ids=["tu_pub"])
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(
+                make_mcp_tool_use(
+                    event_id="tu_pub",
+                    name="create_attachment_upload_url",
+                    mcp_server_name=DAIMON_SERVER_NAME,
+                )
+            ),
+            YieldEvent(make_status_idle(event_id="sevt_pause_1", stop_reason=pause)),
+            YieldEvent(make_status_idle(event_id="sevt_pause_2", stop_reason=pause)),
+            YieldEvent(make_tool_confirmation(event_id="sevt_took", tool_use_id="tu_pub")),
+            YieldEvent(make_agent_message(event_id="sevt_msg", text="uploaded")),
+            YieldEvent(make_status_idle(event_id="sevt_end", stop_reason=make_end_turn())),
+        ]
+    ]
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="publish the notebook",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=chat_tool_confirmation(
+            ToolSafetyPolicy(enabled=False),
+            requester_platform_user_id="U1",
+            confirm=card,
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            asks_before_publishing=True,
+        ),
+    )
+
+    assert final.error is None
+    assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
+    assert len(prompts) == 1, "one card for one call"
+    assert _confirmations(fa) == [
+        {"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "tu_pub"}
+    ]
+
+
+async def test_three_uploads_get_separate_cards_and_answers() -> None:
+    fa = FakeAnthropic()
+    names = ["cg_meme.csv", "launch_features.csv", "launch_curves.csv"]
+    events = [
+        YieldEvent(
+            make_mcp_tool_use(
+                event_id=f"tu_{index}",
+                name="create_attachment_upload_url",
+                mcp_server_name=DAIMON_SERVER_NAME,
+                input={"name": name, "slug": "memecoin-scan"},
+            )
+        )
+        for index, name in enumerate(names)
+    ]
+    events.extend(
+        [
+            YieldEvent(
+                make_status_idle(
+                    event_id="pause",
+                    stop_reason=make_requires_action(
+                        event_ids=[f"tu_{index}" for index in range(3)]
+                    ),
+                )
+            ),
+            YieldEvent(make_agent_message(event_id="message", text="done")),
+            YieldEvent(make_status_idle(event_id="end", stop_reason=make_end_turn())),
+        ]
+    )
+    fa.beta.sessions.events.stream_scripts = [events]
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        assert _confirmations(fa) == []
+        return "denied" if "launch_features.csv" in prompt.title else "approved"
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="upload files",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=chat_tool_confirmation(
+            OPEN_TOOL_SAFETY,
+            requester_platform_user_id="U1",
+            confirm=card,
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            asks_before_publishing=True,
+        ),
+    )
+    assert final.error is None
+    assert len(prompts) == 3
+    assert {prompt.title for prompt in prompts} == {
+        f'Upload "{name}" to notebook "memecoin-scan"?' for name in names
+    }
+    assert [event["tool_use_id"] for event in _confirmations(fa)] == ["tu_0", "tu_1", "tu_2"]
+    assert [event["result"] for event in _confirmations(fa)] == ["allow", "deny", "allow"]
+
+
+async def test_stop_retires_an_approved_card_before_its_allow_is_sent() -> None:
+    fa = FakeAnthropic()
+    events = [
+        YieldEvent(
+            make_mcp_tool_use(
+                event_id=f"tu_{title.lower()}",
+                name="create_issue",
+                mcp_server_name="linear",
+                input={"title": title},
+            )
+        )
+        for title in ("First", "Second")
+    ]
+    events.append(
+        YieldEvent(
+            make_status_idle(
+                event_id="pause",
+                stop_reason=make_requires_action(event_ids=["tu_first", "tu_second"]),
+            )
+        )
+    )
+    fa.beta.sessions.events.stream_scripts = [
+        events,
+        [YieldEvent(make_status_idle(event_id="interrupt_ack", stop_reason=make_end_turn()))],
+    ]
+    cancel = asyncio.Event()
+    second_open = asyncio.Event()
+    first_state = "Pending"
+    second_stopped = False
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:
+        nonlocal first_state, second_stopped
+        if "First" in prompt.title:
+            first_state = "Approved"
+
+            async def retire_unsent() -> None:
+                nonlocal first_state
+                first_state = "Stopped"
+
+            return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
+        second_open.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            second_stopped = True
+            raise
+        return "approved"
+
+    turn = asyncio.create_task(
+        run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="create two issues",
+            lifecycle=RecordingLifecycle(),
+            cancel=cancel,
+            render_interval_s=0.001,
+            billing=_EXEMPT,
+            tool_confirmation=chat_tool_confirmation(
+                _ON,
+                requester_platform_user_id="U1",
+                confirm=card,
+            ),
+        )
+    )
+    await asyncio.wait_for(second_open.wait(), timeout=2)
+    await asyncio.sleep(0)
+    assert first_state == "Approved" and _confirmations(fa) == []
+    cancel.set()
+    await asyncio.wait_for(turn, timeout=5)
+
+    assert first_state == "Stopped"
+    assert second_stopped
+    assert [(event["tool_use_id"], event["result"]) for event in _confirmations(fa)] == [
+        ("tu_first", "deny"),
+        ("tu_second", "deny"),
+    ]

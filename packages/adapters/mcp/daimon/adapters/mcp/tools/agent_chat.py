@@ -89,6 +89,7 @@ from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL, MA_METADATA_KEY_ISOLATED
+from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
 from daimon.core.pricing import MODEL_PRICING, cost_of
@@ -97,6 +98,7 @@ from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_seal import seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores.agent_repo_binding import get_binding
+from daimon.core.stores.github_issued_tokens import touch_unmapped_app_session
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import ExemptReason
@@ -561,9 +563,11 @@ async def _start_turn_impl(
             agent_uuid=auth.agent_id,
             session_factory=runtime.session_factory,
             fernet=runtime.fernet,
+            app_session_unmapped=True,
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
+            agent_github_app=runtime.settings.github_app,
             billing_exempt=billing_exempt,
             memory_read_only=memory_read_only,
             budget_channel_id=budget_channel_id,
@@ -663,6 +667,10 @@ async def _continue_turn_impl(
             raise ToolError(_SEALED_SINCE_START_MSG)
         if session.archived_at is not None:
             raise ToolError("This session is archived.")
+        async with runtime.session_factory.begin() as db:
+            touched = await touch_unmapped_app_session(db, session_id=handle)
+            if touched is False:
+                raise ToolError("This session is closed.")
         sent = await runtime.client.beta.sessions.events.send(
             handle,
             events=[
@@ -729,6 +737,16 @@ async def _archive_my_session_impl(
     await _verify_agent_owns_session(runtime, auth, handle)
     async with session_mutation_fence(runtime.session_factory, handle):
         await runtime.client.beta.sessions.archive(handle)
+    try:
+        await close_headless_app_session(
+            runtime.client,
+            runtime.session_factory,
+            session_id=handle,
+            fernet=runtime.fernet,
+        )
+    except Exception:
+        # The durable vault row stays pending for the scheduler's next sweep.
+        log.exception("mcp.agent_chat.app_session_cleanup_failed", session_id=handle)
     return {"handle": handle, "archived": "true"}
 
 

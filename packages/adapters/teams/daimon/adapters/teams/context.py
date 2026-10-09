@@ -28,6 +28,7 @@ from daimon.core.teams_graph import (
     is_graph_url,
     message_text,
 )
+from daimon.core.teams_sharepoint import ENABLE_FILES_TOOL
 from daimon.core.thread_participation import ClassifierMessage
 from daimon.core.untrusted import untrusted_block
 
@@ -38,6 +39,20 @@ CHANNEL_REPLIES_PER_POST = 10
 # Per turn: earlier messages' images inlined and files given a download URL, newest first.
 HISTORY_IMAGE_LIMIT = 4
 HISTORY_FILE_LIMIT = 10
+# What the agent does, in a channel where files cannot be saved, when asked for one.
+_FILES_HINT = (
+    "Files you make (session outputs, send_message file_handles) cannot be saved in this "
+    "channel yet. When someone asks for a file here, or to turn files on, and they are an "
+    f'admin (is_admin="true"), call {ENABLE_FILES_TOOL} first: an Enable files card follows '
+    "your reply, for an admin who is a member of this channel to sign in with. Tell them to "
+    "ask again once that is done. Anyone else: tell them an admin can ask you to turn files "
+    "on here. Do not swap in an artifact, report or notebook unless they ask for one."
+)
+_FILES_HINT_NO_CARD = (
+    "Files you make cannot be saved in this channel until the deployment's operator grants "
+    "daimon its SharePoint site. Say so when someone asks for a file here; do not swap in "
+    "an artifact, report or notebook unless they ask for one."
+)
 
 
 @dataclass(frozen=True)
@@ -343,12 +358,15 @@ def render_user_message(
     prefix: str,
     history: HistoryBlock | None,
     channel_files: bool | None = None,
+    can_enable_files: bool = False,
 ) -> str:
     """Host facts and any replayed history, then the person's escaped words.
 
     A channel turn names its thread too, the id thread-scoped settings such as
     `set_thread_participation` key on, and says with `files` whether a file
-    saved now reaches the channel (`channel_files`; None in a chat).
+    saved now reaches the channel (`channel_files`; None in a chat). Where it
+    does not, `files_hint` says what to do when asked for one: offer the
+    Enable files card when the deployment can (`can_enable_files`).
     `unprompted="true"` marks a message nobody addressed to the bot (organic
     thread participation); `external="true"` a sender from another organisation.
     """
@@ -357,6 +375,9 @@ def render_user_message(
         files = ""
         if channel_files is not None:
             files = f' files="{"available" if channel_files else "unavailable"}"'
+        if channel_files is False:
+            hint = _FILES_HINT if can_enable_files else _FILES_HINT_NO_CARD
+            files += f" files_hint={quoteattr(hint)}"
         names = "".join(
             f" {attr}={quoteattr(value)}"
             for attr, value in (

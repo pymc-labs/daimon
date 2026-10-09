@@ -60,6 +60,21 @@ from .conftest import (
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 
 
+def test_agent_name_prefix_follows_deployment_switch() -> None:
+    assert (
+        app_module._agent_name_prefix(  # pyright: ignore[reportPrivateUsage]
+            enabled=False, name="Ada", metadata=None, default_name="daimon"
+        )
+        is None
+    )
+    assert (
+        app_module._agent_name_prefix(  # pyright: ignore[reportPrivateUsage]
+            enabled=True, name="Ada", metadata=None, default_name="daimon"
+        )
+        == "Ada"
+    )
+
+
 def _app(
     db_factory: async_sessionmaker[AsyncSession], sender: FakeSender, cap: int = 3
 ) -> TeamsApp:

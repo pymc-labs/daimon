@@ -4,7 +4,8 @@ Mirrors Slack's `/agent-setup` and its rules. The panel is open to every
 member; agent changes happen in a setup conversation, where the chat tools own
 authorization, and a channel's environment, isolation and admins in the
 Channel settings dialog (`channel_settings`). New agent is open to everyone (a
-fresh agent is unrouted, so it puts nothing at risk). Minting a coding-tool
+fresh agent is unrouted, so it puts nothing at risk); Add skill on Details is
+Discord's and Slack's form, with their rule (`add_skill`). Minting a coding-tool
 token is `authorize_coding_token`'s call, as on Discord and Slack: panels live
 in the 1:1 chat, so a channel admin picks one of their channels in the dialog
 and the token is bound there (an unbound token stays with server admins). Only
@@ -20,8 +21,14 @@ import uuid
 from collections.abc import Awaitable, Mapping
 from datetime import UTC, datetime
 
+import anthropic
 import structlog
 from daimon.adapters.teams import setup_card as cards
+from daimon.adapters.teams.add_skill import (
+    SkillAddRefused,
+    add_previewed_skill,
+    skill_change_refusal,
+)
 from daimon.adapters.teams.card_actions import (
     FAILED,
     SENDING_PANEL_ERRORS,
@@ -75,8 +82,9 @@ from daimon.core.panel_operator_tokens import (
     revoke_panel_operator_token,
 )
 from daimon.core.permissions import any_agent_rules
-from daimon.core.roster import Roster, load_roster, paginate
+from daimon.core.roster import Roster, RosterAgent, load_roster, paginate
 from daimon.core.rule_views import load_rule_viewer
+from daimon.core.skills.ingest import SkillIngestError, bundle_from_markdown
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
 from microsoft_teams.api import (
@@ -171,6 +179,81 @@ class SetupPanel:
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
         return await _guarded(self._operator_submit(ctx.activity), dialog_message(FAILED))
+
+    async def on_skill_open(
+        self, ctx: ActivityContext[TaskFetchInvokeActivity]
+    ) -> TaskModuleInvokeResponse:
+        return await _guarded(self._skill_open(ctx.activity), dialog_message(FAILED))
+
+    async def on_skill_submit(
+        self, ctx: ActivityContext[TaskSubmitInvokeActivity]
+    ) -> TaskModuleInvokeResponse:
+        return await _guarded(self._skill_submit(ctx), dialog_message(FAILED))
+
+    async def _skill_target(self, actor: Actor, name: str) -> RosterAgent | None:
+        """The agent `name` as the panel lists it to `actor`: a click never names an id."""
+        roster = await self._roster(actor.tenant_id, actor.conversation_id, is_admin=actor.is_admin)
+        return next((row for row in roster.rows if row.name == name), None)
+
+    async def _skill_open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
+        actor = await card_actor(self._runtime, activity)
+        if actor is None:
+            return dialog_message(DENIED)
+        agent = await self._skill_target(
+            actor, str(submitted_fields(activity.value.data).get("agent") or "")
+        )
+        if agent is None:
+            return dialog_message(GONE)
+        account_id = await get_or_create_account(self._runtime, actor)
+        if refusal := await skill_change_refusal(
+            self._runtime, actor, agent, account_id=account_id
+        ):
+            return dialog_message(refusal)
+        return dialog(f"Add a skill to {agent.name}", cards.add_skill_form(agent.name))
+
+    async def _skill_submit(
+        self, ctx: ActivityContext[TaskSubmitInvokeActivity]
+    ) -> TaskModuleInvokeResponse:
+        """Preview the paste, or add it when it is the text just previewed."""
+        actor = await card_actor(self._runtime, ctx.activity)
+        if actor is None:
+            return dialog_message(DENIED)
+        data = submitted_fields(ctx.activity.value.data)
+        agent = await self._skill_target(actor, str(data.get("agent") or ""))
+        if agent is None:
+            return dialog_message(GONE)
+        account_id = await get_or_create_account(self._runtime, actor)
+        # Every submit, as on Discord: a preview is a step of the add, not open to everyone.
+        if refusal := await skill_change_refusal(
+            self._runtime, actor, agent, account_id=account_id
+        ):
+            return dialog_message(refusal)
+        title, text = f"Add a skill to {agent.name}", str(data.get("skill") or "")
+        try:
+            bundle = bundle_from_markdown(text.strip())
+        except SkillIngestError as exc:
+            return dialog(title, cards.add_skill_form(agent.name, text=text, error=str(exc)))
+        if data.get("hash") != bundle.preview.content_hash:
+            form = cards.add_skill_form(agent.name, text=text, preview=bundle.preview)
+            return dialog(title, form)
+        try:
+            result = await add_previewed_skill(
+                self._runtime, actor, agent, bundle, account_id=account_id
+            )
+        except SkillAddRefused as exc:
+            return dialog_message(exc.refusal)
+        except SkillIngestError as exc:
+            return dialog_message(f"{exc} Nothing was added.")
+        except (DaimonError, anthropic.APIError):
+            log.exception("teams.agent_setup.skill_add_failed", agent_name=agent.name)
+            return dialog_message(
+                f"Adding {bundle.preview.name} to {agent.name} failed. Try again."
+            )
+        details = await self._details(actor, agent.name, 0)
+        if ctx.activity.reply_to_id and details is not None:
+            await edit_origin_card(ctx, details)  # As on Slack, Details shows the new skill.
+        done = "already had" if result.action == "unchanged" else "now has"
+        return dialog_message(f"{agent.name} {done} the skill {bundle.preview.name}.")
 
     async def _operator_tokens(
         self, actor: Actor, notice: str | None = None

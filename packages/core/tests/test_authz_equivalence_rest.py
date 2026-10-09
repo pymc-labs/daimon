@@ -88,6 +88,7 @@ def _old_delivery_refusal(
 
 _OLD_SPEC: frozenset[str] = frozenset({"agent_spec_edit", "skill_add", "skill_remove"})
 _OLD_POSTED_TOKEN: frozenset[str] = frozenset({"key_add", "keys_import", "mcp_connect"})
+_NEW_ADMIN_ONLY: frozenset[str] = frozenset({"github_connect", "github_grant"})
 
 
 def _old_reachable_outcome(target: TargetFacts) -> PolicyOutcome:
@@ -228,7 +229,9 @@ def test_no_agent_post_ignores_subject_and_pins() -> None:
             assert bool(decision) is (channel != "C1")
 
 
-@pytest.mark.parametrize("operation", get_args(OperationKind))
+@pytest.mark.parametrize(
+    "operation", [kind for kind in get_args(OperationKind) if kind not in _NEW_ADMIN_ONLY]
+)
 def test_shared_agent_table_matches(operation: OperationKind) -> None:
     for is_admin, managed, reachable, local, held, unattended, unplaced in itertools.product(
         (False, True), repeat=7
@@ -260,4 +263,6 @@ def test_every_operation_kind_is_in_one_old_family() -> None:
         "repo_bind",
         "skill_repo_connect",
     }
-    assert set(get_args(OperationKind)) == attachment | _OLD_SPEC | _OLD_POSTED_TOKEN
+    assert (
+        set(get_args(OperationKind)) == attachment | _OLD_SPEC | _OLD_POSTED_TOKEN | _NEW_ADMIN_ONLY
+    )

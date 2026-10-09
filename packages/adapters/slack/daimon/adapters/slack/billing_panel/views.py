@@ -1,32 +1,81 @@
-"""Pure Block Kit view builders for the Slack /billing panel.
+"""Pure Block Kit view builders for the Slack /billing panel and the views it pushes.
 
 Raw dicts only — no slack_sdk model types, no stripe, no I/O. All user-derived
-strings are escaped with escape_mrkdwn (S5). The figures and formatters are
-the chat-neutral ones in daimon.core.billing_panel.
+strings are escaped with escape_mrkdwn (S5). The figures and words are the
+chat-neutral ones in daimon.core.billing_panel.
+
+The panel is a modal: the month, the credit left, the channel's budget, for an
+admin the top spenders and channel budgets, and the actions, set apart by
+dividers. "Expiry dates" pushes a view of its own over it. People are named in
+plain escaped text (`names.py` resolves them). Only someone Slack never named
+to us is shown as a `<@U…>` mention, which a modal renders as their name and
+notifies nobody. These blocks only ever go into a modal (views.open,
+views.update, views.push); never post them as a message, where a mention pings.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from daimon.adapters.slack.billing_panel.names import is_user_id
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.billing_panel import (
+    ADD_CREDIT,
+    ASK_ADMIN,
+    CHANNEL_BUDGET,
+    CHANNEL_BUDGETS,
     CHANNEL_BUDGETS_SHOWN,
+    EXPIRY_DATES,
+    EXPIRY_INTRO,
+    LOOK_UP,
+    NOTHING_USED,
+    REDEEM_CODE,
+    TITLE,
+    TOP_SPENDERS,
+    TOP_SPENDERS_SHOWN,
     TOPUP_AMOUNTS,
+    YOU,
     BillingPanelState,
+    MemberRow,
+    admin_summary,
     caller_line,
     channel_budget_line,
+    channel_budget_phrase,
+    credit_headline,
     estimate_turns,
-    fmt_usd,
+    expiry_rows,
+    month_label,
     more_channel_budgets,
-    period_label,
+    more_spenders,
     spend_over_cap,
+    spender_line,
+    timed_credit_note,
+    turns_phrase,
 )
-from daimon.core.channel_budget import describe_budget
+from daimon.core.promo_credit import ActiveTimedCredit
 
+TOPUP_ACTION_ID = "billing_topup"
 REDEEM_OPEN_ACTION_ID = "billing_redeem_open"
+EXPIRY_OPEN_ACTION_ID = "billing_expiry_open"
+LOOKUP_ACTION_ID = "billing_lookup"
+# The panel's own actions besides the top-up select and the redeem form.
+PANEL_ACTION_IDS = frozenset({EXPIRY_OPEN_ACTION_ID, LOOKUP_ACTION_ID})
+LOOKUP_BLOCK_ID = "billing_lookup_result"
+UNKNOWN_PERSON = "That person"
+
+
+@dataclasses.dataclass(frozen=True)
+class Lookup:
+    """A "Look up a person" pick: who, their name if known, and their spend line."""
+
+    user_id: str
+    name: str | None
+    line: str
+
 
 # ---------------------------------------------------------------------------
 # Block Kit builders (pure raw dicts — S4 pattern)
@@ -39,49 +88,117 @@ def slack_time(moment: datetime) -> str:
     return f"<!date^{int(moment.timestamp())}^{{date_short_pretty}} {{time}}|{fallback}>"
 
 
-def _timed_credit_lines(state: BillingPanelState) -> str:
-    """One line per live timed promo credit, prefixed with a newline; empty when none."""
-    lines = [
-        f"\n⏳ {fmt_usd(c.remaining_usd)} timed credit left · ends {slack_time(c.ends_at)}"
-        for c in state.timed_credit[:3]
-    ]
-    if len(state.timed_credit) > 3:
-        lines.append(f"\n⏳ {len(state.timed_credit) - 3} more timed credits")
-    return "".join(lines)
+def slack_date(moment: datetime) -> str:
+    """A date every reader sees in their own timezone, with a UTC fallback."""
+    fallback = f"{moment.astimezone(UTC):%Y-%m-%d}"
+    return f"<!date^{int(moment.timestamp())}^{{date_short_pretty}}|{fallback}>"
 
 
-def _channel_budget_suffix(state: BillingPanelState) -> str:
-    if state.channel_budget is None:
-        return ""
-    return f"\nthis channel: {describe_budget(state.channel_budget)}"
+def _context(text: str) -> dict[str, Any]:
+    """Small grey lines."""
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
 
-def _channel_budgets_text(state: BillingPanelState) -> str | None:
-    """The admin view's channel budgets, most used first; None when there are none."""
-    if not state.channel_budgets:
-        return None
-    lines = ["📊 *Channel budgets*"] + [
-        channel_budget_line(status, label=f"<#{status.budget.channel_id}>")
-        for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
-    ]
-    if more := more_channel_budgets(state):
-        lines.append(f"_{more} more channel budgets_")
-    return "\n".join(lines)
+def _section(text: str) -> dict[str, Any]:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
+def _divider() -> dict[str, Any]:
+    return {"type": "divider"}
+
+
+def _button(text: str, action_id: str) -> dict[str, Any]:
+    return {"type": "button", "action_id": action_id, "text": {"type": "plain_text", "text": text}}
+
+
+def _modal(title: str, blocks: list[dict[str, Any]], *, close: str = "Close") -> dict[str, Any]:
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": title},
+        "close": {"type": "plain_text", "text": close},
+        "blocks": blocks,
+    }
+
+
+def _credit_blocks(state: BillingPanelState) -> list[dict[str, Any]]:
+    """`*$62.40* total credit left`, then the timed credit it includes in grey."""
+    figure, words = credit_headline(state.guild_balance_usd)
+    blocks = [_section(f"*{figure}*" + (f" {words}" if words else ""))]
+    details = [note] if (note := timed_credit_note(state.timed_credit)) else []
+    if not state.is_admin:
+        details.append(ASK_ADMIN)
+    if details:
+        blocks.append(_context("\n".join(details)))
+    return blocks
+
+
+def person_name(user_id: str, name: str | None) -> str:
+    """A person's name as escaped plain text on one line.
+
+    Someone with no known name is a `<@U…>` mention, which a modal shows as their
+    name without notifying them; an id that is not a Slack user id reads
+    `That person`.
+    """
+    if name and (flat := " ".join(name.split())):
+        return escape_mrkdwn(flat)
+    return f"<@{user_id}>" if is_user_id(user_id) else UNKNOWN_PERSON
+
+
+def spender_name(row: MemberRow) -> str:
+    """The row's name, as `person_name` writes it."""
+    return person_name(row.platform_user_id, row.display_name)
+
+
+def _topup_select(state: BillingPanelState) -> dict[str, Any]:
+    options: list[dict[str, Any]] = []
+    for amount in TOPUP_AMOUNTS:
+        turns = estimate_turns(
+            float(amount), guild_spend=state.guild_spend, guild_turns=state.guild_turns
+        )
+        options.append(
+            {
+                "text": {"type": "plain_text", "text": f"${amount}"},
+                "value": str(amount),
+                "description": {"type": "plain_text", "text": turns_phrase(turns)[:75]},
+            }
+        )
+    return {
+        "type": "static_select",
+        "action_id": TOPUP_ACTION_ID,
+        "placeholder": {"type": "plain_text", "text": ADD_CREDIT},
+        "options": options,
+    }
 
 
 def build_loading_view() -> dict[str, Any]:
     """Return a Slack modal view dict showing a loading indicator."""
-    return {
-        "type": "modal",
-        "title": {"type": "plain_text", "text": "Billing"},
-        "close": {"type": "plain_text", "text": "Close"},
-        "blocks": [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "⏳ Loading billing data…"},
-            }
-        ],
-    }
+    return _modal(TITLE, [_section("Loading…")])
+
+
+def _spenders_blocks(state: BillingPanelState) -> list[dict[str, Any]]:
+    """`*Top spenders*` by name, then a grey `+ N more`."""
+    rows = [
+        spender_line(
+            rank, spender_name(row), cost=row.cost_usd, is_caller=row.is_caller, you=" _(you)_"
+        )
+        for rank, row in enumerate(state.member_rows[:TOP_SPENDERS_SHOWN], start=1)
+    ] or [NOTHING_USED]
+    blocks = [_section("\n".join([f"*{TOP_SPENDERS}*", *rows]))]
+    if overflow := more_spenders(len(state.member_rows), state.over_cap_count):
+        blocks.append(_context(f"+ {overflow} more"))
+    return blocks
+
+
+def _channel_budgets_blocks(state: BillingPanelState, now: datetime) -> list[dict[str, Any]]:
+    """`*Channel budgets*`, most used first, five then a grey `+ N more`."""
+    lines = [f"*{CHANNEL_BUDGETS}*"] + [
+        channel_budget_line(status, label=f"<#{status.budget.channel_id}>", now=now)
+        for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
+    ]
+    blocks = [_section("\n".join(lines))]
+    if more := more_channel_budgets(state):
+        blocks.append(_context(f"+ {more} more"))
+    return blocks
 
 
 def build_billing_container(
@@ -89,163 +206,85 @@ def build_billing_container(
     *,
     now: datetime,
     since: datetime,
+    lookup: Lookup | None = None,
 ) -> list[dict[str, Any]]:
-    """Build Block Kit blocks for the /billing modal view.
+    """Block Kit blocks for the /billing modal, its sections set apart by dividers.
 
-    Admin branch:
-      - Header section: '💸 Billing · admin view' + period/workspace totals
-      - Divider
-      - Server credit section
-      - Top spenders header + per-member rows (top 5 shown; overflow noted)
-      - Divider
-      - Top-up actions block with static_select (admin only)
+      - context: `October 2026` over `$48.17 spent by 9 people` (a member: the month)
+      - a member's own use: `*You*` + `$11.50 of your $25.00 this month`
+      - credit: `*$62.40* total credit left` + context with the timed credit it
+        includes (and for a member `Ask an admin to add credit.`)
+      - `*This channel*` + `$1.20 of $5.00 used this month`, when the
+        invoking channel has one
+      - admin only: `*Top spenders*` by name, then `*Channel budgets*`
+      - actions: `Add credit` and `Redeem code` (admin), `Expiry dates` with
+        timed credit; for an admin a `Look up a person` picker, and under it
+        ``lookup``, the picked person's name and spend
 
-    Member branch:
-      - Header section: '💸 Billing' + period
-      - Divider
-      - Caller section
-      - Server credit section
-
-    No color fields anywhere. User/agent-derived text is escaped via
-    escape_mrkdwn (S5).
+    No color fields anywhere; the modal's own title is the panel's title.
     """
-    blocks: list[dict[str, Any]] = []
-
+    subtext = (
+        admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
+        if state.is_admin
+        else (month_label(since),)
+    )
+    blocks: list[dict[str, Any]] = [_context("\n".join(subtext)), _divider()]
+    if not state.is_admin:
+        own = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
+        over = "  ⚠️ Over your cap" if spend_over_cap(state.caller_spend, state.caller_cap) else ""
+        blocks += [_section(f"*{YOU}*{over}\n{own}"), _divider()]
+    blocks += _credit_blocks(state)
+    if state.channel_budget is not None:
+        phrase = channel_budget_phrase(state.channel_budget, now=now)
+        blocks += [_divider(), _section(f"*{CHANNEL_BUDGET}*\n{phrase}")]
     if state.is_admin:
-        subtext = (
-            f"{period_label(since)} · "
-            f"workspace total {fmt_usd(state.guild_spend)} · "
-            f"{state.guild_turns} turns · "
-            f"{state.guild_distinct_members} active members"
-        )
-        blocks.append(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*💸 Billing · admin view*\n{subtext}"},
-            }
-        )
-        blocks.append({"type": "divider"})
+        blocks += [_divider(), *_spenders_blocks(state)]
+        if state.channel_budgets:
+            blocks += [_divider(), *_channel_budgets_blocks(state, now)]
 
-        # Server credit
-        credit_line = (
-            f"🏦 *Server credit*\n{fmt_usd(state.guild_balance_usd)} balance"
-            f"{_timed_credit_lines(state)}"
-            f"{_channel_budget_suffix(state)}"
-        )
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": credit_line}})
-        if (budgets_text := _channel_budgets_text(state)) is not None:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": budgets_text}})
-
-        # Top spenders
-        top5 = state.member_rows[:5]
-        spenders_lines: list[str] = ["🏆 *Top spenders*"]
-        if top5:
-            for i, row in enumerate(top5):
-                rank = i + 1
-                you = " _(you)_" if row.is_caller else ""
-                spend_str = fmt_usd(row.cost_usd)
-                name = escape_mrkdwn(row.display_name)
-                spenders_lines.append(f"{rank}. {name}{you}  {spend_str} · {row.turn_count} turns")
-        else:
-            spenders_lines.append("no usage yet this period")
-
-        overflow = max(0, len(state.member_rows) - 5) + state.over_cap_count
-        if overflow > 0:
-            spenders_lines.append(f"_{overflow} more members_")
-
-        blocks.append(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "\n".join(spenders_lines)},
-            }
-        )
-
-        # Top-up static_select — admin only
-        topup_options: list[dict[str, Any]] = []
-        for amount in TOPUP_AMOUNTS:
-            turns = estimate_turns(
-                float(amount),
-                guild_spend=state.guild_spend,
-                guild_turns=state.guild_turns,
-            )
-            description_text = f"≈ {turns:,} turns"[:75]
-            topup_options.append(
-                {
-                    "text": {"type": "plain_text", "text": f"${amount}"},
-                    "value": str(amount),
-                    "description": {"type": "plain_text", "text": description_text},
-                }
-            )
-        elements: list[dict[str, Any]] = [
-            {
-                "type": "static_select",
-                "action_id": "billing_topup",
-                "placeholder": {"type": "plain_text", "text": "💳 Top up server credit…"},
-                "options": topup_options,
-            }
-        ]
+    elements: list[dict[str, Any]] = []
+    if state.is_admin:
+        elements.append(_topup_select(state))
         if state.has_redeemable_promo_code:
-            elements.append(
-                {
-                    "type": "button",
-                    "action_id": REDEEM_OPEN_ACTION_ID,
-                    "text": {"type": "plain_text", "text": "🎟️ Redeem code"},
-                }
-            )
-        blocks.append({"type": "divider"})
-        blocks.append({"type": "actions", "elements": elements})
-
-    else:
-        # Member (non-admin) branch
-        blocks.append(
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*💸 Billing*\n{period_label(since)}",
-                },
-            }
-        )
-        blocks.append({"type": "divider"})
-
-        # Caller spend
-        if state.caller_spend == 0.0 and state.caller_turns == 0:
-            caller_body = "no usage yet this period"
-        else:
-            caller_body = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
-        over_cap = spend_over_cap(state.caller_spend, state.caller_cap)
-        caller_header = "*You* ⚠️ over cap" if over_cap else "*You*"
-        blocks.append(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"{caller_header}\n{caller_body}"},
-            }
-        )
-
-        # Server credit (top-ups are admin-only)
-        credit_line = (
-            f"🏦 *Server credit*\n"
-            f"{fmt_usd(state.guild_balance_usd)} balance _(top-ups are admin-only)_"
-            f"{_timed_credit_lines(state)}"
-            f"{_channel_budget_suffix(state)}"
-        )
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": credit_line}})
-
+            elements.append(_button(REDEEM_CODE, REDEEM_OPEN_ACTION_ID))
+    if state.timed_credit:
+        elements.append(_button(EXPIRY_DATES, EXPIRY_OPEN_ACTION_ID))
+    if elements:
+        blocks += [_divider(), {"type": "actions", "elements": elements}]
+    if state.is_admin:
+        picker = {
+            "type": "users_select",
+            "action_id": LOOKUP_ACTION_ID,
+            "placeholder": {"type": "plain_text", "text": LOOK_UP},
+        }
+        blocks.append({"type": "actions", "elements": [picker]})
+        if lookup is not None:
+            name = person_name(lookup.user_id, lookup.name)
+            result = _section(f"*{name}*\n{lookup.line}")
+            blocks.append(result | {"block_id": LOOKUP_BLOCK_ID})
     return blocks
 
 
 def build_billing_view(
-    state: BillingPanelState, *, now: datetime, since: datetime, channel_id: str | None = None
+    state: BillingPanelState,
+    *,
+    now: datetime,
+    since: datetime,
+    channel_id: str | None = None,
+    lookup: Lookup | None = None,
 ) -> dict[str, Any]:
     """The /billing modal around ``build_billing_container``.
 
     ``channel_id`` is the channel /billing ran in, kept in the view so a
-    refresh from the redeem form still shows that channel's budget.
+    refresh from the redeem form or a lookup still shows that channel's budget.
     """
-    return {
-        "type": "modal",
-        "title": {"type": "plain_text", "text": "Billing"},
-        "close": {"type": "plain_text", "text": "Close"},
-        "private_metadata": json.dumps({"channel_id": channel_id or ""}),
-        "blocks": build_billing_container(state, now=now, since=since),
-    }
+    blocks = build_billing_container(state, now=now, since=since, lookup=lookup)
+    view = _modal(TITLE, blocks)
+    view["private_metadata"] = json.dumps({"channel_id": channel_id or ""})
+    return view
+
+
+def build_expiry_view(credits: Sequence[ActiveTimedCredit]) -> dict[str, Any]:
+    """Pushed by "Expiry dates": `Unused credit expires:` and `$20.00 on Oct 12` rows."""
+    rows = expiry_rows(credits, when=slack_date)
+    return _modal(EXPIRY_DATES, [_section("\n".join([EXPIRY_INTRO, *rows]))], close="Back")

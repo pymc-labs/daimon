@@ -22,7 +22,7 @@ from cryptography.fernet import MultiFernet
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_admins import GroupMembersFor
 from daimon.core.channel_budget_notice import BudgetNotifier
-from daimon.core.config import McpSettings, Settings
+from daimon.core.config import GithubAppSettings, McpSettings, Settings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.scope import DeploymentDefault
@@ -57,6 +57,7 @@ class TurnDeps:
     github_app_id: str | None
     github_app_private_key: str | None
     public_url: str | None
+    agent_github_app: GithubAppSettings | None = None
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY
     preparation_gate: PreparationGate = field(default_factory=lambda: PreparationGate(1))
     # Sends the channel budget notice; set by an adapter with a platform client.
@@ -112,6 +113,7 @@ def build_turn_deps(
         github_fallback_pat=_reveal(github.fallback_pat),
         github_app_id=github.app_id,
         github_app_private_key=_reveal(github.app_private_key),
+        agent_github_app=settings.github_app,
         public_url=str(settings.mcp.public_url) if settings.mcp.public_url is not None else None,
         tool_safety=settings.tool_safety,
         preparation_gate=PreparationGate(_preparation_limit(settings)),

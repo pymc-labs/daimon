@@ -323,13 +323,38 @@ jobs:
       - name: pytest (mux)
         run: uv run pytest packages/mux -n auto
 
+  # Builds the three images deploy.yml ships. On a push to main it also fills
+  # the build cache deploy.yml reads, while the tests run, so the deploy only
+  # rebuilds what changed. Pull requests read that cache but never write it:
+  # their entries would crowd main's out of the repository's cache quota. A
+  # failed cache upload is ignored: it must not block the deploy needing this.
   docker-build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: docker build
-        run: docker build -t daimon:ci .
+      - uses: docker/setup-buildx-action@v3
+      - name: daimon
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          cache-from: type=gha,scope=daimon
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=daimon,ignore-error=true' || '' }}
+      - name: notebook-host
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/notebook-host/Dockerfile
+          cache-from: type=gha,scope=notebook-host
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=notebook-host,ignore-error=true' || '' }}
+      - name: report-host
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/report-host/Dockerfile
+          cache-from: type=gha,scope=report-host
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=report-host,ignore-error=true' || '' }}
 
   deploy-gcp:
     name: Deploy to GCP (staging)

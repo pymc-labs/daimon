@@ -40,6 +40,7 @@ def mint_token(
     ttl_seconds: int = 300,
     name: str | None = None,
     tenant: str | None = None,
+    notebook_ttl_seconds: int | None = None,
 ) -> str:
     """Return a ``<payload_b64>.<sig_b64>`` capability token for one upload."""
     if now.tzinfo is None:
@@ -57,6 +58,10 @@ def mint_token(
     # report host's claims (which have no tenant) are unchanged.
     if tenant is not None:
         payload["tenant"] = tenant
+    # How long the host keeps a read-only scratch notebook. Omitted for every
+    # other op, for the same reason as ``tenant``.
+    if notebook_ttl_seconds is not None:
+        payload["notebook_ttl_seconds"] = notebook_ttl_seconds
     # Compact/canonical JSON — no whitespace. These exact bytes are what gets
     # signed, so the separators are load-bearing; do not reformat.
     payload_json = json.dumps(payload, separators=(",", ":"))

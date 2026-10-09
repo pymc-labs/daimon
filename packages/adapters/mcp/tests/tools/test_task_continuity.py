@@ -156,9 +156,9 @@ async def test_handoff_binds_the_thread_and_writes_no_channel_or_workspace_routi
     assert result.destination_ma_agent_id == _DESTINATION_ID, "the concrete identity is bound"
     assert result.previous_responder_name == "daimon", "the result names who was answering"
     assert result.continuation_recorded is False, "a switch alone queues no work"
-    assert (
-        "research-bot takes over this task from your next message here." in result.confirmation
-    ), "the tool returns final copy the model can relay without a model turn"
+    assert "research-bot will handle your next message." in result.confirmation, (
+        "the tool returns final copy the model can relay without a model turn"
+    )
     async with committing_sessionmaker() as session:
         binding = await get_binding(
             session,
@@ -292,19 +292,18 @@ async def test_handoff_nulls_a_fabricated_or_switch_only_continuation(
 
 
 @pytest.mark.parametrize(
-    ("platform", "parent", "mention"),
+    ("platform", "parent"),
     [
-        ("discord", "C_PARENT", "<#C_PARENT>"),
-        ("teams", "19:C_PARENT@thread.tacv2", "this channel"),
-        ("teams", "a:C_PARENT", "this chat"),
+        ("discord", "C_PARENT"),
+        ("teams", "19:C_PARENT@thread.tacv2"),
+        ("teams", "a:C_PARENT"),
     ],
 )
-async def test_handoff_confirmation_renders_the_channel_as_a_mention(
+async def test_handoff_confirmation_omits_the_raw_channel_id(
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     platform: Platform,
     parent: str,
-    mention: str,
 ) -> None:
     """Issue 3 (staging QA, 2026-09-13): the confirmation must never print a
     raw platform channel id."""
@@ -335,12 +334,8 @@ async def test_handoff_confirmation_renders_the_channel_as_a_mention(
             runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
         )
 
-    assert mention in result.confirmation, (
-        f"expected a channel mention, got: {result.confirmation!r}"
-    )
-    assert "C_PARENT is unchanged" not in result.confirmation, (
-        "the raw channel id must never appear unwrapped in person-facing copy"
-    )
+    assert result.confirmation.startswith("research-bot will handle your next message.")
+    assert parent not in result.confirmation, "the raw channel id stays out of person-facing copy"
 
 
 async def test_handoff_unreachable_refusal_renders_the_channel_as_a_mention(

@@ -12,6 +12,8 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCRIPT_PATH = _REPO_ROOT / "scripts" / "lint_migrations.py"
@@ -217,6 +219,47 @@ def test_lint_tree_over_real_versions_directory_is_clean() -> None:
     findings = lint_migrations.lint_tree(versions_dir)
 
     assert findings == [], f"real migrations must be clean, got {findings}"
+
+
+def test_alembic_has_one_head() -> None:
+    config = Config(str(_REPO_ROOT / "alembic.ini"))
+    script = ScriptDirectory.from_config(config)
+    assert len(script.get_heads()) == 1
+    assert all(len(revision.revision) <= 32 for revision in script.walk_revisions())
+
+
+def test_github_migrations_follow_agent_avatars() -> None:
+    config = Config(str(_REPO_ROOT / "alembic.ini"))
+    script = ScriptDirectory.from_config(config)
+    notices = script.get_revision("0054_github_new_repo_notices")
+    audit = script.get_revision("0055_github_token_audit_versions")
+    teams_sites = script.get_revision("0056_teams_channel_sites")
+    panel = script.get_revision("0066_github_panel_notices")
+    access_requests = script.get_revision("0067_github_access_requests")
+    assert notices is not None and notices.down_revision == "0053_agent_avatars"
+    assert audit is not None and audit.down_revision == "0054_github_new_repo_notices"
+    assert (
+        teams_sites is not None and teams_sites.down_revision == "0055_github_token_audit_versions"
+    )
+    assert panel is not None and panel.down_revision == "0065_turn_card_recovery_failures"
+    assert (
+        access_requests is not None and access_requests.down_revision == "0066_github_panel_notices"
+    )
+    [head] = script.get_heads()
+    chain = {rev.revision for rev in script.iterate_revisions(head, "base")}
+    assert "0055_github_token_audit_versions" in chain, "on the line to the head"
+    assert "0066_github_panel_notices" in chain, "on the line to the head"
+    assert "0067_github_access_requests" in chain, "on the line to the head"
+    refresh = script.get_revision("0057_github_mcp_session_refresh")
+    assert refresh is not None and refresh.down_revision == "0056_teams_channel_sites"
+    installation_kind = script.get_revision("0058_github_app_install_kind")
+    assert installation_kind is not None
+    assert installation_kind.down_revision == "0057_github_mcp_session_refresh"
+    panel_audit = script.get_revision("0059_security_audit_agent_name")
+    assert panel_audit is not None and panel_audit.down_revision == "0058_github_app_install_kind"
+    operator_origin = script.get_revision("0062_github_connect_origin")
+    assert operator_origin is not None
+    assert operator_origin.down_revision == "0061_github_agent_connect"
 
 
 def test_main_returns_zero_for_clean_real_tree(capsys: pytest.CaptureFixture[str]) -> None:

@@ -20,6 +20,7 @@ from daimon.adapters.teams import (
     privacy_card,
     routines_card,
     setup_card,
+    thread_handoff,
     tool_confirmation,
     wizard,
 )
@@ -32,8 +33,9 @@ from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
 from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.externals import ExternalParticipants, MemberFacts
-from daimon.adapters.teams.feedback import record_feedback
+from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, TeamsFeedback
 from daimon.adapters.teams.help import send_help
+from daimon.adapters.teams.here import show_here
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TimedSender
 from daimon.adapters.teams.memory import show_memory
@@ -43,27 +45,36 @@ from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import new_command
 from daimon.adapters.teams.setup_panel import SetupPanel
-from daimon.adapters.teams.site_grant import CALLBACK_PATH, callback_route
+from daimon.adapters.teams.site_grant import (
+    CALLBACK_PATH,
+    GrantedSite,
+    GrantTarget,
+    callback_route,
+)
 from daimon.adapters.teams.support import VERB as SUPPORT_VERB
 from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support import enabled as support_enabled
+from daimon.adapters.teams.thread_handoff import TeamsThreadHandoff
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.wizard import TeamsWizards
 from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.domain import TeamsChannelSiteRow
+from daimon.core.stores.teams_channel_sites import (
+    get_teams_channel_site,
+    upsert_teams_channel_site,
+)
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, TeamGroups
 from daimon.core.teams_sharepoint import SharePoint
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from microsoft_teams.api import MessageSubmitActionInvokeActivity
 from microsoft_teams.api.auth.cloud_environment import PUBLIC
-from microsoft_teams.apps import ActivityContext, App, FastAPIAdapter
+from microsoft_teams.apps import App, FastAPIAdapter
 from microsoft_teams.common import Client, ClientOptions
 from microsoft_teams.common.http import MiddlewareContext, MiddlewareNext
-from sqlalchemy.exc import SQLAlchemyError
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 MAX_TEAMS_HTTP_BODY_BYTES = 64 * 1024
@@ -307,7 +318,16 @@ def create_teams_http_service(
         entra_tenant_id=settings.tenant_id,
         alert_url=runtime.settings.ops.alert_webhook_url,
     )
-    files = ChannelFiles(SharePoint(graph, runtime.http_client), groups, channel_names)
+
+    async def stored_site(channel_id: str) -> TeamsChannelSiteRow | None:
+        async with runtime.sessionmaker() as session:
+            return await get_teams_channel_site(
+                session, tenant_id=teams_tenant, channel_id=channel_id
+            )
+
+    files = ChannelFiles(
+        SharePoint(graph, runtime.http_client), groups, channel_names, stored_site=stored_site
+    )
     reader = ThreadReader(graph, groups, bot_app_id=settings.client_id, files=files)
     routines = RoutinesPanel(runtime)
 
@@ -315,19 +335,26 @@ def create_teams_http_service(
         return turns.spawn(coro, name=name)  # Built below; its drain waits for the task.
 
     privacy = PrivacyPanel(runtime, spawn=spawn)
-    billing = BillingPanel(runtime)
+    billing = BillingPanel(
+        runtime,
+        roster_name=billing_panel.sdk_roster_name(teams_app),
+        team_channels=billing_panel.sdk_team_channels(teams_app),
+    )
     setup = SetupPanel(runtime)
     channel_settings = ChannelSettingsDialog(runtime, channel_names=channel_names)
     commands: dict[str, CommandHandler] = {
         "new": new_command,
         "setup": setup.command,
+        "here": show_here,
         "routines": routines.command,
         "memory": show_memory,
         "privacy": privacy.command,
         "billing": billing.command,
     }
     direct = SdkDirectChats(teams_app, TimedSender(teams_app), entra_tenant_id=settings.tenant_id)
-    support = SupportCommand(runtime, direct) if support_enabled(runtime.settings) else None
+    support = (
+        SupportCommand(runtime, direct, spawn=spawn) if support_enabled(runtime.settings) else None
+    )
     if support is not None:
         commands["support"] = support.command
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
@@ -340,6 +367,7 @@ def create_teams_http_service(
         channel_files=files,
         installs=installs,
         direct=direct,
+        ask_human=support is not None,
         routine_poster=make_teams_routine_poster(
             runtime.sessionmaker,
             direct,
@@ -348,14 +376,7 @@ def create_teams_http_service(
         ),
     )
 
-    async def handle_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity]) -> None:
-        try:
-            await record_feedback(
-                runtime.sessionmaker, ctx.activity, configured_tenant=settings.tenant_id
-            )
-        except SQLAlchemyError:
-            log.exception("teams.feedback.failed")
-
+    feedback = TeamsFeedback(runtime, direct, spawn=spawn)
     teams_app.on_message(turns.handle_message)
     teams_app.on_install_add(installs.on_install)
     teams_app.on_install_remove(installs.on_uninstall)
@@ -364,6 +385,7 @@ def create_teams_http_service(
     teams_app.on_card_action_execute(privacy_card.VERB, privacy.on_action)
     teams_app.on_card_action_execute(billing_panel.VERB, billing.on_action)
     teams_app.on_card_action_execute(tool_confirmation.VERB, turns.confirmations.on_action)
+    teams_app.on_card_action_execute(thread_handoff.VERB, TeamsThreadHandoff(runtime).on_action)
     teams_app.on_dialog_open(routines_card.CREATE_DIALOG, routines.on_dialog_open)
     teams_app.on_dialog_submit(routines_card.CREATE_DIALOG, routines.on_dialog_submit)
     teams_app.on_card_action_execute(setup_card.VERB, setup.on_action)
@@ -373,20 +395,40 @@ def create_teams_http_service(
     teams_app.on_card_action_execute(wizard.VERB, wizards.on_action)
     if support is not None:
         teams_app.on_card_action_execute(SUPPORT_VERB, support.on_action)
+        teams_app.on_dialog_open(card.ASK_HUMAN_DIALOG, support.on_ask_open)
+        teams_app.on_dialog_submit(card.ASK_HUMAN_DIALOG, support.on_ask_submit)
     teams_app.on_dialog_open(setup_card.CREATE_DIALOG, setup.on_create_open)
     teams_app.on_dialog_submit(setup_card.CREATE_DIALOG, setup.on_create_submit)
     teams_app.on_dialog_open(setup_card.TOKEN_DIALOG, setup.on_token_open)
     teams_app.on_dialog_submit(setup_card.TOKEN_DIALOG, setup.on_token_submit)
     teams_app.on_dialog_open(setup_card.OPERATOR_DIALOG, setup.on_operator_open)
     teams_app.on_dialog_submit(setup_card.OPERATOR_DIALOG, setup.on_operator_submit)
+    teams_app.on_dialog_open(setup_card.SKILL_DIALOG, setup.on_skill_open)
+    teams_app.on_dialog_submit(setup_card.SKILL_DIALOG, setup.on_skill_submit)
     teams_app.on_dialog_open(CHANNEL_DIALOG, channel_settings.on_open)
     teams_app.on_dialog_submit(CHANNEL_DIALOG, channel_settings.on_submit)
     teams_app.on_dialog_open(CREDENTIAL_DIALOG, turns.credentials.on_dialog_open)
     teams_app.on_dialog_submit(credential_requests.SUBMIT, turns.credentials.on_dialog_submit)
-    teams_app.on_message_submit_feedback(handle_feedback)
+    teams_app.on_message_fetch_task(feedback.on_fetch)
+    teams_app.on_dialog_submit(FEEDBACK_DIALOG, feedback.on_submit)
+    teams_app.on_message_submit_feedback(feedback.on_builtin)
     teams_app.on_file_consent(turns.outputs.handle_consent)
     if settings.public_url is not None:
-        grant = callback_route(settings, runtime.http_client, on_granted=files.forget)
+
+        async def files_granted(target: GrantTarget, site: GrantedSite) -> None:
+            async with runtime.sessionmaker.begin() as session:
+                await upsert_teams_channel_site(
+                    session,
+                    tenant_id=teams_tenant,
+                    channel_id=target.channel_id,
+                    group_id=target.group_id,
+                    site_id=site.site_id,
+                    drive_id=site.folder.drive_id,
+                    folder_id=site.folder.item_id,
+                )
+            files.forget(target.group_id)
+
+        grant = callback_route(settings, runtime.http_client, on_granted=files_granted)
         fastapi_app.add_api_route(CALLBACK_PATH, grant, methods=["GET"])
     return TeamsHttpService(
         app=fastapi_app,

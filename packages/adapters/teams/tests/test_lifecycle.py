@@ -105,8 +105,9 @@ async def test_renders_draw_the_turns_tool_lines_and_the_latest_draft() -> None:
     clock.now += 65
     await lifecycle.on_render(TurnState(content=[read, bash], finished_tool_ids=("t1",)))
 
-    headline, tools, draft, _actions = _card_body(sender, -1)
-    assert headline["text"] == "**Working** · 1m 5s", "a running tool makes the turn Working"
+    headline, details, tools, draft, _actions = _card_body(sender, -1)
+    assert headline["text"] == "**Working on it…**"
+    assert details["text"] == "Details"
     assert tools["text"] == "✔️ Read a file\n\n🖋️ Running a command", "one paragraph per line"
     assert tools["fontType"] == "Monospace", "a TextBlock draws no code fence"
     assert (draft["text"], draft["isSubtle"]) == ("Checking the files.", True), "draft on one line"
@@ -114,7 +115,7 @@ async def test_renders_draw_the_turns_tool_lines_and_the_latest_draft() -> None:
     clock.now += 5
     finished = dataclasses.replace(bash, status="complete")
     await lifecycle.on_render(TurnState(content=[read, finished], finished_tool_ids=("t1", "t2")))
-    assert _card_body(sender, -1)[0]["text"] == "**Thinking** · 1m 10s", "no tool runs any more"
+    assert _card_body(sender, -1)[0]["text"] == "**Working on it…**"
 
 
 async def test_answer_replaces_the_card_with_feedback_and_no_usage_footer() -> None:
@@ -131,6 +132,23 @@ async def test_answer_replaces_the_card_with_feedback_and_no_usage_footer() -> N
     assert final.channel_data is not None and final.channel_data.feedback_loop is not None
     assert lifecycle.answer_prefix_applied
     assert lifecycle.card_closed and lifecycle.final_message_id == "m-1"
+
+
+async def test_agent_name_prefix_is_only_on_first_answer_chunk() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender, agent_name_prefix="Ada")
+    await lifecycle.on_terminal_success(_answer("One.\n\n" + "Long answer. " * 600))
+    answers = [activity.text or "" for activity in sender.activities[1:]]
+    assert len(answers) > 1
+    assert answers[0].startswith("**Ada**\n\n")
+    assert all("**Ada**" not in chunk for chunk in answers[1:])
+
+
+async def test_builtin_answer_has_no_name_prefix() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("Done."))
+    assert sender.activities[-1].text == "Done."
 
 
 async def test_a_spend_limit_alerts_the_operators(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -180,8 +198,18 @@ async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark()
     await lifecycle.on_terminal_success(_answer("never seen"))
 
     assert sender.activities[-1].id == "m-1"
-    assert "Something went wrong posting the answer" in _card_json(sender, -1)
+    assert "Something went wrong." in _card_json(sender, -1)
     assert lifecycle.card_closed and lifecycle.final_message_id is None
+
+
+async def test_direct_chat_failure_says_send_a_message() -> None:
+    sender = FakeSender(fail_on={1})
+    lifecycle = await _posted(sender, direct_chat=True)
+    await lifecycle.on_terminal_success(_answer("never seen"))
+
+    failure = _card_json(sender, -1)
+    assert "Send a message to try again." in failure
+    assert "Mention me" not in failure
 
 
 async def test_a_failed_later_part_says_the_answer_may_be_cut_short() -> None:
@@ -232,13 +260,13 @@ async def test_a_timed_out_cancel_notice_is_resent_then_collapsed_without_an_ans
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(TurnState())
     assert [a.id for a in sender.activities[1:]] == ["m-1", "m-1"], "the edit is resent"
-    assert card.CANCELLED_NOTICE in _card_json(sender, -1) and lifecycle.card_closed
+    assert "Stopped." in _card_json(sender, -1) and lifecycle.card_closed
 
     sender = FakeSender(timeout_on={1, 2})
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(TurnState())
     assert sender.activities[-1].id == "m-1"
-    assert "went wrong finishing this turn" in _card_json(sender, -1), "no answer is claimed"
+    assert "Something went wrong." in _card_json(sender, -1), "no answer is claimed"
     assert lifecycle.card_closed
 
 
@@ -355,7 +383,7 @@ async def test_no_answer_reads_as_cancelled_or_done() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(TurnState())
-    assert card.CANCELLED_NOTICE in _card_json(sender, -1)
+    assert "Stopped." in _card_json(sender, -1)
 
     sender = FakeSender()
     lifecycle = await _posted(sender)
@@ -366,6 +394,51 @@ async def test_no_answer_reads_as_cancelled_or_done() -> None:
 
 def _card_text(sender: FakeSender, index: int) -> str:
     return json.loads(_card_json(sender, index))["attachments"][0]["content"]["body"][0]["text"]
+
+
+def _rated(activity: MessageActivityInput) -> bool:
+    data = activity.channel_data
+    return (
+        data is not None and data.feedback_loop is not None and data.feedback_loop.type == "custom"
+    )
+
+
+def _asks(sender: FakeSender, index: int) -> bool:
+    return card.ASK_HUMAN_DIALOG in _card_json(sender, index)
+
+
+@pytest.mark.parametrize("ask_human", [True, False])
+async def test_the_last_answer_part_carries_feedback_and_ask_a_human_when_support_is_on(
+    ask_human: bool,
+) -> None:
+    """As on Slack: Ask a human sits on the final answer, beside the 👍/👎."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender, ask_human=ask_human)
+    await lifecycle.on_terminal_success(_answer("x" * (card.TEAMS_LIMIT + 10)))
+
+    first, last = sender.activities[-2:]
+    assert not _rated(first) and not _asks(sender, -2), "earlier parts carry no controls"
+    assert _rated(last), "the 👍/👎 open daimon's own form"
+    assert _asks(sender, -1) is ask_human, "the button only when support is on"
+    assert last.text and last.text.startswith("x"), "the answer stays markdown text"
+    assert await lifecycle.append_to_answer("Saved to this channel's files:")
+    assert _asks(sender, -1) is ask_human and _rated(sender.activities[-1]), "edits keep both"
+
+
+async def test_a_tool_only_turn_carries_the_controls_and_a_cancelled_one_none() -> None:
+    """#428's rule: a finished tool-only turn is an answer; a cancelled turn is not."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender, ask_human=True)
+    tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
+    await lifecycle.on_terminal_success(TurnState(content=[tool]))
+    assert _rated(sender.activities[-1]) and _asks(sender, -1), "✅ Done can be rated"
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert _rated(sender.activities[-1]) and _asks(sender, -1), "an edit keeps the controls"
+
+    sender = FakeSender()
+    lifecycle = await _posted(sender, ask_human=True)
+    await lifecycle.on_terminal_success(TurnState())
+    assert not _rated(sender.activities[-1]) and not _asks(sender, -1), "cancelled: nothing"
 
 
 async def test_failure_closes_the_card_with_the_termination_notice_once() -> None:

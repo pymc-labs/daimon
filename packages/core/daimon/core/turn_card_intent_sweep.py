@@ -1,6 +1,6 @@
-"""Prune retired initial-card intents after their recovery history expires.
+"""Prune terminal initial-card intents after their recovery history expires.
 
-Retired intents are no longer needed for recovery. Keep them for seven days
+Retired and unrecoverable intents are no longer needed for recovery. Keep them for seven days
 as a short forensic trail, matching the finite-retention event dedup record,
 then remove them in bounded batches. Active intents are never eligible.
 The scheduler calls this out-of-band; cleanup never runs on a turn path.

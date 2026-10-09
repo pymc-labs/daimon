@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 import uuid
 from dataclasses import replace
@@ -32,6 +33,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsTextBlock,
     BetaManagedAgentsUserMessageEvent,
 )
+from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.hosted_artifacts import ChartUrl, HostedChartDelivery
 from daimon.adapters.mcp.middleware.mcp_identity import (
@@ -64,6 +66,7 @@ from daimon.adapters.mcp.tools.agent_chat import (
 from daimon.adapters.mcp.tools.sessions import SessionEventOut
 from daimon.core import bundle_handle
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.config import GithubAppSettings
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
@@ -71,17 +74,21 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_SEALED,
 )
+from daimon.core.github_app_session import prepare_app_access as mint_app_access
+from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores import github_access, github_app_installations
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_repo_binding import set_binding
+from daimon.core.stores.github_links import save_verified_link
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.tenant_balance import debit_amount
 from daimon.testing import ma_agent, ma_model_usage, ma_session
 from daimon.testing.asgi import call_mcp_tool, mcp_session
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma import (
     EMPTY_CLOUD_CONFIG,
     MARouter,
@@ -99,6 +106,7 @@ from fastmcp.server.transforms.search.base import serialize_tools_for_output_mar
 from fastmcp.tools import ToolResult
 from mcp.types import ImageContent
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
 
@@ -451,6 +459,136 @@ async def test_non_narrowed_token_still_gets_bm25_search_surface() -> None:
 # ---------------------------------------------------------------------------
 # Test 2: Start/poll — start_turn creates session, get_reply returns running→done
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("linked", [False, True])
+async def test_start_turn_mints_baseline_app_token_with_or_without_personal_link(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    linked: bool,
+) -> None:
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, id=_TENANT_ID, workspace_id="app-start-turn")
+        account = await make_account(session, tenant=tenant, id=_ACCOUNT_ID)
+        await session.execute(
+            text(
+                "INSERT INTO tenant_github_repos "
+                "(tenant_id, repo_id, owner_id, installation_id, repo_full_name, "
+                "max_access, authorized_by_github_user_id, status, version) "
+                "VALUES (:tenant_id, 101, 55, 77, 'example/repo', 'read', 17, 'active', 1)"
+            ),
+            {"tenant_id": tenant.id},
+        )
+        await session.flush()
+        await github_app_installations.upsert_github_app(
+            session,
+            installation_id=77,
+            account_id=55,
+            account_login="example",
+            account_type="Organization",
+            repository_selection="selected",
+            suspended_at=None,
+        )
+        await github_access.stage_grant(
+            session,
+            tenant_id=tenant.id,
+            agent_id=_AGENT_UUID,
+            repo_id=101,
+            baseline_access="read",
+            ceiling_access="read",
+            granted_by_account_id=_ACCOUNT_ID,
+        )
+        await github_access.activate_agent(session, tenant_id=tenant.id, agent_id=_AGENT_UUID)
+        if linked:
+            await make_platform_principal(
+                session, platform="discord", external_id="person", tenant=tenant, account=account
+            )
+            await save_verified_link(
+                session,
+                intent_account_id=account.id,
+                platform="discord",
+                platform_user_id="person",
+                github_user_id=17,
+                login="linked-person",
+                access_token="test-access",
+                refresh_token="test-refresh",
+                expires_in=86400,
+                refresh_expires_in=172800,
+                fernet=fernet,
+            )
+
+    minted: list[dict[str, Any]] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/app/installations/77/access_tokens"
+        assert request.headers["Authorization"] == "Bearer app-jwt"
+        minted.append(json.loads(request.content))
+        return httpx.Response(201, json={"token": "ghs_start_turn"})
+
+    async def prepare_with_mock_github(*args: Any, **kwargs: Any) -> Any:
+        assert kwargs["config"] == app_settings
+        async with httpx.AsyncClient(transport=httpx.MockTransport(github_handler)) as github:
+            return await mint_app_access(args[0], github, **kwargs)
+
+    app_settings = GithubAppSettings(
+        app_id="123",
+        private_key=SecretStr("unused"),
+        client_id="client",
+        client_secret=SecretStr("secret"),
+    )
+    monkeypatch.setattr("daimon.core.github_app_session.build_app_jwt", lambda *_a, **_k: "app-jwt")
+    monkeypatch.setattr(
+        "daimon.core.github_app_session.linked_permissions",
+        AsyncMock(return_value={101: "read"}),
+    )
+    monkeypatch.setattr("daimon.core.sessions.prepare_app_access", prepare_with_mock_github)
+    monkeypatch.setattr(
+        "daimon.core.sessions.create_session_vault", AsyncMock(return_value="vlt_start_turn")
+    )
+    monkeypatch.setattr("daimon.core.sessions.add_app_credentials", AsyncMock())
+
+    router = _agent_and_env_router()
+    router.add(
+        "POST",
+        r"/v1/sessions",
+        lambda _r, _m: httpx.Response(200, json=_session_json(session_id="ses_app_start")),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: send_events_response(
+            data=[
+                BetaManagedAgentsUserMessageEvent(
+                    id="sevt_app_start",
+                    content=[BetaManagedAgentsTextBlock(type="text", text="hi")],
+                    type="user.message",
+                    processed_at=None,
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    runtime = _runtime(
+        build_fake_anthropic(router.dispatch),
+        session_factory=db_session_factory,
+        environment_name=_ENV_NAME,
+    )
+    runtime.settings.github_app = app_settings
+    runtime = replace(runtime, fernet=fernet)
+    result = await _start_turn_impl(runtime, _auth(), "hi")
+
+    assert result["handle"] == "ses_app_start"
+    assert minted == [
+        {
+            "repository_ids": [101],
+            "permissions": {
+                "metadata": "read",
+                "contents": "read",
+                "issues": "read",
+                "pull_requests": "read",
+            },
+        }
+    ]
 
 
 async def test_start_turn_then_poll_get_session_and_read_transcript(
@@ -2307,9 +2445,11 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "agent_uuid",
         "session_factory",
         "fernet",
+        "app_session_unmapped",
         "github_fallback_pat",
         "github_app_id",
         "github_app_private_key",
+        "agent_github_app",
         "billing_exempt",
         "memory_read_only",
         "budget_channel_id",
@@ -2317,6 +2457,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "origin_seal_ids",
         "before_create",
     }, f"the non-bundle path must keep passing its full argument set; got {sorted(call_kwargs)!r}"
+    assert call_kwargs["app_session_unmapped"] is True
 
 
 @pytest.mark.parametrize("billed", [True, False], ids=["billed", "unbilled"])
@@ -2370,7 +2511,10 @@ async def test_continue_turn_gates_on_the_sessions_own_budget_channel(billed: bo
     assert sent == [], "a refused follow-up must never reach the session"
 
 
-async def test_continue_turn_returns_boundary_from_its_own_send() -> None:
+@pytest.mark.parametrize("touch_result", [None, True], ids=["mapped-vault", "unmapped-vault"])
+async def test_continue_turn_returns_boundary_from_its_own_send(
+    touch_result: bool | None,
+) -> None:
     """continue_turn's turn_event_id is THIS send's accepted event, not session
     history; turn_started_at is the caller's own clock, captured before THIS
     send, not the echo's timestamp (the live API never populates one on the
@@ -2407,7 +2551,11 @@ async def test_continue_turn_returns_boundary_from_its_own_send() -> None:
     runtime = _runtime(client)
     auth = _auth()
 
-    result = await _continue_turn_impl(runtime, auth, "ses_test001", "again", now=now)
+    with patch(
+        "daimon.adapters.mcp.tools.agent_chat.touch_unmapped_app_session",
+        new=AsyncMock(return_value=touch_result),
+    ) as touch_app:
+        result = await _continue_turn_impl(runtime, auth, "ses_test001", "again", now=now)
 
     assert result == {
         "handle": "ses_test001",
@@ -2417,6 +2565,33 @@ async def test_continue_turn_returns_boundary_from_its_own_send() -> None:
     assert call_order == ["now", "send"], (
         f"the clock must be read BEFORE events.send, not after; got {call_order!r}"
     )
+    assert touch_app.await_args is not None
+    assert touch_app.await_args.kwargs == {"session_id": "ses_test001"}
+
+
+async def test_continue_turn_rejects_a_closed_app_vault_before_send() -> None:
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=_session_json(status="idle")),
+    )
+    sent: list[str] = []
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: sent.append("sent") or httpx.Response(500),
+    )
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat.touch_unmapped_app_session",
+            new=AsyncMock(return_value=False),
+        ),
+        pytest.raises(ToolError, match="session is closed"),
+    ):
+        await _continue_turn_impl(runtime, _auth(), "ses_test001", "again")
+    assert sent == []
 
 
 async def test_start_turn_raises_when_send_accepts_nothing(
@@ -2617,11 +2792,21 @@ async def test_archive_my_session_archives_an_owned_session_exactly_once() -> No
     runtime = _runtime(client)
     auth = _auth()
 
-    result = await _archive_my_session_impl(runtime, auth, "ses_test001")
+    with patch(
+        "daimon.adapters.mcp.tools.agent_chat.close_headless_app_session",
+        new=AsyncMock(),
+    ) as close_app:
+        result = await _archive_my_session_impl(runtime, auth, "ses_test001")
 
     assert result == {"handle": "ses_test001", "archived": "true"}
     assert archive_calls == ["ses_test001"], (
         f"expected exactly one archive call; got {archive_calls!r}"
+    )
+    close_app.assert_awaited_once_with(
+        runtime.client,
+        runtime.session_factory,
+        session_id="ses_test001",
+        fernet=runtime.fernet,
     )
 
 

@@ -2,12 +2,28 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from daimon.core._models import SecurityAuditEvent
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.security_audit import capture_decision
 from daimon.core.stores.security_audit import append_event, list_events
 from daimon.testing.factories import make_account, make_security_audit_event, make_tenant
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
+
+
+async def test_migrated_audit_columns_match_orm(db_engine):
+    async with db_engine.connect() as connection:
+        columns = set(
+            (
+                await connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'public' AND table_name = 'security_audit_events'"
+                    )
+                )
+            ).scalars()
+        )
+    assert set(SecurityAuditEvent.__table__.columns.keys()) <= columns
 
 
 async def test_tenant_account_time_filters_and_paging(db_session):

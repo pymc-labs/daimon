@@ -4,7 +4,7 @@ SlackTurnLifecycle receives SSE events from the turn driver, accumulates
 Block Kit state via the blockkit module, debounces chat.update at 5s,
 replaces the status message in-place on terminal success with overflow
 chunk support (final_ts widened to the last posted message), applies
-the cost/usage footer, and registers/deregisters its cancel Event
+the cost/usage Details, and registers/deregisters its cancel Event
 in the SlackApp registry.
 
 Design decisions:
@@ -50,6 +50,7 @@ from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
+from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.adapters.slack.blockkit import (
     NOTICE_MAX_CHARS,
     EmbedEvent,
@@ -72,8 +73,10 @@ from daimon.adapters.slack.mrkdwn import (
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.support_escalation import build_ask_human_button
 from daimon.adapters.slack.tables import render_slack_tables
+from daimon.core.agent_identity import AgentIdentity
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
+from daimon.core.channel_tidy import record_turn_post
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
@@ -142,7 +145,7 @@ class SlackTurnLifecycle:
 
     Accumulates Block Kit state from SSE events, debounces chat.update at
     _DEBOUNCE_S seconds, replaces the status message in-place on terminal
-    success, applies the cost/usage footer, and registers/deregisters the
+    success, applies the cost/usage Details, and registers/deregisters the
     cancel Event in the caller-supplied registry.
 
     Constructor args are all keyword-only (mirrors DiscordTurnLifecycle's
@@ -172,6 +175,7 @@ class SlackTurnLifecycle:
         render_tables: bool = False,
         clock: Callable[[], float] = time.monotonic,
         adopt_status_ts: str | None = None,
+        header_customized: bool = False,
         intent_id: UUID | None = None,
         request_id: Callable[[], str] = bound_request_id,
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
@@ -179,6 +183,8 @@ class SlackTurnLifecycle:
         budget_channel_id: str | None = None,
         alert_webhook_url: SecretStr | None = None,
         ask_human: bool = False,
+        identity: AgentIdentity | None = None,
+        ma_agent_id: str | None = None,
     ) -> None:
         self._trigger_ts = trigger_ts
         # Whether the final answer offers Ask a human beside the vote buttons
@@ -191,6 +197,9 @@ class SlackTurnLifecycle:
         self._request_id = request_id
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
+        self._identity = identity
+        self._ma_agent_id = ma_agent_id
+        self._intent_id = intent_id
         self._budget_channel_id = budget_channel_id
         self._alert_webhook_url = alert_webhook_url
         self._channel = channel
@@ -209,6 +218,7 @@ class SlackTurnLifecycle:
         self._state: State = State(
             phase=TurnPhase.THINKING,
             agent_name=agent_name,
+            header_customized=header_customized,
             started_at=self._clock(),
         )
         # Seeded only by dead-session recovery, which hands over the card the
@@ -265,6 +275,48 @@ class SlackTurnLifecycle:
         """
         return self._status_ts
 
+    @property
+    def header_customized(self) -> bool:
+        """Whether the adopted status card carries an agent header."""
+        return self._state.header_customized
+
+    async def record_post(self, ts: str) -> None:
+        if (
+            self._sessionmaker is not None
+            and self._tenant_id is not None
+            and self._ma_agent_id is not None
+            and self._intent_id is not None
+        ):
+            await record_turn_post(
+                self._sessionmaker,
+                tenant_id=self._tenant_id,
+                platform="slack",
+                ma_agent_id=self._ma_agent_id,
+                channel_id=self._channel,
+                message_id=ts,
+                requester_platform_user_id=self._author_id,
+                source="turn",
+                turn_card_intent_id=self._intent_id,
+                thread_ts=self._thread_ts,
+            )
+
+    def _set_header_customized(self, customized: bool) -> None:
+        self._state = dataclasses.replace(self._state, header_customized=customized)
+
+    async def post_notice(self, text: str, *, blocks: list[dict[str, Any]] | None = None) -> str:
+        """Post a turn notice with the same header and ownership as its answer."""
+        kwargs: dict[str, Any] = {
+            "channel": self._channel,
+            "thread_ts": self._thread_ts,
+            "text": text,
+        }
+        if blocks is not None:
+            kwargs["blocks"] = blocks
+        resp = await post_as_agent(self._client, self._identity, **kwargs)
+        ts = cast(str, resp["ts"])
+        await self.record_post(ts)
+        return ts
+
     async def post_initial(self) -> None:
         """Post the initial status card immediately, before session setup.
 
@@ -314,7 +366,10 @@ class SlackTurnLifecycle:
                 self._register_pending(self._cancel_key, self._cancel, self._author_id)
                 self._pending_registered = True
             try:
-                resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                resp = await post_as_agent(
+                    self._client,
+                    self._identity,
+                    on_customized=self._set_header_customized,
                     channel=self._channel,
                     thread_ts=self._thread_ts,
                     blocks=blocks,
@@ -332,6 +387,7 @@ class SlackTurnLifecycle:
             if self._pending_registered and self._deregister_pending is not None:
                 self._deregister_pending(self._cancel_key)
                 self._pending_registered = False
+            await self.record_post(self._status_ts)
             self._last_flush = now
         elif now - self._last_flush >= _DEBOUNCE_S:
             # Debounce elapsed — update the status message in place.
@@ -347,9 +403,9 @@ class SlackTurnLifecycle:
         """Fold accumulated token totals + priced cost onto the Block Kit state.
 
         Reconstructs a per-turn BetaManagedAgentsSpanModelUsage from the four
-        cache-split totals and prices it through cost_of, so the footer cost
+        cache-split totals and prices it through cost_of, so the displayed cost
         matches the billing ledger to the cent. An unpriced model yields None
-        cost — the footer omits the cost segment.
+        cost — Details omits the cost line.
         """
         t = state.usage_totals
         usage = BetaManagedAgentsSpanModelUsage(
@@ -376,7 +432,10 @@ class SlackTurnLifecycle:
         prior SSE flush.
         """
         if self._status_ts is None:
-            resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+            resp = await post_as_agent(
+                self._client,
+                self._identity,
+                on_customized=self._set_header_customized,
                 channel=self._channel,
                 thread_ts=self._thread_ts,
                 blocks=blocks,
@@ -384,6 +443,7 @@ class SlackTurnLifecycle:
             )
             self._status_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
             self._register(self._status_ts, self._cancel, self._author_id)
+            await self.record_post(self._status_ts)
         else:
             await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel,
@@ -408,7 +468,13 @@ class SlackTurnLifecycle:
             except Exception:
                 log.warning("turn.balance_footer_failed", exc_info=True)
 
-    async def _flush_terminal(self, fallback_text: str | None = None) -> None:
+    async def _flush_terminal(
+        self,
+        fallback_text: str | None = None,
+        *,
+        feedback: bool = False,
+        answer_visible: bool = False,
+    ) -> None:
         """Unconditionally flush the terminal Block Kit surface, bypassing debounce.
 
         Sets _terminal=True so subsequent _maybe_flush calls become no-ops. The
@@ -416,10 +482,29 @@ class SlackTurnLifecycle:
         (done/error) so to_blocks emits the collapsed footer with no cancel button.
         ``fallback_text`` replaces the generic top-level ``text`` that
         notifications and screen readers show instead of the blocks.
+        ``feedback`` appends the vote (and Ask a human) controls, for a turn
+        whose product is this card: a tool-only turn has no answer to carry them.
         """
         self._terminal = True
-        blocks = to_blocks(self._state, now=self._clock(), cancel_key=self._cancel_key)
-        await self._post_or_update(blocks, fallback_text or f"{self._state.phase.value} …")
+        blocks = to_blocks(
+            self._state,
+            now=self._clock(),
+            cancel_key=self._cancel_key,
+            answer_visible=answer_visible,
+        )
+        if feedback:
+            blocks.append(self._feedback_block())
+        fallback = "Something went wrong. Mention me to try again."
+        if self._state.phase is TurnPhase.DONE:
+            fallback = "Done."
+        await self._post_or_update(blocks, fallback_text or fallback)
+
+    def _feedback_block(self) -> dict[str, Any]:
+        """👍/👎, plus Ask a human when this deployment offers it."""
+        block = build_feedback_actions_block()
+        if self._ask_human:
+            block["elements"].append(build_ask_human_button())
+        return block
 
     async def _flush_cancelled(self) -> None:
         """Replace the status message with a plain 'Turn cancelled.' notice.
@@ -430,8 +515,14 @@ class SlackTurnLifecycle:
         """
         self._terminal = True
         await self._post_or_update(
-            [{"type": "section", "text": {"type": "mrkdwn", "text": "Turn cancelled."}}],
-            "Turn cancelled.",
+            [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Stopped."}},
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "Send a message to start again."},
+                },
+            ],
+            "Stopped. Send a message to start again.",
         )
 
     async def _repair_terminal_flush(self, text: str) -> None:
@@ -450,8 +541,11 @@ class SlackTurnLifecycle:
         with contextlib.suppress(*_SLACK_SEND_ERRORS):
             # The status_ts guard above pins _post_or_update to its update branch.
             await self._post_or_update(
-                [{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
-                text,
+                [
+                    {"type": "section", "text": {"type": "mrkdwn", "text": line}}
+                    for line in text.splitlines()
+                ],
+                text.replace("\n", " "),
             )
 
     async def on_terminal_success(self, state: TurnState) -> None:
@@ -472,9 +566,9 @@ class SlackTurnLifecycle:
         the user never saw.
         """
         # Transition to the DONE phase BEFORE rendering so to_blocks emits the
-        # terminal collapse (cost/usage footer, no cancel button) — matches the
+        # terminal collapse (cost/usage Details, no cancel button) — matches the
         # Discord parity reference. Without this the status would render as still
-        # running and the footer would never appear.
+        # running and the Details metrics would never appear.
         self._state = update(self._state, EmbedEvent(kind="done", label=""))
         self._apply_usage(state)
         await self._apply_balance()
@@ -484,7 +578,7 @@ class SlackTurnLifecycle:
         surface_replaced = False
         # A no-answer collapse (tool-only done footer, "Turn cancelled.") must
         # not be repaired with copy that claims an answer existed.
-        repair_notice = "⚠️ Something went wrong finishing this turn."
+        repair_notice = "Something went wrong.\nMention me to try again."
         try:
             answer_parts = [
                 text
@@ -503,29 +597,32 @@ class SlackTurnLifecycle:
                     await self._flush_cancelled()
                     self.final_ts = self._status_ts
                     return
-                final_text = f"{final_text}\n\nTurn cancelled."
+                final_text = f"{final_text}\n\nStopped.\nSend a message to start again."
             if not final_text:
                 # No final answer. A tool-only turn keeps the collapsed done
                 # footer; a truly empty turn (cancellation) shows "Turn
                 # cancelled." — matches the Discord parity reference.
                 if any(isinstance(block, ToolUseBlock) for block in state.content):
-                    await self._flush_terminal()
+                    await self._flush_terminal(feedback=True)
                     # #79: no reply to hang the notice under on a tool-only
                     # turn, so a dropped server is named on its own line.
                     tool_only_notice = render_degraded_notice(state.mcp_failures)
                     if tool_only_notice is not None:
-                        await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                        resp = await post_as_agent(
+                            self._client,
+                            self._identity,
                             channel=self._channel,
                             thread_ts=self._thread_ts,
                             blocks=[{"type": "markdown", "text": tool_only_notice}],
                             text=tool_only_notice,
                         )
+                        await self.record_post(cast(str, resp["ts"]))
                 else:
                     await self._flush_cancelled()
                 self.final_ts = self._status_ts
                 return
 
-            repair_notice = "⚠️ Something went wrong posting the answer."
+            repair_notice = "I couldn't send the full answer.\nMention me to try again."
             if self.answer_prefix is not None:
                 final_text = f"{self.answer_prefix}\n\n{final_text}"
                 self.answer_prefix_applied = True
@@ -544,7 +641,7 @@ class SlackTurnLifecycle:
             # continuity notices, and only the last carries feedback controls.
             self._terminal = True
             if notify_on_completion:
-                await self._flush_terminal()
+                await self._flush_terminal(answer_visible=True)
             index = 0
             first_markdown_prefixed = False
             current_ts: str | None = self._status_ts
@@ -575,18 +672,17 @@ class SlackTurnLifecycle:
                     if mention and block.get("type") == "table":
                         blocks.insert(0, {"type": "markdown", "text": mention})
                         notification_chunk = f"{mention}\n{chunk}"
-                    blocks.extend(to_blocks(self._state, now=self._clock()))
+                    blocks.extend(to_blocks(self._state, now=self._clock(), answer_visible=True))
                 if index == len(deliveries) - 1 and not cancelled:
-                    feedback_block = build_feedback_actions_block()
-                    if self._ask_human:
-                        feedback_block["elements"].append(build_ask_human_button())
-                    blocks.append(feedback_block)
+                    blocks.append(self._feedback_block())
                 try:
                     if index == 0 and not notify_on_completion:
                         await self._post_or_update(blocks, _notification_text(notification_chunk))
                         current_ts = self._status_ts
                     else:
-                        resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                        resp = await post_as_agent(
+                            self._client,
+                            self._identity,
                             channel=self._channel,
                             thread_ts=self._thread_ts,
                             blocks=blocks,
@@ -594,6 +690,7 @@ class SlackTurnLifecycle:
                             link_names=False if notify_on_completion else None,
                         )
                         current_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
+                        await self.record_post(current_ts)
                     if index == 0:
                         self._answer_ts = current_ts
                         self._revealed_first_chunk = notification_chunk
@@ -733,7 +830,7 @@ class SlackTurnLifecycle:
             self.final_ts = self._status_ts
         except Exception:
             log.warning("turn.terminal_failure.flush_failed", exc_info=True)
-            await self._repair_terminal_flush("⚠️ Something went wrong finishing this turn.")
+            await self._repair_terminal_flush("Something went wrong.\nMention me to try again.")
         finally:
             if self._status_ts is not None:
                 self._deregister(self._status_ts)

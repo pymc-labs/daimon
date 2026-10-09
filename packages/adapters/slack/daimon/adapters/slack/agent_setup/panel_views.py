@@ -1,4 +1,4 @@
-"""Pure Block Kit builders for the read-only setup panel.
+"""Pure Block Kit builders for the setup panel.
 
 Three screens — Agents, one agent's Details, and Who answers where — plus the
 New agent form and the placeholder shown while a creation is in flight. Every
@@ -10,8 +10,8 @@ how a Slack modal says them. It reads no settings, resolves no credential and
 re-derives no precedence: an unrouted agent is unrouted because
 `AgentDetails.answers_in` is empty, and the sentence about it is the one
 `daimon.core.routing_facts` wrote. Admin and member see identical blocks; the
-role changes only whose voice the routing request is in, and whether Who
-answers where lists the channel admins with a form to edit them.
+role changes which admin controls are offered, including avatar changes and
+the channel admins form.
 
 Pure — no I/O, no clock, no slack_sdk.
 """
@@ -66,6 +66,13 @@ __all__ = [
     "ACTION_CHANNEL_SKILLS",
     "ACTION_CODING_TOOLS",
     "ACTION_DETAILS",
+    "ACTION_AVATAR_CHANGE",
+    "ACTION_AVATAR_DETAILS",
+    "ACTION_AVATAR_RESET",
+    "CALLBACK_AVATAR_UPLOAD",
+    "AVATAR_FILE_INPUT_ID",
+    "build_avatar_upload_form",
+    "build_avatar_status_view",
     "ACTION_ENVIRONMENT",
     "ACTION_EXPAND_KEYS",
     "ACTION_EXPAND_SKILLS",
@@ -111,6 +118,11 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 ACTION_DETAILS: Final = "agent_setup__details"
+ACTION_AVATAR_CHANGE: Final = "agent_setup__avatar_change"
+ACTION_AVATAR_RESET: Final = "agent_setup__avatar_reset"
+ACTION_AVATAR_DETAILS: Final = "agent_setup__avatar_details"
+CALLBACK_AVATAR_UPLOAD: Final = "agent_setup__avatar_upload"
+AVATAR_FILE_INPUT_ID: Final = "agent_setup__avatar_file"
 """Open one agent's Details. The button's `value` is the agent name."""
 
 ACTION_ROUTING: Final = "agent_setup__routing"
@@ -120,6 +132,114 @@ ACTION_EXPAND_KEYS: Final = "agent_setup__expand:keys"
 ACTION_EXPAND_SKILLS: Final = "agent_setup__expand:skills"
 ACTION_EXPAND_CONNECTIONS: Final = "agent_setup__expand:connections"
 ACTION_NEW: Final = "agent_setup__new"
+ACTION_GITHUB_CONNECT: Final = "agent_setup__github_connect"
+ACTION_GITHUB_START: Final = "agent_setup__github_start"
+ACTION_GITHUB_CHOOSE_AGENT: Final = "agent_setup__github_choose_agent"
+ACTION_GITHUB_BACK: Final = "agent_setup__github_step_back"
+ACTION_GITHUB_MANAGE: Final = "agent_setup__github_manage"
+ACTION_GITHUB_REPOS: Final = "agent_setup__github_repos"
+ACTION_GITHUB_PERSONAL_LINK: Final = "agent_setup__github_personal_link"
+ACTION_GITHUB_UNLINK: Final = "agent_setup__github_unlink"
+ACTION_GITHUB_UNLINK_CONFIRM: Final = "agent_setup__github_unlink_confirm"
+ACTION_GITHUB_UNLINK_BACK: Final = "agent_setup__github_unlink_back"
+ACTION_GITHUB_WAITING: Final = "agent_setup__github_waiting_open"
+
+
+def build_github_home_view(
+    meta: PanelMetadata,
+    *,
+    connected_count: int,
+    is_admin: bool = True,
+    owners: tuple[str, ...] = (),
+    agent_count: int = 0,
+    pending_url: str | None = None,
+    linked_login: str | None = None,
+    can_choose_agent: bool = False,
+    own_waiting_count: int = 0,
+) -> dict[str, Any]:
+    """The private GitHub entry screen for workspace admins."""
+    if meta.github_step == "personal_unlink":
+        return finish_modal(
+            title="GitHub",
+            blocks=[
+                _section("Unlink GitHub from your account?"),
+                {
+                    "type": "actions",
+                    "elements": [
+                        _button(action_id=ACTION_GITHUB_UNLINK_CONFIRM, label="Unlink"),
+                        _button(action_id=ACTION_GITHUB_UNLINK_BACK, label="◀ Back"),
+                    ],
+                },
+            ],
+            private_metadata=encode_panel_metadata(meta.with_view("github_home")),
+            callback_id="agent_setup__github_home",
+        )
+    if is_admin and pending_url:
+        summary = "Connection in progress."
+        actions: list[dict[str, Any]] = [
+            {
+                "type": "button",
+                "action_id": "github_link__open",
+                "text": {"type": "plain_text", "text": "Continue"},
+                "url": pending_url,
+            },
+            _button(action_id=ACTION_GITHUB_START, label="Start over"),
+        ]
+    elif not is_admin:
+        summary = "Workspace admins connect repos here."
+        actions = (
+            [_button(action_id=ACTION_GITHUB_CHOOSE_AGENT, label="Choose agent")]
+            if can_choose_agent
+            else []
+        )
+    elif connected_count:
+        source = f" from {', '.join(owners)}" if owners else ""
+        summary = f"Connected: {connected_count} repos{source}."
+        actions = [
+            _button(action_id=ACTION_GITHUB_CHOOSE_AGENT, label="Choose agent"),
+            _button(action_id=ACTION_GITHUB_START, label="Connect more repos"),
+            _button(action_id=ACTION_GITHUB_MANAGE, label="Manage connected repos"),
+        ]
+    else:
+        summary = "Connect repos here, then choose which agents can use them."
+        actions = [_button(action_id=ACTION_GITHUB_START, label="Connect GitHub")]
+    actions.append(_button(action_id=ACTION_GITHUB_BACK, label="◀ Back"))
+    status = f"Linked as @{linked_login}" if linked_login else "GitHub isn't linked."
+    fields = [{"type": "mrkdwn", "text": f"*Personal link*\n{status}"}]
+    if connected_count:
+        fields.insert(0, {"type": "mrkdwn", "text": f"*Agents*\n{agent_count} using these repos"})
+    blocks: list[dict[str, Any]] = [
+        _section(summary),
+        {"type": "section", "fields": fields},
+        {"type": "divider"},
+    ]
+    if actions:
+        blocks.append({"type": "actions", "elements": actions})
+    personal = [
+        _button(
+            action_id=ACTION_GITHUB_PERSONAL_LINK,
+            label="Use another account" if linked_login else "Link GitHub",
+        )
+    ]
+    if linked_login:
+        personal.append(_button(action_id=ACTION_GITHUB_UNLINK, label="Unlink"))
+    blocks.append({"type": "actions", "elements": personal})
+    if is_admin or can_choose_agent or own_waiting_count:
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [_button(action_id=ACTION_GITHUB_WAITING, label="Requests waiting")],
+            }
+        )
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "GitHub on Daimon"}]})
+    return finish_modal(
+        title="GitHub",
+        blocks=blocks,
+        private_metadata=encode_panel_metadata(meta.with_view("github_home")),
+        callback_id="agent_setup__github_home",
+    )
+
+
 ACTION_CHANNEL_ADMINS: Final = "agent_setup__channel_admins"
 ACTION_CHANNEL_SKILLS: Final = "agent_setup__channel_skills"
 """Open the form naming this channel's admins. Workspace admins only."""
@@ -382,7 +502,7 @@ def build_agents_view(
     channel" from "answers nowhere", and the panel must not guess: without it
     a row carries no routing claim at all.
     """
-    del is_admin, attributions
+    del attributions
     blocks: list[dict[str, Any]] = [_section(f"*Agents in <#{escape_mrkdwn(channel_id)}>*")]
     answering = roster.answering
     if not roster.rows:
@@ -411,6 +531,8 @@ def build_agents_view(
     )
     elements.append(_button(action_id=ACTION_NEW, label=NEW_AGENT_LABEL))
     elements.append(_button(action_id=ACTION_ROUTING, label=ROUTING_LABEL))
+    if is_admin:
+        elements.append(_button(action_id=ACTION_GITHUB_CONNECT, label="🐙 GitHub"))
     blocks.append({"type": "actions", "elements": elements})
     blocks.extend(_pager_blocks(page, meta=meta))
     return finish_modal(
@@ -459,15 +581,16 @@ def build_details_view(
     coding_tools_available: bool,
     channel_id: str,
     attribution: str | None,
+    avatar_url: str | None = None,
+    avatar_editable: bool | None = None,
 ) -> dict[str, Any]:
     """One agent's whole readable state, in the order the roster promised.
 
-    `is_admin` reaches this view only through `details.unrouted_note`, which
-    the core already phrased in the reader's voice; nothing here is shown or
-    hidden by role. Key values are not a parameter and cannot be: the model
-    carries names and attribution only.
+    `is_admin` controls the avatar buttons. The core phrases
+    `details.unrouted_note` in the reader's voice. Key values are not a
+    parameter: the model carries names and attribution only.
     """
-    del is_admin, attribution
+    del attribution
     title = fit_title(details.name)
     blocks: list[dict[str, Any]] = []
     if title != details.name:
@@ -485,9 +608,45 @@ def build_details_view(
         }
     )
     blocks.append(_section(f"*Model:* {escape_mrkdwn(details.model_display_name)}"))
+    show_avatar = not details.daimon_managed if avatar_editable is None else avatar_editable
+    avatar_accessory = (
+        {"type": "image", "image_url": avatar_url, "alt_text": f"{details.name}'s picture"}
+        if show_avatar and avatar_url
+        else None
+    )
+    if show_avatar:
+        blocks.append(
+            _section("*Picture*\nShown next to this agent's messages.", accessory=avatar_accessory)
+        )
+    if is_admin and show_avatar:
+        reset_button = _button(
+            action_id=ACTION_AVATAR_RESET, label="Use default", value=details.name
+        )
+        reset_button["confirm"] = {
+            "title": {"type": "plain_text", "text": "Use default picture?"},
+            "text": {
+                "type": "mrkdwn",
+                "text": "Use the default picture?",
+            },
+            "confirm": {"type": "plain_text", "text": "Use default"},
+            "deny": {"type": "plain_text", "text": "Cancel"},
+        }
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    _button(action_id=ACTION_AVATAR_CHANGE, label="Change", value=details.name),
+                    reset_button,
+                    _button(action_id=ACTION_AVATAR_DETAILS, label="Details", value=details.name),
+                ],
+            }
+        )
     blocks.extend(_repo_blocks(details))
     blocks.extend(_detail_list_blocks(details, meta=meta))
-    actions = [_button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name)]
+    actions = [
+        _button(action_id=ACTION_GITHUB_REPOS, label="🐙 GitHub repos", value=details.name),
+        _button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name),
+    ]
     if coding_tools_available:
         actions.insert(
             0,
@@ -511,6 +670,86 @@ def build_details_view(
         ),
         callback_id=CALLBACK_DETAILS,
     )
+
+
+def build_avatar_upload_form(*, meta: PanelMetadata) -> dict[str, Any]:
+    """A single image upload for the agent in the details view."""
+    return finish_modal(
+        title="Change picture",
+        blocks=[
+            _section("Choose a picture. Up to 2 MB."),
+            {
+                "type": "input",
+                "block_id": AVATAR_FILE_INPUT_ID,
+                "label": {"type": "plain_text", "text": "Picture"},
+                "element": {
+                    "type": "file_input",
+                    "action_id": AVATAR_FILE_INPUT_ID,
+                    "filetypes": ["png", "jpg", "jpeg", "gif", "webp"],
+                    "max_files": 1,
+                },
+            },
+            {"type": "divider"},
+            _context("File types: PNG, JPG, GIF or WebP."),
+        ],
+        private_metadata=encode_panel_metadata(meta),
+        callback_id=CALLBACK_AVATAR_UPLOAD,
+        close="Cancel",
+        submit="Save",
+    )
+
+
+def build_avatar_details_view(*, meta: PanelMetadata) -> dict[str, Any]:
+    """Keep public-image and cache guidance behind Details."""
+    return finish_modal(
+        title="Picture details",
+        blocks=[
+            _section("Anyone who sees a message can open the picture."),
+            _section("The old picture may still appear for a while."),
+            {"type": "divider"},
+            _context("Agent setup"),
+        ],
+        private_metadata=encode_panel_metadata(meta),
+        callback_id="agent_setup__avatar_details_view",
+        close="Done",
+    )
+
+
+def build_avatar_status_view(
+    *, meta: PanelMetadata, message: str, external_id: str | None = None, retry: bool = False
+) -> dict[str, Any]:
+    """Show upload progress or a result in the submitted modal itself."""
+    title, separator, next_step = message.partition(". ")
+    view = finish_modal(
+        title="Picture",
+        blocks=[
+            _section(title + ("." if separator else "")),
+            *([_section(next_step)] if next_step else []),
+            {"type": "divider"},
+            *(
+                [
+                    {
+                        "type": "actions",
+                        "elements": [
+                            _button(
+                                action_id=ACTION_AVATAR_CHANGE,
+                                label="Choose picture",
+                                value=meta.agent_name or "",
+                            )
+                        ],
+                    },
+                ]
+                if retry
+                else []
+            ),
+            _context("Agent setup"),
+        ],
+        private_metadata=encode_panel_metadata(meta),
+        callback_id=CALLBACK_AVATAR_UPLOAD,
+    )
+    if external_id is not None:
+        view["external_id"] = external_id
+    return view
 
 
 def _answers_text(details: AgentDetails) -> str:

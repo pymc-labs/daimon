@@ -1,10 +1,10 @@
 # Configuration reference
 
-Every environment variable daimon reads. Generated from the settings models themselves
+Every environment variable Daimon reads. Generated from the settings models themselves
 by `scripts/generate_config_reference.py` — edit the `Field(description=...)` in the
 model, not this page. CI fails when the two disagree.
 
-Values come from the process environment and, for the daimon processes, from a `.env`
+Values come from the process environment and, for the Daimon processes, from a `.env`
 file in the working directory. `.env.example` lists the same `DAIMON_*` variables in
 copy-paste form; this page adds the types, the defaults and the two standalone services.
 Nested blocks use `__` as the delimiter, so `DAIMON_MCP__JWT_SECRET` is
@@ -24,6 +24,7 @@ typo is silent — check the spelling here.
 - [Ops](#ops)
 - [MCP Server](#mcp-server)
 - [Hub](#hub)
+- [Agent Identity](#agent-identity)
 - [Discord](#discord)
 - [Thread Participation](#thread-participation)
 - [Slack](#slack)
@@ -56,10 +57,10 @@ section below is a nested block on this model, reached with the `__` delimiter.
 
 `int` · optional · default `90`
 
-Security audit retention age in days, default 90. Operators must schedule daimon audit
-prune TENANT_UUID for each tenant (for example daily). The command deletes older events.
-Set 0 to explicitly retain events forever; privacy erasure and tenant deletion still
-apply.
+Security audit retention age in days, default 90. Operators must schedule `daimon audit
+prune TENANT_UUID` for each tenant (for example daily). The command deletes older
+events. Set 0 to explicitly retain events forever; privacy erasure and tenant deletion
+still apply.
 
 ### `DAIMON_COMPLETION_PINGS`
 
@@ -354,6 +355,34 @@ Base64url 32-byte key that signs hub login tokens. Required when any hub mount i
 configured, and rejected at boot unless it decodes to exactly 32 bytes. Generate with
 Fernet.generate_key().
 
+## Agent Identity
+
+Read from `daimon.core.config.AgentIdentitySettings`. Prefix `DAIMON_AGENT_IDENTITY__`.
+
+### `DAIMON_AGENT_IDENTITY__ENABLED`
+
+`bool` · optional · default `False`
+
+Enable per-agent display names and avatars on Slack and Discord, agent name prefixes on
+Teams, and reply-to-agent routing on Discord. Off by default; set
+DAIMON_AGENT_IDENTITY__ENABLED=true after platform setup is ready.
+
+### `DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS`
+
+`list[str]` · optional · default unset
+
+Discord guild IDs where agent identity stays off when enabled globally. Set
+DAIMON_AGENT_IDENTITY__EXCLUDED_DISCORD_GUILD_IDS to a JSON array of IDs. Default: []
+(no guilds excluded).
+
+### `DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS`
+
+`list[str]` · optional · default unset
+
+Slack workspace team IDs where agent identity stays off when enabled globally. Set
+DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS to a JSON array of IDs. Default: [] (no
+workspaces excluded).
+
 ## Discord
 
 Read from `daimon.core.config.DiscordSettings`. Prefix `DAIMON_DISCORD__`.
@@ -396,6 +425,22 @@ Maximum Discord agent turns running across all guilds and DMs in this process. U
 leaves deployment-wide admission unlimited. Excess turns are refused with a retry
 notice; continuation wakes keep their existing admission path.
 
+### `DAIMON_DISCORD__TURN_CARD_UNRECOVERABLE_AFTER_S`
+
+`int` · optional · default `86400`
+
+Minimum age in seconds before Discord can retire a card after definite recovery failure
+or repeated failed recovery passes. Must be at least the turn ceiling plus 15 minutes.
+Recovery runs at startup and periodically, and deletes a known pending card when the bot
+has Manage Messages permission.
+
+### `DAIMON_DISCORD__TURN_CARD_UNRECOVERABLE_AFTER_ATTEMPTS`
+
+`int` · optional · default `3`
+
+Failed Discord card recovery passes required before an aged intent can be retired
+without a definite platform failure. Count persists across restarts.
+
 ### `DAIMON_DISCORD__HEALTH_PORT`
 
 `int` · optional · default `8081`
@@ -407,13 +452,13 @@ Port for the Discord process's liveness endpoint. Must not collide with the mcp 
 
 `tuple[str, ...]` · optional · default unset
 
-Discord user ids of automated QA bots allowed to start turns by mention. Bot-authored
-mentions are rejected by default; these are allow-listed so a harness can drive the
-mention path end-to-end without a human. Several are supported because admin-gated tools
-need a caller holding Manage Server while the refusal paths need one without it. Leave
-empty outside test deployments -- an allow-listed bot spends real credit. As a tuple
-field this must be set as a JSON array, e.g. '["123","456"]'. daimon's own id is refused
-at the gate even if listed.
+Discord user ids of automated QA bots allowed to start turns by mention or reply to a
+recorded agent post. Bot-authored messages are rejected by default; these are allow-
+listed so a harness can drive addressed turns end-to-end without a human. Several are
+supported because admin-gated tools need a caller holding Manage Server while the
+refusal paths need one without it. Leave empty outside test deployments -- an allow-
+listed bot spends real credit. As a tuple field this must be set as a JSON array, e.g.
+'["123","456"]'. Daimon's own id is refused at the gate even if listed.
 
 ### `DAIMON_DISCORD__BOT_DISPLAY_NAME`
 
@@ -612,7 +657,7 @@ keeps running so ingress can be re-enabled without a redeploy.
 `HttpUrl | None` · optional · default unset
 
 Externally reachable base URL of the Teams service (the Bot Framework messaging endpoint
-without /api/messages). Enables the admin sign-in that grants daimon a team's SharePoint
+without /api/messages). Enables the admin sign-in that grants Daimon a team's SharePoint
 site; its callback is &lt;public_url&gt;/oauth/teams/files/callback, which must be a Web
 redirect URI on the app registration.
 
@@ -967,18 +1012,19 @@ spends the same per-user, per-tenant allowance from one ledger.
 
 Channel id where human-support requests from Discord and Teams are posted: a Discord
 channel id, or a Teams channel id (`19:…`) that the Teams bot posts in. Teams requests
-reach a Discord channel only when the Discord bot token is also set. Unset (the default)
-disables the escalate affordance on Discord and Teams — a request that reaches nobody is
-worse than no button at all. A channel rather than operator DMs: it survives one
-person's DMs being closed, and it leaves a shared record anyone on the rota can pick up.
-The bot must be able to post there.
+reach a Discord channel only when the Discord bot token is also set; a Teams channel
+turns Ask a human off on Discord, which cannot post there. Unset (the default) disables
+the escalate affordance on Discord and Teams — a request that reaches nobody is worse
+than no button at all. A channel rather than operator DMs: it survives one person's DMs
+being closed, and it leaves a shared record anyone on the rota can pick up. The bot must
+be able to post there.
 
 ### `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID`
 
 `str | None` · optional · default unset
 
 Slack channel id where human-support requests from Slack are posted. Unset (the default)
-disables the Ask a human button on Slack. Slack requests never go to the Discord
+disables the Ask the team button on Slack. Slack requests never go to the Discord
 channel, nor Discord requests here. The bot must be a member of the channel.
 
 ### `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID`
@@ -988,7 +1034,7 @@ channel, nor Discord requests here. The bot must be a member of the channel.
 Slack workspace id (T…) that owns DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID, for a
 deployment installed in several workspaces: every workspace's requests are posted with
 that workspace's bot token. Unset posts with the requesting workspace's own token, which
-suits a single-workspace install. daimon must be installed in the named workspace.
+suits a single-workspace install. Daimon must be installed in the named workspace.
 
 ### `DAIMON_SUPPORT__CREDITS_PER_USER`
 
@@ -997,6 +1043,18 @@ suits a single-workspace install. daimon must be installed in the named workspac
 How many human-support requests each user gets within a tenant. A COUNT of interactions,
 NOT the USD in DAIMON_BILLING__SIGNUP_CREDIT — the two are deliberately separate
 ledgers. 0 disables escalation.
+
+### `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT`
+
+`dict[UUID, bool]` · optional · default `{}`
+
+Per-tenant switch, keyed by tenant UUID: true also posts every submitted 👎 "What went
+wrong?" form (the reasons, the text, the person, the agent and a link to the answer) to
+the channel Ask a human posts to: DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID for Slack,
+DAIMON_SUPPORT__ESCALATION_CHANNEL_ID for Discord (a Discord channel) and Teams (a Teams
+or Discord channel). Missing/false (the default) keeps the form in the database only.
+The form tells the person their answers are shared when it is on. Spends no support
+credit. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a JSON object.
 
 ## Thread Naming
 
@@ -1140,7 +1198,8 @@ Read from `daimon.adapters.scheduler.settings.SchedulerSettings`. Prefix
 
 `float` · optional · default `30.0`
 
-Seconds between scheduler ticks (loop sleep).
+Seconds between scheduler ticks (loop sleep). The usage sweep runs on its own loop and
+pauses the same interval between passes.
 
 ### `DAIMON_SCHEDULER__MAX_AGE_S`
 
@@ -1190,12 +1249,12 @@ collide with mcp's 8080 or discord's 8081 on the shared host.
 Read from `notebook_host.config.Settings`. Prefix `DAIMON_NOTEBOOK__`.
 
 A standalone service in `apps/notebook-host`, deployed and configured separately from
-the daimon processes. It is not part of `docker-compose.yml`.
+the Daimon processes. It is not part of `docker-compose.yml`.
 
-This service shares the `DAIMON_NOTEBOOK__` prefix with a block on daimon's own
+This service shares the `DAIMON_NOTEBOOK__` prefix with a block on Daimon's own
 Settings, so `DAIMON_NOTEBOOK__ADMIN_SECRET`, `DAIMON_NOTEBOOK__ALLOW_EDITABLE`,
 `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES` appear twice on this page — once for the service and
-once for the daimon side that calls it. They are read by different processes; a single
+once for the Daimon side that calls it. They are read by different processes; a single
 shared env file would set both.
 
 ### `DAIMON_NOTEBOOK__DATA_DIR`
@@ -1225,6 +1284,14 @@ shared env file would set both.
 ### `DAIMON_NOTEBOOK__SUBPROCESS_TTL_SECONDS`
 
 `int` · optional · default `86400`
+
+### `DAIMON_NOTEBOOK__MAX_NOTEBOOK_TTL_SECONDS`
+
+`int` · optional · default `31536000`
+
+### `DAIMON_NOTEBOOK__WARM_WINDOW_SECONDS`
+
+`int` · optional · default `7200`
 
 ### `DAIMON_NOTEBOOK__SWEEP_INTERVAL_SECONDS`
 
@@ -1330,7 +1397,7 @@ every tenant's id.
 Read from `report_host.config.Settings`. Prefix `DAIMON_REPORT__`.
 
 A standalone service in `apps/report-host`, deployed and configured separately from the
-daimon processes. It is not part of `docker-compose.yml`.
+Daimon processes. It is not part of `docker-compose.yml`.
 
 ### `DAIMON_REPORT__DATA_DIR`
 
@@ -1475,7 +1542,7 @@ read.
 
 ## Docker Compose
 
-Interpolated by `docker-compose.yml` itself; no daimon process reads them. They exist so
+Interpolated by `docker-compose.yml` itself; no Daimon process reads them. They exist so
 the compose file can build `DAIMON_DATABASE__URL` for every service from one password.
 
 ### `POSTGRES_USER`

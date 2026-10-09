@@ -14,10 +14,15 @@ import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from daimon.adapters.slack.agent_setup import actions as setup_actions
 from daimon.adapters.slack.agent_setup.panel_views import (
+    ACTION_AVATAR_CHANGE,
+    ACTION_AVATAR_RESET,
     ACTION_CHANNEL_ADMINS,
     ACTION_CHANNEL_SKILLS,
     ACTION_CODING_TOOLS,
@@ -333,7 +338,7 @@ def test_agents_view_when_agent_answers_here_lists_it_first_then_stable_name_ord
     )
 
 
-def test_agents_view_when_member_has_same_blocks_as_admin() -> None:
+def test_agents_view_connect_github_is_admin_only() -> None:
     answering = _roster_agent("research-bot", created_by_account_id=_MAKER)
     roster = _roster(answering, _roster_agent("churn-explorer"), answering=answering)
     shared: dict[str, Any] = {
@@ -344,9 +349,10 @@ def test_agents_view_when_member_has_same_blocks_as_admin() -> None:
     }
     admin_view = build_agents_view(roster, is_admin=True, **shared)
     member_view = build_agents_view(roster, is_admin=False, **shared)
-    assert admin_view == member_view, (
-        "the roster is orientation, not permission — both roles see the same view"
-    )
+    admin_actions = admin_view["blocks"][-1]["elements"]
+    assert admin_actions[-1]["action_id"] == "agent_setup__github_connect"
+    admin_actions.pop()
+    assert admin_view == member_view
 
 
 def test_agents_view_when_roster_empty_shows_empty_state_and_setup_action() -> None:
@@ -461,6 +467,129 @@ def test_details_view_when_name_exceeds_24_chars_truncates_title_and_keeps_full_
     assert f"*{long_name}*" in _joined(view), (
         "a cut title must be repaired by the full name in the body"
     )
+
+
+def test_details_avatar_row_and_admin_controls() -> None:
+    avatar_url = "https://example.test/avatars/token/hash.png"
+    admin = build_details_view(
+        _details(name="research-bot"),
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+        avatar_url=avatar_url,
+    )
+    assert any(
+        block.get("accessory", {}).get("image_url") == avatar_url for block in admin["blocks"]
+    )
+    assert ACTION_AVATAR_CHANGE in json.dumps(admin)
+    assert ACTION_AVATAR_RESET in json.dumps(admin)
+    assert "Shown next to this agent's messages." in _joined(admin)
+    assert "Anyone who sees a message" not in _joined(admin)
+    reset_button = next(
+        element
+        for block in admin["blocks"]
+        for element in block.get("elements", [])
+        if element.get("action_id") == ACTION_AVATAR_RESET
+    )
+    assert reset_button["confirm"]["confirm"]["text"] == "Use default"
+    member = build_details_view(
+        _details(name="research-bot"),
+        meta=_meta(),
+        is_admin=False,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+        avatar_url=avatar_url,
+    )
+    assert ACTION_AVATAR_CHANGE not in json.dumps(member)
+    assert ACTION_AVATAR_RESET not in json.dumps(member)
+    without_public_url = build_details_view(
+        _details(name="research-bot"),
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+        avatar_url=None,
+    )
+    assert not any(
+        block.get("accessory", {}).get("type") == "image" for block in without_public_url["blocks"]
+    )
+    built_in = build_details_view(
+        _details(name="research-bot"),
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+        avatar_url=avatar_url,
+        avatar_editable=False,
+    )
+    assert "*Picture*" not in _joined(built_in)
+    assert ACTION_AVATAR_CHANGE not in json.dumps(built_in)
+
+
+async def test_load_details_view_omits_avatar_when_identity_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = AsyncMock()
+    sessionmaker = MagicMock()
+    sessionmaker.return_value.__aenter__ = AsyncMock(return_value=session)
+    sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
+    runtime = SimpleNamespace(
+        sessionmaker=sessionmaker,
+        anthropic=MagicMock(),
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+        settings=SimpleNamespace(agent_identity=SimpleNamespace(enabled=False)),
+    )
+    monkeypatch.setattr(setup_actions, "load_panel_roster", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(setup_actions, "load_panel_details", AsyncMock(return_value=_details()))
+    monkeypatch.setattr(setup_actions, "resolve_attributions", AsyncMock(return_value={}))
+    monkeypatch.setattr(setup_actions, "coding_tools_available", lambda _runtime: True)
+    avatar_lookup = AsyncMock()
+    monkeypatch.setattr(setup_actions, "resolve_agent_identity", avatar_lookup)
+
+    view = await setup_actions.load_details_view(  # type: ignore[arg-type]
+        runtime, tenant_id=uuid.uuid4(), meta=_meta(), agent_name="research-bot", is_admin=True
+    )
+
+    assert view is not None
+    assert "*Avatar*" not in _joined(view)
+    assert ACTION_AVATAR_CHANGE not in json.dumps(view)
+    avatar_lookup.assert_not_awaited()
+
+
+async def test_load_details_view_queues_picture_without_generating_in_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = AsyncMock()
+    sessionmaker = MagicMock()
+    sessionmaker.return_value.__aenter__ = AsyncMock(return_value=session)
+    sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
+    runtime = SimpleNamespace(
+        sessionmaker=sessionmaker,
+        anthropic=MagicMock(),
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+        settings=SimpleNamespace(
+            agent_identity=SimpleNamespace(enabled=True),
+            mcp=SimpleNamespace(app_root_url="https://example.test"),
+        ),
+    )
+    monkeypatch.setattr(setup_actions, "load_panel_roster", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(setup_actions, "load_panel_details", AsyncMock(return_value=_details()))
+    monkeypatch.setattr(setup_actions, "resolve_attributions", AsyncMock(return_value={}))
+    monkeypatch.setattr(setup_actions, "coding_tools_available", lambda _runtime: True)
+    lookup = AsyncMock(return_value=SimpleNamespace(avatar_url=None))
+    monkeypatch.setattr(setup_actions, "resolve_agent_identity", lookup)
+
+    view = await setup_actions.load_details_view(  # type: ignore[arg-type]
+        runtime, tenant_id=uuid.uuid4(), meta=_meta(), agent_name="research-bot", is_admin=True
+    )
+
+    assert view is not None
+    assert lookup.await_args.kwargs["background_sessionmaker"] is sessionmaker
 
 
 def test_details_view_when_short_name_does_not_repeat_it_in_the_body() -> None:

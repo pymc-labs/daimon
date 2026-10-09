@@ -1,23 +1,32 @@
 """Discord cleanup removes owned messages and preserves whole threads.
 
-Policy and ledger locks are held through each bounded platform write.
-Shared ownership, limits and audit rules live in tools/_tidy.py.
+Owned means a tool post, or a turn's status card, answer or notice, or the
+thread opened from a mention. A turn's posts also need the conversation
+rights in tools/_tidy.py (`conversation_refusal`). Policy and ledger locks
+are held through each bounded platform write. Shared ownership, limits and
+audit rules live in tools/_tidy.py.
 """
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._tidy import (
     Check,
+    PostRecord,
     TidyContext,
     TidyResult,
+    conversation_refusal,
     policy_recheck,
+    record_agent_posts,
     refuse,
+    require_conversation_rights,
     require_not_escalation_channel,
     require_own_post,
     resolve_tidy_context,
@@ -30,15 +39,23 @@ from daimon.adapters.mcp.tools.discord._client import (
     _require_guild_id,  # pyright: ignore[reportPrivateUsage]
     _resolve_channel,  # pyright: ignore[reportPrivateUsage]
     _resolve_member,  # pyright: ignore[reportPrivateUsage]
+    ensure_application_id,
     rest_client,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.discord._post_transport import (
+    delete_own_message,
+    edit_own_message,
+    own_webhooks,
 )
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.agent_identity import identity_enabled_for
 from daimon.core.channel_tidy import TidyOperation, TidyTarget
-from daimon.core.stores.agent_posts import AgentPostRow, list_posts_in
+from daimon.core.stores.agent_posts import AgentPostRow, get_post, list_posts_in, mark_deleted
+from daimon.core.stores.turn_origins import request_thread_archive
 from fastmcp.exceptions import ToolError
 
 _PLATFORM = "discord"
@@ -52,6 +69,7 @@ class _Target:
     channel: discord.abc.GuildChannel | discord.Thread
     parent_id: str | None
     bot_user_id: int
+    requester_is_admin: bool
 
 
 def _recheck(runtime: McpRuntime, ctx: TidyContext, auth: AuthIdentity, target: _Target) -> Check:
@@ -94,10 +112,16 @@ async def _resolve_target(
     ctx.read_policy.require(str(channel.id), parent_id)
     if c.user is None:
         raise ToolError("internal: discord client has no user")
-    return _Target(channel=channel, parent_id=parent_id, bot_user_id=c.user.id)
+    return _Target(
+        channel=channel,
+        parent_id=parent_id,
+        bot_user_id=c.user.id,
+        requester_is_admin=member.guild_permissions.administrator,
+    )
 
 
 async def _fetch_own_bot_message(
+    _client: discord.Client,
     runtime: McpRuntime,
     ctx: TidyContext,
     target: _Target,
@@ -112,7 +136,19 @@ async def _fetch_own_bot_message(
         message = await target.channel.fetch_message(int(message_id))
     except discord.NotFound as e:
         raise ToolError("message not found") from e
-    if message.author.id != target.bot_user_id or message.webhook_id is not None:
+    if message.webhook_id is not None:
+        await ensure_application_id(_client)
+    # require_own_post has already checked the durable agent ledger. A deleted
+    # webhook may no longer appear in the channel list, but its recorded post
+    # is still the calling agent's.
+    if not (
+        (message.webhook_id is None and message.author.id == target.bot_user_id)
+        or (
+            message.webhook_id is not None
+            and _client.application_id is not None
+            and message.application_id == _client.application_id
+        )
+    ):
         raise await refuse(
             runtime,
             ctx,
@@ -128,6 +164,53 @@ def _message_id(message_id: str) -> str:
     if not message_id.isdigit():
         raise ToolError("message_id must be a Discord message id")
     return message_id
+
+
+async def _auto_thread_opener(runtime: McpRuntime, ctx: TidyContext, target: _Target) -> str | None:
+    """Who opened the target channel, if it is a thread this agent auto-opened.
+
+    Only the caller's own agent's thread counts: opening a conversation with
+    one agent gives no say over another agent's replies in it.
+    """
+    if target.parent_id is None:
+        return None
+    async with runtime.session_factory() as session:
+        thread_post = await get_post(
+            session,
+            tenant_id=ctx.actor.tenant_id,
+            platform=_PLATFORM,
+            channel_id=target.parent_id,
+            message_id=str(target.channel.id),
+        )
+    if (
+        thread_post is None
+        or thread_post.source != "auto_thread"
+        or thread_post.agent_id != ctx.actor.agent_id
+    ):
+        return None
+    return thread_post.requester_platform_user_id
+
+
+async def _require_message_rights(
+    runtime: McpRuntime,
+    ctx: TidyContext,
+    target: _Target,
+    post: AgentPostRow,
+    *,
+    tool_name: str,
+    operation: TidyOperation,
+) -> None:
+    if post.source == "tool":
+        return
+    await require_conversation_rights(
+        runtime,
+        ctx,
+        post,
+        tool_name=tool_name,
+        operation=operation,
+        requester_is_admin=target.requester_is_admin,
+        thread_opener_id=await _auto_thread_opener(runtime, ctx, target),
+    )
 
 
 async def _edit_message_impl(  # pyright: ignore[reportUnusedFunction]
@@ -161,12 +244,45 @@ async def _edit_message_impl(  # pyright: ignore[reportUnusedFunction]
             channel_id=resolved_channel_id,
             message_id=message_id,
         )
-        message = await _fetch_own_bot_message(
-            runtime, ctx, target, tool_name=tool, operation=operation, message_id=message_id
+        await _require_message_rights(
+            runtime, ctx, target, post, tool_name=tool, operation=operation
         )
+        message = await _fetch_own_bot_message(
+            c, runtime, ctx, target, tool_name=tool, operation=operation, message_id=message_id
+        )
+        replacement: discord.Message | None = None
+        extra_messages: list[discord.Message] = []
 
         async def act() -> None:
-            await message.edit(content=content)
+            nonlocal replacement
+            if post.source == "turn":
+                # A status card is an embed with buttons, and an answer may
+                # carry rendered table images: replacing only the text would
+                # leave the stale card or tables showing under it.
+                replacement = await edit_own_message(
+                    c,
+                    target.channel,
+                    message,
+                    extra_messages=extra_messages,
+                    identity_enabled=identity_enabled_for(
+                        runtime.settings, "discord", auth.external_id
+                    ),
+                    content=content,
+                    embeds=[],
+                    attachments=[],
+                    view=None,
+                )
+            else:
+                replacement = await edit_own_message(
+                    c,
+                    target.channel,
+                    message,
+                    extra_messages=extra_messages,
+                    identity_enabled=identity_enabled_for(
+                        runtime.settings, "discord", auth.external_id
+                    ),
+                    content=content,
+                )
 
         await run_action(
             runtime,
@@ -184,6 +300,24 @@ async def _edit_message_impl(  # pyright: ignore[reportUnusedFunction]
             post=post,
             content=content,
         )
+        if replacement is not None:
+            await record_agent_posts(
+                runtime,
+                auth,
+                platform=_PLATFORM,
+                posts=[
+                    PostRecord(
+                        channel_id=resolved_channel_id,
+                        message_id=str(sent.id),
+                        parent_channel_id=target.parent_id,
+                        content=sent.content,
+                    )
+                    for sent in [replacement, *extra_messages]
+                ],
+            )
+            async with runtime.session_factory.begin() as session:
+                await mark_deleted(session, post_ids=[post.id], now=datetime.now(UTC))
+            message_id = str(replacement.id)
     return TidyResult(
         platform=_PLATFORM, channel_id=resolved_channel_id, message_id=message_id, action="edited"
     )
@@ -215,12 +349,15 @@ async def _delete_message_impl(  # pyright: ignore[reportUnusedFunction]
             channel_id=resolved_channel_id,
             message_id=message_id,
         )
+        await _require_message_rights(
+            runtime, ctx, target, post, tool_name=tool, operation=operation
+        )
         message = await _fetch_own_bot_message(
-            runtime, ctx, target, tool_name=tool, operation=operation, message_id=message_id
+            c, runtime, ctx, target, tool_name=tool, operation=operation, message_id=message_id
         )
 
         async def act() -> None:
-            await message.delete()
+            await delete_own_message(c, target.channel, message)
 
         await run_action(
             runtime,
@@ -278,6 +415,16 @@ async def _resolve_own_thread(
             reason="not_bot_author",
             target=TidyTarget(channel_id=str(thread.id), message_id=str(thread.id)),
         )
+    # A thread opened from someone's mention is their conversation: only they
+    # or a server admin may have it archived or cleared.
+    await require_conversation_rights(
+        runtime,
+        ctx,
+        thread_post,
+        tool_name=tool_name,
+        operation=operation,
+        requester_is_admin=target.requester_is_admin,
+    )
     return target, thread, thread_post
 
 
@@ -289,7 +436,15 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
     origin_context_id: str | None,
 ) -> TidyResult:
     """Archive a thread this agent opened. Its messages stay readable; anyone
-    posting in it reopens it."""
+    posting in it reopens it.
+
+    The thread this turn is running in is archived when the turn ends, not
+    now: Discord refuses edits in an archived thread, so the turn could not
+    finish its own status card. The call is checked, counted and audited as
+    usual, and only once every check has passed is the request written on the
+    turn's origin (`request_thread_archive`), which the Discord adapter reads
+    when the turn's run ends. A turn that fails leaves the thread open.
+    """
     ctx = await resolve_tidy_context(
         runtime, auth, platform=_PLATFORM, origin_context_id=origin_context_id
     )
@@ -301,8 +456,11 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
             c, runtime, ctx, auth, thread_id=thread_id, tool_name=tool, operation=operation
         )
 
+        scheduled = ctx.origin is not None and ctx.origin.channel_id == str(thread.id)
+
         async def act() -> None:
-            await thread.edit(archived=True)
+            if not scheduled:
+                await thread.edit(archived=True)
 
         await run_action(
             runtime,
@@ -315,12 +473,23 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
             describe_error=_describe("archive"),
             post=thread_post,
         )
-    return TidyResult(
+    result = TidyResult(
         platform=_PLATFORM,
         channel_id=target.parent_id or "",
         message_id=str(thread.id),
-        action="archived",
+        action="archive_scheduled" if scheduled else "archived",
     )
+    if scheduled and ctx.origin_context_id is not None:
+        async with runtime.session_factory.begin() as session:
+            recorded = await request_thread_archive(
+                session,
+                origin_id=uuid.UUID(ctx.origin_context_id),
+                thread_id=str(thread.id),
+                now=datetime.now(UTC),
+            )
+        if not recorded:
+            raise ToolError("this turn has ended, so the thread was not archived. Do not retry.")
+    return result
 
 
 async def _delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
@@ -336,7 +505,7 @@ async def _delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
     )
     deleted = 0
     async with rest_client(_require_bot_token(runtime)) as c:
-        target, thread, _ = await _resolve_own_thread(
+        target, thread, thread_post = await _resolve_own_thread(
             c,
             runtime,
             ctx,
@@ -357,9 +526,36 @@ async def _delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
                 message_ids=[str(m.id) for m in messages],
             )
         owned = {p.message_id: p for p in own if p.agent_id == ctx.actor.agent_id}
+        hooks = await own_webhooks(c, target.channel)
+        own_hook_ids = frozenset(hooks)
+        opener = (
+            thread_post.requester_platform_user_id if thread_post.source == "auto_thread" else None
+        )
         for message in messages:
             post = owned.get(str(message.id))
-            if post is None or message.author.id != target.bot_user_id or message.webhook_id:
+            if post is None:
+                continue
+            if not (
+                (message.webhook_id is None and message.author.id == target.bot_user_id)
+                or (
+                    message.webhook_id in own_hook_ids
+                    or (
+                        message.webhook_id is not None
+                        and c.application_id is not None
+                        and message.application_id == c.application_id
+                    )
+                )
+            ):
+                continue
+            # A running turn's card (this turn's own included) and replies to
+            # someone the caller may not speak for are left in place.
+            if await conversation_refusal(
+                runtime,
+                ctx,
+                post,
+                requester_is_admin=target.requester_is_admin,
+                thread_opener_id=opener,
+            ):
                 continue
             try:
                 await run_action(
@@ -369,7 +565,9 @@ async def _delete_thread_impl(  # pyright: ignore[reportUnusedFunction]
                     operation="thread.delete",
                     target=TidyTarget(str(thread.id), str(message.id), post.content_hmac),
                     checks=[_recheck(runtime, ctx, auth, target)],
-                    act=message.delete,
+                    act=lambda message=message: delete_own_message(
+                        c, target.channel, message, known_webhooks=hooks
+                    ),
                     describe_error=_describe("delete"),
                     post=post,
                 )

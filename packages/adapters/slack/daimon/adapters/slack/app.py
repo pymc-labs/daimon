@@ -34,6 +34,11 @@ from daimon.adapters.slack.agent_setup.add_skill import (
     evaluate_add_skill_submission,
     run_add_skill_submission,
 )
+from daimon.adapters.slack.agent_setup.avatar import (
+    AvatarSubmission,
+    evaluate_avatar_submission,
+    run_avatar_submission,
+)
 from daimon.adapters.slack.agent_setup.channel_admins import (
     ChannelAdminsSubmission,
     evaluate_channel_admins_submission,
@@ -51,6 +56,7 @@ from daimon.adapters.slack.agent_setup.operator_tokens import (
 )
 from daimon.adapters.slack.agent_setup.panel_views import (
     CALLBACK_ADD_SKILL,
+    CALLBACK_AVATAR_UPLOAD,
     CALLBACK_CHANNEL_ADMINS,
     CALLBACK_CHANNEL_SKILLS,
     CALLBACK_OPERATOR_MINT,
@@ -66,7 +72,11 @@ from daimon.adapters.slack.attachments import (
     build_image_url_prefix,
     build_skipped_image_prefix,
 )
-from daimon.adapters.slack.billing_panel.actions import handle_billing_command, handle_topup_select
+from daimon.adapters.slack.billing_panel.actions import (
+    handle_billing_command,
+    handle_panel_action,
+    handle_topup_select,
+)
 from daimon.adapters.slack.billing_panel.redeem import (
     REDEEM_CALLBACK_ID,
     RedeemDecision,
@@ -74,7 +84,7 @@ from daimon.adapters.slack.billing_panel.redeem import (
     handle_redeem_open,
     run_redeem_submission,
 )
-from daimon.adapters.slack.billing_panel.views import REDEEM_OPEN_ACTION_ID
+from daimon.adapters.slack.billing_panel.views import PANEL_ACTION_IDS, REDEEM_OPEN_ACTION_ID
 from daimon.adapters.slack.boot_sweep import (
     recover_slack_card_intents,
     retire_orphaned_turns,
@@ -106,7 +116,10 @@ from daimon.adapters.slack.direct_messages import (
 )
 from daimon.adapters.slack.errors import generate_request_id, render_error
 from daimon.adapters.slack.feedback import (
+    FEEDBACK_DETAILS_ACTION_ID,
+    FeedbackTextDecision,
     evaluate_feedback_text_submission,
+    handle_feedback_details_click,
     handle_feedback_vote,
     run_feedback_text_submission,
 )
@@ -115,12 +128,20 @@ from daimon.adapters.slack.gating import (
     is_slack_connect_external,
     mentions_bot,
 )
+from daimon.adapters.slack.github_connect import (
+    ACTION_CANCEL,
+    ACTION_UPDATE,
+    handle_github_cancel_click,
+    handle_github_command,
+    handle_github_update_click,
+)
 from daimon.adapters.slack.help import handle_help_command
 from daimon.adapters.slack.here import handle_here_command
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.memory import handle_memory_command
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.adapters.slack.names import remember_payload_names
 from daimon.adapters.slack.output_delivery import deliver_session_outputs
 from daimon.adapters.slack.privacy_panel.actions import (
     handle_privacy_block_action,
@@ -171,6 +192,12 @@ from daimon.adapters.slack.vision import (
     is_vision_image,
 )
 from daimon.core.access_policy import DM_SCOPE_PREFIX
+from daimon.core.agent_identity import (
+    AgentIdentity,
+    identity_enabled_for,
+    is_builtin_agent,
+    resolve_agent_identity,
+)
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -184,6 +211,9 @@ from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
+from daimon.core.github_new_repo_delivery import run_new_repo_notice_poller
+from daimon.core.github_removal_delivery import run_removal_notice_poller
+from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.named_agent import bind_named_thread, name_after_mention
@@ -192,6 +222,9 @@ from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role, TaskContinuationRow
+from daimon.core.stores.github_access_requests import AccessRequest
+from daimon.core.stores.github_new_repo_notices import NewRepoNoticeGroup
+from daimon.core.stores.github_removal_notices import RemovalNotice
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.slack_connect_prompts import mark_connect_prompted, was_connect_prompted
 from daimon.core.stores.slack_event_dedup import insert_if_new
@@ -415,6 +448,67 @@ class SlackApp:
                 should_stop=lambda: self.draining,
             )
         )
+
+    def start_github_request_expiry_poller(self) -> asyncio.Task[None]:
+        return self._spawn(
+            run_request_expiry_poller(
+                self.runtime.sessionmaker,
+                platform="slack",
+                post=self._post_github_request_expiry,
+                should_stop=lambda: self.draining,
+            )
+        )
+
+    def start_github_new_repo_poller(self) -> asyncio.Task[None]:
+        return self._spawn(
+            run_new_repo_notice_poller(
+                self.runtime.sessionmaker,
+                platform="slack",
+                deliver=self._send_new_repo_group,
+                should_stop=lambda: self.draining,
+            )
+        )
+
+    def start_github_removal_poller(self) -> asyncio.Task[None]:
+        return self._spawn(
+            run_removal_notice_poller(
+                self.runtime.sessionmaker,
+                platform="slack",
+                deliver=self._send_github_removal_notice,
+                should_stop=lambda: self.draining,
+            )
+        )
+
+    async def _send_new_repo_group(self, group: NewRepoNoticeGroup) -> bool:
+        from daimon.adapters.slack.agent_setup.github_new_repo import send_group_dm
+
+        return await send_group_dm(self.runtime, group)
+
+    async def _send_github_removal_notice(self, notice: RemovalNotice) -> bool:
+        from daimon.adapters.slack.agent_setup.github_removal import send_removal_dm
+
+        return await send_removal_dm(self.runtime, notice)
+
+    async def _post_github_request_expiry(self, request: AccessRequest) -> bool:
+        try:
+            async with self.runtime.sessionmaker() as session:
+                tenant = await get_tenant(session, request.tenant_id)
+            if tenant is None:
+                return True
+            client = await resolve_web_client(self.runtime, team_id=tenant.external_id)
+            if client is None:
+                return False
+            await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                channel=request.parent_channel_id,
+                thread_ts=request.thread_id,
+                text="Stopped waiting for GitHub access. Ask again any time.",
+            )
+            return True
+        except SlackApiError as error:
+            return error.response.get("error") in (  # pyright: ignore[reportUnknownMemberType]
+                "channel_not_found",
+                "is_archived",
+            )
 
     def start_delivery_poller(self) -> asyncio.Task[None]:
         """Post routine results to their destinations (FEAT-085) until draining."""
@@ -927,6 +1021,28 @@ class SlackApp:
                             )
 
                     self._spawn(_run_add_skill())
+            elif cb_id == CALLBACK_AVATAR_UPLOAD:
+                _av = evaluate_avatar_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id, payload=_av.response_payload)
+                )
+                if _av.proceed:
+                    _av_team: dict[str, Any] = payload.get("team") or {}
+                    _av_user: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_avatar(
+                        *,
+                        _t: str = str(_av_team.get("id") or ""),
+                        _u: str = str(_av_user.get("id") or ""),
+                        _s: AvatarSubmission = _av,
+                    ) -> None:
+                        wc = await resolve_web_client(self.runtime, team_id=_t)
+                        if wc is not None:
+                            await run_avatar_submission(
+                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
+                            )
+
+                    self._spawn(_run_avatar())
             elif cb_id == "feedback_text":
                 # Pure evaluate (no I/O) — must run before the single ack.
                 _fb_decision = evaluate_feedback_text_submission(payload)
@@ -946,17 +1062,10 @@ class SlackApp:
                         *,
                         _t: str = str(_fb_team_info.get("id") or ""),
                         _u: str = str(_fb_user_info.get("id") or ""),
-                        _c: str = _fb_decision.channel_id,
-                        _f: str = _fb_decision.feedback_id,
-                        _x: str = _fb_decision.text,
+                        _d: FeedbackTextDecision = _fb_decision,
                     ) -> None:
                         await run_feedback_text_submission(
-                            self.runtime,
-                            team_id=_t,
-                            user_id=_u,
-                            channel_id=_c,
-                            feedback_id=_f,
-                            text=_x,
+                            self.runtime, team_id=_t, user_id=_u, decision=_d
                         )
 
                     self._spawn(_run_feedback_text())
@@ -992,6 +1101,8 @@ class SlackApp:
         if is_app_mention:
             # No await occurs before the handler task is registered below.
             self._mention_acks_pending -= 1
+        # For /billing's top spenders; in the background, never failing the event.
+        remember_payload_names(self.runtime.sessionmaker, req.type, payload)
 
         if req.type == "events_api":
             event = event_for_ack
@@ -1044,7 +1155,9 @@ class SlackApp:
                 self._spawn(handle_billing_command(self.runtime, payload))
             elif cmd == "/privacy":
                 self._spawn(handle_privacy_command(self.runtime, payload))
-            elif cmd == "/agent-setup":
+            elif cmd == "/github" and str(payload.get("text") or "").strip().startswith("connect"):
+                self._spawn(handle_github_command(self.runtime, payload))
+            elif cmd in ("/agent-setup", "/github"):
                 self._spawn(handle_agent_setup_command(self.runtime, payload))
             elif cmd == "/memory":
                 self._spawn(handle_memory_command(self.runtime, payload))
@@ -1077,6 +1190,8 @@ class SlackApp:
                     self._spawn(handle_topup_select(self.runtime, payload))
                 elif action_id == REDEEM_OPEN_ACTION_ID:
                     self._spawn(handle_redeem_open(self.runtime, payload))
+                elif action_id in PANEL_ACTION_IDS:
+                    self._spawn(handle_panel_action(self.runtime, payload))
                 elif action_id in (
                     "privacy_delete_open",
                     "privacy_export",
@@ -1085,10 +1200,28 @@ class SlackApp:
                     self._spawn(handle_privacy_block_action(self.runtime, payload))
                 elif action_id.startswith("agent_setup__"):
                     self._spawn(handle_agent_setup_action(self.runtime, payload))
+                elif action_id.startswith("github_new_repo__"):
+                    from daimon.adapters.slack.agent_setup.github_new_repo import handle_action
+
+                    self._spawn(handle_action(self.runtime, payload))
+                elif action_id.startswith("github_link__"):
+                    from daimon.adapters.slack.agent_setup.github_link import handle_action
+
+                    self._spawn(handle_action(self.runtime, payload))
+                elif action_id.startswith("github_request__"):
+                    from daimon.adapters.slack.agent_setup.github_requests import handle_action
+
+                    self._spawn(handle_action(self.runtime, payload))
                 elif action_id == SLACK_CREDENTIAL_ACTION_ID:
                     self._spawn(handle_credential_request_click(self.runtime, payload))
+                elif action_id == ACTION_UPDATE:
+                    self._spawn(handle_github_update_click(self.runtime, payload))
+                elif action_id == ACTION_CANCEL:
+                    self._spawn(handle_github_cancel_click(self.runtime, payload))
                 elif action_id.startswith("feedback_vote:"):
                     self._spawn(handle_feedback_vote(self.runtime, payload))
+                elif action_id == FEEDBACK_DETAILS_ACTION_ID:
+                    self._spawn(handle_feedback_details_click(self.runtime, payload))
                 elif action_id == ASK_HUMAN_ACTION_ID:
                     self._spawn(handle_ask_human_click(self.runtime, payload))
                 elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
@@ -2004,6 +2137,24 @@ class SlackApp:
             )
         _lc_agent_name: str = agent.name
         _lc_model_id: str = agent.model.id
+        turn_identity: AgentIdentity | None = None
+        try:
+            async with self.runtime.sessionmaker.begin() as identity_session:
+                turn_identity = await resolve_agent_identity(
+                    identity_session,
+                    tenant_id=tenant_id,
+                    agent_name=agent.name,
+                    is_builtin=is_builtin_agent(
+                        name=agent.name,
+                        metadata=agent.metadata,
+                        default_agent_name=self.runtime.deployment_default.agent_name,
+                    ),
+                    public_base_url=self.runtime.settings.mcp.app_root_url,
+                    enabled=identity_enabled_for(self.runtime.settings, "slack", team_id),
+                    background_sessionmaker=self.runtime.sessionmaker,
+                )
+        except (anthropic.APIError, SQLAlchemyError) as exc:
+            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
 
         # Commit the intent before Slack can accept the initial card. If the
         # response is lost or this task is cancelled during the request, a
@@ -2046,6 +2197,8 @@ class SlackApp:
             register_pending=self._register_cancel,
             deregister_pending=self._deregister_cancel,
             intent_id=card_intent.id,
+            identity=turn_identity,
+            ma_agent_id=str(agent.id),
         )
         lifecycle_holder: list[SlackTurnLifecycle] = [lifecycle]
 
@@ -2165,11 +2318,7 @@ class SlackApp:
                     )
                     intent_terminal = True
                 else:
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                        channel=channel,
-                        thread_ts=thread_id,
-                        text=explanation,
-                    )
+                    await lifecycle.post_notice(explanation)
                 return
             except SessionBusyError:
                 # Nothing failed and nothing is misconfigured: the previous
@@ -2189,11 +2338,7 @@ class SlackApp:
                     )
                     intent_terminal = True
                 else:
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                        channel=channel,
-                        thread_ts=thread_id,
-                        text=busy_text,
-                    )
+                    await lifecycle.post_notice(busy_text)
                 return
             except SessionAgentMismatch as error:
                 # The recorded (previous) responder's display name is a
@@ -2228,12 +2373,7 @@ class SlackApp:
                     )
                     intent_terminal = True
                 else:
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                        channel=channel,
-                        thread_ts=thread_id,
-                        text=explanation,
-                        blocks=hand_over,
-                    )
+                    await lifecycle.post_notice(explanation, blocks=hand_over)
                 return
             ma_session_id = prepared.ma_session_id
             watermark = prepared.watermark
@@ -2274,6 +2414,16 @@ class SlackApp:
                     prepared.continuity.transfer_kind, lost=[]
                 )
                 lifecycle.answer_prefix = replacement_summary
+            if prepared.continuity.state == "replaced" and prepared.mapping_id is not None:
+                from daimon.core.stores.thread_sessions import github_key_restart_line
+
+                async with self.runtime.sessionmaker() as notice_session:
+                    key_restart = await github_key_restart_line(
+                        notice_session, mapping_id=prepared.mapping_id
+                    )
+                if key_restart is not None:
+                    replacement_summary = key_restart
+                    lifecycle.answer_prefix = key_restart
 
             # Turn marker: message ts + channel + start time, written as soon as
             # the mapping row is known and the card exists. Slack passes
@@ -2430,10 +2580,8 @@ class SlackApp:
                 # Only claim the images were "linked" when the proxy is configured —
                 # that's the branch that actually minted fetchable URLs into the prefix.
                 if images_skipped:
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                        channel=channel,
-                        thread_ts=thread_id,
-                        text=(
+                    await lifecycle.post_notice(
+                        (
                             "Some images couldn't be inlined — I've linked them for the agent to "
                             "fetch instead: "
                             + ", ".join(f"`{f['name']}` ({r})" for f, r in images_skipped)
@@ -2509,7 +2657,13 @@ class SlackApp:
                     # this turn's answer rather than left standing beside a
                     # second, successful card.
                     adopt_status_ts=lifecycle.status_ts,
+                    header_customized=(
+                        lifecycle.header_customized
+                        and identity_enabled_for(self.runtime.settings, "slack", team_id)
+                    ),
                     intent_id=card_intent.id,
+                    identity=turn_identity,
+                    ma_agent_id=str(agent.id),
                 )
                 # The replacement summary belongs to the turn, not to the
                 # lifecycle object that happens to render it -- a recovery
@@ -2586,7 +2740,11 @@ class SlackApp:
                         render_interval_s=2.0,
                         deadline=turn_deadline_at,
                         confirm_write=self._confirmations.hook(
-                            web_client, channel=channel, thread_ts=thread_id
+                            web_client,
+                            channel=channel,
+                            thread_ts=thread_id,
+                            identity=turn_identity,
+                            record_post=lifecycle.record_post,
                         ),
                     )
                     intent_terminal = lifecycle_holder[0].final_ts is not None
@@ -2621,16 +2779,12 @@ class SlackApp:
                 # back to a message when there is no answer to sit above (a
                 # tool-only or failed turn) or it will not fit.
                 if not await final_lifecycle.prepend_revealed_answer(loss_notice):
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                        channel=channel, thread_ts=thread_id, text=loss_notice
-                    )
+                    await final_lifecycle.post_notice(loss_notice)
             if replacement_summary is not None and not final_lifecycle.answer_prefix_applied:
                 # The turn produced no answer to carry the summary (tool-only,
                 # cancelled, or failed). The person still has to be told what
                 # the replacement carried across, so it goes out on its own.
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel, thread_ts=thread_id, text=replacement_summary
-                )
+                await final_lifecycle.post_notice(replacement_summary)
 
             # --- Watermark --- Preserves Slack's original gate exactly (unconditional
             # on final_ts, no state.error branch) -- Discord's inline sequence had an
@@ -2658,10 +2812,8 @@ class SlackApp:
             # the change is saved and will apply at their NEXT message here,
             # not this one -- the answer they just got used the old config.
             if prepared.continuity.pending:
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel,
-                    thread_ts=thread_id,
-                    text=render_current_work_must_finish(admission.agent.name, handoff=False),
+                await final_lifecycle.post_notice(
+                    render_current_work_must_finish(admission.agent.name, handoff=False)
                 )
 
             # This turn's own marker is cleared BEFORE anything is dispatched.
@@ -2899,6 +3051,24 @@ class SlackApp:
             )
             await intent_session.commit()
         follow_cancel = asyncio.Event()
+        follow_identity: AgentIdentity | None = None
+        try:
+            async with self.runtime.sessionmaker.begin() as identity_session:
+                follow_identity = await resolve_agent_identity(
+                    identity_session,
+                    tenant_id=tenant_id,
+                    agent_name=follow_admission.agent.name,
+                    is_builtin=is_builtin_agent(
+                        name=follow_admission.agent.name,
+                        metadata=follow_admission.agent.metadata,
+                        default_agent_name=self.runtime.deployment_default.agent_name,
+                    ),
+                    public_base_url=self.runtime.settings.mcp.app_root_url,
+                    enabled=identity_enabled_for(self.runtime.settings, "slack", team_id),
+                    background_sessionmaker=self.runtime.sessionmaker,
+                )
+        except (anthropic.APIError, SQLAlchemyError) as exc:
+            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
@@ -2920,6 +3090,8 @@ class SlackApp:
             register_pending=self._register_cancel,
             deregister_pending=self._deregister_cancel,
             intent_id=card_intent.id,
+            identity=follow_identity,
+            ma_agent_id=str(follow_admission.agent.id),
         )
         lifecycle_holder: list[SlackTurnLifecycle] = [follow_lifecycle]
         await follow_lifecycle.post_initial()
@@ -2947,6 +3119,13 @@ class SlackApp:
                     now=datetime.now(UTC),
                 )
                 await _at_session.commit()
+
+        if row.reason == "github_access_ready":
+            await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel,
+                thread_ts=thread_id,
+                text="Access is ready, continuing.",
+            )
 
         handoff_notice = (
             build_handoff_notice(
@@ -3006,6 +3185,13 @@ class SlackApp:
                 register_pending=self._register_cancel,
                 deregister_pending=self._deregister_cancel,
                 adopt_status_ts=follow_lifecycle.status_ts,
+                header_customized=(
+                    follow_lifecycle.header_customized
+                    and identity_enabled_for(self.runtime.settings, "slack", team_id)
+                ),
+                intent_id=card_intent.id,
+                identity=follow_identity,
+                ma_agent_id=str(follow_admission.agent.id),
             )
             lifecycle_holder[0] = new_lifecycle
             if follow_lifecycle.status_ts is not None:
@@ -3065,7 +3251,11 @@ class SlackApp:
                     render_interval_s=2.0,
                     deadline=follow_deadline,
                     confirm_write=self._confirmations.hook(
-                        web_client, channel=channel, thread_ts=thread_id
+                        web_client,
+                        channel=channel,
+                        thread_ts=thread_id,
+                        identity=follow_identity,
+                        record_post=follow_lifecycle.record_post,
                     ),
                 )
         finally:

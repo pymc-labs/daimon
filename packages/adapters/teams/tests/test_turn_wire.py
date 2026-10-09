@@ -30,6 +30,7 @@ from anthropic.types.beta.sessions import (
 from daimon.adapters.teams import app, card, lifecycle
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.core import output_delivery
+from daimon.core.config import SupportSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
@@ -93,15 +94,19 @@ async def _service(
     router: MARouter,
     *,
     one_session: bool = True,
+    support: bool = False,
 ) -> AsyncIterator[TeamsHttpService]:
     """The started service over `router`; drained on exit, then every activity is checked.
 
-    `one_session` hands every turn `SESSION_ID`; without it `router` creates sessions."""
+    `one_session` hands every turn `SESSION_ID`; without it `router` creates sessions.
+    `support` turns human support on, posting to a Teams channel."""
     runtime = build_teams_runtime(
         db_factory,
         anthropic=build_fake_anthropic(router.dispatch),
         deployment_default=TURN_DEFAULT,
     )
+    if support:
+        runtime.settings.support = SupportSettings(escalation_channel_id="19:ops@thread.tacv2")
     session = ma_session(id=SESSION_ID, agent_id=AGENT_ID, environment_id=ENV_ID)
     create = patch("daimon.core.turn.prepare.create_session", return_value=session)
     with create if one_session else nullcontext():
@@ -117,8 +122,10 @@ async def _turn(
     fake: TeamsApiFake,
     router: MARouter,
     activity: dict[str, object],
+    *,
+    support: bool = False,
 ) -> None:
-    async with _service(db_factory, fake, router) as service:
+    async with _service(db_factory, fake, router, support=support) as service:
         await post_activity(service, activity)
 
 
@@ -205,8 +212,22 @@ async def test_answer_replaces_the_status_card_in_the_conversation_it_came_from(
     ), "the answer replaces the card in place"
     assert answer.body["text"] == AGENT_TEXT, "the answer alone, no usage footer"
     assert "attachments" not in answer.body, "no card left under the answer"
-    assert _feedback(answer) == {"type": "default"}, "Teams' thumbs up and down"
+    assert _feedback(answer) == {"type": "custom"}, "Teams' thumbs, answered by our own form"
     assert "AIGeneratedContent" in str(answer.body["entities"]), "labelled AI generated"
+
+
+async def test_with_support_on_the_answer_carries_an_ask_a_human_button_teams_accepts(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    router = build_turn_router(str(TENANT), session_id=SESSION_ID)
+    await _turn(db_session_factory, teams_api_fake, router, make_message_activity(), support=True)
+
+    _status, answer = teams_api_fake.activity_requests
+    assert answer.body["text"] == AGENT_TEXT, "the answer stays markdown text"
+    [button] = _actions(answer)
+    assert (button["type"], button["title"]) == ("Action.Submit", card.ASK_HUMAN)
+    assert button["data"]["msteams"]["type"] == "task/fetch", "it opens a dialog"
+    assert _feedback(answer) == {"type": "custom"}, "the thumbs stay beside it"
 
 
 def _echo_sessions(router: MARouter) -> None:
@@ -309,7 +330,7 @@ async def test_long_answer_splits_into_ordered_parts_and_keeps_its_code_block_wh
     whole = [code in str(r.body["text"]) for r in parts]
     assert whole == [False, True, False], "the code block stays whole in one part"
     feedback = [_feedback(r) for r in parts]
-    assert feedback == [None, None, {"type": "default"}], "only the last part asks for feedback"
+    assert feedback == [None, None, {"type": "custom"}], "only the last part asks for feedback"
     labels = ["AIGeneratedContent" in str(r.body["entities"]) for r in parts]
     assert all(labels), "every part is labelled AI generated"
 
@@ -360,7 +381,7 @@ async def test_tool_use_edits_the_status_card_before_the_answer_replaces_it(
     targets = {(r.method, _path(r).rsplit("/", 1)[-1]) for r in [*edits, answer]}
     assert targets == {("PUT", "m-1")}, "every edit lands on the card"
     progress = next(r for r in edits if _RUNNING_BASH in _texts(r))
-    assert _texts(progress)[0].startswith("**Working** · "), "the phase follows the turn"
+    assert _texts(progress)[0].startswith("**Working on it…**"), "the card shows active work"
     assert [a["verb"] for a in _actions(progress)] == [card.CANCEL_VERB], "Cancel stays"
     assert str(answer.body["text"]).startswith(AGENT_TEXT), "then the answer replaces it"
 

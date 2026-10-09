@@ -212,6 +212,57 @@ async def test_stored_discord_roles_stand_without_a_lookup(db_session: AsyncSess
     )
 
 
+async def test_a_stored_discord_role_grants_only_while_the_member_still_holds_it(
+    db_session: AsyncSession,
+) -> None:
+    """Discord's lookup reads the member's roles: a role taken away lapses before their next turn."""
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="111111111111112")
+    user = "222222222222223"
+    account_id = await _stored_member(db_session, tenant, user, ["r1"])
+    await _grant(db_session, tenant, "r1", [])
+
+    async def administered(roles: Callable[[str], Awaitable[frozenset[str]]] | None) -> set[str]:
+        stored = await read_stored_admin(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            account_id=account_id,
+            platform_user_id=user,
+        )
+        return set((await confirm_stored_subject(stored, roles)).administered_channel_ids)
+
+    _, holds = _fetcher({user: frozenset({"r1", "r9"})})
+    _, lost = _fetcher({user: frozenset({"r9"})})
+    _, failing = _fetcher({})
+    assert await administered(holds) == {"C1"}, "still holds the role: still the channel's admin"
+    assert await administered(lost) == set(), "the role was taken away: no longer"
+    assert await administered(failing) == set(), "a failed lookup grants nothing"
+    assert await administered(None) == {"C1"}, "with no lookup the stored role stands"
+
+
+async def test_channel_admin_dms_reach_a_discord_role_holder_only_while_they_hold_it(
+    db_session: AsyncSession,
+) -> None:
+    """Members who lost the role sort first; twice the cap is read so they don't fill it."""
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="111111111111113")
+    await _stored_member(db_session, tenant, "1000", ["r1"])
+    await _stored_member(db_session, tenant, "2000", ["r1"])
+    await _grant(db_session, tenant, "r1", ["3000"])
+    asked, roles = _fetcher({"1000": frozenset(), "2000": frozenset({"r1"})})
+
+    found = await channel_admin_user_ids(
+        async_sessionmaker(bind=db_session.bind),
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="C1",
+        limit=2,
+        members=roles,
+    )
+
+    assert found == ["2000", "3000"], "a granted user, and the member who still holds the role"
+    assert sorted(asked) == ["1000", "2000"], "each stored match is read once; a granted user never"
+
+
 async def test_channel_admin_dms_reach_a_stored_slack_group_member_only_while_still_in_it(
     db_session: AsyncSession,
 ) -> None:

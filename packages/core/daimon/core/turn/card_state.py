@@ -53,6 +53,7 @@ class CardState:
     phase: TurnPhase = TurnPhase.THINKING
     tool_lines: tuple[str, ...] = ()
     agent_name: str = ""
+    header_customized: bool = False
     started_at: float = 0.0
     usage_in: int = 0
     usage_out: int = 0

@@ -9,10 +9,12 @@ from daimon.core.credential_requests import build_custom_id as build_credential_
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.message_feedback import (
     CUSTOM_ID_PATTERN,
+    FEEDBACK_REASONS,
     THUMBS_DOWN,
     THUMBS_UP,
     build_custom_id,
     is_bot_authored,
+    known_feedback_reasons,
     should_trigger_feedback_dm,
     vote_for_reaction,
 )
@@ -232,3 +234,22 @@ def test_credential_custom_id_does_not_fullmatch_feedback_template() -> None:
         "an incoming custom_id, with no early break, so a credential-request custom_id must "
         "never also fullmatch the feedback template -- overlap would double-dispatch one click"
     )
+
+
+def test_known_feedback_reasons_keeps_vocabulary_order_once_each() -> None:
+    assert known_feedback_reasons(["other", "inaccurate", "other"]) == ["inaccurate", "other"]
+
+
+def test_known_feedback_reasons_drops_codes_outside_the_vocabulary() -> None:
+    assert known_feedback_reasons(["", "Inaccurate", "drop table"]) == []
+
+
+def test_feedback_reason_codes_are_the_stored_contract() -> None:
+    """Renaming a code orphans every row that stored it; change the label instead."""
+    assert list(FEEDBACK_REASONS) == [
+        "inaccurate",
+        "ignored_request",
+        "incomplete",
+        "too_slow",
+        "other",
+    ]

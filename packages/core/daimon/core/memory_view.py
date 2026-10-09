@@ -28,11 +28,14 @@ async def get_channel_memory_store(
     user_id: str,
     channel_id: str,
     default: DeploymentDefault,
+    thread_id: str | None = None,
 ) -> tuple[str, str] | None:
     """`(agent_name, memory_store_id)` for the agent answering in `channel_id`.
 
+    With `thread_id`, the agent answering in that thread under it, so a thread
+    bound to another agent shows that agent's memory.
     None when no agent is configured there, it has no memory store yet, or its
-    pin or channel isolation hides it from `channel_id`.
+    pin or channel isolation hides it from that place.
     Raises DaimonError when the configured agent is missing on the MA side.
     """
     # Never committed: a first-contact principal only scopes this read.
@@ -41,7 +44,11 @@ async def get_channel_memory_store(
             session, tenant_id=tenant_id, platform=platform, external_id=user_id
         )
         scope = ScopeContext(
-            account_id=principal.account_id, tenant_id=tenant_id, channel_id=channel_id
+            account_id=principal.account_id,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            platform=platform,
+            thread_id=thread_id,
         )
         config = await resolve_config(session, context=scope, default=default)
         policy = await load_access_policy(session, tenant_id=tenant_id)
@@ -51,7 +58,12 @@ async def get_channel_memory_store(
     if agent is None:
         raise DaimonError(f"Configured agent '{config.agent_name}' not found.")
     names = (config.agent_name, *agent_pin_names(agent.name, agent.metadata))
-    if is_memory_hidden(policy, agent_names=names, channel_id=channel_id):
+    if is_memory_hidden(
+        policy,
+        agent_names=names,
+        channel_id=thread_id or channel_id,
+        parent_channel_id=channel_id if thread_id is not None else None,
+    ):
         return None
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id))
     async with sessionmaker() as session:

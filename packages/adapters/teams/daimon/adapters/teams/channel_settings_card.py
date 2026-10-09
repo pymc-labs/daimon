@@ -2,7 +2,7 @@
 
 The setup panel lives in the 1:1 chat, so the dialog first asks which
 channel, then shows that channel's environment and, for server admins, its
-permissions and channel admins. Every submit names its `op` and the channel.
+permissions, channel admins and channel skills. Every submit names its `op` and the channel.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from daimon.core.channel_environments import (
     environment_option_value,
 )
 from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleStatus
+from daimon.core.stores.domain import ChannelSkillRow
 from microsoft_teams.cards import (
     Action,
     AdaptiveCard,
@@ -34,7 +35,7 @@ CHANNEL_DIALOG: Final = "channel_settings"
 MAX_CHANNEL_CHOICES: Final = 100
 """Channels the picker lists; a server admin with more types the id instead."""
 
-ChannelOp = Literal["pick", "environment", "rule", "admins"]
+ChannelOp = Literal["pick", "environment", "rule", "admins", "skills"]
 RuleExtra = Literal["none", "copy", "release"]
 RULE_EXTRAS: Final[Mapping[RuleExtra, str]] = {
     "none": "Nothing else",
@@ -52,6 +53,11 @@ CHANNEL_ADMINS_NOTE: Final = (
     "Channel admins pick their channels' environment and default agent. Server admins run "
     "every channel. Enter Entra object ids, separated by commas; leave it empty to remove them."
 )
+CHANNEL_SKILLS_NOTE: Final = (
+    "Added to whatever agent answers in this channel, here only, from the next message: a "
+    "library skill, or one uploaded to this channel's agent. Server admins only."
+)
+MAX_LISTED_SKILLS: Final = 20
 
 
 @dataclass(frozen=True)
@@ -65,6 +71,8 @@ class ChannelSettings:
     rule: ChannelRuleStatus | None
     """None for a caller who is not a server admin."""
     admin_user_ids: tuple[str, ...] | None
+    """None for a caller who is not a server admin."""
+    skills: tuple[ChannelSkillRow, ...] | None = None
     """None for a caller who is not a server admin."""
 
 
@@ -149,8 +157,41 @@ def _rule_section(status: ChannelRuleStatus) -> list[CardElement]:
     return [*body, _text(PERMISSIONS_NOTE, subtle=True)]
 
 
+def _skills_section(rows: Sequence[ChannelSkillRow]) -> list[CardElement]:
+    """Discord's and Slack's channel skills: the list, a name to add, ticks to remove."""
+    shown = rows[:MAX_LISTED_SKILLS]
+    lines = [f"`{row.name}` · {row.version}" for row in shown]
+    if len(rows) > len(shown):
+        lines.append(f"…and {len(rows) - len(shown)} more")
+    body: list[CardElement] = [
+        _text("**Channel skills**\n\n" + ("\n".join(lines) or "No extra skills.")),
+        TextInput(
+            id="skill_add",
+            label="Add a skill",
+            placeholder="name, agent/name or skill id",
+            max_length=200,
+        ),
+    ]
+    if shown:
+        choices = [Choice(title=row.name, value=row.skill_id) for row in shown]
+        label = "Remove"
+        if len(rows) > len(shown):
+            label += f" (first {len(shown)} shown; remove some to reach the rest)"
+        body.append(
+            ChoiceSetInput(
+                id="skill_remove",
+                label=label,
+                is_multi_select=True,
+                style="expanded",
+                choices=choices,
+            )
+        )
+    return [*body, _text(CHANNEL_SKILLS_NOTE, subtle=True)]
+
+
 def channel_settings_form(settings: ChannelSettings, *, notice: str | None = None) -> AdaptiveCard:
-    """The channel's settings, each with its own save; permissions and admins for server admins."""
+    """The channel's settings, each with its own save; permissions, admins and skills for
+    server admins."""
     body: list[CardElement] = [_text(notice)] if notice else []
     body.append(_text(settings.label, bold=True))
     environment, actions = _environment_section(settings)
@@ -171,6 +212,9 @@ def channel_settings_form(settings: ChannelSettings, *, notice: str | None = Non
             _text(CHANNEL_ADMINS_NOTE, subtle=True),
         ]
         actions.append(_submit("Save channel admins", "admins", channel))
+    if settings.skills is not None:
+        body += _skills_section(settings.skills)
+        actions.append(_submit("Save skills", "skills", channel))
     actions.append(_submit("Another channel", "pick"))
     return AdaptiveCard(body=body, actions=actions, fallback_text=settings.label)
 

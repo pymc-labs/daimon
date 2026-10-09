@@ -43,6 +43,8 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # deployment-wide. Account links inherit tenant isolation from accounts.id.
     "github_user_links": "deployment-wide GitHub user identity; tenant links live in account_github_links",
     "account_github_links": "keyed by account_id (globally unique, maps to one tenant)",
+    "github_access_request_deliveries": "keyed by request_id (globally unique FK to a tenant-scoped request); store reads verify that request's tenant",
+    "github_connect_flows": "keyed by random state hash and bound by FK to a tenant-scoped invitation",
     # Push delivery receipts and jobs are deployment-wide GitHub metadata, not
     # tenant data. Resync resolves each tenant's bindings and scoped credentials
     # at execution time from the canonical repository/ref.

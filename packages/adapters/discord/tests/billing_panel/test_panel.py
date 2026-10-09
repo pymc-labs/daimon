@@ -3,6 +3,7 @@ build_member_lookup_container, and estimate_turns."""
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -16,16 +17,19 @@ import pytest
 from daimon.adapters.discord.billing_panel.panel import (
     BillingPanelView,
     build_billing_container,
+    build_expiry_container,
     build_member_lookup_container,
     estimate_turns,
 )
 from daimon.adapters.discord.billing_panel.state import (
     COLOR_OVER_CAP,
+    COLOR_WARNING,
     BillingPanelState,
     MemberRow,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget import ChannelBudgetStatus
+from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores.domain import ChannelBudgetRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -164,8 +168,7 @@ def test_member_view_has_refresh_and_done_buttons_only() -> None:
         since=SINCE,
     )
     labels = [c.label for c in view.walk_children() if isinstance(c, discord.ui.Button)]
-    assert "🔄 Refresh" in labels, "member view must have Refresh button"
-    assert "Done" in labels, "member view must have Done button"
+    assert labels == ["Refresh", "Done"], f"no timed credit, no admin actions: {labels}"
 
     user_select = _find_select(view, discord.ui.UserSelect)  # type: ignore[type-abstract]
     assert user_select is None, "member view must not have a UserSelect"
@@ -196,26 +199,73 @@ def test_admin_view_has_topup_select_with_4_options() -> None:
         "top-up select options must be ['10','25','50','100']"
     )
     for opt in options:
-        assert opt.description is not None and opt.description.startswith("≈ "), (
-            f"option '{opt.label}' description must start with '≈ '"
+        assert opt.label == f"${opt.value}", "the label is the amount alone"
+        assert opt.description is not None and opt.description.startswith("about "), (
+            f"option '{opt.label}' says what it buys as `about N turns`"
         )
+        assert opt.description.endswith(" turns")
 
 
-def test_admin_view_has_user_select_for_member_lookup() -> None:
-    """Admin view must have a UserSelect for member spend lookup."""
-    view = BillingPanelView(
-        _make_state(is_admin=True),
+def test_the_admin_panel_has_the_member_lookup_and_a_member_panel_does_not() -> None:
+    lookup = _find_select(_panel(is_admin=True), discord.ui.UserSelect)  # type: ignore[type-abstract]
+    assert lookup is not None and lookup.placeholder == "Look up a person"
+    assert _find_select(_panel(), discord.ui.UserSelect) is None  # type: ignore[type-abstract]
+
+
+def _button_rows(view: discord.ui.LayoutView) -> list[list[str | None]]:
+    return [
+        [c.label for c in row.children if isinstance(c, discord.ui.Button)]
+        for row in view.walk_children()
+        if isinstance(row, discord.ui.ActionRow)
+    ]
+
+
+def _panel(**overrides: Any) -> BillingPanelView:
+    state = _make_state(**overrides)
+    return BillingPanelView(
+        state,
         runtime=_make_runtime(),
         allowed_user_id=42,
-        is_admin=True,
+        is_admin=state.is_admin,
         account_id=_TEST_ACCOUNT_ID,
         now=NOW,
         since=SINCE,
     )
-    user_select = _find_select(view, discord.ui.UserSelect)  # type: ignore[type-abstract]
-    assert user_select is not None, "admin view must have a UserSelect for member lookup"
-    assert isinstance(user_select, discord.ui.UserSelect), (
-        "found select must be a discord.ui.UserSelect"
+
+
+def test_buttons_follow_the_viewer_and_the_credit() -> None:
+    timed = (ActiveTimedCredit(Decimal("5"), datetime(2026, 6, 30, tzinfo=UTC)),)
+    admin = _button_rows(_panel(is_admin=True, timed_credit=timed, has_redeemable_promo_code=True))
+    assert admin == [[], ["Redeem code", "Expiry dates"], [], ["Refresh", "Done"]], (
+        "Add credit, the actions, Look up a person, then Refresh and Done"
+    )
+    assert _button_rows(_panel(is_admin=True)) == [[], [], ["Refresh", "Done"]]
+    assert _button_rows(_panel(timed_credit=timed)) == [["Expiry dates"], ["Refresh", "Done"]]
+    assert _button_rows(_panel()) == [["Refresh", "Done"]], "a member without timed credit"
+
+
+@pytest.mark.asyncio
+async def test_expiry_dates_replies_privately_with_each_credit_soonest_first() -> None:
+    from daimon.adapters.discord.billing_panel.panel import _ExpiryButton
+
+    timed = (
+        ActiveTimedCredit(Decimal("20"), datetime(2026, 5, 20, 18, 0, tzinfo=UTC)),
+        ActiveTimedCredit(Decimal("5"), datetime(2026, 5, 31, tzinfo=UTC)),
+    )
+    view = _panel(timed_credit=timed)
+    button = next(item for item in view.walk_children() if isinstance(item, _ExpiryButton))
+    interaction = _admin_interaction(guild_id=1)
+
+    await button.callback(interaction)
+
+    kwargs = interaction.response.send_message.call_args.kwargs
+    assert kwargs["ephemeral"] is True
+    first, last = (int(c.ends_at.timestamp()) for c in timed)
+    assert _joined_view_text(kwargs["view"]) == (
+        "## Expiry dates\n"
+        "Unused credit expires:\n"
+        f"$20.00 on <t:{first}:D> (<t:{first}:R>)\n"
+        f"$5.00 on <t:{last}:D> (<t:{last}:R>)"
     )
 
 
@@ -635,180 +685,41 @@ async def test_member_lookup_select_still_renders_spend_for_a_live_admin(
     )
     text = _joined_view_text(rendered)
     assert "bob" in text, "the card must name the looked-up member"
-    assert "no usage this period" in text, (
+    assert "Nothing used this month" in text, (
         "a member with no seeded usage must render the zero-spend copy, not a refusal"
     )
     assert db_session is not None
 
 
-# ---- V2 container builder tests (B8 design) ----
+# ---- container builder tests ----
 
 
-def test_admin_container_with_8_member_rows_renders_top5_plus_more_line() -> None:
-    """Admin container with 8 member_rows renders exactly 5 spender rows + 'more members' line."""
-    rows = tuple(
-        _make_member_row(
-            platform_user_id=f"u{i}",
-            display_name=f"user{i}",
-            cost_usd=float(8 - i),
-            turn_count=i + 1,
-        )
-        for i in range(8)
-    )
-    state = _make_state(
-        is_admin=True,
-        guild_spend=36.0,
-        guild_turns=36,
-        guild_distinct_members=8,
-        member_rows=rows,
-        over_cap_count=2,
-    )
-    container = build_billing_container(state, now=NOW, since=SINCE)
-    text = _joined_container_text(container)
-
-    # Exactly 5 rank rows (check for "-# 1." through "-# 5." dim rows)
-    for rank in range(1, 6):
-        assert f"-# {rank}." in text, f"rank {rank} spender row must be present"
-    assert "-# 6." not in text, "rank 6 must not appear — only top 5 render"
-
-    # Overflow: (8 - 5) = 3 in member_rows beyond 5, plus over_cap_count=2 → 5 total
-    assert "5 more members — look one up below" in text, (
-        "overflow line must report (8-5)+over_cap_count=5 more members"
-    )
+def _text(container: discord.ui.Container[Any]) -> str:
+    return _joined_container_text(container)
 
 
-def test_admin_container_with_5_or_fewer_rows_and_no_overflow_has_no_more_line() -> None:
-    """Admin container with <=5 member_rows and over_cap_count==0 must not have 'more' line."""
-    rows = tuple(
-        _make_member_row(
-            platform_user_id=f"u{i}",
-            display_name=f"user{i}",
-            cost_usd=float(5 - i),
-        )
-        for i in range(4)
-    )
-    state = _make_state(
-        is_admin=True,
-        member_rows=rows,
-        over_cap_count=0,
-    )
-    container = build_billing_container(state, now=NOW, since=SINCE)
-    text = _joined_container_text(container)
-    assert "more members" not in text, (
-        "no 'more members' line when member_rows<=5 and over_cap_count==0"
-    )
+def _blocks(container: discord.ui.Container[Any]) -> list[str]:
+    """Each TextDisplay, and `---` for a large separator, in order."""
+    out: list[str] = []
+    for child in container.children:
+        if isinstance(child, discord.ui.TextDisplay):
+            out.append(child.content)
+        elif isinstance(child, discord.ui.Separator):
+            out.append("---" if child.spacing is discord.SeparatorSpacing.large else "-")
+    return out
 
 
-def test_admin_container_header_subtext_contains_period_guild_totals_and_active_members() -> None:
-    """Header subtext must contain period label, guild total, turn count, and active-member count."""
-    state = _make_state(
-        is_admin=True,
-        guild_spend=42.50,
-        guild_turns=17,
-        guild_distinct_members=5,
-    )
-    container = build_billing_container(state, now=NOW, since=SINCE)
-    # The first TextDisplay child is the header (from layout.header)
-    header_td = next(c for c in container.children if isinstance(c, discord.ui.TextDisplay))
-    text = header_td.content
-    assert "May 2026" in text, "period month/year must appear in header subtext"
-    assert "$42.50" in text, "guild total spend must appear in header subtext"
-    assert "17 turns" in text, "guild turn count must appear in header subtext"
-    assert "5 active members" in text, "active member count must appear in header subtext"
+def _this_channel_budget() -> ChannelBudgetStatus:
+    return _budget_status("c", "1.2", limit="5")
 
 
-def test_member_container_has_you_group_and_no_top_spenders_group() -> None:
-    """Member (non-admin) container has a 'You' group and no '🏆' group."""
-    state = _make_state(
-        is_admin=False,
-        caller_spend=5.0,
-        caller_turns=10,
-    )
-    container = build_billing_container(state, now=NOW, since=SINCE)
-    text = _joined_container_text(container)
-    assert "**You**" in text, "member container must contain the You group"
-    assert "🏆" not in text, "member container must not contain the Top spenders group"
-
-
-def test_both_views_show_the_invoking_channels_budget_only_when_it_has_one() -> None:
-    budget = ChannelBudgetRow(
-        id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        platform="discord",
-        channel_id="c",
-        limit_usd=Decimal("5"),
-        window="monthly",
-        starts_at=None,
-        ends_at=None,
-        set_by_account_id=None,
-        created_at=NOW,
-        updated_at=NOW,
-    )
-    status = ChannelBudgetStatus(budget=budget, spent_usd=Decimal("1.2"), is_active=True)
-    for is_admin in (False, True):
-        with_budget = _make_state(is_admin=is_admin, channel_budget=status)
-        text = _joined_container_text(build_billing_container(with_budget, now=NOW, since=SINCE))
-        assert "this channel: $1.20 of $5.00 (monthly)" in text
-        plain = _joined_container_text(
-            build_billing_container(_make_state(is_admin=is_admin), now=NOW, since=SINCE)
-        )
-        assert "this channel" not in plain
-
-
-def test_over_cap_container_has_color_over_cap_accent() -> None:
-    """Container for an over-cap caller must use COLOR_OVER_CAP as accent_colour."""
-    state = _make_state(caller_spend=200.0, caller_turns=10, caller_cap=Decimal("100.00"))
-    container = build_billing_container(state, now=NOW, since=SINCE)
-    assert container.accent_colour == COLOR_OVER_CAP, (
-        "over-cap container must have COLOR_OVER_CAP accent"
-    )
-
-
-def test_nominal_container_has_no_accent() -> None:
-    """Container for a nominal (under-cap) caller must have no accent colour."""
-    state = _make_state(caller_spend=10.0, caller_turns=2, caller_cap=Decimal("100.00"))
-    container = build_billing_container(state, now=NOW, since=SINCE)
-    assert container.accent_colour is None, (
-        "nominal container must have no accent_colour (COLOR_NOMINAL retired)"
-    )
-
-
-def test_member_lookup_container_zero_spend_renders_no_usage_copy() -> None:
-    """lookup container with spend==0.0 and turns==0 must contain 'no usage this period'."""
-    container = build_member_lookup_container(
-        display_name="charlie",
-        spend_usd=0.0,
-        turns=0,
-        since=SINCE,
-        now=NOW,
-    )
-    text = _joined_container_text(container)
-    assert "no usage this period" in text, (
-        "zero-spend lookup must render the locked 'no usage this period' copy"
-    )
-
-
-def test_member_lookup_container_nonzero_spend_renders_spend_and_turns() -> None:
-    """lookup container with real spend renders formatted spend + turns."""
-    container = build_member_lookup_container(
-        display_name="dave",
-        spend_usd=12.34,
-        turns=5,
-        since=SINCE,
-        now=NOW,
-    )
-    text = _joined_container_text(container)
-    assert "$12.34" in text, "lookup container must show formatted spend"
-    assert "5 turns" in text, "lookup container must show turn count"
-
-
-def _budget_status(channel_id: str, spent: str) -> ChannelBudgetStatus:
+def _budget_status(channel_id: str, spent: str, *, limit: str = "10") -> ChannelBudgetStatus:
     budget = ChannelBudgetRow(
         id=uuid.uuid4(),
         tenant_id=uuid.uuid4(),
         platform="discord",
         channel_id=channel_id,
-        limit_usd=Decimal("10"),
+        limit_usd=Decimal(limit),
         window="monthly",
         starts_at=None,
         ends_at=None,
@@ -819,34 +730,192 @@ def _budget_status(channel_id: str, spent: str) -> ChannelBudgetStatus:
     return ChannelBudgetStatus(budget=budget, spent_usd=Decimal(spent), is_active=True)
 
 
-def test_the_admin_view_lists_channel_budgets_and_the_member_view_does_not() -> None:
-    budgets = tuple(_budget_status(str(100 + i), str(9 - i)) for i in range(7))
-    admin = _joined_container_text(
-        build_billing_container(
-            _make_state(is_admin=True, channel_budgets=budgets), now=NOW, since=SINCE
-        )
-    )
-    assert "<#100>: $9.00 of $10.00 (monthly) · 90% used" in admin
-    assert "<#104>" in admin and "<#105>" not in admin, "only the five most used"
-    assert "2 more channel budgets" in admin
-    member = _joined_container_text(
-        build_billing_container(
-            _make_state(is_admin=False, channel_budgets=budgets), now=NOW, since=SINCE
-        )
-    )
-    assert "Channel budgets" not in member, "a member sees no other channel"
+def _credit(remaining: str, day: int) -> ActiveTimedCredit:
+    return ActiveTimedCredit(Decimal(remaining), datetime(2026, 5, day, 18, 0, tzinfo=UTC))
 
 
-def test_admin_container_budget_content_length_under_4000() -> None:
-    """Admin container with 5 rows of 32-char names must fit in 4000 display characters."""
-    long_name = "A" * 32
+def test_the_admin_panel_is_header_credit_channel_and_spenders_apart() -> None:
+    state = _make_state(
+        is_admin=True,
+        guild_balance_usd=Decimal("62.4"),
+        guild_spend=48.17,
+        guild_distinct_members=9,
+        timed_credit=(_credit("20", 30), _credit("5", 31)),
+        channel_budget=_this_channel_budget(),
+        member_rows=(_make_member_row(display_name="Maya Chen", cost_usd=14.02),),
+        channel_budgets=(_budget_status("100", "4.1"),),
+    )
+    assert _blocks(build_billing_container(state, now=NOW, since=SINCE)) == [
+        "## Billing\n-# May 2026\n-# $48.17 spent by 9 people",
+        "---",
+        "### $62.40\ntotal credit left\n-# Includes $25.00 that expires. It's used first.",
+        "---",
+        "**This channel**\n$1.20 of $5.00 used this month",
+        "---",
+        "**Top spenders**\n1. Maya Chen  $14.02",
+        "---",
+        "**Channel budgets**\n<#100>  $4.10 of $10.00 used this month",
+    ]
+
+
+def test_the_member_panel_adds_your_use_and_asks_an_admin_for_credit() -> None:
+    state = _make_state(
+        caller_spend=11.5, caller_turns=71, caller_cap=Decimal("25"), guild_balance_usd=Decimal("9")
+    )
+    assert _blocks(build_billing_container(state, now=NOW, since=SINCE)) == [
+        "## Billing\n-# May 2026",
+        "---",
+        "**You**\n$11.50 of your $25.00 this month",
+        "---",
+        "### $9.00\ntotal credit left\n-# Ask an admin to add credit.",
+    ]
+
+
+def test_the_member_panel_shows_own_use_in_plain_words() -> None:
+    def you(**overrides: Any) -> str:
+        text = _text(build_billing_container(_make_state(**overrides), now=NOW, since=SINCE))
+        return text.split("**You**\n", 1)[1].splitlines()[0]
+
+    assert you(caller_spend=11.5, caller_turns=71) == "$11.50 used this month"
+    assert you() == "Nothing used this month"
+
+
+def test_a_negative_balance_says_no_credit_left_and_still_shows_timed_credit() -> None:
+    state = _make_state(
+        is_admin=True, guild_balance_usd=Decimal("-3.1"), timed_credit=(_credit("5", 20),)
+    )
+    blocks = _blocks(build_billing_container(state, now=NOW, since=SINCE))
+    assert blocks[2] == (
+        "### No credit left\n$3.10 spent beyond it\n"
+        "-# Includes $5.00 that expires. It's used first."
+    )
+
+
+def test_controls_sit_last_and_done_drops_them() -> None:
+    view = _panel(is_admin=True)
+    container = next(c for c in view.children if isinstance(c, discord.ui.Container))
+    assert isinstance(container.children[-1], discord.ui.ActionRow), "actions are the last block"
+    plain = build_billing_container(view.state, now=NOW, since=SINCE)
+    assert not any(isinstance(c, discord.ui.ActionRow) for c in plain.children)
+
+
+def test_the_accent_shows_state() -> None:
+    def accent(**overrides: Any) -> object:
+        state = _make_state(**({"guild_balance_usd": Decimal("10")} | overrides))
+        return build_billing_container(state, now=NOW, since=SINCE).accent_colour
+
+    assert accent() is None, "nothing to flag"
+    assert accent(guild_balance_usd=Decimal("0")) == COLOR_OVER_CAP, "no credit left"
+    assert accent(caller_spend=200.0, caller_turns=1, caller_cap=Decimal("100")) == COLOR_OVER_CAP
+    assert accent(timed_credit=(_credit("5", 20),)) == COLOR_WARNING, "expires within a week"
+    assert accent(timed_credit=(_credit("5", 31),)) is None, "expires later"
+
+
+def _section(state: BillingPanelState, title: str) -> str:
+    blocks = _blocks(build_billing_container(state, now=NOW, since=SINCE))
+    return next(block for block in blocks if block.startswith(title))
+
+
+def test_top_spenders_names_five_and_counts_the_rest() -> None:
     rows = tuple(
         _make_member_row(
             platform_user_id=f"u{i}",
-            display_name=long_name,
-            cost_usd=float(5 - i),
-            turn_count=10,
+            display_name=f"user{i}",
+            cost_usd=float(8 - i),
+            is_caller=i == 1,
         )
+        for i in range(8)
+    )
+    state = _make_state(is_admin=True, member_rows=rows, over_cap_count=2)
+    assert _section(state, "**Top spenders**") == (
+        "**Top spenders**\n1. user0  $8.00\n2. user1 (you)  $7.00\n3. user2  $6.00\n"
+        "4. user3  $5.00\n5. user4  $4.00\n-# + 5 more — look one up below"
+    ), "overflow is (8-5) rows plus over_cap_count=2"
+
+
+def test_top_spenders_without_usage_and_no_channel_budgets_section() -> None:
+    state = _make_state(is_admin=True)
+    assert _section(state, "**Top spenders**") == "**Top spenders**\nNothing used this month"
+    blocks = _blocks(build_billing_container(state, now=NOW, since=SINCE))
+    assert not any(block.startswith("**Channel budgets**") for block in blocks)
+
+
+def test_channel_budgets_lists_five_and_counts_the_rest_for_admins_only() -> None:
+    budgets = tuple(_budget_status(str(100 + i), str(9 - i)) for i in range(7))
+    section = _section(_make_state(is_admin=True, channel_budgets=budgets), "**Channel budgets**")
+    assert section.splitlines()[1] == "<#100>  $9.00 of $10.00 used this month"
+    assert "<#104>" in section and "<#105>" not in section and section.endswith("-# + 2 more")
+    member = _blocks(
+        build_billing_container(_make_state(channel_budgets=budgets), now=NOW, since=SINCE)
+    )
+    assert not any("Channel budgets" in block or "Top spenders" in block for block in member)
+
+
+def test_top_spender_names_are_escaped() -> None:
+    row = _make_member_row(display_name="@everyone **x** <@100000000000000009>")
+    line = _section(_make_state(is_admin=True, member_rows=(row,)), "**Top spenders**")
+    assert "@everyone" not in line and "<@100000000000000009>" not in line, line
+    assert "\\*\\*x\\*\\*" in line, "markdown in a name is shown literally"
+
+
+def test_someone_never_named_to_us_is_a_mention_the_client_names() -> None:
+    row = _make_member_row(platform_user_id="100000000000004993", display_name=None)
+    line = _section(_make_state(is_admin=True, member_rows=(row,)), "**Top spenders**")
+    assert line.splitlines()[1] == "1. <@100000000000004993>  $1.23", (
+        "no `User 4993`: the client renders the mention as their name"
+    )
+    assert "User " not in line
+
+
+def test_no_rendered_panel_has_a_dot_separator_or_a_user_label() -> None:
+    rows = tuple(
+        _make_member_row(
+            platform_user_id=f"10000000000000000{i}",
+            display_name=None if i % 2 else f"user{i}",
+            cost_usd=float(9 - i),
+        )
+        for i in range(7)
+    )
+    for is_admin in (True, False):
+        state = _make_state(
+            is_admin=is_admin,
+            guild_spend=48.17,
+            guild_turns=300,
+            guild_distinct_members=9,
+            member_rows=rows if is_admin else (),
+            timed_credit=(_credit("20", 30), _credit("5", 31)),
+            has_redeemable_promo_code=True,
+            channel_budget=_this_channel_budget(),
+            channel_budgets=(_budget_status("100", "4.1"),),
+        )
+        view = _panel(**{f.name: getattr(state, f.name) for f in dataclasses.fields(state)})
+        texts = [_joined_view_text(view), _text(build_expiry_container(state))]
+        texts += [
+            f"{option.label} {option.description}"
+            for item in view.walk_children()
+            if isinstance(item, discord.ui.Select)
+            for option in item.options
+        ]
+        for text in texts:
+            assert "·" not in text and "≈" not in text, text
+            assert "User " not in text, text
+
+
+def test_member_lookup_reply_is_the_name_and_the_month() -> None:
+    def lookup(spend: float, turns: int) -> list[str]:
+        container = build_member_lookup_container(
+            display_name="@everyone **x**", spend_usd=spend, turns=turns, since=SINCE, now=NOW
+        )
+        return _blocks(container)
+
+    assert lookup(14.02, 3) == ["## @\u200beveryone \\*\\*x\\*\\*", "$14.02 this month"]
+    assert lookup(0.0, 0)[1] == "Nothing used this month"
+
+
+def test_admin_container_budget_content_length_under_4000() -> None:
+    """The fullest admin panel fits Discord's 4000 display characters."""
+    rows = tuple(
+        _make_member_row(platform_user_id=f"u{i}", display_name="A" * 32, cost_usd=float(5 - i))
         for i in range(5)
     )
     state = _make_state(
@@ -856,15 +925,13 @@ def test_admin_container_budget_content_length_under_4000() -> None:
         guild_distinct_members=10,
         member_rows=rows,
         over_cap_count=5,
+        timed_credit=tuple(_credit("1", 20 + i) for i in range(9)),
+        has_redeemable_promo_code=True,
+        channel_budget=_this_channel_budget(),
         channel_budgets=tuple(_budget_status("9" * 20, "1" * 9) for _ in range(100)),
     )
-    from daimon.adapters.discord import layout as layout_mod
-
-    container = build_billing_container(state, now=NOW, since=SINCE)
-    view = layout_mod.static_view(container)
-    assert view.content_length() <= 4000, (
-        f"budget test: content_length {view.content_length()} must be <= 4000"
-    )
+    fields = {field.name: getattr(state, field.name) for field in dataclasses.fields(state)}
+    assert _panel(**fields).content_length() <= 4000
 
 
 # ---- estimate_turns unit tests ----

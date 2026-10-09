@@ -83,6 +83,7 @@ class PanelState:
     last_sync_error: str | None = None
     default_mcp_url: str | None = None
     is_admin: bool = False
+    can_manage_github_agents: bool = False
     guild_id: int = 0
     channel_id: int = 0
     # Resolved invocation-channel name (no leading #), for the cascade-ladder field
@@ -119,6 +120,8 @@ class PanelState:
     routing_page: int = 0
     expanded_detail: DetailListName | None = None
     details: AgentDetails | None = None
+    # Public URLs for agents whose Details have been loaded in this panel.
+    avatar_urls: dict[str, str | None] = dataclasses.field(default_factory=dict[str, str | None])
     answering_map: AnsweringMap | None = None
     thread_context: ThreadContext | None = None
     # The thread the panel was opened in, when it was opened in one. `channel_id`

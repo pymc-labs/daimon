@@ -122,8 +122,8 @@ async def notice_recipients(
 ) -> tuple[str, ...]:
     """The channel's admins, else the server admins; at most `MAX_RECIPIENTS`.
 
-    `members` re-checks a recipient matched by a stored Slack group or Teams
-    team, with no DB session open; without it such a match reaches nobody.
+    `members` re-checks a recipient matched by a stored group or Discord role,
+    with no DB session open; without it a Slack or Teams match reaches nobody.
     """
     listed = await channel_admin_user_ids(
         sessionmaker,

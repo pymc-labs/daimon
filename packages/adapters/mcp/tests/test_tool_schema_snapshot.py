@@ -13,7 +13,7 @@ workers only persist a subset of newly generated snapshots.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.hub.app import build_hub_app
@@ -30,7 +30,7 @@ from daimon.core.config import (
     Settings,
     SlackSettings,
 )
-from daimon.core.defaults.loader import DeploymentDefault
+from daimon.core.scope import DeploymentDefault
 from daimon.testing.ma import build_stub_anthropic
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -87,7 +87,25 @@ def _strip_trailing_whitespace(description: str | None) -> str | None:
     """
     if description is None:
         return None
-    return "\n".join(line.rstrip() for line in description.split("\n"))
+    # Syrupy indents blank lines differently across Python versions. Keep a
+    # visible placeholder so pre-commit whitespace trimming cannot change the
+    # committed snapshot's meaning.
+    return "\n".join(
+        line.rstrip() if line.strip() else "<blank line>" for line in description.split("\n")
+    )
+
+
+def _normalize_snapshot_value[T](value: T) -> T:
+    """Render multiline blanks without serializer-dependent indentation."""
+    if isinstance(value, str):
+        return cast(T, _strip_trailing_whitespace(value) if "\n" in value else value)
+    if isinstance(value, dict):
+        mapping = cast(dict[str, object], value)
+        return cast(T, {key: _normalize_snapshot_value(item) for key, item in mapping.items()})
+    if isinstance(value, list):
+        items = cast(list[object], value)
+        return cast(T, [_normalize_snapshot_value(item) for item in items])
+    return value
 
 
 async def test_rendered_tool_schema_matches_snapshot(
@@ -114,7 +132,7 @@ async def test_rendered_tool_schema_matches_snapshot(
         }
         for tool in tools
     }
-    rendered = dict(sorted(rendered.items()))
+    rendered = _normalize_snapshot_value(dict(sorted(rendered.items())))
 
     assert rendered, "rendered tool registry must not be empty"
     missing = _MUST_CONTAIN - rendered.keys()
@@ -161,6 +179,7 @@ async def test_rendered_hub_tool_schema_matches_snapshot(
         ),
     }
 
+    rendered = _normalize_snapshot_value(rendered)
     assert rendered["tools"], "the hub tool registry must not be empty"
     assert rendered == snapshot, "rendered hub tool schema drifted from the committed snapshot"
 

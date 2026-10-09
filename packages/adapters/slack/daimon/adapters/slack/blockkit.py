@@ -10,24 +10,24 @@ with Discord; ``escape_mrkdwn`` is imported from the sibling ``mrkdwn`` module
 (same adapter package boundary; not a cross-adapter import).
 
 Phase reference:
-  THINKING     → *Thinking* · {elapsed}
-  TOOL_RUNNING → *Working* · {elapsed}  (a tool call is running)
+  THINKING     → *Working on it…*
+  TOOL_RUNNING → *Working on it…*  (a tool call is running)
   DONE         → collapsed summary (terminal)
   ERROR        → ❌ collapsed summary (terminal)
 
 Status surface shape (non-terminal):
-  section  — *Thinking* · 12s  (headline)
+  section  — *Working on it…*  (headline)
   section  — ```tool lines```  (when the turn has made tool calls)
   section  — > {escaped draft}  (when text_preview is set; expand=True)
   actions  — Cancel button (action_id="cancel_turn"; style="danger"; no value)
 
 Terminal collapse (DONE/ERROR):
-  context  — {agent_name} · {elapsed}s · {in} in / {out} out [· {cost}]
-             For ERROR: ❌ {reason} prepended
+  section  — outcome and retry step when needed
+  context  — Details: time, cost, tokens, balance
 
 No color field anywhere — blocks only, no attachments.
 Preview text entity-escaped via escape_mrkdwn (& first, then < >).
-Cost/usage footer on terminal.
+Terminal metrics stay visible in Details.
 """
 
 from __future__ import annotations
@@ -53,6 +53,7 @@ from daimon.core.turn.card_state import (
 )
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.status_lines import (
+    format_duration,
     format_headline,
 )
 
@@ -71,10 +72,7 @@ _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
 
 # Copy is byte-identical to the Discord adapter's orphan-retirement embed: the
 # two adapters must say the same thing about the same event.
-INTERRUPTED_NOTICE: str = (
-    f"{_EMOJI_CROSS} This turn was interrupted by a restart and cannot be "
-    "resumed. Nothing was lost on your side — mention me again to retry."
-)
+INTERRUPTED_NOTICE: str = "Stopped: Daimon restarted.\nMention me to try again."
 
 # ---------------------------------------------------------------------------
 # Pure functions
@@ -90,7 +88,7 @@ def _fmt_tokens(n: int) -> str:
 
 
 def to_fallback_text(state: State, *, now: float | None) -> str:
-    """The running card's headline in plain words, e.g. ``Working · 1m 5s``.
+    """The running card's headline in plain words, e.g. ``Working on it…``.
 
     Slack shows it in notifications and to screen readers instead of the blocks.
     """
@@ -107,7 +105,11 @@ def _headline(state: State, now: float | None, *, bold: Callable[[str], str]) ->
 
 
 def to_blocks(
-    state: State, *, now: float | None, cancel_key: str | None = None
+    state: State,
+    *,
+    now: float | None,
+    cancel_key: str | None = None,
+    answer_visible: bool = False,
 ) -> list[dict[str, Any]]:
     """Render State into a list of Slack Block Kit block dicts.
 
@@ -122,35 +124,63 @@ def to_blocks(
         parameter. No ``slack_sdk.models.blocks`` types — pure dicts (Pitfall 5).
 
     Non-terminal (THINKING / TOOL_RUNNING):
-        - section  : ``*Thinking* · {elapsed}`` or ``*Working* · {elapsed}``
+        - section  : ``*Working on it…*``
         - section  : the tool lines in a code block  (when there are any)
         - section  : > {escaped draft}  (when text_preview is set; expand=True)
         - actions  : Cancel button  (action_id="cancel_turn", style="danger")
 
     Terminal (DONE / ERROR):
-        - context  : {agent_name} · {elapsed}s · {in} in / {out} out [· {cost}]
-                     ERROR prepends ❌ {reason}, under a section with the
-                     termination notice when one was rendered
+        - context  : Details with time, cost, tokens and balance
+                     ERROR adds a separate notice section when available
         No actions block (cancel button removed on terminal).
     """
     if state.phase in _TERMINAL_PHASES:
-        # Terminal collapse: one summary context block only.
+        # Terminal collapse: outcome above, metrics grouped under Details.
         elapsed = int(now - state.started_at) if now is not None else 0
         tokens = f"{_fmt_tokens(state.usage_in)} in / {_fmt_tokens(state.usage_out)} out"
-        parts: list[str] = [state.agent_name, f"{elapsed}s", tokens]
+        parts: list[str] = [f"Time: {elapsed}s"]
         if state.cost_str is not None:
-            parts.append(state.cost_str)
+            parts.append(f"Cost: {state.cost_str}")
+        parts.append(f"Tokens: {tokens}")
         if state.balance_str is not None:
-            parts.append(state.balance_str)
-        summary = " · ".join(parts)
-        if state.phase is TurnPhase.ERROR:
-            summary_text = f"{_EMOJI_CROSS} {state.error_reason or 'error'} · {summary}"
-        else:
-            summary_text = summary
+            parts.append(f"Balance: {state.balance_str}")
         blocks: list[dict[str, Any]] = []
-        if state.phase is TurnPhase.ERROR and state.notice:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": state.notice}})
-        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": summary_text}]})
+        if state.phase is TurnPhase.ERROR:
+            blocks.append(
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Something went wrong."}}
+            )
+            next_step = "Mention me to try again."
+            notice_text = state.notice
+            if state.notice and "*Next:* " in state.notice:
+                extracted = state.notice.split("*Next:* ", 1)[1].split("\n", 1)[0].strip()
+                if extracted:
+                    next_step = extracted
+                notice_text = "\n".join(
+                    line for line in state.notice.splitlines() if not line.startswith("*Next:* ")
+                )
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": next_step}})
+            if state.notice:
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": f"*Details*\n{notice_text}"},
+                    }
+                )
+        elif not answer_visible and state.text_preview is None:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "Done."}})
+        if blocks:
+            blocks.append({"type": "divider"})
+        if state.agent_name and not state.header_customized:
+            blocks.append(
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": state.agent_name}]}
+            )
+        details_label = "" if state.phase is TurnPhase.ERROR and state.notice else "*Details*\n"
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": details_label + "\n".join(parts)}],
+            }
+        )
         return blocks
 
     # Non-terminal: the headline, the tool lines, then the latest draft.
@@ -159,9 +189,14 @@ def to_blocks(
         {"type": "section", "text": {"type": "mrkdwn", "text": headline}},
     ]
     if state.tool_lines:
-        tool_lines = escape_mrkdwn("\n".join(state.tool_lines))
+        tool_lines = "\n".join(
+            f"`{escape_mrkdwn(line.replace('`', "'"))}`" for line in state.tool_lines
+        )
         blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"```\n{tool_lines}\n```"}}
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"*Details*\n{tool_lines}"}],
+            }
         )
     # expand=True keeps Slack from folding the draft behind "see more".
     if state.text_preview:
@@ -179,17 +214,25 @@ def to_blocks(
     cancel_button: dict[str, Any] = {
         "type": "button",
         "action_id": "cancel_turn",
-        "text": {"type": "plain_text", "text": "Cancel"},
+        "text": {"type": "plain_text", "text": "Stop"},
         "style": "danger",
     }
     if cancel_key is not None:
         cancel_button["value"] = cancel_key
+    blocks.append({"type": "divider"})
     blocks.append(
         {
             "type": "actions",
             "elements": [cancel_button],
         }
     )
+    if now is not None and state.started_at:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": format_duration(now - state.started_at)}],
+            }
+        )
 
     return blocks
 
@@ -200,20 +243,21 @@ def to_interrupted_blocks() -> list[dict[str, Any]]:
     Deliberately NOT ``to_blocks(State(phase=TurnPhase.ERROR, ...))``: a fresh
     boot process has the DB row and nothing else -- no agent name, no usage,
     no monotonic start -- so the terminal collapse would render an empty
-    agent field and a misleading "0s · 0 in / 0 out" for a turn that may have
+        agent field and misleading zero usage for a turn that may have
     run 40 minutes.
 
     Takes no arguments and emits no ``actions`` block, so the Cancel button is
     gone by construction -- there is no live turn left to cancel.
     """
-    return [{"type": "section", "text": {"type": "mrkdwn", "text": INTERRUPTED_NOTICE}}]
+    title, next_step = INTERRUPTED_NOTICE.split("\n", 1)
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": title}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": next_step}},
+    ]
 
 
 def format_termination_notice(notice: TerminationNotice) -> str:
-    """Draw the core notice as mrkdwn for the ERROR card.
-
-    The headline is not repeated here: it is already the summary's reason.
-    """
+    """Draw the core notice below the ERROR card's title as mrkdwn."""
     lines = [escape_mrkdwn(notice.cause)]
     work = notice.work_line(lambda name: f"`{escape_mrkdwn(name.replace('`', ''))}`")
     if work is not None:

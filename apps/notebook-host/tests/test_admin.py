@@ -166,16 +166,62 @@ def test_put_notebook_with_valid_bearer_returns_200(
     assert "port" in body, "response should include port"
     assert "pid" in body, "response should include pid"
     assert "size_bytes" in body, "response should include size_bytes"
-    assert "subprocess_ttl_seconds" in body, "response should include subprocess_ttl_seconds"
-    assert "expires_at" in body, "response should include expires_at"
+    assert body["permanent"] is False, "a scratch notebook is not a blog"
     # expires_at must parse as an ISO-8601 timestamp with timezone info.
     parsed = datetime.fromisoformat(body["expires_at"])
     assert parsed.tzinfo is not None, "expires_at should be timezone-aware"
-    # And it should be in the future, ttl seconds from now (give a 5s slack).
+    # With no lifetime asked for, it is the host TTL from now (give a 5s slack).
     delta = (parsed - datetime.now(UTC)).total_seconds()
-    assert 0 < delta <= body["subprocess_ttl_seconds"] + 5, (
-        f"expires_at should be ~ttl seconds in the future; delta={delta}"
+    assert 0 < delta <= 86400 + 5, f"expires_at should be ~ttl seconds in the future; delta={delta}"
+
+
+def test_put_notebook_keeps_a_read_only_notebook_for_the_lifetime_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_host.blogs_store import load_blogs
+
+    client, _, _ = _make_test_app(tmp_path, monkeypatch)
+    resp = client.put(
+        "/admin/notebooks/week",
+        json={"source": "x = 1", "ttl_seconds": 7 * 86400},
+        headers={"Authorization": AUTH},
     )
+    assert resp.status_code == 200, resp.text
+    delta = (datetime.fromisoformat(resp.json()["expires_at"]) - datetime.now(UTC)).total_seconds()
+    assert 7 * 86400 - 5 < delta <= 7 * 86400 + 5, "kept for the week asked for"
+    record = load_blogs(tmp_path / "blogs.json")["week"]
+    assert record.expires_at is not None, "the lifetime is saved so it survives a restart"
+
+
+def test_put_notebook_clamps_the_lifetime_to_the_host_maximum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DAIMON_NOTEBOOK__MAX_NOTEBOOK_TTL_SECONDS", "3600")
+    client, _, _ = _make_test_app(tmp_path, monkeypatch)
+    resp = client.put(
+        "/admin/notebooks/long",
+        json={"source": "x = 1", "ttl_seconds": 365 * 86400},
+        headers={"Authorization": AUTH},
+    )
+    delta = (datetime.fromisoformat(resp.json()["expires_at"]) - datetime.now(UTC)).total_seconds()
+    assert delta <= 3600 + 5, "the operator's maximum wins over the agent's ask"
+
+
+def test_republishing_a_blog_without_permanent_keeps_it_a_blog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_host.blogs_store import load_blogs
+
+    client, _, _ = _make_test_app(tmp_path, monkeypatch)
+    client.put("/admin/blogs/post", json={"source": "x = 1"}, headers={"Authorization": AUTH})
+    resp = client.put(
+        "/admin/notebooks/post",
+        json={"source": "x = 2", "ttl_seconds": 86400},
+        headers={"Authorization": AUTH},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["permanent"] is True, "an edit to a blog must not schedule its deletion"
+    assert load_blogs(tmp_path / "blogs.json")["post"].expires_at is None
 
 
 def test_put_notebook_writes_file_to_data_dir(
@@ -650,9 +696,8 @@ def test_put_notebook_returns_null_expires_at_when_ttl_indefinite(
     )
     assert resp.status_code == 200, "valid bearer should return 200"
     body = resp.json()
-    assert body["subprocess_ttl_seconds"] == 0, "response should echo the indefinite TTL"
     assert body["expires_at"] is None, (
-        "expires_at should be null when age-based reaping is disabled"
+        "with no lifetime asked for and age-based reaping disabled, it is kept until deleted"
     )
 
 

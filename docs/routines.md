@@ -4,10 +4,12 @@ A routine is a recurring headless turn: a cron expression, a timezone, an
 agent and one prompt. The scheduler fires it, the agent runs with no human in
 the thread, and the tail of its final message is written back onto the
 routine row.
+For an agent in GitHub App mode, a routine has no human asker and receives only
+the agent's baseline repository grants.
 
 A routine may name a **destination**: a channel or a thread. With one, the run
 is told where its result goes, and if the agent does not post there itself,
-daimon posts the tail of its final reply there after the run (see
+Daimon posts the tail of its final reply there after the run (see
 [Delivery](#delivery)). Without one — every routine created before this
 existed, and any created without it — nothing is delivered anywhere: the
 result is only recorded on the row, and if it should land in a channel the
@@ -31,7 +33,7 @@ through `packages/core/daimon/core/stores/routines.py`:
 | --- | --- |
 | `tenant_id` | the partition; cascades on tenant delete |
 | `created_by_user_id` | the **platform** user id of the creator, not an account id |
-| `agent_name` / `agent_id` | the daimon tag is authoritative; the MA id is a cache, self-healed at fire time |
+| `agent_name` / `agent_id` | the Daimon tag is authoritative; the MA id is a cache, self-healed at fire time |
 | `cron_expr` / `timezone` | a five-field croniter expression and an IANA zone |
 | `trigger_message` | the prompt sent as the turn's user message |
 | `enabled` | the pause flag |
@@ -68,13 +70,13 @@ checks that the pair comes together, that the id has the platform's shape (a
 Discord id is a number; a Slack channel is `C…`, a Slack thread
 `<channel>:<ts>`; a Teams channel `19:…@thread.tacv2`, a Teams thread
 `<channel>;messageid=<root>`), that the channel exists in the caller's own server or
-workspace with daimon able to post there (on Slack, daimon must be a member;
+workspace with Daimon able to post there (on Slack, Daimon must be a member;
 a thread must exist), that the kind matches (a Discord thread is not a
 channel), that **the caller themselves may post there** — the same checks
 `send_message` applies to a caller (Discord: view and send, send in threads,
 membership of a private thread unless they manage threads; Slack: membership
 of a private channel, or of any channel for a guest; Teams: on the channel's
-roster, in a team daimon is in) — and that the tenant's
+roster, in a team Daimon is in) — and that the tenant's
 access policy does not protect it — checked
 with the parent channel and category resolved from the platform. Changing the
 destination drops a result still pending for the old one. The adapter checks
@@ -132,6 +134,10 @@ Each tick, 30 seconds apart by default:
    eligibility while waiting for a dispatch slot, preserving the previous batch
    behavior even when a slow sibling runs past the freshness window. Additional
    unclaimed work remains in PostgreSQL when the bounded batch is full.
+
+The [usage sweep](billing.md#the-tables) runs on its own loop with the same
+pause between passes, so a long pass no longer blocks claims. Shutdown cancels a
+pass in flight; the next process starts a full pass.
 
 The per-routine catch-up policy controls downtime recovery:
 
@@ -192,7 +198,7 @@ A routine with a destination sends its trigger message after a
 `<turn_controls>` block (`render_routine_controls` in
 `packages/core/daimon/core/routine_delivery.py`): the routine's id, agent,
 schedule, timezone and destination, and one line saying that nobody is
-watching and that daimon posts the end of the final reply to the destination
+watching and that Daimon posts the end of the final reply to the destination
 unless the agent posts there itself. If the destination's rule has since
 become `writers: none`, the controls say so and tell
 the agent not to post there (the result goes to the creator instead). The
@@ -213,7 +219,7 @@ On success the runner returns the tail of the final message, truncated to
 
 For a routine with a destination, a successful fire also fills the row's
 outbox. The scheduler looks through the finished turn for a completed,
-non-error `send_message` on daimon's own server — called directly or through
+non-error `send_message` on Daimon's own server — called directly or through
 the MCP search interface's `call_tool(name="send_message", arguments=…)` —
 whose `channel_id` is exactly the destination (a Slack thread counts only as
 `<channel>:<ts>`; a top-level post in its channel is not the thread). If the

@@ -47,8 +47,9 @@ from typing import Any, Self, cast
 
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.channel_admin_roles import member_roles
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import DirectMessagePolicy, SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import (
@@ -57,8 +58,10 @@ from daimon.core.stores.support_escalation import (
 )
 from daimon.core.stores.thread_sessions import get_latest_thread_session
 from daimon.core.support_escalation import (
+    ASK_THE_TEAM,
     CUSTOM_ID_TEMPLATE,
     EMPTY_NOTE,
+    ESCALATE,
     OUT_OF_CREDITS,
     RECORDED_UNDELIVERED,
     UNAVAILABLE,
@@ -72,8 +75,8 @@ from discord.ext import commands
 
 _log = structlog.get_logger()
 
-_CALLBACK_FAILED = "Something went wrong opening the form -- please try again."
-_SUBMIT_FAILED = "Something went wrong sending your request -- please try again."
+_CALLBACK_FAILED = "That didn't work. Try again."
+_SUBMIT_FAILED = "That didn't work. Try again."
 # The person-facing copy is shared with Slack (`daimon.core.support_escalation`).
 _EMPTY_NOTE = EMPTY_NOTE
 _MALFORMED = UNAVAILABLE
@@ -81,7 +84,59 @@ _OUT_OF_CREDITS = OUT_OF_CREDITS
 _RECORDED_UNDELIVERED = RECORDED_UNDELIVERED
 
 
-class SupportModal(discord.ui.Modal, title="Ask a human"):
+def discord_channel(support: SupportSettings) -> str | None:
+    """Ask a human's escalation channel when the Discord bot can post in it, else None.
+
+    A deployment running the Discord and Teams bots shares
+    `escalation_channel_id`. A Teams channel (`19:…`) there belongs to the
+    Teams bot, so Discord offers no Ask a human rather than spending credits
+    on requests it could never deliver.
+    """
+    channel = support.escalation_channel_id
+    return None if channel is None or channel.startswith("19:") else channel
+
+
+async def post_to_support_channel(
+    bot: commands.Bot,
+    *,
+    channel_id: str,
+    body: str,
+    allowed_mentions: discord.AllowedMentions | None = None,
+) -> bool:
+    """Post ``body`` into the support channel. True if it landed.
+
+    Shared by Ask a human and the routed 👎 form (`feedback_modal`). Resolves
+    through the cache first and falls back to one fetch, because the
+    escalation channel lives in the operators' own guild and may not be in a
+    freshly-started bot's cache. Returns False on anything that means the
+    message did not arrive -- a channel that cannot be resolved, one the bot
+    cannot post in, or an id that is not a channel it can message.
+    """
+    try:
+        channel = bot.get_channel(int(channel_id))
+        if channel is None:
+            channel = await bot.fetch_channel(int(channel_id))
+        if not isinstance(channel, discord.abc.Messageable):
+            _log.warning("support.channel_not_messageable", channel_id=channel_id)
+            return False
+        if allowed_mentions is None:
+            await channel.send(body)
+        else:
+            await channel.send(body, allowed_mentions=allowed_mentions)
+        return True
+    except (discord.HTTPException, ValueError) as exc:
+        # A misconfigured id, a channel the bot was removed from, or lost
+        # send permission. All operator-side, none of them the requester's
+        # problem -- and none of them may lose the row.
+        _log.warning(
+            "support.channel_undeliverable",
+            channel_id=channel_id,
+            err_type=type(exc).__name__,
+        )
+        return False
+
+
+class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
     """Free-text form; writing it is what spends the credit.
 
     `on_submit` commits the row, closes the transaction, and only then tries
@@ -101,6 +156,8 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
         self._message_id = message_id
         self.note_input: discord.ui.TextInput[SupportModal] = discord.ui.TextInput(
             label="What do you need help with?",
+            # Discord caps a label at 45 characters; Slack says this in its label.
+            placeholder="Write a few words.",
             style=discord.TextStyle.paragraph,
             required=True,
             max_length=4000,
@@ -115,7 +172,7 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
             return
 
         settings = self._runtime.settings
-        channel_id = settings.support.escalation_channel_id
+        channel_id = discord_channel(settings.support)
         if channel_id is None:
             # Disabled between the reaction and the submit. Nothing is spent.
             await interaction.followup.send(_MALFORMED, ephemeral=True)
@@ -231,6 +288,7 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
             platform="discord",
             channel_id=await self._origin_channel_id(bot),
             requester_id=str(interaction.user.id),
+            members=member_roles(self._runtime, bot, self._guild_id),
         )
         if not tiers:
             return False
@@ -259,37 +317,14 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
         guild_id: str,
         channel_id: str,
     ) -> bool:
-        """Post the request into the escalation channel. True if it landed.
-
-        Resolves through the cache first and falls back to one fetch, because
-        the escalation channel lives in the operators' own guild and may not be
-        in a freshly-started bot's cache. Returns False on anything that means
-        the message did not arrive -- a channel that cannot be resolved, one
-        the bot cannot post in, or an id that is not a channel it can message
-        -- so the caller leaves `delivered_at` NULL and tells the requester the
-        honest thing.
-        """
-        body = self._body(interaction, note)
-        bot = cast(commands.Bot, interaction.client)
-        try:
-            channel = bot.get_channel(int(channel_id))
-            if channel is None:
-                channel = await bot.fetch_channel(int(channel_id))
-            if not isinstance(channel, discord.abc.Messageable):
-                _log.warning("support.channel_not_messageable", channel_id=channel_id)
-                return False
-            await channel.send(body)
-            return True
-        except (discord.HTTPException, ValueError) as exc:
-            # A misconfigured id, a channel the bot was removed from, or lost
-            # send permission. All operator-side, none of them the requester's
-            # problem -- and none of them may lose the row.
-            _log.warning(
-                "support.channel_undeliverable",
-                channel_id=channel_id,
-                err_type=type(exc).__name__,
-            )
-            return False
+        """Post the request into the escalation channel. True if it landed; on
+        False the caller leaves `delivered_at` NULL and tells the requester the
+        honest thing."""
+        return await post_to_support_channel(
+            cast(commands.Bot, interaction.client),
+            channel_id=channel_id,
+            body=self._body(interaction, note),
+        )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         """Adapter boundary: discord.py routes on_submit failures here, not to a dispatcher."""
@@ -317,7 +352,8 @@ class SupportEscalateButton(
     def __init__(self, *, guild_id: str, channel_id: str, message_id: str) -> None:
         button: discord.ui.Button[discord.ui.View] = discord.ui.Button(
             style=discord.ButtonStyle.primary,
-            label="Ask a human",
+            label=ASK_THE_TEAM,
+            emoji=ESCALATE,
             custom_id=build_custom_id(
                 guild_id=guild_id, channel_id=channel_id, message_id=message_id
             ),

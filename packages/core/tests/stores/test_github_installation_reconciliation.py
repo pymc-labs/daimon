@@ -47,6 +47,32 @@ async def test_duplicate_delivery_does_not_advance_generation_or_delete_installa
     assert installation is not None, "a duplicate receipt must not replay its delete action"
 
 
+async def test_legacy_deletion_does_not_remove_new_app_installation(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        await installation_store.upsert_github_app(
+            session,
+            installation_id=8899,
+            account_id=55,
+            account_login="owner",
+            account_type="Organization",
+            repository_selection="selected",
+            suspended_at=None,
+        )
+        await store.enqueue(
+            session,
+            installation_id=8899,
+            delivery_id="legacy-delete-new-app",
+            event="installation",
+            deleted=True,
+            now=datetime.now(UTC),
+        )
+        installation = await installation_store.get(session, installation_id=8899)
+
+    assert installation is not None and installation.app == "github_app"
+
+
 async def test_deleted_delivery_fences_a_delayed_repository_snapshot(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

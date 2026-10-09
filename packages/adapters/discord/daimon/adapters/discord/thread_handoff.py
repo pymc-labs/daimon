@@ -26,6 +26,7 @@ from typing import Any, Final, Self, cast
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import channel_admin_caller
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.thread_handoff import switch_thread_on_request
 
@@ -50,7 +51,7 @@ class HandOverButton(
     def __init__(self, *, agent_id: str, agent_name: str | None = None) -> None:
         button: discord.ui.Button[discord.ui.View] = discord.ui.Button(
             style=discord.ButtonStyle.primary,
-            label=f"Hand over to {agent_name}"[:80] if agent_name else "Hand over",
+            label=f"Switch to {agent_name}"[:80] if agent_name else "Switch",
             custom_id=build_custom_id(agent_id),
         )
         super().__init__(button)
@@ -119,7 +120,14 @@ class HandOverButton(
         )
         if interaction.message is not None:
             # The notice's button has done its job.
-            await interaction.message.edit(view=None)
+            transport = DiscordPostTransport(
+                bot,
+                thread,
+                name=interaction.message.author.name,
+                avatar_url=None,
+                builtin=False,
+            )
+            await transport.edit(interaction.message, view=None)
         # The public post above is the answer; drop the private "thinking".
         await interaction.delete_original_response()
 

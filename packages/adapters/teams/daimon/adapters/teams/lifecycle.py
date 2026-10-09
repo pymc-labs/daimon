@@ -17,7 +17,7 @@ import asyncio
 import contextlib
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Protocol
 
@@ -40,15 +40,16 @@ from daimon.core.turn.state import (
 )
 from daimon.core.turn.termination import termination_reason
 from microsoft_teams.api import Account, MessageActivityInput, SentActivity
+from microsoft_teams.cards import Action, ExecuteAction
 from pydantic import SecretStr
 
 log = structlog.get_logger()
 
 _DEBOUNCE_S = 5.0
 _SEALED_RESPONSE_MIN_CHARS = 500  # Same substantive-answer threshold as Slack.
-_DELIVERY_FAILED = "⚠️ Something went wrong posting the answer."
+_DELIVERY_FAILED = "Something went wrong. Mention me to try again."
 # Slack's copy for a no-answer turn, which must not claim an answer existed.
-_FINISH_FAILED = "⚠️ Something went wrong finishing this turn."
+_FINISH_FAILED = "Something went wrong. Mention me to try again."
 _DELIVERY_UNCERTAIN = "⚠️ Posting the answer timed out. If it isn't above, ask again."
 _ANSWER_CUT_SHORT = "⚠️ Part of this answer may be missing. Ask again if it stops short."
 # Everything an SDK send can raise: httpx.HTTPError for the Bot Framework
@@ -112,10 +113,17 @@ class TeamsTurnLifecycle:
         unprompted: bool = False,
         completion_ping: bool = False,
         requester: Account | None = None,
+        agent_name_prefix: str | None = None,
+        ask_human: bool = False,
+        direct_chat: bool = False,
     ) -> None:
         self._sender = sender
+        # Support is on: the answer carries an Ask a human button.
+        self._ask_human = ask_human
         self._ping = completion_ping and not unprompted
         self._requester = requester if self._ping else None
+        self._agent_name_prefix = agent_name_prefix
+        self._direct_chat = direct_chat
         # Nobody asked, so nothing is owed: no card, no notice, no failure post.
         self._unprompted = unprompted
         self._request_id = request_id
@@ -142,8 +150,9 @@ class TeamsTurnLifecycle:
         self._answer_id: str | None = None
         # Each answer message as on screen, id -> (text, is_last), for later edits.
         self._shown: dict[str, tuple[str, bool]] = {}
-        # Shown messages that are notice cards, not answers: edited as cards.
-        self._notices: set[str] = set()
+        # Shown messages that are notice cards, not answers: edited as cards,
+        # with their buttons and whether they carry the feedback buttons.
+        self._notices: dict[str, tuple[tuple[Action, ...], bool]] = {}
         # Edits of a shown answer, from the turn and the output sweep, one at a time.
         self._answer_edits = asyncio.Lock()
 
@@ -204,7 +213,7 @@ class TeamsTurnLifecycle:
         self._last_flush = now
         await self._send(self._status(), message_id=self._message_id)
 
-    async def close_with_notice(self, text: str) -> None:
+    async def close_with_notice(self, text: str, *, actions: Sequence[ExecuteAction] = ()) -> None:
         """Terminal render for adapter-side bailouts. Never raises on a send error."""
         if self._terminal:
             return
@@ -213,17 +222,24 @@ class TeamsTurnLifecycle:
             log.info("teams.turn.unprompted_notice_dropped")
             return
         try:
-            await self._close(text)
+            await self._close(text, actions=tuple(actions))
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.notice_failed", exc_info=True)
 
-    async def _close(self, text: str) -> None:
-        """Replace the card with a final notice; an edit that timed out is sent once more."""
-        self._message_id = message_id = await self._edit(card.notice_card(text), self._message_id)
+    async def _close(
+        self, text: str, *, actions: tuple[Action, ...] = (), rated: bool = False
+    ) -> None:
+        """Replace the card with a final notice; an edit that timed out is sent once more.
+
+        `rated` adds the feedback buttons: a tool-only turn's result is an answer too.
+        """
+        notice = card.notice_card(text, actions=actions)
+        notice = card.rated(notice) if rated else notice
+        self._message_id = message_id = await self._edit(notice, self._message_id)
         self.final_message_id = self._answer_id = message_id
         self.card_closed = True
         # A tool-only or failed turn's notice still carries what is edited into it.
-        self._notices.add(message_id)
+        self._notices[message_id] = (actions, rated)
         self._shown[message_id] = (text, True)
 
     def _answer_text(self, state: TurnState) -> str:
@@ -252,13 +268,17 @@ class TeamsTurnLifecycle:
                 text = card.TOOLS_DONE_NOTICE if tool_only else card.CANCELLED_NOTICE
                 if tool_only and degraded is not None:
                     text = f"{degraded}\n\n{text}"
-                await self._close(text)
+                # As on Slack: a cancelled turn carries no controls, a tool-only one does.
+                ask = (card.ask_human_action(),) if tool_only and self._ask_human else ()
+                await self._close(text, actions=ask, rated=tool_only)
                 return
             if self.answer_prefix is not None:
                 answer = f"{self.answer_prefix}\n\n{answer}"
                 self.answer_prefix_applied = True
             if degraded is not None:
                 answer = f"{answer}\n\n{degraded}"
+            if self._agent_name_prefix is not None:
+                answer = f"**{self._agent_name_prefix}**\n\n{answer}"
             chunks = split_fenced(answer, card.TEAMS_LIMIT)
             last = len(chunks) - 1
             # A ping posts the answer fresh, so Teams notifies; the card is retired after.
@@ -267,7 +287,9 @@ class TeamsTurnLifecycle:
             for index, chunk in enumerate(chunks):
                 is_last = index == last
                 mention = self._requester if index == 0 else None
-                message = card.answer_message(chunk, is_last=is_last, mention=mention)
+                message = card.answer_message(
+                    chunk, is_last=is_last, mention=mention, ask_human=self._ask_human
+                )
                 if index == 0 and not fresh:
                     current = self._message_id = await self._edit(message, current)
                     self.card_closed = True
@@ -298,7 +320,12 @@ class TeamsTurnLifecycle:
                 return
             # Collapse the card so it does not show a live turn forever.
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                failed = card.notice_card(_DELIVERY_FAILED if answer else _FINISH_FAILED)
+                failed_text = _DELIVERY_FAILED if answer else _FINISH_FAILED
+                if self._direct_chat:
+                    failed_text = failed_text.replace(
+                        "Mention me to try again.", "Send a message to try again."
+                    )
+                failed = card.notice_card(failed_text)
                 await self._send(failed, message_id=self._message_id)
                 self.card_closed = True
 
@@ -339,10 +366,14 @@ class TeamsTurnLifecycle:
             if len(updated) > card.TEAMS_LIMIT:
                 return False
             if message_id in self._notices:
-                rendered = card.notice_card(updated)
+                actions, rated = self._notices[message_id]
+                rendered = card.notice_card(updated, actions=actions)
+                rendered = card.rated(rendered) if rated else rendered
             else:
                 mention = self._requester if message_id == self._answer_id else None
-                rendered = card.answer_message(updated, is_last=shown[1], mention=mention)
+                rendered = card.answer_message(
+                    updated, is_last=shown[1], mention=mention, ask_human=self._ask_human
+                )
             try:
                 await self._edit(rendered, message_id)
             except _TIMEOUTS:

@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import hmac
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
 from uuid import UUID
@@ -38,6 +39,7 @@ from notebook_host.jail import (
     resolve_jail_uid,
     write_file_nofollow,
 )
+from notebook_host.lazy_spawn import sweep_once
 from notebook_host.lifecycle import (
     NotebookProcess,
     ValidationResult,
@@ -47,7 +49,6 @@ from notebook_host.lifecycle import (
     origin_label_for,
     safe_attachment_name,
     safe_slug,
-    should_reap,
     wait_for_port,
 )
 from notebook_host.pids_store import record_from_process, save_pids
@@ -93,7 +94,7 @@ class AdminState:
         *,
         access_token: str,
         mode: Literal["edit", "run"] = "edit",
-        permanent: bool = False,
+        registered: bool = False,
     ) -> NotebookProcess:
         public_url_base = self.settings.public_url_base
         if self.settings.origin_base is not None:
@@ -107,7 +108,7 @@ class AdminState:
             host_port=self.settings.host_port,
             public_url_base=public_url_base,
             mode=mode,
-            permanent=permanent,
+            registered=registered,
             access_token=access_token,
         )
 
@@ -118,9 +119,9 @@ class AdminState:
         between the read-only app and the editor mints a new one, so holders of
         a read-only link never become editors and an editor link stops working
         once the slug is read-only. A live process's token wins, then a
-        registered blog's persisted one (blogs are always read-only). Deleting
-        or reaping a slug drops both, so its next publish gets a fresh token and
-        every old link stops working.
+        registered notebook's persisted one (registered notebooks are always
+        read-only). Deleting or reaping a slug drops both, so its next publish
+        gets a fresh token and every old link stops working.
         """
         existing = self.processes.get(slug)
         if existing is not None:
@@ -152,6 +153,82 @@ class WriteRequest(BaseModel):
     # The marimo code editor instead of the read-only app. Refused unless the
     # host's ``allow_editable`` is on.
     editable: bool = False
+    # How long to keep a read-only notebook, as the upload token's
+    # ``notebook_ttl_seconds``. Ignored for the editor.
+    ttl_seconds: int | None = None
+
+
+def _register_read_only(
+    state: AdminState, np: NotebookProcess, *, permanent: bool, ttl_seconds: int | None
+) -> float | None:
+    """Record a just-published read-only notebook; returns its ``expires_at``.
+
+    ``ttl_seconds`` None or <= 0 means the host's ``subprocess_ttl_seconds``,
+    and any value is clamped to ``max_notebook_ttl_seconds``. Re-publishing
+    a slug restarts its lifetime from now, except that a blog stays a blog:
+    re-uploading one without ``permanent`` must not quietly schedule it for
+    deletion. Deleting it is the way back to a scratch notebook.
+    """
+    path = state.settings.resolved_blogs_file
+    existing = load_blogs(path).get(np.slug)
+    expires_at: float | None
+    if permanent or (existing is not None and existing.expires_at is None):
+        expires_at = None
+    else:
+        ttl = (
+            ttl_seconds
+            if ttl_seconds is not None and ttl_seconds > 0
+            else state.settings.subprocess_ttl_seconds
+        )
+        # A host TTL <= 0 disables expiry, so with no lifetime asked for the
+        # notebook is kept until it is deleted.
+        expires_at = (
+            np.started_at + min(ttl, state.settings.max_notebook_ttl_seconds) if ttl > 0 else None
+        )
+    register_blog(
+        path,
+        BlogRecord(
+            slug=np.slug,
+            created_at=existing.created_at if existing is not None else np.started_at,
+            title=existing.title if existing is not None else None,
+            access_token=np.access_token,
+            expires_at=expires_at,
+        ),
+    )
+    return expires_at
+
+
+def _iso(epoch: float | None) -> str | None:
+    return datetime.fromtimestamp(epoch, tz=UTC).isoformat() if epoch is not None else None
+
+
+def _read_only_response(
+    state: AdminState, np: NotebookProcess, expires_at: float | None
+) -> dict[str, object]:
+    return {
+        "slug": np.slug,
+        "url": np.url,
+        "port": np.port,
+        "pid": np.process.pid,
+        "size_bytes": get_slug_paths(state.settings.data_dir, np.slug).notebook.stat().st_size,
+        "permanent": expires_at is None,
+        "expires_at": _iso(expires_at),
+    }
+
+
+def _editor_response(state: AdminState, np: NotebookProcess) -> dict[str, object]:
+    ttl = state.settings.subprocess_ttl_seconds
+    # ttl <= 0 disables age-based reaping — the editor never expires, so there
+    # is no expiry timestamp to report.
+    return {
+        "slug": np.slug,
+        "url": np.url,
+        "port": np.port,
+        "pid": np.process.pid,
+        "size_bytes": get_slug_paths(state.settings.data_dir, np.slug).notebook.stat().st_size,
+        "subprocess_ttl_seconds": ttl,
+        "expires_at": _iso(np.started_at + ttl if ttl > 0 else None),
+    }
 
 
 def _require_editor_allowed(settings: Settings) -> None:
@@ -235,7 +312,6 @@ async def _spawn_tracked(
     source_bytes: bytes,
     *,
     mode: Literal["edit", "run"],
-    permanent: bool = False,
 ) -> NotebookProcess:
     """Write source, validate, replace any existing process, spawn, wait ready.
 
@@ -245,11 +321,15 @@ async def _spawn_tracked(
     timeout). Shared by the notebook and blog PUT handlers so the two never
     drift.
 
-    Raises 409 for the editor on a registered blog: its readers hold a
-    read-only link, and delete-then-republish is the way to turn it back into
-    a scratch notebook.
+    A read-only process is registered (started on a visit, stopped when
+    idle); the caller records it with ``_register_read_only``. Raises 409 for
+    the editor on a blog: its readers hold a read-only link, and
+    delete-then-republish is the way to turn it back into a scratch notebook.
+    The editor on a read-only scratch notebook replaces it and drops its
+    registry record, since the editor is never restarted on a visit.
     """
-    if mode == "edit" and slug in load_blogs(state.settings.resolved_blogs_file):
+    record = load_blogs(state.settings.resolved_blogs_file).get(slug)
+    if mode == "edit" and record is not None and record.expires_at is None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             f"{slug!r} is a published blog; delete it before publishing an editor there",
@@ -323,9 +403,11 @@ async def _spawn_tracked(
     )
     proc = state.spawner(slug, paths, port, access_token=access_token, mode=mode, jail_uid=uid)
     np = state.make_process(
-        slug, port, proc, access_token=access_token, mode=mode, permanent=permanent
+        slug, port, proc, access_token=access_token, mode=mode, registered=mode == "run"
     )
     state.processes[slug] = np
+    if mode == "edit" and record is not None:
+        unregister_blog(state.settings.resolved_blogs_file, slug)
 
     state.snapshot_pids()
     ready = await wait_for_port(
@@ -362,6 +444,8 @@ def create_admin_router(state: AdminState) -> APIRouter:
                 "in_use": len(state.processes),
             },
             "subprocess_ttl_seconds": state.settings.subprocess_ttl_seconds,
+            "warm_window_seconds": state.settings.warm_window_seconds,
+            "registered_notebooks": len(load_blogs(state.settings.resolved_blogs_file)),
         }
 
     @router.put("/admin/notebooks/{slug}", dependencies=[Depends(require_admin)])
@@ -379,23 +463,12 @@ def create_admin_router(state: AdminState) -> APIRouter:
                 _require_editor_allowed(state.settings)
             mode: Literal["edit", "run"] = "edit" if body.editable else "run"
             np = await _spawn_tracked(state, slug, source_bytes, mode=mode)
-            ttl = state.settings.subprocess_ttl_seconds
-            # ttl <= 0 disables age-based reaping — the notebook never expires,
-            # so there is no expiry timestamp to report.
-            expires_at = (
-                datetime.fromtimestamp(np.started_at, tz=UTC) + timedelta(seconds=ttl)
-                if ttl > 0
-                else None
+            if mode == "edit":
+                return _editor_response(state, np)
+            expires_at = _register_read_only(
+                state, np, permanent=False, ttl_seconds=body.ttl_seconds
             )
-            return {
-                "slug": slug,
-                "url": np.url,
-                "port": np.port,
-                "pid": np.process.pid,
-                "size_bytes": get_slug_paths(state.settings.data_dir, slug).notebook.stat().st_size,
-                "subprocess_ttl_seconds": ttl,
-                "expires_at": expires_at.isoformat() if expires_at is not None else None,
-            }
+            return _read_only_response(state, np, expires_at)
 
     @router.put(
         "/admin/notebooks/{slug}/data/{name}",
@@ -481,6 +554,7 @@ def create_admin_router(state: AdminState) -> APIRouter:
                     "pid": np.process.pid,
                     "alive": np.is_alive(),
                     "age_s": round(np.age_s, 2),
+                    "registered": np.registered,
                 }
                 for np in sorted(state.processes.values(), key=lambda p: p.slug)
             ]
@@ -497,21 +571,19 @@ def create_admin_router(state: AdminState) -> APIRouter:
                 f"{state.settings.max_source_bytes})",
             )
         async with state.lock_for(slug):
-            np = await _spawn_tracked(state, slug, source_bytes, mode="run", permanent=True)
-            register_blog(
-                state.settings.resolved_blogs_file,
-                BlogRecord(slug=slug, created_at=np.started_at, access_token=np.access_token),
-            )
-            return {
-                "slug": slug,
-                "url": np.url,
-                "port": np.port,
-                "pid": np.process.pid,
-                "size_bytes": get_slug_paths(state.settings.data_dir, slug).notebook.stat().st_size,
-            }
+            np = await _spawn_tracked(state, slug, source_bytes, mode="run")
+            expires_at = _register_read_only(state, np, permanent=True, ttl_seconds=None)
+            return _read_only_response(state, np, expires_at)
 
     @router.get("/admin/blogs", dependencies=[Depends(require_admin)])
     def list_blogs() -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
+        """Every registered read-only notebook, running or not.
+
+        The route keeps its blog-era name so older bots keep working. Scratch
+        notebooks are told apart by ``expires_at`` (None for a blog). ``url``
+        is None while a notebook is stopped; its link still works and starts
+        it.
+        """
         records = load_blogs(state.settings.resolved_blogs_file)
         blogs: list[dict[str, object]] = []
         for slug, rec in sorted(records.items()):
@@ -521,6 +593,7 @@ def create_admin_router(state: AdminState) -> APIRouter:
                     "slug": slug,
                     "created_at": rec.created_at,
                     "title": rec.title,
+                    "expires_at": _iso(rec.expires_at),
                     "url": np.url if np is not None else None,
                     "port": np.port if np is not None else None,
                     "pid": np.process.pid if np is not None else None,
@@ -552,25 +625,16 @@ def create_admin_router(state: AdminState) -> APIRouter:
             state.snapshot_pids()
 
     @router.post("/admin/sweep", dependencies=[Depends(require_admin)])
-    def sweep() -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
-        reaped: list[dict[str, object]] = []
-        for slug in list(state.processes.keys()):
-            np = state.processes[slug]
-            if not np.is_alive():
-                reason = "dead"
-            elif should_reap(np, state.settings.subprocess_ttl_seconds):
-                reason = "ttl"
-            else:
-                continue
-            kill(np)
-            state.processes.pop(slug, None)
-            remove_slug_tree(
-                state.settings.data_dir, slug, uids_file=state.settings.resolved_uids_file
-            )
-            reaped.append({"slug": slug, "reason": reason, "age_s": round(np.age_s, 2)})
-        if reaped:
+    async def sweep() -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
+        result = await sweep_once(state, now=time.time())
+        if result.mutated:
             state.snapshot_pids()
-        return {"reaped": reaped, "subprocess_ttl_seconds": state.settings.subprocess_ttl_seconds}
+        return {
+            "reaped": result.reaped,
+            "stopped": result.stopped,
+            "subprocess_ttl_seconds": state.settings.subprocess_ttl_seconds,
+            "warm_window_seconds": state.settings.warm_window_seconds,
+        }
 
     @router.put("/upload/{token}")
     async def upload(token: str, request: Request) -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
@@ -649,37 +713,17 @@ def create_admin_router(state: AdminState) -> APIRouter:
         # Only an explicit ``notebook_edit`` token gets the editor. A plain
         # scratch notebook is a read-only app like a blog, so a forwarded link
         # runs the notebook without handing out a code-executing editor.
-        permanent = claims.op == "blog"
         mode: Literal["edit", "run"] = "edit" if claims.op == "notebook_edit" else "run"
         async with state.lock_for(slug):
-            np = await _spawn_tracked(state, slug, body, mode=mode, permanent=permanent)
-            size_bytes = get_slug_paths(state.settings.data_dir, slug).notebook.stat().st_size
-            if permanent:
-                register_blog(
-                    state.settings.resolved_blogs_file,
-                    BlogRecord(slug=slug, created_at=np.started_at, access_token=np.access_token),
-                )
-                return {
-                    "slug": slug,
-                    "url": np.url,
-                    "port": np.port,
-                    "pid": np.process.pid,
-                    "size_bytes": size_bytes,
-                }
-            ttl = state.settings.subprocess_ttl_seconds
-            expires_at = (
-                datetime.fromtimestamp(np.started_at, tz=UTC) + timedelta(seconds=ttl)
-                if ttl > 0
-                else None
+            np = await _spawn_tracked(state, slug, body, mode=mode)
+            if mode == "edit":
+                return _editor_response(state, np)
+            expires_at = _register_read_only(
+                state,
+                np,
+                permanent=claims.op == "blog",
+                ttl_seconds=claims.notebook_ttl_seconds,
             )
-            return {
-                "slug": slug,
-                "url": np.url,
-                "port": np.port,
-                "pid": np.process.pid,
-                "size_bytes": size_bytes,
-                "subprocess_ttl_seconds": ttl,
-                "expires_at": expires_at.isoformat() if expires_at is not None else None,
-            }
+            return _read_only_response(state, np, expires_at)
 
     return router

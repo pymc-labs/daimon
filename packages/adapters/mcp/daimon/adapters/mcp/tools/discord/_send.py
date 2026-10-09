@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import io
+import time
 import uuid
 from urllib.parse import urlparse
 
 import aiohttp
 import discord
+import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._file_handles import staged_uploads
-from daimon.adapters.mcp.tools._tidy import PostRecord, record_agent_posts
+from daimon.adapters.mcp.tools._tidy import PostRecord, executing_agent_id, record_agent_posts
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -25,17 +27,23 @@ from daimon.adapters.mcp.tools.discord._models import (
     MessageRow,
     _to_message_row,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.discord._post_transport import send_agent_message
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.agent_identity import identity_enabled_for, resolve_agent_identity
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Discord uses MiB, not MB, for the per-attachment cap.
 _DISCORD_ATTACHMENT_MAX_BYTES: int = 25 * 1024 * 1024
 _MAX_ATTACHMENTS_PER_MESSAGE: int = 10
+_actor_names: dict[tuple[uuid.UUID, uuid.UUID], tuple[str, float]] = {}
+_ACTOR_NAME_TTL_SECONDS = 600
+_log = structlog.get_logger()
 
 # SSRF guard: attachment fetches are restricted to Discord's CDN hosts. A bare
 # https scheme check is insufficient — an attacker-supplied https URL can
@@ -148,7 +156,49 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
         parent_id = str(channel.parent_id) if isinstance(channel, discord.Thread) else None
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support sending messages")
-        sent = await channel.send(content=content, files=files)
+        actor_id = executing_agent_id(auth)
+        identity = None
+        if actor_id is not None and identity_enabled_for(runtime.settings, "discord", guild_id):
+            try:
+                key = (auth.tenant_id, actor_id)
+                cached = _actor_names.get(key)
+                if cached is not None and cached[1] > time.monotonic():
+                    actor_name = cached[0]
+                else:
+                    actor = await find_agent_by_derived_uuid(
+                        runtime.client, tenant_id=auth.tenant_id, agent_id=actor_id
+                    )
+                    actor_name = actor.name if actor is not None else None
+                    if actor_name is not None:
+                        _actor_names[key] = (actor_name, time.monotonic() + _ACTOR_NAME_TTL_SECONDS)
+                if actor_name is not None:
+                    async with runtime.session_factory.begin() as identity_session:
+                        identity = await resolve_agent_identity(
+                            identity_session,
+                            tenant_id=auth.tenant_id,
+                            agent_name=actor_name,
+                            is_builtin=actor_name.casefold() == "daimon",
+                            public_base_url=runtime.settings.mcp.app_root_url,
+                            enabled=identity_enabled_for(runtime.settings, "discord", guild_id),
+                            background_sessionmaker=runtime.session_factory,
+                        )
+            except Exception as exc:
+                _log.warning(
+                    "mcp.discord.identity_resolution_failed", error_type=type(exc).__name__
+                )
+        extra_messages: list[discord.Message] = []
+        if identity is None:
+            sent = await channel.send(content=content, files=files)
+        else:
+            sent = await send_agent_message(
+                c,
+                channel,
+                identity,
+                content=content,
+                files=files,
+                extra_messages=extra_messages,
+                identity_enabled=identity_enabled_for(runtime.settings, "discord", guild_id),
+            )
         await record_agent_posts(
             runtime,
             auth,
@@ -156,10 +206,11 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
             posts=[
                 PostRecord(
                     channel_id=str(channel.id),
-                    message_id=str(sent.id),
+                    message_id=str(post.id),
                     parent_channel_id=parent_id,
-                    content=content,
+                    content=post.content,
                 )
+                for post in [sent, *extra_messages]
             ],
         )
         return _to_message_row(sent)

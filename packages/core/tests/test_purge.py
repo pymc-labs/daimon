@@ -1594,3 +1594,47 @@ async def test_purge_account_removes_the_person_from_channel_admins(
     assert [(row.channel_id, row.user_ids, row.updated_by_account_id) for row in rows] == [
         ("c2", (), None)
     ], "an emptied grant is dropped; a role grant stays without the person"
+
+
+async def test_purge_account_clears_the_person_from_recorded_turn_posts(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A turn's posts keep their agent; only the asker's id leaves them."""
+    import uuid as _uuid
+
+    from daimon.core.privacy import collect_purge_preview
+    from daimon.core.stores.agent_posts import get_post, record_post
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="discord", external_id="u-asker", tenant=tenant, account=account
+    )
+    agent = _uuid.uuid4()
+    for channel, message, source in (("222", "444", "auto_thread"), ("444", "1000", "turn")):
+        await record_post(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id=channel,
+            message_id=message,
+            agent_id=agent,
+            kind="thread" if source == "auto_thread" else "message",
+            source=source,  # pyright: ignore[reportArgumentType]
+            requester_platform_user_id="u-asker",
+            turn_card_intent_id=_uuid.uuid4() if source == "turn" else None,
+        )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    assert preview.agent_post_requesters.count == 2, "the preview counts both records"
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+
+    assert report.db.agent_post_requesters == 2, "purge clears both"
+    async with db_session_factory() as session:
+        post = await get_post(
+            session, tenant_id=tenant.id, platform="discord", channel_id="444", message_id="1000"
+        )
+    assert post is not None and post.agent_id == agent, "the post stays its agent's"
+    assert post.requester_platform_user_id is None, "but no longer names the person"

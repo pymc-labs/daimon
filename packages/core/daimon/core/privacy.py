@@ -27,15 +27,18 @@ import uuid
 
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
+from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import channel_admins as channel_admins_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
+from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_credentials as github_credentials_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
+from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
@@ -76,6 +79,7 @@ class PurgePreview(BaseModel):
     account: PurgePreviewRow  # singular: 1 if row exists else 0
     user_skills: PurgePreviewRow
     github_credentials: PurgePreviewRow
+    github_connect_requests: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     github_user_links: PurgePreviewRow
     github_oauth_states: PurgePreviewRow
     mcp_tokens: PurgePreviewRow
@@ -88,6 +92,8 @@ class PurgePreview(BaseModel):
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow
     channel_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    agent_post_requesters: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
 def summary_line(preview: PurgePreview) -> str:
@@ -98,6 +104,7 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.user_configs, "user config row(s)"),
         (preview.user_skills, "synced skill(s)"),
         (preview.github_credentials, "GitHub token(s)"),
+        (preview.github_connect_requests, "GitHub setup request(s)"),
         (preview.github_user_links, "GitHub user link(s)"),
         (preview.github_oauth_states, "OAuth handshake record(s)"),
         (preview.mcp_tokens, "MCP token(s)"),
@@ -106,6 +113,8 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.slack_turn_contexts, "Slack turn context(s)"),
         (preview.direct_message_conversations, "private conversation(s)"),
         (preview.channel_admins, "channel admin grant(s)"),
+        (preview.agent_post_requesters, "record(s) of you asking an agent in a thread"),
+        (preview.platform_user_names, "remembered name(s)"),
     )
     parts = [f"{row.count} {label}" for row, label in categories if row.count > 0]
     return ", ".join(parts) if parts else "nothing visible to you yet"
@@ -392,7 +401,32 @@ async def collect_purge_preview(
                 platform=pp.platform,
                 platform_user_id=pp.external_id,
             )
+        # 17. agent_posted_messages — posts and auto-opened threads naming this
+        # person as who asked; erasure clears the id and keeps the post's owner.
+        agent_post_requesters_total = 0
+        for pp in pp_list:
+            agent_post_requesters_total += await agent_posts_store.count_requester(
+                session,
+                tenant_id=pp.tenant_id,
+                platform=pp.platform,
+                platform_user_id=pp.external_id,
+            )
+        # 18. platform_user_names — the last name each platform gave for them,
+        # keyed exactly as the purge's per-principal delete.
+        platform_user_names_total = 0
+        for pp in pp_list:
+            platform_user_names_total += (
+                await platform_names_store.count_user_names_for_platform_user(
+                    session,
+                    tenant_id=pp.tenant_id,
+                    platform=pp.platform,
+                    platform_user_id=pp.external_id,
+                )
+            )
         direct_message_count = await direct_messages_store.count_conversations_for_account(
+            session, account_id=account_id
+        )
+        github_connect_requests_count = await github_connect_store.count_requests_for_account(
             session, account_id=account_id
         )
 
@@ -404,6 +438,7 @@ async def collect_purge_preview(
         account=account,
         user_skills=user_skills,
         github_credentials=github_credentials,
+        github_connect_requests=PurgePreviewRow(count=github_connect_requests_count, example=None),
         github_user_links=github_user_links,
         github_oauth_states=github_oauth_states,
         mcp_tokens=mcp_tokens,
@@ -415,5 +450,7 @@ async def collect_purge_preview(
         message_feedback=message_feedback,
         support_escalations=support_escalations,
         channel_admins=PurgePreviewRow(count=channel_admins_total, example=None),
+        agent_post_requesters=PurgePreviewRow(count=agent_post_requesters_total, example=None),
         direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),
+        platform_user_names=PurgePreviewRow(count=platform_user_names_total, example=None),
     )

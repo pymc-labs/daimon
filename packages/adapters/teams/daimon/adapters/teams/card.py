@@ -4,14 +4,18 @@ The status card says what Discord's and Slack's say, in the words of
 `daimon.core.turn.status_lines`: a Thinking or Working headline with the
 elapsed time, the turn's tool lines, the latest draft, and a Cancel button.
 The answer replaces the card as plain markdown messages: a card TextBlock
-renders no code blocks, a message does.
+renders no code blocks, a message does. Its last message, and a tool-only
+turn's ✅ Done, carry Teams' 👍/👎 (`rated`, answered by `feedback`) and, when
+support is on, an Ask a human button in a one-button card below the text.
 """
 
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from dataclasses import dataclass
 
+from daimon.core.support_escalation import ASK_THE_TEAM, ESCALATE
 from daimon.core.turn.errors import NamedAgentRefused
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.state import TurnState
@@ -23,11 +27,14 @@ from daimon.core.turn.status_lines import (
 )
 from microsoft_teams.api import Account, MentionEntity, MessageActivityInput
 from microsoft_teams.cards import (
+    Action,
     ActionSet,
     AdaptiveCard,
     CardElement,
     ExecuteAction,
+    OpenDialogData,
     OpenUrlAction,
+    SubmitAction,
     TextBlock,
 )
 
@@ -35,12 +42,11 @@ from microsoft_teams.cards import (
 # 4 000 stays under it at 4 UTF-8 bytes each, the widest (an emoji).
 TEAMS_LIMIT = 4_000
 CANCEL_VERB = "cancel_turn"
-INTERRUPTED_NOTICE = (
-    "❌ This turn was interrupted by a restart and cannot be resumed. "
-    "Nothing was lost on your side — message me again to retry."
-)
-CANCELLED_NOTICE = "Turn cancelled."
-TOOLS_DONE_NOTICE = "✅ Done."
+INTERRUPTED_NOTICE = "Stopped: Daimon restarted.\nSend a message to try again."
+CANCELLED_NOTICE = "Stopped.\nSend a message to start again."
+TOOLS_DONE_NOTICE = "Done."
+ASK_HUMAN = f"{ESCALATE} {ASK_THE_TEAM}"
+ASK_HUMAN_DIALOG = "ask_human"
 _FALLBACK_MAX_CHARS = 100
 
 
@@ -70,13 +76,14 @@ def _card(body: list[CardElement], *, fallback: str) -> MessageActivityInput:
 
 
 ENABLE_FILES = (
-    "I can't open this team's files yet. A Microsoft 365 admin can turn them on for this "
-    "team with one sign-in; the first one in the organisation must be a global admin."
+    "I can't use this channel's files yet. A Microsoft 365 admin who is a member of this "
+    "channel can turn them on with one sign-in; the first one in the organisation must be "
+    "a global admin."
 )
 
 
 def enable_files_card(url: str) -> MessageActivityInput:
-    """Offers the sign-in that grants daimon this team's SharePoint site."""
+    """Offers the sign-in that grants daimon the SharePoint site of this channel's files."""
     body: list[CardElement] = [TextBlock(text=ENABLE_FILES, wrap=True)]
     action = OpenUrlAction(title="Enable files", url=url)
     card = AdaptiveCard(body=body, actions=[action], fallback_text=ENABLE_FILES)
@@ -104,6 +111,7 @@ def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActi
     body: list[CardElement] = [TextBlock(text=headline, wrap=True)]
     if state.tool_lines:
         lines = "\n\n".join(state.tool_lines)
+        body.append(TextBlock(text="Details", size="Small", wrap=True))
         body.append(TextBlock(text=lines, font_type="Monospace", size="Small", wrap=True))
     if state.draft:
         body.append(TextBlock(text=state.draft, is_subtle=True, wrap=True))
@@ -111,7 +119,7 @@ def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActi
         ActionSet(
             actions=[
                 ExecuteAction(
-                    title="Cancel",
+                    title="Stop",
                     verb=CANCEL_VERB,
                     data={"action": CANCEL_VERB, "turn": cancel_key},
                     style="destructive",
@@ -139,23 +147,38 @@ def termination_text(notice: TerminationNotice) -> str:
     return fit_notice(["\n\n".join(lines)], tail=tail, limit=TEAMS_LIMIT)
 
 
-def notice_card(text: str) -> MessageActivityInput:
-    """A terminal card with no buttons: bailouts, failures, restarts.
+def notice_card(text: str, *, actions: Sequence[Action] = ()) -> MessageActivityInput:
+    """A terminal card: bailouts, failures, restarts; `actions` are its buttons, if any.
 
     Clipped as Slack clips its notices; the fallback repeats it, so it gets less.
     """
     body = fit_notice([text], tail=None, limit=TEAMS_LIMIT)
     fallback = fit_notice([text], tail=None, limit=_FALLBACK_MAX_CHARS)
-    return _card([TextBlock(text=body, wrap=True)], fallback=fallback)
+    elements: list[CardElement] = [TextBlock(text=body, wrap=True)]
+    if actions:
+        elements.append(ActionSet(actions=list(actions)))
+    return _card(elements, fallback=fallback)
 
 
-ANSWERED_BELOW = "✅ Done. The answer is below."
+ANSWERED_BELOW = "Done."
+
+
+def ask_human_action() -> SubmitAction:
+    """Opens Ask a human's dialog; an Action.Submit, since Action.Execute opens none."""
+    return SubmitAction(title=ASK_HUMAN, data=OpenDialogData(ASK_HUMAN_DIALOG))
+
+
+def rated(message: MessageActivityInput) -> MessageActivityInput:
+    """Teams' 👍/👎 on `message`. Custom mode: a click asks daimon for the dialog,
+    so a 👎 gets the reasons Teams' built-in form has no room for."""
+    return message.add_feedback("custom")
 
 
 def answer_message(
-    text: str, *, is_last: bool, mention: Account | None = None
+    text: str, *, is_last: bool, mention: Account | None = None, ask_human: bool = False
 ) -> MessageActivityInput:
-    """One chunk of the answer; the last carries the feedback buttons.
+    """One chunk of the answer; the last carries the feedback buttons and, with
+    `ask_human`, the Ask a human button.
 
     A completion ping leads with `mention` (an AAD object id is enough).
     """
@@ -164,4 +187,10 @@ def answer_message(
         tag = f"<at>{(mention.name or 'you').replace('<', '').replace('>', '')}</at>"
         message.text = f"{tag}\n\n{text}"
         message.add_entity(MentionEntity(mentioned=mention, text=tag))
-    return message.add_feedback() if is_last else message
+    if not is_last:
+        return message
+    if ask_human:
+        # Beside the text, not in place of it: a card renders no code blocks.
+        buttons = ActionSet(actions=[ask_human_action()])
+        message.add_card(AdaptiveCard(body=[buttons], fallback_text=ASK_HUMAN))
+    return rated(message)

@@ -14,6 +14,7 @@ from daimon.adapters.discord.embed import (
     update,
     update_activity,
 )
+from daimon.adapters.discord.lifecycle import build_discord_embed
 from daimon.adapters.discord.theme import (
     COLOR_GREEN,
     COLOR_IN_PROGRESS,
@@ -44,6 +45,41 @@ def _call(name: str, status: Literal["pending", "complete", "failed"] = "pending
     return ToolUseBlock(
         kind="tool_use", id=f"tu_{name}", type="agent.tool_use", name=name, input={}, status=status
     )
+
+
+def test_max_length_error_notice_keeps_all_metrics() -> None:
+    tail = "\n**Next:** Add credit.\n`rid: test`"
+    notice = "x" * (950 - len(tail)) + tail
+    assert len(notice) == 950
+    state = dataclasses.replace(
+        _make_state(phase=TurnPhase.ERROR, cost_str="$0.05"),
+        notice=notice,
+        balance_str="$9.95",
+        usage_in=1200,
+        usage_out=300,
+    )
+    embed = build_discord_embed(to_embed_data(state, now=12.0))
+
+    assert embed.description == "Add credit."
+    assert embed.fields[0].value == notice.replace("**Next:** Add credit.\n", "")
+    assert embed.fields[1].value == (
+        "Time: 12s\nCost: $0.05\nTokens: 1.2k in / 300 out\nBalance: $9.95"
+    )
+
+
+def test_empty_notice_next_step_keeps_retry_text_and_metrics() -> None:
+    state = dataclasses.replace(
+        _make_state(phase=TurnPhase.ERROR, cost_str="$0.05"),
+        notice="Model usage limit reached.\n**Next:** \n`rid: test`",
+        balance_str="$9.95",
+    )
+    embed = build_discord_embed(to_embed_data(state, now=12.0))
+
+    assert embed.description == "Mention me to try again."
+    assert "Model usage limit reached." in embed.fields[0].value
+    assert "`rid: test`" in embed.fields[0].value
+    assert "Cost: $0.05" in embed.fields[1].value
+    assert "Balance: $9.95" in embed.fields[1].value
 
 
 class TestUpdate:
@@ -123,11 +159,16 @@ class TestToEmbedData:
             text_preview="Checking *the* logs",
         )
         data = to_embed_data(state, now=165.0)
-        assert data.title == "", "the headline lives in the description, not a title"
-        assert data.description == (
-            "**Working** · 1m 5s\n```\n✔️ Ran a command\n🔍 Reading a file\n```\n"
-            "> Checking \\*the\\* logs"
-        ), "headline, code-fenced tool lines, then the escaped draft as a quote"
+        assert data.title == "Working on it…"
+        assert data.description == "> Checking \\*the\\* logs"
+        assert data.details == "`✔️ Ran a command`\n`🔍 Reading a file`"
+
+    def test_tool_line_markdown_stays_in_inline_code(self) -> None:
+        state = dataclasses.replace(
+            _make_state(phase=TurnPhase.TOOL_RUNNING),
+            tool_lines=("🔍 Search *issue* <#123>",),
+        )
+        assert to_embed_data(state).details == "`🔍 Search *issue* <#123>`"
 
     def test_footer_none_on_non_terminal(self) -> None:
         state = _make_state(phase=TurnPhase.THINKING)
@@ -138,29 +179,33 @@ class TestToEmbedData:
         state = _make_state(phase=TurnPhase.DONE, agent_name="my-agent", started_at=100.0)
         data = to_embed_data(state, now=105.0)
         assert data.footer is not None
-        assert "5s" in data.footer
+        assert "Time: 5s" in data.details
         assert "my-agent" in data.footer
 
     def test_footer_set_on_error(self) -> None:
         state = _make_state(phase=TurnPhase.ERROR, agent_name="my-agent", started_at=0.0)
         data = to_embed_data(state, now=12.0)
         assert data.footer is not None
-        assert "12s" in data.footer
+        assert "Time: 12s" in data.details
         assert "my-agent" in data.footer
 
     def test_footer_format_with_cost(self) -> None:
-        state = _make_state(
-            phase=TurnPhase.DONE,
-            agent_name="Atlas",
-            started_at=0.0,
-            usage_in=1500,
-            usage_out=320,
-            cost_str="$0.04",
+        state = dataclasses.replace(
+            _make_state(
+                phase=TurnPhase.DONE,
+                agent_name="Atlas",
+                started_at=0.0,
+                usage_in=1500,
+                usage_out=320,
+                cost_str="$0.04",
+            ),
+            balance_str="$12.50 left",
         )
         data = to_embed_data(state, now=12.0)
         # Centered dot U+00B7
-        assert data.footer == "Atlas · 12s · 1.5k in / 320 out · $0.04", (
-            "success footer is agent · elapsed · in/out · cost"
+        assert data.footer == "Atlas"
+        assert data.details == (
+            "Time: 12s\nCost: $0.04\nTokens: 1.5k in / 320 out\nBalance: $12.50 left"
         )
 
     def test_footer_omits_cost_when_unpriced(self) -> None:
@@ -173,9 +218,8 @@ class TestToEmbedData:
             cost_str=None,
         )
         data = to_embed_data(state, now=12.0)
-        assert data.footer == "Atlas · 12s · 1.5k in / 320 out", (
-            "unpriced model footer shows tokens only, no trailing cost segment"
-        )
+        assert data.footer == "Atlas"
+        assert data.details == "Time: 12s\nTokens: 1.5k in / 320 out"
 
     def test_fmt_tokens_humanizes(self) -> None:
         assert _fmt_tokens(320) == "320", "sub-1000 counts render verbatim"
@@ -192,15 +236,15 @@ class TestToEmbedData:
         assert done.footer is not None and "✅" not in done.footer, (
             "the one-line summary lives in the footer; success path has no checkmark"
         )
-        assert done.footer.startswith("Atlas · 3s · "), "footer leads with agent · elapsed"
+        assert done.footer == "Atlas"
+        assert done.details.startswith("Time: 3s")
 
     def test_error_collapses_to_footer_with_cross_and_reason(self) -> None:
         error = to_embed_data(_make_state(phase=TurnPhase.ERROR), now=3.0)
-        assert error.title == "", "error also collapses to one line — no title"
-        assert error.description == "", "error collapses — trail drops away"
-        assert error.footer is not None and error.footer.startswith("❌ "), (
-            "error keeps the ❌ in the footer (red bar + cross signal failure)"
-        )
+        assert error.title == "Something went wrong."
+        assert error.description == "Mention me to try again."
+        assert error.footer == "test-agent"
+        assert error.details.startswith("Time: 3s")
 
     def test_error_footer_renders_reason_and_summary(self) -> None:
         state = _make_state(
@@ -212,9 +256,8 @@ class TestToEmbedData:
             cost_str=None,
         )
         data = to_embed_data(dataclasses.replace(state, error_reason="rate limited"), now=3.0)
-        assert data.footer == "❌ rate limited · Atlas · 3s · 100 in / 50 out", (
-            "error footer carries the failure reason then the data-bearing summary"
-        )
+        assert data.footer == "Atlas"
+        assert data.details == "Time: 3s\nTokens: 100 in / 50 out"
 
     def test_update_carries_usage_fields_forward(self) -> None:
         state = _make_state(
@@ -230,21 +273,19 @@ class TestToEmbedData:
         assert done.title == "", "done collapses to footer-only — no title"
 
         error = to_embed_data(_make_state(phase=TurnPhase.ERROR))
-        assert error.title == "", "error collapses to footer-only — no title"
+        assert error.title == "Something went wrong."
 
 
 class TestHeadline:
     def test_in_progress_with_now_leads_with_state_and_elapsed(self) -> None:
         data = to_embed_data(_make_state(started_at=100.0), now=142.0)
-        assert data.description.splitlines()[0] == "**Thinking** · 42s", (
-            "the headline leads the card"
-        )
+        assert data.title == "Working on it…", "the headline leads the card"
 
     def test_headline_runs_to_hours(self) -> None:
         state = _make_state(phase=TurnPhase.TOOL_RUNNING, started_at=1.0)
         data = to_embed_data(state, now=1.0 + 2 * 3600 + 3 * 60)
-        assert data.description.splitlines()[0] == "**Working** · 2h 3m", "long turns show hours"
+        assert data.title == "Working on it…"
 
     def test_in_progress_without_now_has_no_elapsed(self) -> None:
         data = to_embed_data(_make_state(started_at=100.0))
-        assert data.description == "**Thinking**", "no now → the headline word alone"
+        assert data.title == "Working on it…"

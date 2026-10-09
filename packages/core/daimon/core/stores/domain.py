@@ -33,7 +33,9 @@ PreparationStage = Literal["decided", "checkpointed", "uploaded", "created", "co
 # What the caller answered about uncommitted repository changes: carry them
 # into the successor's working files, or leave them in the old checkout.
 UnsavedWorkChoice = Literal["copy", "leave"]
-ContinuationReason = Literal["task_handoff", "private_input_applied", "timer"]
+ContinuationReason = Literal[
+    "task_handoff", "private_input_applied", "timer", "github_access_ready"
+]
 ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
 UserSkillSource = Literal["repo", "upload"]
 
@@ -297,7 +299,8 @@ class TurnCardIntentRow(BaseModel):
     turn_token: uuid.UUID
     channel_id: str | None
     message_id: str | None
-    status: Literal["prepared", "posted", "retired"]
+    status: Literal["prepared", "posted", "retired", "unrecoverable"]
+    recovery_failures: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -399,6 +402,17 @@ class TeamsInstallationRow(BaseModel):
     team_id: str
     group_id: str
     name: str | None = None
+
+
+class TeamsChannelSiteRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    channel_id: str
+    group_id: str
+    site_id: str
+    drive_id: str
+    folder_id: str
 
 
 class SlackUserTokenRow(BaseModel):
@@ -736,6 +750,7 @@ class GitHubAppInstallationRow(BaseModel):
     installation_id: int
     account_login: str
     repo_full_names: tuple[str, ...]
+    app: Literal["legacy", "github_app"] = "legacy"
     account_id: int | None = None
     account_type: str | None = None
     repository_selection: str | None = None
@@ -880,6 +895,7 @@ class MessageFeedbackRow(BaseModel):
     ma_session_id: str | None
     vote: str
     feedback_text: str | None
+    feedback_reasons: list[str] | None
     created_at: datetime
     updated_at: datetime
 

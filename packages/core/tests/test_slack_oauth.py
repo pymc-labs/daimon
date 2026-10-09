@@ -19,6 +19,7 @@ from daimon.core.slack_oauth import (
     build_slack_connect_url,
     exchange_code,
     mint_state,
+    slack_bot_scopes,
     verify_state,
 )
 
@@ -89,6 +90,8 @@ def test_slack_bot_scopes_constant_contains_required_v3_day1_scopes() -> None:
     )
     assert {"im:history", "im:write"} <= set(SLACK_BOT_SCOPES)
     assert len(SLACK_BOT_SCOPES) == 14
+    assert "chat:write.customize" not in slack_bot_scopes()
+    assert "chat:write.customize" in slack_bot_scopes(identity_enabled=True)
 
 
 def test_slack_user_scopes_include_users_read_for_author_resolution() -> None:

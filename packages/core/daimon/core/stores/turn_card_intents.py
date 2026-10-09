@@ -118,12 +118,69 @@ async def retire_turn_card_intent(
     return cast(CursorResult[object], result).rowcount == 1
 
 
+async def turn_card_intent_is_active(session: AsyncSession, *, id: uuid.UUID) -> bool:
+    """Whether the turn behind this intent is still running.
+
+    Terminal intents are retired or marked unrecoverable and pruned later,
+    so a missing row means a finished turn.
+    """
+    status = await session.scalar(select(TurnCardIntent.status).where(TurnCardIntent.id == id))
+    return status in ("prepared", "posted")
+
+
+async def mark_turn_card_intent_unrecoverable(
+    session: AsyncSession,
+    *,
+    id: uuid.UUID,
+    cutoff: datetime,
+) -> bool:
+    """Close an aged active Discord intent after recovery cannot resolve it."""
+    result = await session.execute(
+        update(TurnCardIntent)
+        .where(
+            TurnCardIntent.id == id,
+            TurnCardIntent.platform == "discord",
+            TurnCardIntent.status.in_(("prepared", "posted")),
+            TurnCardIntent.created_at <= cutoff,
+        )
+        .values(status="unrecoverable", updated_at=func.now())
+    )
+    await session.flush()
+    return cast(CursorResult[object], result).rowcount == 1
+
+
+async def record_turn_card_recovery_failure(
+    session: AsyncSession,
+    *,
+    id: uuid.UUID,
+) -> int | None:
+    """Count one unresolved Discord recovery pass, across process restarts."""
+    count = await session.scalar(
+        update(TurnCardIntent)
+        .where(
+            TurnCardIntent.id == id,
+            TurnCardIntent.platform == "discord",
+            TurnCardIntent.status.in_(("prepared", "posted")),
+        )
+        .values(recovery_failures=TurnCardIntent.recovery_failures + 1)
+        .returning(TurnCardIntent.recovery_failures)
+    )
+    await session.flush()
+    return count
+
+
+async def get_turn_card_intent(session: AsyncSession, *, id: uuid.UUID) -> TurnCardIntentRow | None:
+    """Read the current row after recovery may have recorded its message ID."""
+    orm = await session.scalar(select(TurnCardIntent).where(TurnCardIntent.id == id))
+    return TurnCardIntentRow.model_validate(orm) if orm is not None else None
+
+
 async def list_recoverable_turn_card_intents(
     session: AsyncSession,
     *,
     platform: str,
 ) -> list[TurnCardIntentRow]:
-    """List every non-retired intent for one adapter's boot recovery.
+    """List every active intent for one adapter's boot recovery.
 
     Prepared rows with a NULL message ID are included deliberately. They mark
     the post/response-persistence crash window, whose recovery behavior is an
@@ -148,12 +205,15 @@ async def delete_retired_turn_card_intents(
     cutoff: datetime,
     batch_size: int,
 ) -> int:
-    """Delete at most batch_size retired intents updated before cutoff."""
+    """Delete at most batch_size terminal intents updated before cutoff."""
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     victims = (
         select(TurnCardIntent.id)
-        .where(TurnCardIntent.status == "retired", TurnCardIntent.updated_at < cutoff)
+        .where(
+            TurnCardIntent.status.in_(("retired", "unrecoverable")),
+            TurnCardIntent.updated_at < cutoff,
+        )
         .order_by(TurnCardIntent.updated_at, TurnCardIntent.id)
         .limit(batch_size)
     )

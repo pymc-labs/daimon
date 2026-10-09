@@ -83,7 +83,10 @@ jobs:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SA }}
 
+      # The runner image ships gcloud; installing another copy cost ~20s.
       - uses: google-github-actions/setup-gcloud@v2
+        with:
+          skip_install: true
 
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.AR_HOST }} --quiet
@@ -101,20 +104,45 @@ jobs:
           echo "notebook=$BASE/notebook-host:$SHA" >> "$GITHUB_OUTPUT"
           echo "report=$BASE/report-host:$SHA" >> "$GITHUB_OUTPUT"
 
+      # Builds read the GitHub Actions cache that ci.yml's docker-build job
+      # fills on every push to main, so only changed layers are rebuilt. No
+      # provenance or SBOM attestations: they would turn the push into an
+      # image index, and every consumer (VMs, Cloud Run, promote.yml's image
+      # check) has only ever seen the plain manifest `docker push` produces.
+      - uses: docker/setup-buildx-action@v3
+
       - name: Build + push daimon image
-        run: |
-          docker build -t "${{ steps.tags.outputs.daimon }}" -f Dockerfile .
-          docker push "${{ steps.tags.outputs.daimon }}"
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          tags: ${{ steps.tags.outputs.daimon }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=daimon
 
       - name: Build + push notebook-host image
-        run: |
-          docker build -t "${{ steps.tags.outputs.notebook }}" -f apps/notebook-host/Dockerfile .
-          docker push "${{ steps.tags.outputs.notebook }}"
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/notebook-host/Dockerfile
+          tags: ${{ steps.tags.outputs.notebook }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=notebook-host
 
       - name: Build + push report-host image
-        run: |
-          docker build -t "${{ steps.tags.outputs.report }}" -f apps/report-host/Dockerfile .
-          docker push "${{ steps.tags.outputs.report }}"
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/report-host/Dockerfile
+          tags: ${{ steps.tags.outputs.report }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=report-host
 
       - name: Run migrations (blocking gate)
         run: |
@@ -126,6 +154,127 @@ jobs:
         run: |
           gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
             --image "${{ steps.tags.outputs.daimon }}"
+
+      - name: Resolve seam URL for report-host
+        id: seam
+        run: |
+          # report-host's DAIMON_REPORT__MCP_URL points at the same mcp
+          # Cloud Run service the workers call, mounted at /mcp. The service
+          # URL is stable for the life of the service but has no predictable
+          # form, so it is discovered the same way the health gate step
+          # below discovers it, not hardcoded or stored as a variable.
+          URL=$(gcloud run services describe ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
+            --format='value(status.url)')
+          echo "url=$URL/mcp" >> "$GITHUB_OUTPUT"
+
+      - name: Register the IAP SSH key
+        run: |
+          # The first `gcloud compute ssh` on a fresh runner generates a key
+          # and writes it to project metadata. Doing that once here keeps the
+          # two VM refreshes below, which run side by side, from racing on it.
+          gcloud compute ssh ${{ vars.GCP_AR_REPO }}-notebook --zone "$ZONE" \
+            --tunnel-through-iap --command true
+          # gcloud waits for a new key to reach only the VM it connects to, so
+          # wait for the workers VM (when running) to accept it as well.
+          STATUS=$(gcloud compute instances describe ${{ vars.GCP_AR_REPO }}-workers \
+            --zone "$ZONE" --format='value(status)')
+          if [ "$STATUS" = "RUNNING" ]; then
+            for i in $(seq 1 6); do
+              if gcloud compute ssh ${{ vars.GCP_AR_REPO }}-workers --zone "$ZONE" \
+                --tunnel-through-iap --command true; then
+                break
+              fi
+              if [ "$i" = "6" ]; then
+                echo "workers VM did not accept the SSH key" >&2
+                exit 1
+              fi
+              sleep 10
+            done
+          fi
+
+      - name: Start notebook-host VM refresh (in the background)
+        id: notebook_refresh
+        run: |
+          # Runs alongside the worker refresh below; the two VMs share nothing.
+          # Output and exit status go to files rather than this step's log, so
+          # the step returns at once and "Wait for notebook-host VM refresh"
+          # reports both once the worker refresh is done.
+          (
+            rc=0
+            gcloud compute ssh ${{ vars.GCP_AR_REPO }}-notebook --zone "$ZONE" \
+              --tunnel-through-iap --command '
+                # Same reason as the workers refresh below: without this the
+                # exit status comes from the trailing `prune || true` and every
+                # failure inside is silent.
+                set -euo pipefail
+                export NOTEBOOK_IMAGE="${{ steps.tags.outputs.notebook }}"
+                # Caddy fronts notebook-host with TLS on this domain; the compose
+                # file interpolates NOTEBOOK_DOMAIN + NOTEBOOK_PUBLIC_URL_BASE
+                export NOTEBOOK_DOMAIN="${{ env.NOTEBOOK_DOMAIN }}"
+                export NOTEBOOK_PUBLIC_URL_BASE="https://${{ env.NOTEBOOK_DOMAIN }}"
+                # report-host is the second service on this same VM, behind the
+                # same Caddy on its own hostname.
+                export REPORT_IMAGE="${{ steps.tags.outputs.report }}"
+                export REPORT_DOMAIN="${{ env.REPORT_DOMAIN }}"
+                export REPORT_PUBLIC_URL_BASE="https://${{ env.REPORT_DOMAIN }}"
+                export REPORT_MCP_URL="${{ steps.seam.outputs.url }}"
+                # Same DOCKER_CONFIG redirect as the workers refresh: use root
+                # docker config (has the Artifact Registry credential helper).
+                export DOCKER_CONFIG=/root/.docker
+                # Ordering matters: refresh env -> refresh compose assets ->
+                # pull -> up -d. Recreating (up -d) is what makes a container
+                # read the new env_file; docker restart does NOT. NOTEBOOK_IMAGE
+                # must keep coming from the freshly computed tag exported above
+                # and must never be re-derived from VM metadata (stale metadata
+                # rolls the image back). The refresh script (pulled from the
+                # assets bucket) exits nonzero on a
+                # permission or transient Secret Manager failure, failing the
+                # deploy — intended: a config the pipeline cannot assemble must
+                # not read green.
+                sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/daimon-refresh-env /usr/local/bin/daimon-refresh-env
+                sudo chmod 755 /usr/local/bin/daimon-refresh-env
+                sudo /usr/local/bin/daimon-refresh-env
+                sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/compose.notebook.yml /etc/daimon/compose.notebook.yml
+                caddyfile_before=$(sudo sha256sum /etc/daimon/Caddyfile 2>/dev/null || true)
+                sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/Caddyfile /etc/daimon/Caddyfile
+                cd /etc/daimon
+                sudo -E docker compose -f compose.notebook.yml pull
+                sudo -E docker compose -f compose.notebook.yml up -d --remove-orphans
+                # Caddy reads its config only at start, and `up -d` does not
+                # recreate it for a changed bind-mounted file: restart on change.
+                if [ "$caddyfile_before" != "$(sudo sha256sum /etc/daimon/Caddyfile)" ]; then
+                  sudo -E docker compose -f compose.notebook.yml restart caddy
+                  sleep 5
+                  # A bad Caddyfile exits at start; the report gate below skips Caddy.
+                  if [ "$(sudo docker inspect --format "{{.State.Running}}" daimon-caddy-1)" != "true" ]; then
+                    echo "caddy not running after its config changed" >&2
+                    exit 1
+                  fi
+                fi
+                # Gate: report-host must come up and stay up. `up -d` alone does
+                # not fail on a crash-looping container, and a green step that
+                # proves nothing is worse than a red one -- same reasoning as
+                # the slack worker gate below, modelled on it here.
+                for i in $(seq 1 20); do
+                  sleep 6
+                  running=$(sudo docker inspect --format "{{.State.Running}}" daimon-report-host-1)
+                  restarts=$(sudo docker inspect --format "{{.RestartCount}}" daimon-report-host-1)
+                  if [ "$running" = "true" ] && [ "$restarts" = "0" ] \
+                    && sudo docker exec daimon-report-host-1 python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:8002/health\", timeout=3)" 2>/dev/null; then
+                    echo "report host healthy (attempt $i)"
+                    break
+                  fi
+                  if [ "$i" = "20" ]; then
+                    echo "report host not healthy after 120s (running=$running restarts=$restarts)" >&2
+                    exit 1
+                  fi
+                done
+                # Same prune as the workers refresh (see comment there).
+                sudo docker image prune -af || true
+              ' || rc=$?
+            echo "$rc" > "$RUNNER_TEMP/notebook-refresh.rc.tmp"
+            mv "$RUNNER_TEMP/notebook-refresh.rc.tmp" "$RUNNER_TEMP/notebook-refresh.rc"
+          ) > "$RUNNER_TEMP/notebook-refresh.log" 2>&1 < /dev/null &
 
       - name: Refresh worker VM containers (recreate in place)
         run: |
@@ -168,8 +317,9 @@ jobs:
               sudo -E docker compose -f compose.worker.yml pull
               sudo -E docker compose -f compose.worker.yml up -d --remove-orphans
               # Gate: the slack worker must come up and stay up. Its liveness
-              # responder binds only after the boot defaults sweep (~75s), and
-              # a bad Slack config crash-loops the container rather than
+              # responder binds only once startup is done (including
+              # `daimon defaults apply` when the service runs through the image
+              # entrypoint), and a bad Slack config crash-loops the container rather than
               # failing `up -d` — so require a running container with zero
               # restarts that answers on its liveness port before calling the
               # refresh done. Discord fails loudly on its own (bad token kills
@@ -193,92 +343,24 @@ jobs:
               # breaks IAP SSH key writes (breaking this very refresh step).
               sudo docker image prune -af || true
             '
+          date +%s > "$RUNNER_TEMP/workers-refreshed-at"
 
-      - name: Resolve seam URL for report-host
-        id: seam
+      - name: Wait for notebook-host VM refresh
+        # Also after a failed worker refresh, so the notebook-host outcome is
+        # always on record; not after a cancel, which ends the job anyway.
+        if: ${{ !cancelled() && steps.notebook_refresh.outcome == 'success' }}
         run: |
-          # report-host's DAIMON_REPORT__MCP_URL points at the same mcp
-          # Cloud Run service the workers call, mounted at /mcp. The service
-          # URL is stable for the life of the service but has no predictable
-          # form, so it is discovered the same way the health gate step
-          # below discovers it, not hardcoded or stored as a variable.
-          URL=$(gcloud run services describe ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
-            --format='value(status.url)')
-          echo "url=$URL/mcp" >> "$GITHUB_OUTPUT"
-
-      - name: Refresh notebook-host VM container (recreate in place)
-        run: |
-          gcloud compute ssh ${{ vars.GCP_AR_REPO }}-notebook --zone "$ZONE" \
-            --tunnel-through-iap --command '
-              # Same reason as the workers refresh above: without this the
-              # exit status comes from the trailing `prune || true` and every
-              # failure inside is silent.
-              set -euo pipefail
-              export NOTEBOOK_IMAGE="${{ steps.tags.outputs.notebook }}"
-              # Caddy fronts notebook-host with TLS on this domain; the compose
-              # file interpolates NOTEBOOK_DOMAIN + NOTEBOOK_PUBLIC_URL_BASE
-              export NOTEBOOK_DOMAIN="${{ env.NOTEBOOK_DOMAIN }}"
-              export NOTEBOOK_PUBLIC_URL_BASE="https://${{ env.NOTEBOOK_DOMAIN }}"
-              # report-host is the second service on this same VM, behind the
-              # same Caddy on its own hostname.
-              export REPORT_IMAGE="${{ steps.tags.outputs.report }}"
-              export REPORT_DOMAIN="${{ env.REPORT_DOMAIN }}"
-              export REPORT_PUBLIC_URL_BASE="https://${{ env.REPORT_DOMAIN }}"
-              export REPORT_MCP_URL="${{ steps.seam.outputs.url }}"
-              # Same DOCKER_CONFIG redirect as the workers refresh: use root
-              # docker config (has the Artifact Registry credential helper).
-              export DOCKER_CONFIG=/root/.docker
-              # Ordering matters: refresh env -> refresh compose assets ->
-              # pull -> up -d. Recreating (up -d) is what makes a container
-              # read the new env_file; docker restart does NOT. NOTEBOOK_IMAGE
-              # must keep coming from the freshly computed tag exported above
-              # and must never be re-derived from VM metadata (stale metadata
-              # rolls the image back). The refresh script (pulled from the
-              # assets bucket) exits nonzero on a
-              # permission or transient Secret Manager failure, failing the
-              # deploy — intended: a config the pipeline cannot assemble must
-              # not read green.
-              sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/daimon-refresh-env /usr/local/bin/daimon-refresh-env
-              sudo chmod 755 /usr/local/bin/daimon-refresh-env
-              sudo /usr/local/bin/daimon-refresh-env
-              sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/compose.notebook.yml /etc/daimon/compose.notebook.yml
-              caddyfile_before=$(sudo sha256sum /etc/daimon/Caddyfile 2>/dev/null || true)
-              sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/Caddyfile /etc/daimon/Caddyfile
-              cd /etc/daimon
-              sudo -E docker compose -f compose.notebook.yml pull
-              sudo -E docker compose -f compose.notebook.yml up -d --remove-orphans
-              # Caddy reads its config only at start, and `up -d` does not
-              # recreate it for a changed bind-mounted file: restart on change.
-              if [ "$caddyfile_before" != "$(sudo sha256sum /etc/daimon/Caddyfile)" ]; then
-                sudo -E docker compose -f compose.notebook.yml restart caddy
-                sleep 5
-                # A bad Caddyfile exits at start; the report gate below skips Caddy.
-                if [ "$(sudo docker inspect --format "{{.State.Running}}" daimon-caddy-1)" != "true" ]; then
-                  echo "caddy not running after its config changed" >&2
-                  exit 1
-                fi
-              fi
-              # Gate: report-host must come up and stay up. `up -d` alone does
-              # not fail on a crash-looping container, and a green step that
-              # proves nothing is worse than a red one -- same reasoning as
-              # the slack worker gate above, modelled on it here.
-              for i in $(seq 1 20); do
-                sleep 6
-                running=$(sudo docker inspect --format "{{.State.Running}}" daimon-report-host-1)
-                restarts=$(sudo docker inspect --format "{{.RestartCount}}" daimon-report-host-1)
-                if [ "$running" = "true" ] && [ "$restarts" = "0" ] \
-                  && sudo docker exec daimon-report-host-1 python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:8002/health\", timeout=3)" 2>/dev/null; then
-                  echo "report host healthy (attempt $i)"
-                  break
-                fi
-                if [ "$i" = "20" ]; then
-                  echo "report host not healthy after 120s (running=$running restarts=$restarts)" >&2
-                  exit 1
-                fi
-              done
-              # Same prune as the workers refresh (see comment there).
-              sudo docker image prune -af || true
-            '
+          # 15 minutes; the refresh's own gates give up well before that.
+          for _ in $(seq 1 450); do
+            [ -f "$RUNNER_TEMP/notebook-refresh.rc" ] && break
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/notebook-refresh.log"
+          if [ ! -f "$RUNNER_TEMP/notebook-refresh.rc" ]; then
+            echo "notebook-host refresh still running after 15 minutes" >&2
+            exit 1
+          fi
+          exit "$(cat "$RUNNER_TEMP/notebook-refresh.rc")"
 
       - name: Health gate
         run: |
@@ -310,6 +392,20 @@ jobs:
               sudo -E docker compose -f compose.worker.yml run --rm smoke
             '
 
+      - name: Let the adapters' boot reconcile settle
+        run: |
+          # After it starts, each adapter reconciles its installs against the
+          # shipped defaults in the background and signals nothing when done;
+          # the verify below would read a reconcile still in flight as drift.
+          # The notebook-host refresh used to sit between the two and give it a
+          # minute or more. It now runs alongside, so keep that margin here.
+          [ -f "$RUNNER_TEMP/workers-refreshed-at" ] || exit 0
+          wait_s=$(( $(cat "$RUNNER_TEMP/workers-refreshed-at") + 90 - $(date +%s) ))
+          if [ "$wait_s" -gt 0 ]; then
+            echo "waiting ${wait_s}s"
+            sleep "$wait_s"
+          fi
+
       - name: Verify deployed installs match shipped defaults
         # No environment gate, deliberately: this runs on every staging deploy
         # AND every production promote — unlike the smoke turn above, which is
@@ -326,10 +422,19 @@ jobs:
           # precheck, no error-suppressing fallback. A deploy whose installs
           # could not be checked against the shipped defaults must fail loudly,
           # not read green — that silent gap is exactly what this step closes.
-          gcloud compute ssh ${{ vars.GCP_AR_REPO }}-workers --zone "$ZONE" \
-            --tunnel-through-iap --command '
-              export DAIMON_IMAGE="${{ steps.tags.outputs.daimon }}"
-              export DOCKER_CONFIG=/root/.docker
-              cd /etc/daimon
-              sudo -E docker compose -f compose.worker.yml run --rm smoke defaults verify
-            '
+          verify() {
+            gcloud compute ssh ${{ vars.GCP_AR_REPO }}-workers --zone "$ZONE" \
+              --tunnel-through-iap --command '
+                export DAIMON_IMAGE="${{ steps.tags.outputs.daimon }}"
+                export DOCKER_CONFIG=/root/.docker
+                cd /etc/daimon
+                sudo -E docker compose -f compose.worker.yml run --rm smoke defaults verify
+              '
+          }
+          # The settle floor above covers a typical boot reconcile; one retry a
+          # minute later covers a slow one. Real drift fails both attempts.
+          if ! verify; then
+            echo "verify failed; retrying in 60s"
+            sleep 60
+            verify
+          fi

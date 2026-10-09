@@ -7,6 +7,7 @@ import contextlib
 import types
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -312,7 +313,11 @@ class TestNewThreadCreation:
         message = _make_channel_message()
         thread = MagicMock(spec=discord.Thread)
         thread.id = 9999
-        thread.send = AsyncMock(return_value=types.SimpleNamespace(id=1000, edit=AsyncMock()))
+        thread.send = AsyncMock(
+            return_value=types.SimpleNamespace(
+                id=1000, edit=AsyncMock(), webhook_id=None, application_id=None
+            )
+        )
         message.create_thread.return_value = thread  # pyright: ignore[reportAttributeAccessIssue]
 
         from daimon.core.turn.lifecycle import acknowledge
@@ -433,6 +438,179 @@ class TestNewThreadCreation:
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_mention_records_its_thread_card_and_overflow_for_tidying(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Everything the turn posts names the turn's agent and the person who asked."""
+        from daimon.core.ma_identity import derive_agent_uuid
+        from daimon.core.stores.agent_posts import get_post, list_posts_in
+        from daimon.core.stores.turn_card_intents import turn_card_intent_is_active
+
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_create_session.return_value = ma_session(id="sess-tidy")
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        runtime = _make_runtime(tenant.id, db_session_factory)
+        bot = make_bot(runtime)
+        message = _make_channel_message(channel_id=789, author_id=111)
+        mock_thread = MagicMock(spec=discord.Thread)
+        mock_thread.id = 9999
+        mock_thread.parent_id = 789
+        mock_thread.send = AsyncMock(
+            side_effect=[
+                types.SimpleNamespace(id=1000, edit=AsyncMock()),
+                types.SimpleNamespace(id=1001, edit=AsyncMock()),
+            ]
+        )
+        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
+
+        from daimon.core.turn.state import TextBlock, TurnState
+
+        async def finish_turn(*, lifecycle, **kwargs):
+            # Long enough to overflow the card into a second message.
+            state = TurnState(content=[TextBlock(kind="text", text="word " * 500)])
+            await lifecycle.on_terminal_success(state)
+            return state
+
+        mock_run_turn.side_effect = finish_turn
+        await bot.on_message(message)
+
+        async with db_session_factory() as session:
+            thread_row = await get_post(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                channel_id="789",
+                message_id="9999",
+            )
+            turn_rows = await list_posts_in(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                channel_id="9999",
+                message_ids=["1000", "1001"],
+            )
+            assert thread_row is not None, "the auto-opened thread is recorded under its parent"
+            by_id = {r.message_id: r for r in turn_rows}
+            assert set(by_id) == {"1000", "1001"}, "the status card and the overflow are recorded"
+            rows = [thread_row, *turn_rows]
+            agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_test")
+            assert {r.agent_id for r in rows} == {agent_uuid}, "keyed by the turn's agent"
+            assert {r.requester_platform_user_id for r in rows} == {"111"}, "and who asked"
+            assert (thread_row.source, thread_row.kind) == ("auto_thread", "thread")
+            for message_id in ("1000", "1001"):
+                row = by_id[message_id]
+                assert (row.source, row.kind, row.channel_id) == ("turn", "message", "9999")
+                assert row.turn_card_intent_id is not None, "each names its turn"
+                assert not await turn_card_intent_is_active(session, id=row.turn_card_intent_id), (
+                    "and that turn is over once the mention is handled"
+                )
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    @pytest.mark.parametrize(
+        ("asked", "with_files", "newer_turn"),
+        [(True, True, False), (True, False, False), (False, True, False), (True, True, True)],
+    )
+    async def test_an_archive_asked_during_the_turn_happens_after_its_last_post(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        asked: bool,
+        with_files: bool,
+        newer_turn: bool,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """archive_thread on the turn's own thread is carried out after the card and files."""
+        from daimon.core.stores.turn_origins import request_thread_archive
+        from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+        from sqlalchemy import text
+
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_create_session.return_value = ma_session(id="sess-archive")
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message(channel_id=789, author_id=111)
+        order: list[str] = []
+        card = types.SimpleNamespace(
+            id=1000, edit=AsyncMock(side_effect=lambda **_: order.append("card_edit"))
+        )
+        mock_thread = MagicMock(spec=discord.Thread)
+        mock_thread.id = 9999
+        mock_thread.parent_id = 789
+        mock_thread.send = AsyncMock(return_value=card)
+        mock_thread.edit = AsyncMock(side_effect=lambda **kw: order.append(f"thread_edit:{kw}"))
+        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
+
+        async def finish_turn(*, lifecycle, **kwargs):
+            if asked:
+                # What archive_thread writes when called from inside this thread.
+                async with db_session_factory.begin() as session:
+                    origin_id = (
+                        await session.execute(
+                            text("SELECT id FROM turn_origins WHERE thread_id = '9999'")
+                        )
+                    ).scalar_one()
+                    assert await request_thread_archive(
+                        session, origin_id=origin_id, thread_id="9999", now=datetime.now(UTC)
+                    )
+            tool = ToolUseBlock(
+                kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
+            )
+            text_block = TextBlock(kind="text", text="Archiving this thread.")
+            state = TurnState(content=[tool, text_block] if with_files else [text_block])
+            await lifecycle.on_terminal_success(state)
+            return state
+
+        async def deliver(*_args: object, **_kwargs: object) -> None:
+            await asyncio.sleep(0)
+            order.append("file_posted")
+            if newer_turn:
+                # The sweep takes seconds; a queued mention's turn has the thread now.
+                bot._processing.add(9999)  # pyright: ignore[reportPrivateUsage]
+
+        mock_run_turn.side_effect = finish_turn
+        with patch("daimon.adapters.discord.bot.deliver_session_outputs", side_effect=deliver):
+            await bot.on_message(message)
+            await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+
+        archived = "thread_edit:{'archived': True}"
+        if newer_turn:
+            assert archived not in order, "archiving under a newer turn would break its card"
+        elif asked:
+            assert order[-1] == archived, f"the archive comes after every post, got {order}"
+            assert order.count(archived) == 1 and "card_edit" in order
+            if with_files:
+                assert order.index("file_posted") < order.index(archived), (
+                    "a delivered file would reopen the thread, so the archive waits for it"
+                )
+        else:
+            assert archived not in order, "no archive without a request"
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_thread_and_status_embed_posted_before_session_create(
         self,
         mock_resolve: AsyncMock,
@@ -491,9 +669,7 @@ class TestNewThreadCreation:
         )
         assert "embeds" in first_send_kwargs, "instant feedback should be an embed, not text"
         embed = cast("list[discord.Embed]", first_send_kwargs["embeds"])[0]
-        assert (embed.description or "").startswith("**Thinking**"), (
-            "initial embed should show the thinking phase"
-        )
+        assert embed.title == "Working on it…", "initial embed should show the thinking phase"
 
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_missing_config_sends_error_no_thread(
@@ -971,6 +1147,7 @@ class TestSetupHook:
         mock_billing_cog = MagicMock()
         mock_privacy_cog = MagicMock()
         mock_memory_cog = MagicMock()
+        mock_github_cog = MagicMock()
 
         help_mod = types.ModuleType("daimon.adapters.discord.commands.help")
         help_mod.HelpCog = mock_help_cog  # type: ignore[attr-defined]
@@ -986,6 +1163,8 @@ class TestSetupHook:
         privacy_mod.PrivacyCog = mock_privacy_cog  # type: ignore[attr-defined]
         memory_mod = types.ModuleType("daimon.adapters.discord.commands.memory")
         memory_mod.MemoryCog = mock_memory_cog  # type: ignore[attr-defined]
+        github_mod = types.ModuleType("daimon.adapters.discord.commands.github")
+        github_mod.GitHubCog = mock_github_cog  # type: ignore[attr-defined]
         mock_feedback_reaction_cog = MagicMock()
         feedback_reactions_mod = types.ModuleType("daimon.adapters.discord.feedback_reactions")
         feedback_reactions_mod.FeedbackReactionCog = mock_feedback_reaction_cog  # type: ignore[attr-defined]
@@ -1013,13 +1192,15 @@ class TestSetupHook:
                 "daimon.adapters.discord.commands.billing": billing_mod,
                 "daimon.adapters.discord.commands.privacy": privacy_mod,
                 "daimon.adapters.discord.commands.memory": memory_mod,
+                "daimon.adapters.discord.commands.github": github_mod,
                 "daimon.adapters.discord.feedback_reactions": feedback_reactions_mod,
             },
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 9, "setup_hook should add exactly 9 Cogs"
+        assert len(add_cog_calls) == 10, "setup_hook should add exactly 10 Cogs"
         assert sum(isinstance(cog, DirectMessageCog) for cog in add_cog_calls) == 1
+        mock_github_cog.assert_called_once_with(bot)
         mock_help_cog.assert_called_once_with(bot)
         mock_here_cog.assert_called_once_with(bot)
         mock_agent_setup_cog.assert_called_once_with(bot)
@@ -1027,6 +1208,7 @@ class TestSetupHook:
         mock_billing_cog.assert_called_once_with(bot)
         mock_privacy_cog.assert_called_once_with(bot)
         mock_memory_cog.assert_called_once_with(bot)
+        mock_github_cog.assert_called_once_with(bot)
         mock_feedback_reaction_cog.assert_called_once_with(bot)
 
 

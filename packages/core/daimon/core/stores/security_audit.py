@@ -23,6 +23,7 @@ class SecurityAuditEntry(BaseModel):
     tenant_id: uuid.UUID
     account_id: uuid.UUID | None
     agent_id: uuid.UUID | None
+    agent_name: str | None = None
     platform: str | None
     platform_user_id: str | None
     tool_name: str
@@ -47,6 +48,8 @@ class SecurityAuditEntry(BaseModel):
     github_installation_id: int | None = None
     github_repo_ids: list[int] | None = None
     github_permissions: dict[str, str] | None = None
+    github_grant_versions: dict[str, int] | None = None
+    github_turn_origin_id: uuid.UUID | None = None
     github_expires_at: datetime | None = None
 
 
@@ -69,6 +72,8 @@ async def append_github_token_event(
     repo_ids: list[int],
     permissions: dict[str, str],
     expires_at: datetime,
+    grant_versions: dict[str, int] | None = None,
+    turn_origin_id: uuid.UUID | None = None,
 ) -> SecurityAuditRow | None:
     """Audit a token lifecycle step without recording the secret or repo names."""
     return await append_event(
@@ -87,6 +92,8 @@ async def append_github_token_event(
         github_installation_id=installation_id,
         github_repo_ids=repo_ids,
         github_permissions=permissions,
+        github_grant_versions=grant_versions,
+        github_turn_origin_id=turn_origin_id,
         github_expires_at=expires_at,
     )
 
@@ -97,6 +104,7 @@ async def append_event(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID | None,
     agent_id: uuid.UUID | None,
+    agent_name: str | None = None,
     platform: str | None,
     platform_user_id: str | None,
     tool_name: str,
@@ -116,6 +124,8 @@ async def append_event(
     github_installation_id: int | None = None,
     github_repo_ids: list[int] | None = None,
     github_permissions: dict[str, str] | None = None,
+    github_grant_versions: dict[str, int] | None = None,
+    github_turn_origin_id: uuid.UUID | None = None,
     github_expires_at: datetime | None = None,
 ) -> SecurityAuditRow | None:
     if occurred_at is not None and occurred_at.utcoffset() is None:
@@ -142,6 +152,7 @@ async def append_event(
         tenant_id=tenant_id,
         account_id=account_id,
         agent_id=agent_id,
+        agent_name=agent_name,
         platform=platform,
         platform_user_id=platform_user_id,
         tool_name=tool_name,
@@ -161,6 +172,8 @@ async def append_event(
         github_installation_id=github_installation_id,
         github_repo_ids=github_repo_ids,
         github_permissions=github_permissions,
+        github_grant_versions=github_grant_versions,
+        github_turn_origin_id=github_turn_origin_id,
         github_expires_at=github_expires_at,
     )
     session.add(event)

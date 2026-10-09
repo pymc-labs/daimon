@@ -7,19 +7,166 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The scheduler's usage sweep no longer re-replays every model call it has
+  already metered.** It asks the API for `span.model_request_end` events only
+  and skips events already in `usage_events` before writing, so the startup and
+  hourly full passes cost one query per session and a read of its model calls,
+  not every event it holds and one transaction per call. On a workspace with
+  tens of thousands of metered calls those passes ran for many minutes of CPU.
+  The sweep also runs on its own loop now, so a long pass no longer holds up
+  routine claims. Billing is unchanged.
+- Identity exclusions now leave unscoped DMs on the deployment switch, and Discord card recovery retires aged pending cards after repeated lookup failures without dropping cards found during a pass.
+- Discord card recovery now keeps the hourly pass away from live turns and startup reconciliation, retires aged intents after repeated failed passes, and uses "Stopped." for cards found while the bot is running.
+- The Discord webhook capacity model now accounts for lifecycle edit debounce; its overload cases distinguish cold bursts from the removed-debounce counterfactual.
+- Discord restart recovery does not replace an uneditable orphan card. Aged intents stop blocking channel tidy only after a definite recovery failure; a periodic pass revisits them. The bot deletes a known stale card only while it still carries that turn's pending button. Missing messages no longer count as failed deletes, while unknown webhooks do.
+- Discord keeps a pending turn-card intent when recovery cannot edit its webhook card or an unprompted turn cannot delete its card, instead of retiring an unresolved card.
+- Discord picture upload retry expires cleanly, and a completed upload still succeeds if its setup panel was dismissed.
+- The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
 - Name an agent with `@bot agent-name: request` on Discord, Slack or Teams, or mention its managed Discord role. Named turns use the normal admission checks and keep the named agent for later replies in the thread. An agent with a home is hidden outside it; an unknown name follows ordinary routing. An existing thread points a different named agent to Hand over or `hand_off_task`, and a channel with `readers: own` names its own agent when another is requested. Discord manages mentionable roles only for agents without a home and with a runnable channel; a background sweep backfills, renames and removes those roles.
 - Named-agent refusals use the same short copy on Discord, Slack and Teams. Discord shows a notice card, Slack uses Block Kit and Teams uses an Adaptive Card. Discord and Slack put the existing Hand over action on a thread-switch notice. Discord read and search tools name the missing channel permissions in two short lines.
-- `/here` on Discord and Slack shows a fixed, caller-filtered card for channel access, stored channel and agent rules, their effective limits here, and credential names. It points to the answering agent and routing tier in one line. The `where_am_i` MCP tool returns the same card for conversational questions. Discord read and scoped search tools explain when the bot lacks channel view or message history access.
+- Agent identity can be disabled for selected Discord guilds or Slack workspaces
+  while remaining enabled elsewhere in the deployment.
+- Discord and Slack GitHub setup panels now manage connected repos, agent grants,
+  personal links, waiting requests, and disconnects. The
+  server-rendered connection pages include a searchable picker, a persistent
+  Connect repos action, and pages for approval and recovery states.
+- Agents can offer an admin a private GitHub connect link bound to the current agent; members can record a setup request. `/github connect` is available in Discord and Slack with a private button. Self-serve links refuse legacy-mode agents with a saved GitHub key, working repo, skill repo, or channel pin. An operator can issue an agent-bound CLI link for a saved-key agent, then finish the staged update with `daimon github finish-update`. New selections default to **Read and write**: push branches, open issues and pull requests. **Read only** reads code, issues and pull requests.
+- With agent identity enabled, new default pictures use a tenant-assigned
+  Daimon face built from the production mascot and canonical expressions.
+  Layer IDs and draw weights live in a manifest; stored variants keep their
+  appearance when the draw table changes.
+  First-use face generation runs after a turn starts, and stored 20 px
+  thumbnails keep assignment fast in larger workspaces.
+  Public avatar URLs can serve pre-rendered 128 px and 512 px images. An
+  initials URL remains valid after its generated face is stored, until an
+  admin changes the picture. Uploads and the identity-off behavior keep their
+  existing paths.
+- Agent identity now has a deployment switch, `DAIMON_AGENT_IDENTITY__ENABLED`,
+  off by default. When off, Slack and Discord post as the app, Discord replies
+  need a mention, Teams omits the agent name prefix, and setup panels hide
+  avatar controls.
+- **👎 feedback can go to the support channel, per tenant.** With
+  `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` on for a tenant (off by default), each
+  submitted "What went wrong?" form on Slack, and each 👎 text on Discord, is
+  also posted once to the channel Ask a human uses, with the person, the agent,
+  the reasons, the text and a link to the answer. The form tells the person
+  it is shared.
+- **Teams feedback catches up with Slack.** 👎 on a Teams answer now opens a
+  "What went wrong?" form with the same reasons and optional text, and 👍 is
+  acknowledged. Only people who could start a turn at the answer can vote.
+  `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` now covers Teams: a submitted form is
+  posted once to the support channel, spending no credit. With support set
+  up, answers carry an Ask a person button that opens the support form for
+  that answer. Turns that only ran tools get both on their finished card;
+  cancelled turns get neither.
+- **Teams support requests reach a channel's own admins first.** As on Slack
+  and Discord, a request asked from a Teams channel with channel admins now
+  goes to them in 1:1 chats, then to the organisation's admins, and to the
+  support channel only when no chat landed. Only people who could start a
+  turn in that channel can ask from it. A channel read only from inside
+  is marked in the request and in a routed 👎 form, and the form warns that
+  the note leaves the channel.
+- **Add skill in the Teams setup panel.** An agent's Details in `setup` now
+  has an Add skill button, as on Discord and Slack. Its dialog takes a pasted
+  SKILL.md, previews its name, description, files and any scripts, and adds
+  it as the agent's own skill when sent again unchanged. The same people may
+  add as on the other platforms, re-checked on every step. Teams dialogs take
+  no files, so a `.zip` is attached in a message and added from chat.
+- **Channel skills in the Teams Channel settings dialog.** Server admins can
+  now see a channel's extra skills in its Channel settings dialog, add one by
+  name, `agent/name` or skill id, and tick skills to remove them, as Who
+  answers where offers on Discord and Slack. The same core checks decide
+  which skills a channel may add, refusals say why, and every save is
+  audited. A channel's own admins still can't change them.
+- **Teams channel reads link files.** `read_channel`, `read_thread`,
+  `get_message` and `search_messages` now return each file on a message with
+  a download link where the channel's SharePoint site is granted, as Slack
+  reads do, so an agent can open a file it finds there. Only files in the
+  channel's own Files folder are linked: the site grant ignores SharePoint's
+  per-file permissions, so a file from another library or folder, and any
+  file elsewhere, is still listed by name. Links last about an hour and only
+  come with messages the read already returns, so a sealed thread's files
+  stay out. Each file is now an object with `name` and `url`, not a name.
+- Agent setup uses short Picture labels on Slack and Discord. Discord Change opens a file upload form; the attachment option on `/agent-setup` remains available.
+- Status cards and follow-up prompts use short labels on Discord, Slack and Teams. Working cards show Stop, tool steps sit under Details, and finished Discord and Slack cards show time, cost, tokens and balance under Details for everyone. Error, stop, restart and post-failure notices show a clear next step. Feedback and help forms use the same short wording across platforms. Threads whose channel responder changed offer Switch to the new agent and a new-thread hint; staying with the old agent in that thread is not a supported action.
+- **Teams files in private and shared channels, turned on by asking.** The
+  Enable files sign-in now starts from a channel and grants daimon that
+  channel's own SharePoint site: the team's for a standard channel, a site of
+  its own for a private or shared one. The admin's sign-in finds the channel's
+  Files folder, which daimon's `Sites.Selected` permission cannot, and daimon
+  stores it (`teams_channel_sites`). The admin must be a member of the channel
+  and a SharePoint or global admin; the sign-in now also asks for the
+  delegated `Files.Read.All`. Asked to turn files on, or for a file where they
+  are off, the agent calls the new `enable_channel_files` tool and the bot
+  posts the card after its answer, instead of offering an artifact or notebook.
+- Discord server admins can change an agent's avatar with an attachment on `/agent-setup` or reset it from the agent detail panel. The panel shows the current public avatar and warns that caches may keep old images.
+- Slack workspace admins can change or reset an agent's avatar in `/agent-setup`; uploads are cropped and saved as metadata-free PNGs. Teams answers from non-built-in agents start with the agent's bold name on the first chunk.
+- Slack turn messages now carry the answering agent's name and avatar. Built-in Daimon retains the app identity. Existing installs without `chat:write.customize` fall back to the bot header until reinstalled. Turn posts are recorded for agent ownership checks.
+- Discord agent replies can show each agent's name and avatar through a pool of channel webhooks. Replies to recorded bot or application-owned webhook posts can start a turn without mentioning the bot. Servers without Manage Webhooks permission retain bot posts with a name on the first answer chunk.
+- **Agents choose how long a notebook link lasts.** `create_notebook_upload_url` takes `ttl_days`, 1 to 365, default 1, for a read-only scratch notebook; the upload response and `list_notebooks` report `expires_at`. A blog is still kept until it is deleted, and the editor still lasts the host's `subprocess_ttl_seconds`. Read-only notebooks and blogs now survive notebook-host restarts and deploys. The host starts one when someone opens its link and stops it after two hours without a visit (`DAIMON_NOTEBOOK__WARM_WINDOW_SECONDS`), so a link that has been quiet takes a few seconds to load. The host caps lifetimes with `DAIMON_NOTEBOOK__MAX_NOTEBOOK_TTL_SECONDS` (365 days). Re-uploading a blog without `permanent` keeps it a blog.
+- **Slack 👎 asks what went wrong, every time.** The form opens as soon as 👎 is clicked, with optional reasons (wrong or inaccurate, didn't do what I asked, incomplete or cut off, too slow, something else) and optional text. A repeat 👎 opens it again so details can be added later. If Slack doesn't open the form, the person gets a private button that does. Reasons are stored on the feedback row (`message_feedback.feedback_reasons`), next to the text. Only people who could start a turn there can vote.
+- GitHub App grants can be staged and activated per agent. App sessions use per-turn repository tokens and a session-owned vault; legacy agents retain their existing GitHub path. The GitHub connection page offers Select all for repos the confirmer administers, and the default environment includes `gh`.
+
+- `/here` on Discord and Slack shows a compact, private status card: which agent answers here, its reading scope and whether publishing needs approval. When nothing can answer (no channel access, replies disabled, no agent selected) the card shows only that reason. Credential names and routing details stay off the card; the `where_am_i` MCP tool returns the same short summary for conversational questions, with the full structured facts alongside. Discord read and scoped search tools explain when the bot lacks channel view or message history access.
+- **`here` on Teams.** Typed in a channel post, `here` answers in the 1:1
+  chat with the same compact card as Discord and Slack for that post's
+  thread: who answers, what it can read and whether publishing needs
+  approval. Typed in the chat it describes the chat, or the setup
+  conversation it is in. Only the place it was typed in counts as one the
+  caller can see. The `where_am_i` MCP tool now answers in Teams channel
+  turns too, and its facts name a Teams setter by stored name.
+- **Teams `memory` shows the agent where it was typed.** Typed in a channel
+  post, `memory` now lists what that post's agent remembers, following a
+  thread handed to another agent, instead of the 1:1 chat's agent. The answer
+  still arrives in the 1:1 chat, so when the channel's readers are limited
+  (`inside` or `own`) the card says the memory is kept inside the channel and
+  shows nothing, rather than carry it out. Typed in the chat it is
+  unchanged.
+- **Teams `billing` shows the channel's budget.** Typed in a channel with a
+  budget, `billing` adds the **This channel** section the Discord and Slack
+  panels show, worded from its state, and keeps it across Refresh, Add credit
+  and Redeem code clicks on the card. The channel is held server-side for the
+  person who typed the command, so a crafted click cannot read another
+  channel's budget; after a restart a refresh drops the section until
+  `billing` is typed again.
+- **Look up a person on the Teams billing card.** Admins get a **Look up a
+  person** action with the Teams people picker over the organisation's
+  directory. Picking someone shows their spend and turn count this month
+  under the actions, with the name daimon stored for them, or "Name
+  unavailable" for someone it has never seen. Admin is checked again on the
+  click, as on Discord and Slack.
+
 - Slack message reads and searches include file metadata and expiring download links. `send_message` uploads staged file handles, or reposts a file link from the same workspace when the requester can read the file where it was shared and the channel policy lets the call read it there; a file in a sealed thread is reposted only into that thread, and a file shared only in a 1:1 DM only into a DM. `add_skill` applies the same check to a Slack file link. A caption is required, the combined limit is ten files, and posting needs the `files:write` scope. The upload messages are recorded with the caption, so the agent can delete them and `delete_thread` still accepts a thread whose files it posted. Slack thread reads return continuation cursors for newer replies.
-- A thread can move to another agent without opening a new thread. Ask the agent in the thread to hand it over (`hand_off_task`), or, when a channel's agent changed under an existing thread, press Hand over on the notice that thread shows (Discord and Slack). The new agent gets the conversation and working files from the next message, and the old session is archived with its history still readable. Inherited seals keep memory read-only. A member may hand a thread to an agent of that channel: the one it answers with, one pinned to it, or one of an isolated channel's own agents. Other agents need a server admin, or a channel admin of the channel when the thread is not sealed and the agent is one they could make its default.
-- Agents can tidy their own posts on Discord and Slack. `edit_message` and `delete_message` change one message the agent posted with `send_message` or `create_thread`; `archive_thread` (Discord) and `delete_thread` close a thread it opened. An agent can change only what it posted itself, which daimon now records at send time; people's messages, other agents' and other bots' posts, turn replies and cards are refused. Each call is checked against the channel policy (protection, pins, isolation, seals), and checked again on a fresh policy right before the Discord or Slack call. Calls are refused in the support-escalation channels. Discord thread cleanup keeps the thread and other people's messages. Bulk deletes check and audit each message. Limits are 10 message actions per turn and 40 per hour per agent, and 20 refused calls in an hour pause tidying for that agent. Every edit or delete writes a security audit row with the channel and message ids, an HMAC of the replaced text keyed by a server secret, and the turn, never the text. Post records expire with `daimon audit prune`, and erasing an account clears the HMACs on its audit rows. A new seeded skill, `channel-tidy`, tells agents when to use them.
+- A thread can move to another agent without opening a new thread. Ask the agent in the thread to hand it over (`hand_off_task`), or, when a channel's agent changed under an existing thread, press Hand over on the notice that thread shows (Discord, Slack and Teams). The new agent gets the conversation and working files from the next message, and the old session is archived with its history still readable. Inherited seals keep memory read-only. A member may hand a thread to an agent of that channel: the one it answers with, one pinned to it, or one of an isolated channel's own agents. Other agents need a server admin, or a channel admin of the channel when the thread is not sealed and the agent is one they could make its default.
+- Agents can tidy their own posts on Discord, Slack and Teams. `edit_message` and `delete_message` change one message the agent posted with `send_message` or `create_thread`; `archive_thread` (Discord) and `delete_thread` (Discord, Slack) close a thread it opened. An agent can change only what it posted itself, which daimon now records at send time; people's messages and other agents' and other bots' posts are refused. Each call is checked against the channel policy (protection, pins, isolation, seals), and checked again on a fresh policy right before the Discord or Slack call. Calls are refused in the support-escalation channels. Discord thread cleanup keeps the thread and other people's messages. Bulk deletes check and audit each message. Limits are 10 message actions per turn and 40 per hour per agent, and 20 refused calls in an hour pause tidying for that agent. Every edit or delete writes a security audit row with the channel and message ids, an HMAC of the replaced text keyed by a server secret, and the turn, never the text. Post records expire with `daimon audit prune`, and erasing an account clears the HMACs on its audit rows. A new seeded skill, `channel-tidy`, tells agents when to use them.
+- **"Tidy this thread" works on Discord.** An agent can now edit and delete its own chat replies and status cards (empty cards included), and archive or clear the thread it opened from someone's mention. Daimon records what each turn posts, with the agent and the person who asked. A reply or card can be tidied once its turn has finished, and only when the person asking started that turn, opened the thread with that agent, or is a server admin; archiving or clearing an auto-opened thread takes the person who opened it or a server admin. People's messages and other agents' posts stay refused. Erasing an account clears the person's id from these records. Posts from before this release, turn error notices and setup-wizard turns are not recorded and can still be removed by hand. Slack turn replies are not covered yet.
 - **Channel and agent rules.** Two rules now say what reaches whom ([permissions](docs/permissions.md)). A channel rule sets its `readers` (`any`, `inside`: only turns in it, `own`: only its own agents) and `writers` (`any`, `own`, `none`); an agent rule sets the only channels an agent runs in (`runs_in`). Admins set them by asking daimon (`set_channel_rule`, `set_agent_rule`), on each channel's **Permissions** screen (Discord and Slack setup panels, the Teams Channel settings dialog), or with `daimon channels rule set` and `daimon agents rule set`. `daimon tenants access-policy rules` lists them. Rules are per channel; only `daimon channels rule set --thread` keeps one Slack or Discord thread to turns inside it, and threads sealed before keep their seal.
+- Tenant admins can issue a GitHub App connection invitation; a browser confirmation checks repository admin access before authorizing repos for the workspace. The flow is available only with the separate GitHub App settings and encryption keys.
 - Separate `DAIMON_GITHUB_APP__*` settings for agent-scoped GitHub App credentials.
 
 ### Fixed
 
+- Repeated GitHub Connect repos submissions show the successful repo count.
+  The submit button disables while connecting, and new selections default to
+  read and write access.
+- **Sonnet 5.5 cache reads are billed at $0.10 per million tokens**, Anthropic's price since 2026-10-07. Daimon still charged the old $0.20, so the default model's cache reads cost tenants twice the list price in estimates and ledger debits.
+- Approving a tool call no longer fails the turn with "re-requested approval for tool call(s) already confirmed". The approved call now runs inside the turn, so a notebook or attachment publish is no longer refused after Approve.
+- Allow-listed Discord QA bots can start a turn by replying without a mention to a recorded agent post, as they already can by mentioning Daimon.
+- Slack keeps the agent name in answer footers when it accepts custom header fields but posts with the bot's header.
+- GitHub App tokens now refresh during running turns before they expire. Repository resources and vault credentials update in place; a superseded token keeps working until its natural expiry, and is revoked early only when the installation, link, grant or repository authorization is removed or staged, or a later refresh narrows its access. A failed refresh keeps the session open and retries after one minute, doubling up to 30 minutes. A session that has been running continuously for more than 12 hours stops refreshing; seeing it idle resets that clock.
+- When a GitHub App token refresh fails partway through a running turn, the new tokens already in the session's repositories or vault are no longer revoked, so a tool that picked one up keeps working until the token expires. A new token that grants more than the session still holds is revoked at once, and tokens that never reached the session are revoked as before.
+- **Notebook names work for every account.** Each notebook slug starts with a 12-character tag derived from the account, and about 1 account in 64 has a tag beginning with `-`. The notebook host refuses slugs that start with `-`, so every named notebook from those accounts failed at upload with a 400. One in 64 unnamed notebooks failed the same way. Those tags and random slugs now get an `x` in front; every other account keeps its tag, so existing notebooks stay where they are.
+- **Discord's help button says "🙋 Ask the team" too.** The button in the direct message after a 🙋 reaction, and its form, use the same name as Slack; the form's text box says "Someone from the team will reply."
+- **Slack's Ask a human button is now "🙋 Ask the team"**, with an emoji like the 👍/👎 beside it. Its form, notices and refusal say "the team" too ("What do you need help with? Someone from the team will reply."), and the support wording shared with Discord no longer says "a human".
+- **Slack's "What went wrong?" and Ask a human forms open again.** Both declared a 4,000-character text box; Slack caps a text input at 3,000 and refuses the whole form when it is larger, so every 👎 form and every Ask a human note form failed with `invalid_arguments` and nothing opened.
+- **Slack turns that only ran tools can be rated and can ask a human.** Their finished status card now carries 👍/👎 (and Ask a human when it is enabled), as Discord's tool-only turns already did.
+- **Slack's Ask a human button no longer looks dead on a slow check.** The click opens a "Checking…" form at once and replaces it with the note form or the reason there is none. Before, the checks (including a live user-group lookup) ran first and could outlast Slack's 3-second window, so nothing opened.
+- **Slack feedback acknowledgements land in the answer's thread** instead of the channel.
+- **Archiving the thread an agent is answering in no longer breaks its reply.** `archive_thread` on the turn's own thread archived it at once, so Discord refused the turn's final card edit: the card stayed on "Thinking", an error was posted, and that post reopened the thread. The archive now happens once the turn has posted everything, generated files included, and the tool says it is scheduled. A refused call schedules nothing, and a thread a newer turn has started in by then stays open. The `channel-tidy` skill tells agents that tidying a thread does not include archiving it, and to say a thread will be archived only after the tool scheduled it.
 - **Slack `/help` lists `/memory` and `/dm`.** Both commands worked but were missing from `/help`, so its list didn't match the commands Slack offers.
 - **Slack `read_thread` stays within 200 messages and its cursor reads older replies.** Slack adds a thread's root to every page, so a read at the 200-message limit returned 201. The continuation hint also said "newer" while Slack returned the thread's older replies. The root now counts toward the limit, so a page holds at most 200 messages; a limit below 2 still reads the root and one reply. The hint and tool description say the cursor reads older replies.
 - **A top-level Slack mention sees what was just said in the channel.** A fresh mention replayed only its own new thread, so a question about a message posted moments earlier went unanswered. Its first turn now gets up to 24 messages before it, as on Discord, read under `read_channel`'s rules. Mentions inside a thread replay that thread as before.
@@ -71,7 +218,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment pick or clear that leaves a sealed channel on unrestricted
   networking now waits for `confirm_open_network` on
   `set_channel_environment` and `clear_channel_environment`; the panels write
-  nothing and point to chat.
+  nothing and point to chat. The same holds for a workspace default that
+  sealed channels without their own pick follow, for `update_environment`
+  opening the network of an environment a sealed channel runs in, and for
+  `archive_environment` dropping one onto an open fallback; both tools take
+  `confirm_open_network`. A sealed Discord thread counts under the channel
+  its sessions ran in, also for a pick made on that channel directly.
 - **Isolated runs from the hub or a DM count toward the channel budget.** A
   run of an isolated channel's own agent from the hub or a DM, which only
   admins and that channel's admins may make, is now gated by and charged to
@@ -87,6 +239,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Tool approval cards on Discord, Slack and Teams now name the action and consequence, show plain labelled inputs in Details, and collapse after a decision. Each blocked call gets its own card and confirmation event.
+- If a turn stops after an approval click but before its confirmation is sent, the answered card now shows Stopped.
+
+- `/billing` (`billing` on Teams) names its top spenders, never as `User 1234` and without pinging anyone. Discord fetches the member when the cache lacks them; Slack asks `users.info` and shows the name as plain text; Teams reads the rosters of the teams the bot is installed in. Someone who has left, or whose lookup is slow, shows the name daimon last saw for them: it now remembers the names Discord, Slack and Teams send with messages, clicks and lookups (`platform_user_names`, removed by a privacy deletion). Discord also asks for a departed person's account name. Someone never seen at all is a mention the Discord or Slack client names, or `Name unavailable` on Teams. Teams names channel budgets by channel name instead of the `19:…` id.
+- `/billing` drops its `·` separators: the admin subtitle is two lines, expiry dates read `$20.00 on Oct 12`, and top-up amounts show `about 100 turns` under the amount.
+- `/billing` is a short panel in the same words on Discord, Slack and Teams: the month and what was spent by how many people, the credit left as one large total (`$62.40` `total credit left`, or `No credit left` and `$3.10 spent beyond it`) with how much of it expires, the invoking channel's budget under **This channel** (`$1.20 of $5.00 used this month`), a member's own use (`$11.50 of your $25.00 this month`), and for admins the **Top spenders** and **Channel budgets**, each in its own section. Actions: **Add credit**, **Redeem code**, **Expiry dates** (each timed credit's end date) and, for admins on Discord and now Slack, **Look up a person**. Discord's accent turns red with no credit left or over your cap, and amber while timed credit expires within a week.
+- `daimon github connect-link` requires `--requester` with a tenant admin platform user ID; the invitation is minted on that admin’s behalf.
 - **Channel and agent rules replace protected, sealed, isolated (confidential) and pinned.** Other entries in this section that use those words describe these rules: a protected channel or category is `writers: none`, a sealed one `readers: inside`, an isolated or confidential one `readers: own` and `writers: own`, and a pin is an agent rule. `set_channel_protection`, `set_channel_isolation`, `daimon channels protect`, `daimon channels isolate` and the rule flags of `daimon tenants access-policy set` are replaced by the rule tools and commands; `archive_isolation_copy` is now `archive_channel_copy`. A stored policy written before reads as the same rules and is saved in the new shape on its next change, so no migration runs. A build from before this change can't read a policy saved by it and refuses rather than falls open. From a channel kept to its own agents, or by an agent with a rule, publishing a report, notebook or attachment now asks the requester to approve it instead of being refused.
 - **Turn outcomes tell protection, pin and isolation refusals apart.** A turn
   refused because its channel is protected, its agent is pinned to other
@@ -186,6 +345,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A Discord role taken away ends channel admin rights at once.** Outside a
+  chat turn (MCP calls, the hub, a connector sign-in, budget notices and ask a
+  human DMs), a channel admin matched by a stored Discord role counts only
+  while Discord still lists the role on them, read per member and cached for a
+  minute. A failed read grants nothing. Before, the stored role stood until
+  their next turn.
 - **Agents that only routines or threads run count as shared.** Editing an
   agent's prompt or setup, or binding a repo to it, now reads sharing as
   widely as a key change: a bound thread, someone's personal default, or
@@ -267,6 +432,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Building the image needs Docker 23 or later: the Dockerfile uses BuildKit instructions the legacy builder rejects.
 - Run migrations `0046_account_external` and `0047_turn_origin_external` before deploying. The new code leaves an empty member guest list out of the stored access policy, so older processes still read it; once one is listed, upgrade every process.
 - Isolated channels' agents no longer read other channels, nor sessions with no channel stamp: setups that relied on it stop working.
 - Teams guests in standard and private channels and 1:1 chats are no longer answered outside isolated channels unless listed with `daimon tenants access-policy --add-member-guest`, or unless `DAIMON_TEAMS__RESTRICT_GUESTS=false`.

@@ -10,12 +10,14 @@ from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.errors import DaimonError
-from daimon.core.here_card import load_here_card
+from daimon.core.here_card import HereCard, load_here_card, render_here_card
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import find_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.webhook.async_client import AsyncWebhookClient
+
+NOTIFICATION_TEXT = "Channel status"
 
 
 async def _channels(client: AsyncWebClient, *, user_id: str | None, types: str) -> dict[str, bool]:
@@ -52,22 +54,35 @@ async def _visible_channel_ids(client: AsyncWebClient, user_id: str) -> set[str]
     }
 
 
-def _plain_blocks(card_text: str) -> list[dict[str, Any]]:
-    """Keep names as plain text so a configured name cannot create a mention."""
-    body = card_text.removeprefix("**Here**\n")
-    return [
-        {"type": "header", "text": {"type": "plain_text", "text": "Here"}},
-        *(
-            {
-                "type": "section",
-                "text": {
-                    "type": "plain_text",
-                    "text": line,
-                },
-            }
-            for line in body.splitlines()
-        ),
+def build_here_attachment(card: HereCard) -> dict[str, Any]:
+    """Block Kit inside a coloured attachment, with no name interpolation in mrkdwn."""
+    shown = render_here_card(card)
+    blocks: list[dict[str, Any]] = [
+        {"type": "header", "text": {"type": "plain_text", "text": shown.title}},
     ]
+    if shown.subline is not None:
+        blocks.append({"type": "section", "text": {"type": "plain_text", "text": shown.subline}})
+    fields: list[dict[str, str]] = []
+    if shown.reading is not None:
+        fields.append({"type": "mrkdwn", "text": f"*Reading*\n{shown.reading}"})
+    if shown.publishing is not None:
+        fields.append({"type": "mrkdwn", "text": f"*Publishing*\n{shown.publishing}"})
+    if fields:
+        blocks.append({"type": "section", "fields": fields})
+    if shown.extras:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "plain_text", "text": "\n".join(shown.extras)}],
+            }
+        )
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [{"type": "plain_text", "text": "Channel setting. Threads can differ."}],
+        }
+    )
+    return {"color": shown.colour, "fallback": card.text, "blocks": blocks}
 
 
 async def _setter_display_name(client: AsyncWebClient, external_id: str) -> str | None:
@@ -136,18 +151,23 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 caller_can_view=caller_view,
             )
         response_url = str(payload.get("response_url") or "")
+        # The attachment carries the card; top-level text is only the notification
+        # line, so Slack does not render the card twice.
         if not bot_view and response_url:
-            await AsyncWebhookClient(response_url).send(
-                text="Here status card",
-                blocks=_plain_blocks(card.text),
-                response_type="ephemeral",
+            await AsyncWebhookClient(response_url).send_dict(
+                {
+                    "text": NOTIFICATION_TEXT,
+                    "attachments": [build_here_attachment(card)],
+                    "response_type": "ephemeral",
+                    "parse": "none",
+                }
             )
         else:
             await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id,
                 user=user_id,
-                text="Here status card",
-                blocks=_plain_blocks(card.text),
+                text=NOTIFICATION_TEXT,
+                attachments=[build_here_attachment(card)],
                 parse="none",
                 link_names=False,
             )

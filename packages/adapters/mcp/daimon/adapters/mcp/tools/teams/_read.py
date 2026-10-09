@@ -11,6 +11,7 @@ message search for an app, so search_messages scans recent posts, bounded.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import httpx
@@ -28,9 +29,11 @@ from daimon.adapters.mcp.tools.teams._directory import (
     split_thread,
     thread_id,
 )
+from daimon.adapters.mcp.tools.teams._files import file_links
 from daimon.adapters.mcp.tools.teams._models import (
     TeamsChannelResult,
     TeamsChannelRow,
+    TeamsFileRow,
     TeamsParsedLink,
     TeamsPost,
     TeamsReadMessage,
@@ -71,8 +74,13 @@ def _order(message: GraphMessage) -> int:
     return int(message.id) if message.id.isdigit() else 0
 
 
-def _row(message: GraphMessage, *, channel_id: str, root_id: str) -> TeamsReadMessage | None:
-    """The message as a row; None for a system event or a deleted message."""
+def _row(
+    message: GraphMessage, *, channel_id: str, root_id: str, links: Mapping[str, str] = {}
+) -> TeamsReadMessage | None:
+    """The message as a row; None for a system event or a deleted message.
+
+    `links` maps a shared file's content URL to its download URL (`file_links`).
+    """
     if message.message_type != "message" or message.deleted_date_time is not None:
         return None
     user = message.sender.user if message.sender else None
@@ -91,20 +99,26 @@ def _row(message: GraphMessage, *, channel_id: str, root_id: str) -> TeamsReadMe
         text=_clip(text),
         timestamp=message.created_date_time,
         subject=message.subject or None,
-        files=[a.name or "file" for a in message.attachments if a.content_type in _FILES],
+        files=[
+            TeamsFileRow(name=a.name or "file", url=links.get(a.content_url or ""))
+            for a in message.attachments
+            if a.content_type in _FILES
+        ],
         images=len(image_sources(html)) if html else 0,
         web_url=message.web_url,
     )
 
 
-def _post(message: GraphMessage, *, channel_id: str) -> TeamsPost | None:
-    root = _row(message, channel_id=channel_id, root_id=message.id)
+def _post(
+    message: GraphMessage, *, channel_id: str, links: Mapping[str, str] = {}
+) -> TeamsPost | None:
+    root = _row(message, channel_id=channel_id, root_id=message.id, links=links)
     if root is None:
         return None
     replies = [
         row
         for reply in sorted(message.replies, key=_order)
-        if (row := _row(reply, channel_id=channel_id, root_id=message.id)) is not None
+        if (row := _row(reply, channel_id=channel_id, root_id=message.id, links=links)) is not None
     ]
     return TeamsPost(
         **root.model_dump(), replies=replies, more_replies=message.replies_next_link is not None
@@ -195,12 +209,11 @@ async def _teams_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
         )
     except GraphUnavailable as err:
         raise _graph_refused(err) from err
-    posts = [
-        p
-        for m in page.value
-        if (p := _post(m, channel_id=ref.channel_id)) is not None
-        and read_policy.allows(p.thread_id, ref.channel_id)
+    kept = [
+        m for m in page.value if read_policy.allows(thread_id(ref.channel_id, m.id), ref.channel_id)
     ]
+    links = await file_links(runtime, auth, client, ref, (x for m in kept for x in (m, *m.replies)))
+    posts = [p for m in kept if (p := _post(m, channel_id=ref.channel_id, links=links)) is not None]
     posts.reverse()
     next_cursor = skiptoken_of(page.next_link)
     return TeamsChannelResult(
@@ -244,10 +257,11 @@ async def _teams_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
             messages.insert(0, await graph.get_message(ref.group_id, ref.channel_id, root))
     except GraphUnavailable as err:
         raise _graph_refused(err) from err
+    links = await file_links(runtime, auth, client, ref, messages)
     rows = [
         row
         for message in messages
-        if (row := _row(message, channel_id=ref.channel_id, root_id=root)) is not None
+        if (row := _row(message, channel_id=ref.channel_id, root_id=root, links=links)) is not None
     ]
     next_cursor = skiptoken_of(replies.next_link)
     return TeamsThreadResult(
@@ -282,7 +296,8 @@ async def _teams_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
                 "channel_id=<channel>;messageid=<root>"
             ) from err
         raise _graph_refused(err) from err
-    row = _row(message, channel_id=ref.channel_id, root_id=root or message.id)
+    links = await file_links(runtime, auth, client, ref, [message])
+    row = _row(message, channel_id=ref.channel_id, root_id=root or message.id, links=links)
     if row is None:
         raise ToolError("that message was deleted, or is a system event")
     return row
@@ -409,7 +424,8 @@ async def _teams_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
     refs = await _searchable(runtime, auth, channel_ids=channel_ids, read_policy=read_policy)
     client, _ = require_client(runtime, auth)
     graph = graph_for(client)
-    matches: list[TeamsSearchMatch] = []
+    # (channel, thread root, message): rows are built once the page is cut, with links.
+    found: list[tuple[TeamsChannelRef, str, GraphMessage]] = []
     scanned_posts = 0
     complete = len(refs) <= _SEARCH_CHANNELS
     for ref in refs[:_SEARCH_CHANNELS]:
@@ -434,22 +450,32 @@ async def _teams_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
                         and (not authors or (row.author_id or "").lower() in authors)
                         and read_policy.allows(row.thread_id, ref.channel_id)
                     ):
-                        matches.append(
-                            TeamsSearchMatch(
-                                channel_id=ref.channel_id,
-                                channel_name=ref.channel_name,
-                                message=row,
-                            )
-                        )
+                        found.append((ref, post.id, message))
                 complete = complete and post.replies_next_link is None
             skiptoken = skiptoken_of(page.next_link)
             if skiptoken is None:
                 break
         else:
             complete = complete and skiptoken is None
-    matches.sort(key=lambda m: int(m.message.id) if m.message.id.isdigit() else 0, reverse=True)
+    found.sort(key=lambda f: _order(f[2]), reverse=True)
+    found = found[: max(1, min(limit, _MAX_SEARCH_RESULTS))]
+    # Per channel: a file shared into two channels is linked only from its own site.
+    links: dict[str, dict[str, str]] = {}
+    for ref in refs[:_SEARCH_CHANNELS]:
+        if mine := [m for r, _, m in found if r is ref]:
+            links[ref.channel_id] = await file_links(runtime, auth, client, ref, mine)
+    matches = [
+        TeamsSearchMatch(channel_id=ref.channel_id, channel_name=ref.channel_name, message=row)
+        for ref, root, message in found
+        if (
+            row := _row(
+                message, channel_id=ref.channel_id, root_id=root, links=links[ref.channel_id]
+            )
+        )
+        is not None
+    ]
     return TeamsSearchResult(
-        matches=matches[: max(1, min(limit, _MAX_SEARCH_RESULTS))],
+        matches=matches,
         scanned_channels=min(len(refs), _SEARCH_CHANNELS),
         scanned_posts=scanned_posts,
         complete=complete,

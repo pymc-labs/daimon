@@ -126,28 +126,19 @@ def is_enabled(*, channel_id: str | None, allowance: int) -> bool:
 # Person-facing copy, shared so Discord and Slack say the same thing. Each
 # adapter renders its own markup around it; none of these carry markup.
 
-OUT_OF_CREDITS: Final[str] = (
-    "You've used all your human-support requests. "
-    "Contact us if you'd like more added to your account."
-)
-UNAVAILABLE: Final[str] = "This support request is no longer available."
-EMPTY_NOTE: Final[str] = "Please describe what you need help with."
+#: The button, the form and its notices, on every platform.
+ASK_THE_TEAM: Final[str] = "Ask a person"
+
+OUT_OF_CREDITS: Final[str] = "You have no help requests left. Contact us."
+UNAVAILABLE: Final[str] = "This request has expired. Ask a person."
+EMPTY_NOTE: Final[str] = "Write a few words first."
 ALREADY_REQUESTED: Final[str] = (
-    "You've already asked for a human on this answer -- someone will follow up. "
+    "You've already asked the team about this answer -- someone will follow up. "
     "That request didn't use another credit."
 )
-RECORDED_UNDELIVERED: Final[str] = (
-    "Thanks -- your request has been recorded and someone will follow up."
-)
-RECEIVED: Final[str] = (
-    "Thanks -- your request has been recorded and someone will follow up. "
-    "You have {remaining} left."
-)
-_OFFER: Final[str] = (
-    "You asked for a human on that answer. "
-    "You have {remaining} support request(s) left -- "
-    "tell us what you need and we'll pick it up."
-)
+RECORDED_UNDELIVERED: Final[str] = "Request sent. Someone will reply."
+RECEIVED: Final[str] = "Request sent. Someone will reply."
+_OFFER: Final[str] = "Need help with this answer?\n{remaining} {request_word} left"
 
 
 def received_text(*, remaining: int) -> str:
@@ -157,4 +148,5 @@ def received_text(*, remaining: int) -> str:
 
 def offer_text(*, remaining: int) -> str:
     """The prompt shown before the note form: how many requests are left."""
-    return _OFFER.format(remaining=remaining)
+    word = "request" if remaining == 1 else "requests"
+    return _OFFER.format(remaining=remaining, request_word=word)

@@ -24,6 +24,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, cast
 
 import httpx
@@ -33,6 +35,7 @@ from daimon.core.github_rate_limit import (
     is_rate_limit_response,
     rate_limit_retry_after,
 )
+from pydantic import BaseModel, Field
 
 _APP_INSTALL_URL_TEMPLATE = "https://github.com/apps/{slug}/installations/new"
 
@@ -53,6 +56,55 @@ PERMISSION_PROFILES: Mapping[PermissionProfile, Mapping[str, str]] = {
     "read": READ_PERMISSIONS,
     "write": WRITE_PERMISSIONS,
 }
+
+
+@dataclass(frozen=True)
+class AppInstallationDetails:
+    installation_id: int
+    account_id: int
+    account_login: str
+    account_type: str
+    repository_selection: Literal["all", "selected"]
+    suspended_at: datetime | None
+
+
+class _InstallationAccount(BaseModel):
+    id: int = Field(gt=0)
+    login: str = Field(min_length=1)
+    type: str = Field(min_length=1)
+
+
+class _InstallationDetailsResponse(BaseModel):
+    id: int = Field(gt=0)
+    account: _InstallationAccount
+    repository_selection: Literal["all", "selected"]
+    suspended_at: datetime | None = None
+
+
+async def get_app_installation_details(
+    http_client: httpx.AsyncClient, *, jwt: str, installation_id: int
+) -> AppInstallationDetails:
+    """Verify an installation belongs to this App and read its account metadata."""
+    response = await http_client.get(
+        f"https://api.github.com/app/installations/{installation_id}",
+        headers={
+            "Authorization": f"Bearer {jwt}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    response.raise_for_status()
+    body = _InstallationDetailsResponse.model_validate(response.json())
+    if body.id != installation_id:
+        raise ValueError("GitHub returned a different installation ID")
+    return AppInstallationDetails(
+        installation_id=body.id,
+        account_id=body.account.id,
+        account_login=body.account.login,
+        account_type=body.account.type,
+        repository_selection=body.repository_selection,
+        suspended_at=body.suspended_at,
+    )
 
 
 def group_repository_access(

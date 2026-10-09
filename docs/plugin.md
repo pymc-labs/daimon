@@ -45,7 +45,7 @@ themselves are in [configuration.md](configuration.md#hub).
 
 Logging in proves one platform identity and the workspaces it belongs to.
 `packages/core/daimon/core/hub_identity.py` intersects that set with the
-tenants where daimon is actually installed and ready, and looks up or
+tenants where Daimon is actually installed and ready, and looks up or
 provisions your account in each one exactly as the chat adapters do on first
 contact — so a turn you start from Claude Code is permission-checked and
 billed as you, in that workspace, not as some shared service identity. The
@@ -54,7 +54,7 @@ Slack visibility.
 
 That also means the answer to "why do I see no daimons" is usually not the
 plugin. Either you have not authenticated that server with `/mcp` yet, or
-daimon is not installed in any workspace you belong to, or the deployment has
+Daimon is not installed in any workspace you belong to, or the deployment has
 no mount for that platform.
 
 ## Before you install

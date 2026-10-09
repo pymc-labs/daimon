@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any, cast
 
 from daimon.core._models import TurnOrigin
 from daimon.core.stores.domain import Role, TurnOriginRow
-from sqlalchemy import delete, select, update
+from sqlalchemy import CursorResult, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -136,3 +137,31 @@ async def update_origin_target(
 
 async def delete_origin(session: AsyncSession, *, origin_id: uuid.UUID) -> None:
     await session.execute(delete(TurnOrigin).where(TurnOrigin.id == origin_id))
+
+
+async def request_thread_archive(
+    session: AsyncSession, *, origin_id: uuid.UUID, thread_id: str, now: datetime
+) -> bool:
+    """Ask for this live turn's own thread to be archived when the turn ends.
+
+    False when the origin is gone (the turn ended) or runs in another thread.
+    """
+    result = await session.execute(
+        update(TurnOrigin)
+        .where(
+            TurnOrigin.id == origin_id,
+            TurnOrigin.thread_id == thread_id,
+            TurnOrigin.expires_at > now,
+        )
+        .values(archive_requested_at=now)
+    )
+    await session.flush()
+    return cast(CursorResult[Any], result).rowcount == 1
+
+
+async def thread_archive_requested(session: AsyncSession, *, origin_id: uuid.UUID) -> bool:
+    """Whether the agent asked, during this turn, to archive the turn's thread."""
+    requested = await session.scalar(
+        select(TurnOrigin.archive_requested_at).where(TurnOrigin.id == origin_id)
+    )
+    return requested is not None
