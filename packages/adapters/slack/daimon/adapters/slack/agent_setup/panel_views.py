@@ -180,7 +180,7 @@ def build_github_home_view(
             {
                 "type": "button",
                 "action_id": "github_link__open",
-                "text": {"type": "plain_text", "text": "Continue"},
+                "text": {"type": "plain_text", "text": "Connect GitHub"},
                 "url": pending_url,
             },
             _button(action_id=ACTION_GITHUB_START, label="Start over"),

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 import httpx
 import structlog
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
-from daimon.adapters.discord.agent_setup.github_home import GitHubLinkView
+from daimon.adapters.discord.agent_setup.github_home import GitHubLinkView, connect_button_view
 from daimon.adapters.discord.checks import is_guild_admin, is_member_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.github_credentials import build_multifernet
@@ -201,13 +201,10 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
     except ValueError as error:
         await interaction.response.send_message(safe_github_error(error), ephemeral=True)
         return True
-    view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button(label="Open GitHub ↗", url=url))
+    view = connect_button_view(url)
     await interaction.response.edit_message(
         content=None,
-        embed=github_embed(
-            f"{CONNECT_COPY}\nLink works once\nExpires in 7 days\n{url}", state="waiting"
-        ),
+        embed=github_embed("Connect GitHub to choose repos.", state="waiting"),
         view=view,
         allowed_mentions=discord.AllowedMentions.none(),
     )
@@ -282,9 +279,7 @@ class NewRepoCard(discord.ui.View):
             return
         await interaction.response.edit_message(
             content=None,
-            embed=github_embed(
-                f"{CONNECT_COPY}\nLink works once\nExpires in 7 days", state="waiting"
-            ),
+            embed=github_embed(CONNECT_COPY, state="waiting"),
             view=GitHubLinkView(
                 url,
                 user_id=interaction.user.id,

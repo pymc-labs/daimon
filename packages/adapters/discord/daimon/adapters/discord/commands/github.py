@@ -3,7 +3,7 @@
 from typing import cast
 
 import anthropic
-from daimon.adapters.discord.agent_setup.github_home import load_home
+from daimon.adapters.discord.agent_setup.github_home import connect_button_view, load_home
 from daimon.adapters.discord.agent_setup.hydrate import load_roster_state
 from daimon.adapters.discord.checks import (
     is_guild_admin,
@@ -143,8 +143,10 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     tenant_id=tenant_id,
                     requester_account_id=principal.account_id,
                     requester_label=str(interaction.user.id),
+                    requester_platform_user_id=str(interaction.user.id),
                     agent_id=agent_id,
                     agent_name=target_name,
+                    origin_platform="discord",
                 )
                 await append_event(
                     session,
@@ -159,15 +161,8 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     reason="admin link minted",
                 )
             await interaction.followup.send(
-                f"Opens GitHub to pick repos for {target_name}.\n"
-                "Nothing is shared until you confirm.",
-                view=discord.ui.View().add_item(
-                    discord.ui.Button(
-                        label="Connect GitHub",
-                        style=discord.ButtonStyle.link,
-                        url=f"{root}/oauth/github/connect/{token}",
-                    )
-                ),
+                f"Connect GitHub for {target_name}.",
+                view=connect_button_view(f"{root}/oauth/github/connect/{token}"),
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )

@@ -273,13 +273,11 @@ def test_discord_github_home_and_destructive_confirmations() -> None:
     pending_labels = [
         item.label for item in pending.walk_children() if isinstance(item, discord.ui.Button)
     ]
-    assert "Continue" in pending_labels and "Start over" in pending_labels
+    assert "Connect GitHub" in pending_labels and "Start over" in pending_labels
     assert "Choose agent" not in pending_labels
     link = GitHubLinkView("https://example.invalid/connect", user_id=7)
     assert {item.label for item in link.children if isinstance(item, discord.ui.Button)} == {
-        "Open GitHub ↗",
-        "Copy link",
-        "◀ Back",
+        "Connect GitHub",
     }
 
 

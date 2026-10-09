@@ -447,8 +447,9 @@ class GitHubWaitingView(PanelViewBase):
         )
         await self.swap_to(interaction, refreshed)
         if url is not None:
-            link_view = discord.ui.View(timeout=600)
-            link_view.add_item(discord.ui.Button(label="Open GitHub ↗", url=url))
+            from daimon.adapters.discord.agent_setup.github_home import connect_button_view
+
+            link_view = connect_button_view(url, timeout=600)
             await interaction.followup.send(
                 "Waiting for GitHub confirmation.", view=link_view, ephemeral=True
             )

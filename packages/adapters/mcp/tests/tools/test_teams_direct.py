@@ -99,6 +99,23 @@ async def test_a_dm_opens_the_recipients_1_1_chat_and_posts_there(
     assert result.message_ids == ["m-2"]
 
 
+async def test_connect_link_is_an_adaptive_card_action(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    fake = _Fake({_CALLER, _RECIPIENT})
+    await _call(fake, db_session, sessionmaker, connect_url="https://mcp.test/connect/abc")
+    posted = fake.posts[1][1]
+    assert "https://mcp.test/connect/abc" not in str(posted.get("text", ""))
+    card = posted["attachments"][0]["content"]
+    assert card["actions"] == [
+        {
+            "type": "Action.OpenUrl",
+            "title": "Connect GitHub",
+            "url": "https://mcp.test/connect/abc",
+        }
+    ]
+
+
 @pytest.mark.parametrize("roster", [{_CALLER}, {_RECIPIENT}])
 async def test_both_people_must_share_a_team_with_daimon(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession], roster: set[str]

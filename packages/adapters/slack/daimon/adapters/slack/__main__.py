@@ -93,6 +93,7 @@ async def main() -> None:
             app.start_github_request_expiry_poller()
             app.start_github_new_repo_poller()
             app.start_github_removal_poller()
+            app.start_connect_notice_poller()
             app.start_delivery_poller()
             # Boot-time reconcile sweep, in the background so a slow provider
             # cannot delay mention handling. A crash is logged, never raised —

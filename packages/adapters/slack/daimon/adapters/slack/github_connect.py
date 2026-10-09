@@ -8,8 +8,8 @@ import anthropic
 import httpx
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.agent_setup.github_link import connect_button_blocks
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
@@ -128,8 +128,10 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 tenant_id=tenant_id,
                 requester_account_id=principal.account_id,
                 requester_label=user_id,
+                requester_platform_user_id=user_id,
                 agent_id=agent_id,
                 agent_name=target_name,
+                origin_platform="slack",
             )
             await append_event(
                 session,
@@ -143,24 +145,11 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 outcome="allowed",
                 reason="admin link minted",
             )
-        message = (
-            f"Opens GitHub to pick repos for {target_name}.\nNothing is shared until you confirm."
-        )
         await reply(
-            message,
-            blocks=[
-                {"type": "section", "text": {"type": "mrkdwn", "text": escape_mrkdwn(message)}},
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Connect GitHub"},
-                            "url": f"{root}/oauth/github/connect/{token}",
-                        }
-                    ],
-                },
-            ],
+            "Connect GitHub",
+            blocks=connect_button_blocks(
+                f"{root}/oauth/github/connect/{token}", f"Connect GitHub for {target_name}."
+            ),
         )
     except ClientAgentConnectionError:
         await reply(CLIENT_AGENT_MESSAGE)

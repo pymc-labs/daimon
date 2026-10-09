@@ -55,8 +55,9 @@ async def send_removal_dm(
                     workspace_label=guild.name,
                     requester_label=member.display_name,
                 )
-            view = discord.ui.View(timeout=None)
-            view.add_item(discord.ui.Button(label="Reconnect", url=url))
+            from daimon.adapters.discord.agent_setup.github_home import connect_button_view
+
+            view = connect_button_view(url)
             await member.send(
                 embed=github_embed(
                     f"Daimon was removed from **{notice.account_login}** on GitHub.",

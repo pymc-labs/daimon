@@ -30,6 +30,7 @@ from daimon.core.stores import agent_files, agent_github_binding, github_access
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.github_credentials import delete_credential_for_principal
 from daimon.core.stores.security_audit import append_event
+from daimon.core.stores.task_continuations import record_continuation
 from daimon.core.stores.thread_session_lineage import request_fresh_start
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, func, select, update
@@ -131,11 +132,20 @@ class Invitation(BaseModel):
     requester_account_id: uuid.UUID
     workspace_label: str
     requester_label: str
+    requester_platform_user_id: str | None
     agent_id: uuid.UUID | None
     agent_name: str | None
     operator_issued: bool
     activation_status: Literal["activated", "update_pending"] | None
     connected_repo_count: int | None
+    origin_platform: str | None
+    origin_parent_channel_id: str | None
+    origin_thread_id: str | None
+    origin_ma_agent_id: str | None
+    requested_work: str | None
+    connected_repos: list[dict[str, str]] | None
+    notice_claimed_at: datetime | None
+    notice_delivered_at: datetime | None
     encrypted_token: bytes | None
     expires_at: datetime
     used_at: datetime | None
@@ -159,10 +169,16 @@ async def mint_invitation(
     tenant_id: uuid.UUID,
     requester_account_id: uuid.UUID,
     requester_label: str | None = None,
+    requester_platform_user_id: str | None = None,
     workspace_label: str | None = None,
     agent_id: uuid.UUID | None = None,
     agent_name: str | None = None,
     operator_issued: bool = False,
+    origin_platform: str | None = None,
+    origin_parent_channel_id: str | None = None,
+    origin_thread_id: str | None = None,
+    origin_ma_agent_id: str | None = None,
+    requested_work: str | None = None,
 ) -> str:
     account = await session.get(Account, requester_account_id)
     if (
@@ -192,9 +208,15 @@ async def mint_invitation(
             workspace_label=workspace_label
             or ("this Discord server" if tenant.platform == "discord" else "this Slack workspace"),
             requester_label=requester_label or str(requester_account_id),
+            requester_platform_user_id=requester_platform_user_id,
             agent_id=agent_id,
             agent_name=agent_name,
             operator_issued=operator_issued,
+            origin_platform=origin_platform,
+            origin_parent_channel_id=origin_parent_channel_id,
+            origin_thread_id=origin_thread_id,
+            origin_ma_agent_id=origin_ma_agent_id,
+            requested_work=requested_work[:500] if requested_work else None,
             expires_at=datetime.now(UTC) + timedelta(days=7),
         )
     )
@@ -344,6 +366,45 @@ async def activate_confirmed_agent(
     row.activation_status = status
     await session.flush()
     return status
+
+
+async def queue_connect_followup(
+    session: AsyncSession, *, invitation: Invitation, repos: list[RepoConfirmation]
+) -> None:
+    """Queue one private notice or one task continuation after activation commits."""
+    if (
+        invitation.operator_issued
+        or invitation.origin_platform not in ("discord", "slack")
+        or invitation.requester_platform_user_id is None
+    ):
+        return
+    row = await session.get(GitHubConnectInvitation, invitation.token_hash, with_for_update=True)
+    if row is None or row.used_at is None or row.activation_status == "update_pending":
+        return
+    row.connected_repos = [{"name": repo.full_name, "access": repo.max_access} for repo in repos]
+    if (
+        row.requested_work
+        and row.origin_parent_channel_id
+        and row.origin_thread_id
+        and row.origin_ma_agent_id
+        and row.agent_name
+    ):
+        await record_continuation(
+            session,
+            tenant_id=row.tenant_id,
+            platform=invitation.origin_platform,
+            parent_channel_id=row.origin_parent_channel_id,
+            thread_id=row.origin_thread_id,
+            requester_account_id=row.requester_account_id,
+            requester_external_user_id=invitation.requester_platform_user_id,
+            target_ma_agent_id=row.origin_ma_agent_id,
+            target_name=row.agent_name,
+            reason="github_access_ready",
+            idempotency_key=uuid.uuid5(uuid.NAMESPACE_URL, f"github-connect:{row.token_hash}"),
+            requested_work=row.requested_work,
+            available_at=datetime.now(UTC),
+        )
+    await session.flush()
 
 
 async def activate_pending_agent(

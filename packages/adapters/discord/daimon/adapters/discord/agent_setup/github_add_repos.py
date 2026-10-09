@@ -15,7 +15,6 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.github_panel import (
-    CONNECT_COPY,
     GrantsPanel,
     RepoChoice,
     activate_grants,
@@ -290,8 +289,7 @@ class GitHubAddReposView(PanelViewBase):
             return
         await interaction.followup.send(
             embed=github_embed(
-                f"Opens GitHub to pick repos for {self.agent.name}.\n"
-                f"Nothing is shared until you confirm.\n{CONNECT_COPY}",
+                f"Connect GitHub for {self.agent.name}.",
                 state="waiting",
             ),
             view=GitHubLinkView(url, user_id=interaction.user.id),

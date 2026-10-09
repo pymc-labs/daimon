@@ -78,7 +78,10 @@ async def test_invalid_recipient_rejected(recipient):
 
 @pytest.mark.parametrize("member", [True, False])
 @pytest.mark.parametrize("fail_delivery", [True, False])
-async def test_discord_live_membership_precedes_dm_and_splits(monkeypatch, member, fail_delivery):
+@pytest.mark.parametrize("with_connect_button", [True, False])
+async def test_discord_live_membership_precedes_dm_and_splits(
+    monkeypatch, member, fail_delivery, with_connect_button
+):
     runtime, auth = runtime_and_auth()
     calls = []
 
@@ -164,14 +167,28 @@ async def test_discord_live_membership_precedes_dm_and_splits(monkeypatch, membe
             )
         return
     result = await direct_messages.send_direct_message_impl(
-        runtime, auth, recipient_id="123", content="x" * 4000
+        runtime,
+        auth,
+        recipient_id="123",
+        content="Connect GitHub for ResearchBot." if with_connect_button else "x" * 4000,
+        connect_url="https://mcp.test/connect/abc" if with_connect_button else None,
     )
-    assert len(result.message_ids) == 3
+    assert len(result.message_ids) == (1 if with_connect_button else 3)
     sent = [
         kwargs["json"] for _, path, kwargs in calls if path == "/channels/{channel_id}/messages"
     ]
-    assert "".join(body["content"] for body in sent) == "x" * 4000
+    assert "".join(body["content"] for body in sent) == (
+        "Connect GitHub for ResearchBot." if with_connect_button else "x" * 4000
+    )
     assert all(body["allowed_mentions"]["parse"] == [] for body in sent)
+    if with_connect_button:
+        button = sent[0]["components"][0]["components"][0]
+        assert (button["type"], button["style"], button["url"], button["label"]) == (
+            2,
+            5,
+            "https://mcp.test/connect/abc",
+            "Connect GitHub",
+        )
 
 
 @pytest.mark.parametrize("recipient_team", ["T123", "TOTHER"])

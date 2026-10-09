@@ -86,7 +86,7 @@ async def update_requester_card(
                         "type": "button",
                         "action_id": "github_personal__open",
                         "url": link_url,
-                        "text": {"type": "plain_text", "text": "Link GitHub"},
+                        "text": {"type": "plain_text", "text": "Connect GitHub"},
                     }
                 )
             if can_cancel:

@@ -9,6 +9,7 @@ from typing import Any, Literal, cast
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.agent_policy import refuse_unless_allowed_for_agent_name
 from daimon.adapters.slack.agent_setup import github_add_repos, github_repos
+from daimon.adapters.slack.agent_setup.github_link import send_link
 from daimon.adapters.slack.agent_setup.read import load_panel_roster
 from daimon.adapters.slack.agent_setup.state import PanelMetadata
 from daimon.adapters.slack.credential_submissions import post_ephemeral
@@ -161,14 +162,12 @@ async def _handle_add(
                 text=safe_github_error(error),
             )
             return True
-        await post_ephemeral(
+        await send_link(
             client,
             channel_id=channel_id,
             user_id=user_id,
-            text=(
-                f"Opens GitHub to pick repos for {meta.agent_name}.\n"
-                f"Nothing is shared until you confirm.\n{url}"
-            ),
+            url=url,
+            line=f"Connect GitHub for {meta.agent_name}.",
         )
         return True
     elif action_id == github_add_repos.ACTION_ADD:

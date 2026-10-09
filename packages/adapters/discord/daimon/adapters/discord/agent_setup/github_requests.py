@@ -57,7 +57,9 @@ async def update_requester_card(
         dm = await user.create_dm()
         view = discord.ui.View(timeout=None) if can_cancel or link_url else None
         if view is not None and link_url:
-            view.add_item(discord.ui.Button(label="Link GitHub", url=link_url))
+            from daimon.adapters.discord.agent_setup.github_home import connect_button
+
+            view.add_item(connect_button(link_url))
         if view is not None and can_cancel:
             view.add_item(
                 discord.ui.Button(
@@ -294,8 +296,9 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
     except ValueError as error:
         await interaction.response.send_message(safe_github_error(error), ephemeral=True)
         return True
-    view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button(label="Open GitHub ↗", url=url))
+    from daimon.adapters.discord.agent_setup.github_home import connect_button_view
+
+    view = connect_button_view(url)
     await interaction.response.edit_message(
         content=None,
         embed=github_embed("Waiting for GitHub confirmation.", state="waiting"),

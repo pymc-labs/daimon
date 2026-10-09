@@ -210,6 +210,7 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError
+from daimon.core.github_connect_delivery import ConnectNotice, run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_new_repo_delivery import run_new_repo_notice_poller
 from daimon.core.github_removal_delivery import run_removal_notice_poller
@@ -483,6 +484,36 @@ class SlackApp:
                 should_stop=lambda: self.draining,
             )
         )
+
+    def start_connect_notice_poller(self) -> asyncio.Task[None]:
+        return self._spawn(
+            run_connect_notice_poller(
+                self.runtime.sessionmaker,
+                platform="slack",
+                deliver=self._send_connect_notice,
+                should_stop=lambda: self.draining,
+            )
+        )
+
+    async def _send_connect_notice(self, notice: ConnectNotice) -> bool:
+        async with self.runtime.sessionmaker() as session:
+            tenant = await get_tenant(session, notice.tenant_id)
+        if tenant is None:
+            return True
+        client = await resolve_web_client(self.runtime, team_id=tenant.external_id)
+        if client is None:
+            return False
+        try:
+            opened = await client.conversations_open(  # pyright: ignore[reportUnknownMemberType]
+                users=notice.requester_platform_user_id
+            )
+            channel_data = cast(dict[str, str], opened["channel"])
+            await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_data["id"], text=notice.text
+            )
+            return True
+        except SlackApiError as error:
+            return cast(str, error.response["error"]) in ("user_not_found", "account_inactive")
 
     async def _send_new_repo_group(self, group: NewRepoNoticeGroup) -> bool:
         from daimon.adapters.slack.agent_setup.github_new_repo import send_group_dm
@@ -3114,13 +3145,6 @@ class SlackApp:
                     now=datetime.now(UTC),
                 )
                 await _at_session.commit()
-
-        if row.reason == "github_access_ready":
-            await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                channel=channel,
-                thread_ts=thread_id,
-                text="Access is ready, continuing.",
-            )
 
         handoff_notice = (
             build_handoff_notice(

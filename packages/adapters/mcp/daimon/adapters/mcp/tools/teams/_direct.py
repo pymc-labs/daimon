@@ -37,7 +37,12 @@ async def _shared_member(
 
 
 async def teams_direct_message(
-    runtime: McpRuntime, auth: AuthIdentity, *, recipient_id: str, chunks: list[str]
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    recipient_id: str,
+    chunks: list[str],
+    connect_url: str | None = None,
 ) -> tuple[str, list[str]]:
     """(1:1 chat id, message ids). A partial failure says how many were sent."""
     client, caller = require_client(runtime, auth)
@@ -46,7 +51,26 @@ async def teams_direct_message(
     try:
         chat = await client.open_personal_chat(member.id)
         for chunk in chunks:
-            ids.append(await client.send(chat, chunk))
+            if connect_url is None:
+                ids.append(await client.send(chat, chunk))
+            else:
+                ids.append(
+                    await client.send_card(
+                        chat,
+                        {
+                            "type": "AdaptiveCard",
+                            "version": "1.4",
+                            "body": [{"type": "TextBlock", "text": chunk, "wrap": True}],
+                            "actions": [
+                                {
+                                    "type": "Action.OpenUrl",
+                                    "title": "Connect GitHub",
+                                    "url": connect_url,
+                                }
+                            ],
+                        },
+                    )
+                )
     except httpx.HTTPStatusError as exc:
         reason = f"HTTP {exc.response.status_code}"
         if exc.response.status_code == 403:

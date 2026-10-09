@@ -56,7 +56,11 @@ def _discord_view(
     view = discord.ui.View(timeout=None)
     for label in ((card.primary,) if card.primary else ()) + card.secondary:
         if label in _LINK_LABELS and link_url:
-            view.add_item(discord.ui.Button(label=label, url=link_url))
+            view.add_item(
+                discord.ui.Button(
+                    label="Connect GitHub", style=discord.ButtonStyle.link, url=link_url
+                )
+            )
         elif label in _DECISIONS:
             view.add_item(
                 discord.ui.Button(
@@ -83,7 +87,7 @@ def _slack_blocks(
                     "type": "button",
                     "action_id": "github_request__link",
                     "url": link_url,
-                    "text": {"type": "plain_text", "text": label},
+                    "text": {"type": "plain_text", "text": "Connect GitHub"},
                 }
             )
         elif label in _DECISIONS:

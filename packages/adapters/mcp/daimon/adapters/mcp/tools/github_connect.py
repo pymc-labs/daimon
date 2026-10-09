@@ -44,6 +44,7 @@ async def _github_connect_impl(
     origin_context_id: str,
     agent_name: str | None = None,
     expected_ma_agent_id: str | None = None,
+    requested_work: str | None = None,
 ) -> ConnectResult:
     if auth.platform not in ("discord", "slack") or auth.platform_user_id is None:
         raise ToolError("GitHub setup from chat is available in Discord and Slack.")
@@ -109,8 +110,14 @@ async def _github_connect_impl(
             tenant_id=auth.tenant_id,
             requester_account_id=auth.account_id,
             requester_label=auth.platform_user_id,
+            requester_platform_user_id=auth.platform_user_id,
             agent_id=agent_id,
             agent_name=agent.name,
+            origin_platform=auth.platform,
+            origin_parent_channel_id=origin.parent_channel_id,
+            origin_thread_id=origin.thread_id,
+            origin_ma_agent_id=str(agent.id),
+            requested_work=requested_work,
         )
         await append_event(
             session,
@@ -130,7 +137,8 @@ async def _github_connect_impl(
             runtime,
             auth,
             recipient_id=auth.platform_user_id,
-            content=f"Connect GitHub for {agent.name}:\n{url}",
+            content=f"Connect GitHub for {agent.name}.",
+            connect_url=url,
         )
     except Exception:
         async with runtime.session_factory.begin() as session:
@@ -138,7 +146,7 @@ async def _github_connect_impl(
         return ConnectResult(
             status="dm_blocked", message="I can't DM you. Run /github connect here."
         )
-    return ConnectResult(status="sent", message="Connect link sent privately.")
+    return ConnectResult(status="sent", message="I sent you a private link.")
 
 
 def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -148,6 +156,7 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str,
         agent_name: str | None = None,
         expected_ma_agent_id: str | None = None,
+        requested_work: str | None = None,
     ) -> ConnectResult:
         """Connect this agent to GitHub when someone asks to set up GitHub.
 
@@ -155,6 +164,9 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Members get Ask an admin and a recorded request. Never repeat a private
         link in a shared reply. For a setup target, pass its current name and
         MA id from turn_controls; otherwise this defaults to the responder.
+        When GitHub access interrupted a task, pass a short restatement as
+        requested_work so the task resumes after connection. Leave it empty
+        when someone only asks to connect GitHub.
         """
         return await _github_connect_impl(
             runtime,
@@ -162,4 +174,5 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             origin_context_id=origin_context_id,
             agent_name=agent_name,
             expected_ma_agent_id=expected_ma_agent_id,
+            requested_work=requested_work,
         )

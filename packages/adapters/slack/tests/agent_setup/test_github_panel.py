@@ -121,19 +121,12 @@ async def test_slack_connect_link_in_dm_has_private_actions() -> None:
     client.chat_postEphemeral.assert_not_awaited()
     posted = client.chat_postMessage.await_args.kwargs
     assert posted["channel"] == "D123"
-    assert [block["type"] for block in posted["blocks"]] == [
-        "section",
-        "section",
-        "divider",
-        "actions",
-        "context",
-    ]
+    assert posted["text"] == "Connect GitHub"
+    assert "https://example.test/link" not in posted["text"]
+    assert [block["type"] for block in posted["blocks"]] == ["section", "actions"]
     actions = next(block for block in posted["blocks"] if block["type"] == "actions")
-    assert [button["text"]["text"] for button in actions["elements"]] == [
-        "Open GitHub ↗",
-        "Copy link",
-        "◀ Back",
-    ]
+    assert [button["text"]["text"] for button in actions["elements"]] == ["Connect GitHub"]
+    assert actions["elements"][0]["url"] == "https://example.test/link"
 
 
 def test_slack_grants_view_shows_staged_and_live_values() -> None:
@@ -230,7 +223,7 @@ def test_slack_github_home_and_confirmations() -> None:
         meta, connected_count=2, pending_url="https://example.invalid/connect"
     )
     pending_text = str(pending["blocks"])
-    assert "Continue" in pending_text and "Start over" in pending_text
+    assert "Connect GitHub" in pending_text and "Start over" in pending_text
     assert "Choose agent" not in pending_text
     no_admin = build_github_home_view(meta, connected_count=0, is_admin=False)
     assert "Workspace admins connect repos here" in str(no_admin["blocks"])

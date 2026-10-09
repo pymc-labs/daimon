@@ -920,6 +920,9 @@ def build_oauth_github_routes(
                         await github_connect.activate_confirmed_agent(
                             session, invitation=invitation, repos=repos
                         )
+                        await github_connect.queue_connect_followup(
+                            session, invitation=invitation, repos=repos
+                        )
                         await finish_confirmed_requests(
                             session,
                             tenant_id=invitation.tenant_id,

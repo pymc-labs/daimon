@@ -78,6 +78,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError, TurnError
+from daimon.core.github_connect_delivery import ConnectNotice, run_connect_notice_poller
 from daimon.core.github_new_repo_delivery import run_new_repo_notice_poller
 from daimon.core.github_removal_delivery import run_removal_notice_poller
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -736,6 +737,14 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker,
                     platform="discord",
                     deliver=self._send_github_removal_notice,
+                    should_stop=lambda: self.draining or self.is_closed(),
+                )
+            )
+            self._spawn(
+                run_connect_notice_poller(
+                    self.runtime.sessionmaker,
+                    platform="discord",
+                    deliver=self._send_connect_notice,
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
@@ -2226,6 +2235,24 @@ class DaimonBot(commands.Bot):
 
         return await send_removal_dm(self, self.runtime, notice)
 
+    async def _send_connect_notice(self, notice: ConnectNotice) -> bool:
+        from daimon.core.stores.tenants import get_tenant
+
+        async with self.runtime.sessionmaker() as session:
+            tenant = await get_tenant(session, notice.tenant_id)
+        if tenant is None:
+            return True
+        try:
+            recipient = await self.open_member_dm(
+                int(tenant.external_id), int(notice.requester_platform_user_id)
+            )
+            await recipient.send(notice.text, allowed_mentions=discord.AllowedMentions.none())
+            return True
+        except (discord.NotFound, discord.Forbidden, ValueError, LookupError):
+            return True
+        except discord.HTTPException:
+            return False
+
     async def open_member_dm(self, guild_id: int, user_id: int) -> discord.abc.Messageable:
         """A DM with a human member of `guild_id` (FEAT-085's delivery fallback).
 
@@ -2506,9 +2533,6 @@ class DaimonBot(commands.Bot):
                     now=datetime.now(UTC),
                 )
                 await session.commit()
-
-        if row.reason == "github_access_ready":
-            await safe_thread_send(thread, "Access is ready, continuing.")
 
         transfer_kind = prepared.continuity.transfer_kind
         workspace: Literal["transferred", "transcript_only", "history_only"] = (

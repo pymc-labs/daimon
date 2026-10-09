@@ -179,9 +179,11 @@ async def connect_link(
         tenant_id=tenant_id,
         requester_account_id=account_id,
         requester_label=requester_label or platform_user_id,
+        requester_platform_user_id=platform_user_id,
         workspace_label=workspace_label,
         agent_id=agent_id,
         agent_name=agent_name,
+        origin_platform=platform,
     )
     fernet = build_multifernet(tuple(key.get_secret_value() for key in settings.crypto.keys))
     await set_invitation_encrypted_token(

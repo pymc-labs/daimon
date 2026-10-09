@@ -42,6 +42,7 @@ from daimon.core.github_app_session import (
     archive_app_vault,
     close_headless_app_session,
 )
+from daimon.core.github_connect_delivery import claim_next, settle
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.github_requester_access import (
     PermissionCache,
@@ -57,8 +58,89 @@ from daimon.core.stores import (
     github_issued_tokens,
     github_links,
 )
+from daimon.core.stores.task_continuations import get_continuation
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+
+@pytest.mark.asyncio
+async def test_connect_followup_resumes_task_once_and_keeps_repo_names_private(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, admin_id, agent_id = (uuid.uuid4() for _ in range(3))
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="123"))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    token = await github_connect.mint_invitation(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=admin_id,
+        requester_label="456",
+        requester_platform_user_id="456",
+        agent_id=agent_id,
+        agent_name="ResearchBot",
+        origin_platform="discord",
+        origin_parent_channel_id="100",
+        origin_thread_id="200",
+        origin_ma_agent_id="ma-agent",
+        requested_work="Review the issue",
+    )
+    invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
+    assert invitation is not None
+    row = await db_session.get(GitHubConnectInvitation, invitation.token_hash)
+    assert row is not None
+    row.used_at = datetime.now(UTC)
+    row.activation_status = "activated"
+    await db_session.flush()
+    repo = github_connect.RepoConfirmation(
+        repo_id=1, owner_id=1, installation_id=1, full_name="private/secret", max_access="write"
+    )
+    await github_connect.queue_connect_followup(db_session, invitation=invitation, repos=[repo])
+    wake_id = uuid.uuid5(uuid.NAMESPACE_URL, f"github-connect:{invitation.token_hash}")
+    wake = await get_continuation(db_session, idempotency_key=wake_id)
+    assert wake is not None
+    assert wake.requested_work == "Review the issue"
+    assert wake.thread_id == "200"
+    assert "private/secret" not in wake.model_dump_json()
+    assert await claim_next(db_session, platform="discord", now=datetime.now(UTC)) is None
+
+
+@pytest.mark.asyncio
+async def test_bare_connect_notice_claim_is_single_and_failure_retries(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="slack", external_id="T1"))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    token = await github_connect.mint_invitation(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=admin_id,
+        requester_label="U1",
+        requester_platform_user_id="U1",
+        origin_platform="slack",
+    )
+    invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
+    assert invitation is not None
+    repo = github_connect.RepoConfirmation(
+        repo_id=1, owner_id=1, installation_id=1, full_name="private/repo", max_access="read"
+    )
+    assert await claim_next(db_session, platform="slack", now=datetime.now(UTC)) is None
+    row = await db_session.get(GitHubConnectInvitation, invitation.token_hash)
+    assert row is not None
+    row.used_at = datetime.now(UTC)
+    await github_connect.queue_connect_followup(db_session, invitation=invitation, repos=[repo])
+    first = await claim_next(db_session, platform="slack", now=datetime.now(UTC))
+    assert first is not None and first.text == "Connected private/repo, Read only. Ready."
+    assert await claim_next(db_session, platform="slack", now=datetime.now(UTC)) is None
+    await settle(db_session, notice=first, delivered=False, now=datetime.now(UTC))
+    retry = await claim_next(db_session, platform="slack", now=datetime.now(UTC))
+    assert retry is not None
+    await settle(db_session, notice=retry, delivered=True, now=datetime.now(UTC))
+    assert await claim_next(db_session, platform="slack", now=datetime.now(UTC)) is None
 
 
 def test_effective_access_properties() -> None:
