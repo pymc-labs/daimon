@@ -54,6 +54,7 @@ from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.tenants import set_provision_status
 from daimon.core.usage_recording import record_turn_usage
 from daimon.testing import ma_model_usage
 from daimon.testing.factories import (
@@ -961,6 +962,48 @@ async def test_fire_records_error_and_skips_run_turn_when_created_by_user_id_is_
     )
 
     await fake_client.close()
+
+
+async def test_fire_rejects_tenant_archived_after_claim(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u1",
+        agent_id="agent_a",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="run",
+    )
+    await db_session.commit()
+    await set_provision_status(db_session_factory, tenant_id=tenant.id, archive=True)
+
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.get_or_create_platform_principal"
+        ) as principal,
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn") as run_turn,
+    ):
+        await fire(row)
+    principal.assert_not_called()
+    run_turn.assert_not_called()
+    async with db_session_factory() as session:
+        saved = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert saved is not None and saved.last_error == "routine tenant archived"
+    await client.close()
 
 
 async def test_fire_resolves_principal_using_tenant_platform_not_hardcoded_discord(

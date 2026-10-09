@@ -243,6 +243,9 @@ async def _build_fire(
             if tenant is None:
                 await record_result(s, row.id, tail=None, error="routine tenant not found")
                 return
+            if tenant.archived_at is not None:
+                await record_result(s, row.id, tail=None, error="routine tenant archived")
+                return
             platform = tenant.platform
             principal = await get_or_create_platform_principal(
                 s,
