@@ -717,3 +717,24 @@ rejected rather than combined with disjoint model-request increments.
 Unknown native root-idle reasons remain opaque in the normalized contract. The
 Anthropic M0 compatibility edge retains legacy terminal handling for those
 records, without adding a neutral outcome or a replay request.
+
+
+## Manual conformance probes
+
+The standalone `mux.conformance.budget` guard reserves conservative spend before
+provider work and appends receipts. All callers share a pinned ledger, checkpoint
+and stable sequence lock; resets and paired snapshot rollbacks refuse admission.
+Runs exceeding 80% of provider or total caps are refused. Failed, cancelled and
+unknown-usage runs retain their reservations. Operators supply reviewed prices
+and enforce token bounds. The harness discovers no keys or SDKs.
+
+Conformance tapes contain normalized mux events and request metadata: method,
+path, a redacted header allowlist and body field names. They never retain raw
+HTTP bodies, body values, URL queries or opaque native event records. Unsupported
+opaque event content is refused. Tool/action argument mappings retain only an
+omission sentinel; export and replay refuse other arbitrary payload mappings.
+A defense-in-depth credential audit covers
+written evidence and reconstructed normalized text before export and replay.
+Replay feeds a caller-supplied offline event fake and recomputes fixture checks;
+PENDING never certifies. Native HTTP/SSE codec certification is separate work.
+See `packages/mux/mux/conformance/README.md` for the APIs and limitations.
