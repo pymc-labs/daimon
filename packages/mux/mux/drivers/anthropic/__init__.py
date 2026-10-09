@@ -22,6 +22,7 @@ from mux.contracts.ports import MemoryStores as CoreMemoryStores
 from mux.contracts.ports import PlatformExport as CorePlatformExport
 from mux.contracts.ports import Vaults as CoreVaults
 from mux.contracts.profile import Profile
+from mux.drivers.anthropic.core_admin import AnthropicCoreAdmin, CoreAdmin
 from mux.drivers.anthropic.outputs import AnthropicOutputs, Outputs
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources._secrets import SecretResolver
@@ -111,6 +112,9 @@ class AnthropicManagedAgents:
         native_memory = AnthropicMemoryStores(client, self.account_scope_id, authorization)
         native_export = AnthropicPlatformExport(client)
         self._extensions: dict[tuple[type[object], str, int], object] = {
+            (CoreAdmin, "anthropic.core_admin", 1): AnthropicCoreAdmin(
+                client, self.account_scope_id, authorization
+            ),
             (SessionWalk, "anthropic.session_walk", 1): native_sessions,
             (SessionTools, "anthropic.session_tools", 1): AnthropicSessionTools(
                 client, self.account_scope_id, authorization

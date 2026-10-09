@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route MCP agent chat, session inspection and confirmation gates through tenant-scoped resource ports, preserving SDK request bytes, pagination, authorization and tool results.
 - Preserve SDK-accepted partial sessions and nullable native location metadata in MCP reads without constructing or changing durable provider bindings.
 
+- Route account purge, DM quarantine and adapter orphan interruption through scoped resource ports; preserve disposable-workspace cleanup requests and its opt-in sentinel gate.
+
 - Bound OpenAI session cleanup with idle polling and HTTP 409 recovery, preserving deletion keys, shared vaults and unknown-outcome failures.
 
 - The experimental mux turn path verifies cancellation through observed stop evidence and uses scoped ports for recovery replay and session cleanup. Headless mux turns require the caller's authorized tenant and account; approval cards and the default legacy path retain their existing behavior.

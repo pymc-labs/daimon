@@ -443,5 +443,7 @@ def test_core_platform_scopes_are_limited_to_workspace_operations() -> None:
             ("mcp_vault_janitor.py", "archive_orphan_mcp_vaults"): 1,
             ("mcp_credential_sweep.py", "sweep_stale_admin_credentials"): 1,
             ("pending_file_sweeper.py", "sweep_pending_file_deletes"): 1,
+            ("ma.py", "find_workspace_disposable_sentinel"): 1,
+            ("ma.py", "delete_entire_workspace_for_testing"): 1,
         }
     )
