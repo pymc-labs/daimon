@@ -32,6 +32,7 @@ from daimon.core.turn.card_state import (
 )
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.status_lines import (
+    SUMMARY_GAP,
     format_duration,
     format_headline,
     format_summary,
@@ -78,6 +79,8 @@ _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
 
 # Discord caps an embed description at 4,096 characters.
 _NOTICE_MAX_CHARS = 950
+# Discord caps an embed footer at 2,048 characters.
+_FOOTER_MAX_CHARS = 2048
 
 
 def _escape_markdown(text: str) -> str:
@@ -100,11 +103,16 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         # Terminal turns drop the activity trail. The coloured edge signals
         # outcome; the footer carries the numbers on one quiet line.
         elapsed = now - state.started_at if now is not None else 0
+        numbers = format_summary(
+            agent_name=None, elapsed_seconds=elapsed, cost=state.cost_str, left=state.balance_str
+        )
+        # The name gives way so the numbers always fit the footer.
+        room = _FOOTER_MAX_CHARS - len(numbers) - len(SUMMARY_GAP)
+        name = state.agent_name
+        if len(name) > room:
+            name = name[: room - 1] + "…"
         footer = format_summary(
-            agent_name=state.agent_name,
-            elapsed_seconds=elapsed,
-            cost=state.cost_str,
-            left=state.balance_str,
+            agent_name=name, elapsed_seconds=elapsed, cost=state.cost_str, left=state.balance_str
         )
         description = ""
         title = ""

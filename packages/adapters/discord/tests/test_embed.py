@@ -75,6 +75,20 @@ def test_empty_notice_next_step_keeps_retry_text_and_metrics() -> None:
     assert embed.footer.text.endswith("$9.95")
 
 
+def test_a_long_agent_name_gives_way_so_the_footer_fits() -> None:
+    state = dataclasses.replace(
+        _make_state(phase=TurnPhase.DONE, agent_name="a" * 2040, cost_str="$0.042"),
+        balance_str="$41.20 left",
+    )
+    embed = build_discord_embed(to_embed_data(state, now=12.0))
+
+    assert embed.footer.text is not None
+    assert len(embed.footer.text) == 2048, "Discord rejects a footer over 2,048 characters"
+    assert embed.footer.text.endswith(
+        "…\u2003\u200312s\u2003\u2003$0.042 used\u2003\u2003$41.20 left"
+    )
+
+
 class TestUpdate:
     def test_message_event_sets_draft_without_touching_phase(self) -> None:
         state = _make_state(phase=TurnPhase.TOOL_RUNNING)
