@@ -12,13 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - When Daimon can't post as the agent on Discord, the agent's name now sits above the answer as a small subtext line instead of a bold header. Admins whose server hasn't given Daimon Manage Webhooks see a one-line note with a re-authorize link in `/agent-setup`. After a webhook permission error, Daimon retries agent names after 60 seconds instead of 10 minutes, and right away when the bot is granted Manage Webhooks.
 - Discord and Slack Connect GitHub buttons now show a link emoji.
 - GitHub connection links now appear in a branded card with the agent's face and readable name when agent identity is enabled. Generated names are shown as "this agent". The compact card is the default; a richer card is available with a one-line switch.
+- With agent identity on, a routine result that Daimon posts for an agent on Slack or Discord now shows the agent's name and face. On Discord it reads `Routine result (0 17 * * 5, Europe/London):` instead of naming the agent in the text; Slack keeps the agent's name in the text. The answer to a submitted Discord form also posts as the agent, like a mention reply.
 
 ### Fixed
 
+- A Discord thread that can't be opened gets one plain reply under the mention: "Couldn't open a thread. @mention Daimon again." It used to be the generic error with a request id. A failed typing indicator no longer stops the thread from opening.
 - **Teams answers arrive again when support is set up.** The answer's last message carried the Ask a person button in a card beside its text, and Teams refuses an edit carrying both, so every answer was replaced by "Something went wrong. Mention me to try again." The button now follows the answer in a message of its own.
 - A conversation is no longer stuck after Daimon restarts while an approval card is up. The next message used to fail every time. Daimon now clears the unanswered request and carries on, and if that ever fails the thread says to start a new thread.
-||||||| parent of 14692a83b (fix(discord): answer a failed thread open with one plain reply)
-- A Discord thread that can't be opened gets one plain reply under the mention: "Couldn't open a thread. @mention Daimon again." It used to be the generic error with a request id. A failed typing indicator no longer stops the thread from opening.
+- A new agent's face is rendered when the agent is created, so its first card or answer has it instead of the Daimon picture. This covers the setup panels' New agent form, `create_agent`, copies (`fork_agent`, `daimon agents fork`, channel rules that copy an agent) and `daimon agents create`; CLI commands wait up to 10 seconds for it.
 - Discord acknowledges a GitHub requester's Link click before minting the link and resolving the card. Connect cards clip long agent names, escape Discord markdown, and load images from the configured app host.
 - The `used` amount on a finished Discord or Slack answer is what the tenant is debited, markup included, so it agrees with `left`. With a 1.1 markup it showed the raw model cost, 10% low.
 - A deploy no longer stops an answer that is about to finish with "Stopped: Daimon restarted." When a deploy replaces the worker containers, in-flight turns now get up to 60 seconds to finish, as the adapters intended; Docker killed them after its default 10.

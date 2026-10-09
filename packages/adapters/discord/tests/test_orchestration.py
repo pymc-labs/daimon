@@ -299,6 +299,44 @@ class TestNewThreadCreation:
         assert bot.turn_queue.depth() == 0
         assert bot._processing == set()  # pyright: ignore[reportPrivateUsage]
 
+    @patch(
+        "daimon.adapters.discord.bot.TurnPostRecorder.opened_thread",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("recording failed"),
+    )
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_failure_after_the_thread_exists_is_not_called_a_failed_open(
+        self,
+        mock_resolve: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        _mock_opened: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        runtime = _make_runtime(tenant.id, db_session_factory)
+        bot = make_bot(runtime)
+        message = _make_channel_message()
+        message.reply = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        message.add_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        message.remove_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        opened = MagicMock(spec=discord.Thread)
+        opened.id = 4242
+        message.create_thread = AsyncMock(return_value=opened)  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        message.create_thread.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        message.reply.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        assert bot._processing == set()  # pyright: ignore[reportPrivateUsage]
+
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)

@@ -226,8 +226,8 @@ async def _open_thread_with_notice(
 
     The acknowledgment is a reaction on the mention, never a channel message: a
     channel-level "your chat is ready" post outlives the wait and reads as a stray
-    reply. A failed opening propagates to `_open_thread_or_explain`, which answers
-    it with one plain reply, so the mention is never left without an answer."""
+    reply. A failed creation is answered with one plain reply before it propagates
+    here, so the mention is never left without an answer."""
     task = asyncio.create_task(opening)
     reacted = False
     try:
@@ -250,7 +250,7 @@ async def _open_thread_with_notice(
         if reacted and message.guild is not None:
             try:
                 await message.remove_reaction(THREAD_OPENING_REACTION, message.guild.me)
-            except discord.HTTPException as exc:
+            except Exception as exc:  # best effort: a stuck ⌛ never fails an opened thread
                 log.warning("discord.thread_open_notice_clear_failed", error=str(exc))
 
 
@@ -273,18 +273,12 @@ class _ThreadOpenFailed(Exception):
     """
 
 
-async def _open_thread_or_explain(
-    message: discord.Message, opening: Coroutine[Any, Any, discord.Thread]
-) -> discord.Thread:
-    """Open the turn's thread; reply in the channel only if that fails."""
+async def _explain_thread_open_failure(message: discord.Message) -> None:
+    """The one reply a mention gets when its thread could not be created."""
     try:
-        return await opening
-    except Exception as exc:
-        try:
-            await message.reply(THREAD_OPEN_FAILED_NOTICE, mention_author=False)
-        except discord.HTTPException as reply_exc:
-            log.warning("discord.thread_open_failed_notice_failed", error=str(reply_exc))
-        raise _ThreadOpenFailed(str(exc)) from exc
+        await message.reply(THREAD_OPEN_FAILED_NOTICE, mention_author=False)
+    except discord.HTTPException as exc:
+        log.warning("discord.thread_open_failed_notice_failed", error=str(exc))
 
 
 def _resolve_bot_display_name(settings: Settings) -> str:
@@ -3060,26 +3054,33 @@ class DaimonBot(commands.Bot):
                 thread_name = f"Chat with {agent.name}"
                 naming = self.runtime.settings.thread_naming
                 opening_text = strip_mentions(message.content)
-                if naming.enabled and opening_text:
-                    async with contextlib.AsyncExitStack() as typing:
-                        try:
-                            await typing.enter_async_context(message.channel.typing())
-                        except Exception as exc:  # best effort: typing never stops the open
-                            log.warning("discord.thread_open_typing_failed", error=str(exc))
-                        thread_name = await generate_thread_name(
-                            fallback=thread_name,
-                            message_text=opening_text,
-                            message_id=message.id,
-                            anthropic=self.runtime.anthropic,
-                            sessionmaker=self.runtime.sessionmaker,
-                            tenant_id=tenant_id,
-                            platform_user_id=str(message.author.id),
-                            markup=self.runtime.settings.billing.markup,
-                            max_input_chars=naming.max_input_chars,
-                            timeout_seconds=naming.timeout_seconds,
-                            channel_id=admission.budget_channel_id,
-                        )
-                opened = await message.create_thread(name=thread_name, auto_archive_duration=10080)
+                try:
+                    if naming.enabled and opening_text:
+                        async with contextlib.AsyncExitStack() as typing:
+                            try:
+                                await typing.enter_async_context(message.channel.typing())
+                            except Exception as exc:  # best effort: typing never stops the open
+                                log.warning("discord.thread_open_typing_failed", error=str(exc))
+                            thread_name = await generate_thread_name(
+                                fallback=thread_name,
+                                message_text=opening_text,
+                                message_id=message.id,
+                                anthropic=self.runtime.anthropic,
+                                sessionmaker=self.runtime.sessionmaker,
+                                tenant_id=tenant_id,
+                                platform_user_id=str(message.author.id),
+                                markup=self.runtime.settings.billing.markup,
+                                max_input_chars=naming.max_input_chars,
+                                timeout_seconds=naming.timeout_seconds,
+                                channel_id=admission.budget_channel_id,
+                            )
+                    opened = await message.create_thread(
+                        name=thread_name, auto_archive_duration=10080
+                    )
+                except Exception as exc:
+                    # Only a failure before the thread exists is "couldn't open".
+                    await _explain_thread_open_failure(message)
+                    raise _ThreadOpenFailed(str(exc)) from exc
                 # No await between creation and registration: follow-ups must queue
                 # behind this turn. The channel branch owns the eventual cleanup.
                 self._processing.add(opened.id)
@@ -3090,13 +3091,10 @@ class DaimonBot(commands.Bot):
 
             discord_settings = self.runtime.settings.discord
             assert discord_settings is not None
-            thread = await _open_thread_or_explain(
+            thread = await _open_thread_with_notice(
                 message,
-                _open_thread_with_notice(
-                    message,
-                    _open_thread(),
-                    after_s=discord_settings.thread_open_notice_after_s,
-                ),
+                _open_thread(),
+                after_s=discord_settings.thread_open_notice_after_s,
             )
 
         # --- Wire lifecycle with send/edit callables ---
