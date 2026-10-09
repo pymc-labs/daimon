@@ -34,6 +34,7 @@ from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.tenants import set_funding_mode
+from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
@@ -1440,6 +1441,41 @@ class TestTurnSummaryFooter:
         assert f"{GAP}{expected} used" in _terminal_footer(edits), (
             f"footer cost must equal the billing-ledger cost {expected} to the cent"
         )
+
+
+@pytest.mark.asyncio
+async def test_footer_cost_is_the_debit_with_markup() -> None:
+    """`used` is what the tenant is debited, markup included, so it agrees with `left`."""
+    sends: list[dict[str, Any]] = []
+
+    async def send(**kwargs: Any) -> object:
+        sends.append(kwargs)
+        return _SENTINEL_REF
+
+    async def edit(ref: Any, **kwargs: Any) -> None:
+        sends.append(kwargs)
+
+    lc = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        agent_name="test-agent",
+        model_id="claude-sonnet-4-6",
+        markup=Decimal("1.1"),
+    )
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_render(TurnState())
+    usage = dict(input_tokens=10000, cache_creation_input_tokens=0, cache_read_input_tokens=0)
+    state = apply(TurnState(), _span_usage_event(event_id="u1", output_tokens=3000, **usage))
+    await lc.on_terminal_success(state)
+
+    raw = cost_of(
+        BetaManagedAgentsSpanModelUsage(output_tokens=3000, speed="standard", **usage),
+        MODEL_PRICING["claude-sonnet-4-6"],
+    )
+    debit = format_cost(float(debit_amount(raw, markup=Decimal("1.1"))))
+    footer = [kw["embeds"][0].footer.text for kw in sends if kw.get("embeds")][-1]
+    assert f"{GAP}{debit} used" in footer, f"footer must show the debit {debit}"
+    assert format_cost(raw) != debit, "the raw cost would understate it"
 
 
 @pytest.mark.asyncio

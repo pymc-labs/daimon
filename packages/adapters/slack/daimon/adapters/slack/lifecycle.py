@@ -41,6 +41,7 @@ import dataclasses
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -80,6 +81,7 @@ from daimon.core.channel_tidy import record_turn_post
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import fit_notice, render_termination_notice
@@ -167,6 +169,7 @@ class SlackTurnLifecycle:
         author_id: str,
         agent_name: str,
         model_id: str,
+        markup: Decimal = Decimal(1),
         register: Callable[[str, asyncio.Event, str], None],
         deregister: Callable[[str], None],
         register_pending: Callable[[str, asyncio.Event, str], None] | None = None,
@@ -208,6 +211,7 @@ class SlackTurnLifecycle:
         self._cancel = cancel
         self._author_id = author_id
         self._model_id = model_id
+        self._markup = markup
         self._register = register
         self._deregister = deregister
         self._register_pending = register_pending
@@ -417,6 +421,9 @@ class SlackTurnLifecycle:
             speed="standard",
         )
         cost = cost_of(usage, MODEL_PRICING.get(self._model_id))
+        if cost is not None:
+            # What the tenant is debited, markup included, so `used` matches `left`.
+            cost = float(debit_amount(cost, markup=self._markup))
         self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
 
     async def _post_or_update(self, blocks: list[dict[str, Any]], text: str) -> None:
