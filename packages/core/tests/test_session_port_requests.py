@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import traceback
 import uuid
 from types import SimpleNamespace
 from typing import cast
@@ -9,7 +11,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from anthropic import AsyncAnthropic, omit
+from anthropic import APIStatusError, AsyncAnthropic, omit
 from anthropic.types.beta import BetaManagedAgentsSessionAgent
 from daimon.core.session_ports_compat import create_session_record, session_scope
 from daimon.core.sessions import create_isolated_session, create_session
@@ -20,6 +22,7 @@ from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 @pytest.mark.parametrize(
     "response",
     [
+        {"id": "sess_partial", "status": "paused_future"},
         {"id": "sess_partial", "agent": {"model": {"id": "claude-sonnet-4-5"}, "system": None}},
         {
             "id": "sess_partial",
@@ -221,3 +224,61 @@ async def test_repository_tokens_stay_opaque_until_the_single_wire_request(monke
     for index in range(2):
         assert f"dummy-repo-token-{index}" not in scoped_specs[0]
     assert "authorization_token_ref" in scoped_specs[0]
+
+
+@pytest.mark.parametrize("status", [400, 404, 500])
+async def test_repository_create_errors_keep_sdk_type_and_redact_every_token(
+    status, caplog
+) -> None:
+    tokens = [f"dummy-repository-secret-{index}" for index in range(2)]
+    resources = [
+        {
+            "type": "github_repository",
+            "url": f"https://github.com/example/repo-{index}",
+            "authorization_token": token,
+        }
+        for index, token in enumerate(tokens)
+    ]
+    old, new = ScriptedTransport(), ScriptedTransport()
+    for transport in (old, new):
+        transport.queue(
+            ScriptedReply(
+                "POST",
+                "/v1/sessions",
+                httpx.Response(
+                    status,
+                    json={"error": {"type": "api_error", "message": "failed: " + " ".join(tokens)}},
+                    headers={"x-provider-detail": " ".join(tokens)},
+                ),
+            )
+        )
+    caplog.set_level(logging.DEBUG, logger="anthropic._base_client")
+    async with old.client() as legacy, new.client() as client:
+        with pytest.raises(APIStatusError) as original:
+            await legacy.beta.sessions.create(
+                agent="ag_1", environment_id="env_1", resources=resources
+            )
+        caplog.clear()
+        with pytest.raises(APIStatusError) as migrated:
+            await create_session_record(
+                client,
+                agent="ag_1",
+                environment_id="env_1",
+                scope=session_scope(tenant_id=None, account_id=None, call_site="test:redaction"),
+                metadata=None,
+                resources=resources,
+            )
+    old.assert_consumed()
+    new.assert_consumed()
+    assert old.requests == new.requests
+    assert type(migrated.value) is type(original.value)
+    assert migrated.value.status_code == status
+    error = migrated.value
+    rendered = (
+        "".join(traceback.format_exception(error)) + str(error) + repr(error) + str(error.body)
+    )
+    rendered += repr(error.request.content) + str(dict(error.request.headers))
+    rendered += str(dict(error.response.headers))
+    for token in tokens:
+        assert token not in rendered
+        assert token not in caplog.text

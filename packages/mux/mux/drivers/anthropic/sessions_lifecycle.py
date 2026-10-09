@@ -235,7 +235,7 @@ class AnthropicSessions:
             legacy_account_id=scope.account_id,
         )
         status = getattr(native, "status", None) or "provisioning"
-        state = "provisioning" if status == "rescheduling" else status
+        state = status if status in ("running", "idle", "terminated") else "provisioning"
         return Session(
             ref=self._ref(scope, "session", native.id),
             binding=binding,
