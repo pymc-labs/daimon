@@ -30,6 +30,7 @@ it was drawn from.
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -56,6 +57,7 @@ CREATE TABLE IF NOT EXISTS threads (
     idle_since TEXT NOT NULL,
     turn_started_at TEXT,
     turn_event_id TEXT,
+    turn_id TEXT,
     turn_deadline_at TEXT,
     reserved_usd INTEGER,
     archived_at TEXT
@@ -85,6 +87,7 @@ class ThreadRow:
     idle_since: datetime
     turn_started_at: datetime | None
     turn_event_id: str | None
+    turn_id: str | None
     turn_deadline_at: datetime | None
     reserved_usd: Decimal | None
     archived_at: datetime | None
@@ -109,6 +112,8 @@ def apply_schema(conn: sqlite3.Connection) -> None:
     called directly outside that flow, but safe to call more than once.
     """
     conn.executescript(_SCHEMA)
+    if "turn_id" not in {row["name"] for row in conn.execute("PRAGMA table_info(threads)")}:
+        conn.execute("ALTER TABLE threads ADD COLUMN turn_id TEXT")
 
 
 def _row_to_thread(row: Row) -> ThreadRow:
@@ -127,6 +132,7 @@ def _row_to_thread(row: Row) -> ThreadRow:
         idle_since=text_to_dt(row["idle_since"]),
         turn_started_at=text_to_dt(turn_started_at) if turn_started_at else None,
         turn_event_id=row["turn_event_id"],
+        turn_id=row["turn_id"],
         turn_deadline_at=text_to_dt(turn_deadline_at) if turn_deadline_at else None,
         reserved_usd=from_micros(reserved_usd) if reserved_usd is not None else None,
         archived_at=text_to_dt(archived_at) if archived_at else None,
@@ -171,6 +177,7 @@ def create_thread(
         handle=None,
         title=title,
         status="idle",
+        turn_id=None,
         created_at=now,
         idle_since=now,
         turn_started_at=None,
@@ -256,12 +263,13 @@ def begin_turn(
         cur = conn.execute(
             """
             UPDATE threads
-            SET status = 'running', turn_started_at = :now, turn_deadline_at = :deadline_at,
-                reserved_usd = :reserved_usd
+            SET status = 'running', turn_id = :turn_id, turn_started_at = :now,
+                turn_deadline_at = :deadline_at, reserved_usd = :reserved_usd
             WHERE id = :thread_id AND status != 'running'
             """,
             {
                 "thread_id": thread_id,
+                "turn_id": uuid.uuid4().hex,
                 "now": dt_to_text(now),
                 "deadline_at": dt_to_text(deadline_at),
                 "reserved_usd": to_micros(reserved_usd),
@@ -301,7 +309,7 @@ def end_turn(conn: sqlite3.Connection, *, thread_id: int, now: datetime) -> None
         conn.execute(
             """
             UPDATE threads
-            SET status = 'idle', turn_started_at = NULL, turn_event_id = NULL,
+            SET status = 'idle', turn_id = NULL, turn_started_at = NULL, turn_event_id = NULL,
                 turn_deadline_at = NULL, reserved_usd = NULL, idle_since = :now
             WHERE id = :thread_id
             """,

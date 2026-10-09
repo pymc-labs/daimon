@@ -438,10 +438,14 @@ def build_uploads_router(
         if consumed is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=_UPLOAD_INVALID_MESSAGE)
         thread = threads_store.load_thread_by_id(conn, thread_id=consumed.thread_id)
-        if thread is None or thread.status != "running":
-            # A token whose turn has already ended (thread back to idle, or
-            # archived) is stale even though it was never spent — refused
-            # with the same message as unknown-or-used.
+        if (
+            thread is None
+            or thread.status != "running"
+            or consumed.turn_id is None
+            or thread.turn_id != consumed.turn_id
+        ):
+            # A token belongs only to the turn that minted it. An old token
+            # stays invalid even when a new turn is running on this thread.
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=_UPLOAD_INVALID_MESSAGE)
 
         spool, _size_bytes = await _spool_body(request, max_bytes=settings.max_pdf_bytes)
@@ -451,6 +455,12 @@ def build_uploads_router(
             pdf_bytes = spool.read()
         finally:
             spool.close()
+
+        # The body stream yields control: this turn may have ended (and even
+        # been replaced by another turn on the same thread) while it arrived.
+        thread = threads_store.load_thread_by_id(conn, thread_id=consumed.thread_id)
+        if thread is None or thread.status != "running" or thread.turn_id != consumed.turn_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=_UPLOAD_INVALID_MESSAGE)
 
         revision_name = _next_revision_name(conn, slug=consumed.slug)
         _atomic_write_bytes(settings.data_dir / consumed.slug / revision_name, pdf_bytes)
