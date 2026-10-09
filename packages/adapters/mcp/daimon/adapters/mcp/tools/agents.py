@@ -434,6 +434,18 @@ def _build_create_spec(
         ) from exc
 
 
+def _require_channel_admin_origin(auth: AuthIdentity, origin: TurnOriginRow | None) -> None:
+    """A channel admin's chat turn names its origin, or the new agent would silently not
+    be theirs to set up in their channel (`_record_creation_channel`)."""
+    chat_turn = auth.chat_agent_id is not None and auth.agent_id is None
+    if chat_turn and origin is None and auth.is_channel_admin and not auth.is_admin:
+        raise ToolError(
+            "create_agent needs this turn's origin_context_id when the caller administers a "
+            "channel, so the new agent is theirs to set up there. Nothing was created. Call "
+            "create_agent again with it."
+        )
+
+
 async def _record_creation_channel(
     runtime: McpRuntime, auth: AuthIdentity, ma_agent_id: str, origin: TurnOriginRow | None
 ) -> None:
@@ -468,6 +480,7 @@ async def _create_agent_impl(
     await require_agent_creatable(
         runtime, auth, origin=turn_origin_place(origin) if origin is not None else None
     )
+    _require_channel_admin_origin(auth, origin)
     await _reject_guild_name_collision(runtime, auth, spec.name)
     public_url = (
         str(runtime.settings.mcp.public_url)
@@ -1019,8 +1032,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         A returned ``answering`` field says the new agent is routed nowhere yet:
         post it verbatim. Always pass this turn's ``origin_context_id``: a chat turn
-        without it is refused while a channel in the workspace is confidential, and with
-        it a channel admin creating the agent for their channel may set it up there.
+        without it is refused while a channel in the workspace is confidential or when the
+        caller administers a channel, and with it a channel admin creating the agent for
+        their channel may set it up there.
         """
         spec = _build_create_spec(
             name=name,
