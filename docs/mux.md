@@ -408,3 +408,16 @@ checks in Discord and Teams retain their existing refusal copy before upload.
 
 Discord memory list/retrieve and scheduler session retrieve/archive calls retain
 their current SDK path pending the memory, lifecycle and archive ports.
+Vault credentials use closed native schemas with opaque host secret references.
+The driver resolves those references only for the existing SDK write. Credential
+snapshots retain public SDK fields and exclude write-only values, including
+nested OAuth refresh and client authentication values. Credential and secret
+file upload failures preserve SDK error classes and status while dropping request
+bodies and authorization headers and redacting echoed secret values.
+
+Files preserve the existing multipart filename, media type and bytes. The
+`anthropic.session_resources@1` driver lists, adds and removes mounts and rotates
+repository tokens by reference. Session archive is a separate administration
+operation; it never archives or deletes shared vaults or memory stores. Workspace
+vault janitor and credential sweep retain their explicit operator scopes and host
+policy; GitHub session provisioning and token rotation use their tenant context.

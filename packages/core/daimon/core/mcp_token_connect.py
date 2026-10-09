@@ -33,6 +33,8 @@ from daimon.core.errors import DaimonError
 from daimon.core.mcp_attach import McpServerReplaceRefusedError, attach_mcp_server_to_agent
 from daimon.core.mcp_server_url import same_mcp_url
 from daimon.core.mcp_vault import add_external_mcp_credential
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -70,6 +72,10 @@ async def connect_mcp_server_with_token(
     `McpAgentGoneError` / `McpAttachFailedError` (nothing stored) or
     `McpTokenWriteFailedError` (attached; the token may be partly stored).
     """
+    scope = resource_scope(
+        tenant_id=str(tenant_id),
+        account_id=str(account_id),
+    )
     agent = await find_agent_by_derived_uuid(client, tenant_id=tenant_id, agent_id=agent_id)
     if agent is None:
         raise McpAgentGoneError("The agent this request was for no longer exists.")
@@ -90,7 +96,7 @@ async def connect_mcp_server_with_token(
                 raise
             except Exception as err:
                 raise McpAttachFailedError(type(err).__name__) from err
-            fresh = await client.beta.agents.retrieve(agent.id)
+            fresh = await retrieve_agent(client, agent.id, scope=scope)
             at_url = [s for s in fresh.mcp_servers or [] if same_mcp_url(s.url, mcp_server_url)]
             if not any(s.name == server_name for s in at_url) or (
                 not replace_allowed and any(s.name != server_name for s in at_url)

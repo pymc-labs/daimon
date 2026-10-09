@@ -8,6 +8,7 @@ from anthropic import AsyncAnthropic
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
+from mux.drivers.anthropic.resources._secrets import SecretResolver
 
 
 def managed_agents(
@@ -15,9 +16,12 @@ def managed_agents(
     *,
     scope: Scope | None = None,
     resources: frozenset[tuple[str, str]] = frozenset(),
+    secrets: SecretResolver | None = None,
 ) -> AnthropicManagedAgents:
     return AnthropicManagedAgents(
-        client, authorization=ResourceAuthorization(scope, resources) if scope is not None else None
+        client,
+        authorization=ResourceAuthorization(scope, resources) if scope is not None else None,
+        secrets=secrets,
     )
 
 

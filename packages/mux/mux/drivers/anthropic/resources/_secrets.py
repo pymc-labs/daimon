@@ -1,0 +1,132 @@
+"""Resolve credential references for one request; keep errors free of values."""
+
+from collections.abc import Awaitable, Callable, Mapping
+from typing import cast
+
+import httpx
+from anthropic import AnthropicError, APIConnectionError, APIStatusError, APITimeoutError
+
+from mux.contracts.ids import Scope
+from mux.drivers.anthropic.resources._errors import normalize_error
+from mux.drivers.anthropic.schemas import NativeConfig
+from mux.errors import ProviderError, ScopeViolation
+
+SecretResolver = Callable[[Scope, str], str]
+
+
+class CredentialFileUpload(NativeConfig):
+    filename: str
+    media_type: str
+    content_ref: str
+    secret_refs: tuple[str, ...] = ()
+
+
+def unavailable_secret(scope: Scope, reference: str) -> str:
+    raise ScopeViolation("credential", "no host credential resolver configured")
+
+
+def _redact(value: object, secrets: list[str]) -> object:
+    if isinstance(value, str):
+        for secret in sorted(set(secrets), key=len, reverse=True):
+            if secret:
+                value = value.replace(secret, "[redacted]")
+        return value
+    if isinstance(value, Mapping):
+        return {
+            cast(str, _redact(str(k), secrets)): _redact(v, secrets)
+            for k, v in cast(Mapping[object, object], value).items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact(item, secrets) for item in cast(list[object] | tuple[object, ...], value)]
+    return value
+
+
+def _safe_error(error: AnthropicError, secrets: list[str]) -> AnthropicError:
+    # SDK request objects hold credential bodies and authorization headers.
+    # Retain method/path/status/request-id and today's message unless it echoes
+    # a credential, but never retain that request's values in the cause.
+    if isinstance(error, (APIStatusError, APIConnectionError)):
+        request = httpx.Request(
+            error.request.method, cast(str, _redact(str(error.request.url), secrets))
+        )
+        if isinstance(error, APIStatusError):
+            response = httpx.Response(
+                error.status_code,
+                headers={
+                    name: cast(str, _redact(value, secrets))
+                    for name, value in error.response.headers.items()
+                },
+                request=request,
+            )
+            return type(error)(
+                cast(str, _redact(error.message, secrets)),
+                response=response,
+                body=_redact(error.body, secrets),
+            )
+        if isinstance(error, APITimeoutError):
+            return APITimeoutError(request=request)
+        return APIConnectionError(message=cast(str, _redact(str(error), secrets)), request=request)
+    return AnthropicError(cast(str, _redact(str(error), secrets)))
+
+
+async def credential_request[T](
+    scope: Scope,
+    config: NativeConfig,
+    resolver: SecretResolver,
+    send: Callable[[dict[str, object]], Awaitable[T]],
+) -> T:
+    values: list[str] = []
+    kwargs: dict[str, object] = config.model_dump(mode="python", exclude_unset=True)
+    error: ProviderError | None = None
+
+    def resolve(node: object) -> object:
+        if isinstance(node, Mapping):
+            result: dict[str, object] = {}
+            for name, value in cast(Mapping[str, object], node).items():
+                if name in {
+                    "token_ref",
+                    "access_token_ref",
+                    "refresh_token_ref",
+                    "client_secret_ref",
+                    "secret_value_ref",
+                    "authorization_token_ref",
+                }:
+                    if value is None:
+                        result[name.removesuffix("_ref")] = None
+                    else:
+                        material = resolver(scope, cast(str, value))
+                        values.append(material)
+                        result[name.removesuffix("_ref")] = material
+                else:
+                    result[name] = resolve(value)
+            return result
+        return node
+
+    pending: Awaitable[T] | None = None
+    try:
+        # Metadata is free text and is never interpreted as secret references.
+        if "auth" in kwargs:
+            kwargs["auth"] = resolve(kwargs["auth"])
+        elif "authorization_token_ref" in kwargs:
+            kwargs = cast(dict[str, object], resolve(kwargs))
+        elif "content_ref" in kwargs:
+            content = resolver(scope, cast(str, kwargs.pop("content_ref")))
+            values.append(content)
+            for reference in cast(tuple[str, ...], kwargs.pop("secret_refs", ())):
+                values.append(resolver(scope, reference))
+            kwargs["content"] = content.encode("utf-8")
+            content = ""
+        pending = send(kwargs)
+        return await pending
+    except AnthropicError as native:
+        safe = _safe_error(native, values)
+        error = normalize_error(safe)
+        error.__cause__ = safe
+    finally:
+        kwargs.clear()
+        values.clear()
+        pending = None
+    # Raise outside the SDK exception context: no original credential request
+    # remains attached to the normalized error or its restored host cause.
+    assert error is not None
+    raise error from error.__cause__

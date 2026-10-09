@@ -34,6 +34,14 @@ from daimon.core.github_requester_access import (
 )
 from daimon.core.mcp_auth import mint_jwt
 from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, add_github_copilot_credential
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import (
+    archive_session,
+    archive_vault,
+    create_credential,
+    create_vault,
+    rotate_session_repo_token,
+)
 from daimon.core.stores.github_access import (
     AgentGrant,
     AuthorizedRepo,
@@ -150,24 +158,32 @@ async def create_session_vault(
     public_url: str | None,
     jwt_secret: bytes | None,
 ) -> str:
-    vault = await anthropic.beta.vaults.create(display_name=f"github-session:{uuid.uuid4()}")
+    scope = resource_scope(
+        tenant_id=str(tenant_id),
+        account_id=str(account_id) if account_id is not None else "service",
+    )
+    vault = await create_vault(anthropic, f"github-session:{uuid.uuid4()}", scope=scope)
     try:
         if public_url is not None and jwt_secret is not None and account_id is not None:
-            await anthropic.beta.vaults.credentials.create(
-                vault_id=vault.id,
-                auth={
-                    "type": "static_bearer",
-                    "mcp_server_url": public_url,
-                    "token": mint_jwt(
-                        account_id=account_id,
-                        chat_agent_id=agent_id,
-                        secret=jwt_secret,
-                        now=datetime.now(UTC),
-                    ),
+            await create_credential(
+                anthropic,
+                vault.id,
+                {
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": public_url,
+                        "token": mint_jwt(
+                            account_id=account_id,
+                            chat_agent_id=agent_id,
+                            secret=jwt_secret,
+                            now=datetime.now(UTC),
+                        ),
+                    }
                 },
+                scope=scope,
             )
     except BaseException:
-        await anthropic.beta.vaults.archive(vault.id)
+        await archive_vault(anthropic, vault.id, scope=scope)
         raise
     return vault.id
 
@@ -690,6 +706,10 @@ async def rotate_live_app_tokens(
     active_turn: bool = False,
 ) -> None:
     """Refresh resources and vault in place; leave equal-access old tokens to expire."""
+    scope = resource_scope(
+        tenant_id=str(tenant_id),
+        account_id=str(account_id) if account_id is not None else "service",
+    )
     provisional = f"pending:{uuid.uuid4()}"
     swapped = False
 
@@ -738,10 +758,12 @@ async def rotate_live_app_tokens(
                     # the session to mount the new checkout.
                     continue
                 try:
-                    await anthropic.beta.sessions.resources.update(
+                    await rotate_session_repo_token(
+                        anthropic,
+                        session_id,
                         resource_id,
-                        session_id=session_id,
-                        authorization_token=resource["authorization_token"],
+                        resource["authorization_token"],
+                        scope=scope,
                     )
                     swapped = True
                     delivered.add(resource["authorization_token"])
@@ -802,10 +824,12 @@ async def rotate_live_app_tokens(
                         resource_id = resource_ids.get(resource["url"])
                         if resource_id is not None:
                             try:
-                                await anthropic.beta.sessions.resources.update(
+                                await rotate_session_repo_token(
+                                    anthropic,
+                                    session_id,
                                     resource_id,
-                                    session_id=session_id,
-                                    authorization_token=resource["authorization_token"],
+                                    resource["authorization_token"],
+                                    scope=scope,
                                 )
                             except Exception:
                                 _log.exception(
@@ -816,7 +840,7 @@ async def rotate_live_app_tokens(
                 elif swapped and not active_turn:
                     # Only an idle session is archived; a running turn is never
                     # interrupted, and the next turn boundary replaces it.
-                    await anthropic.beta.sessions.archive(session_id)
+                    await archive_session(anthropic, session_id, scope=scope)
                 elif swapped:
                     _log.warning(
                         "App refresh failed mid-swap during active turn %s; left running",
