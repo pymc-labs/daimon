@@ -683,16 +683,23 @@ async def _interrupt_and_settle(
     events cannot end the retried turn early. The whole recovery is bounded
     by `_UNWEDGE_SETTLE_S` and raced against Stop; only a confirmed `idle`
     counts as settled, since MA ignores a message sent while it runs.
+
+    A stuck session is already `idle`, paused on `requires_action`, so the
+    status alone settles before MA has taken the interrupt (staging,
+    2026-10-09). Settled means idle with a latest pause that no longer
+    waits on confirmations.
     """
 
     async def _recover() -> bool:
         await anthropic.beta.sessions.events.send(session_id, events=[{"type": "user.interrupt"}])
         while True:
             session = await anthropic.beta.sessions.retrieve(session_id)
-            if session.status == "idle":
-                return True
             if session.status == "terminated":
                 return False
+            if session.status == "idle" and not await _latest_idle_awaits_action(
+                anthropic, session_id=session_id
+            ):
+                return True
             await asyncio.sleep(0.5)
 
     recovery = asyncio.ensure_future(_recover())
@@ -721,6 +728,16 @@ async def _interrupt_and_settle(
         return "failed"
     log.info("turn.session_unwedged", session_id=session_id)
     return "idle"
+
+
+async def _latest_idle_awaits_action(anthropic: AsyncAnthropic, *, session_id: str) -> bool:
+    """Whether the session's most recent idle is a `requires_action` pause."""
+    async for event in anthropic.beta.sessions.events.list(
+        session_id=session_id, types=["session.status_idle"], order="desc", limit=1
+    ):
+        stop_reason = getattr(event, "stop_reason", None)
+        return getattr(stop_reason, "type", None) == "requires_action"
+    return False
 
 
 async def _pump(
