@@ -3488,6 +3488,7 @@ class DaimonBot(commands.Bot):
                 configuration_target_name=admission.config.configuration_target_name,
                 role=role,
                 is_setup=admission.config.thread_binding_kind == "setup",
+                message_text=message.content,
             ) as origin:
                 outcome = await run_prepared_turn(
                     self.runtime.turn_deps,

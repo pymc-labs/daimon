@@ -14,6 +14,7 @@ from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.channel_admins import get_channel_admins
 from daimon.core.stores.domain import Role, TransferKind, TurnOriginRow
+from daimon.core.stores.pending_skill_adds import resolve_pending_skill_adds
 from daimon.core.stores.turn_origins import create_origin, delete_origin
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -164,11 +165,15 @@ async def turn_origin(
     configuration_target_name: str | None = None,
     is_setup: bool = False,
     is_external: bool = False,
+    message_text: str | None = None,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
     `is_external` (`Admission.is_external`) holds the turn's MCP calls to what
     an external participant may do, even when nothing about them was stored.
+    `message_text` is the person's own message that started this turn, as the
+    adapter received it; it settles their open skill-add previews in this
+    thread (`resolve_pending_skill_adds`). None for a turn no message started.
     """
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
@@ -189,6 +194,10 @@ async def turn_origin(
             is_setup=is_setup,
             is_external=is_external,
         )
+        if message_text is not None:
+            await resolve_pending_skill_adds(
+                session, origin=origin, message_text=message_text, now=now
+            )
     origin_context = current_origin_id.set(origin.id)
     try:
         yield origin
