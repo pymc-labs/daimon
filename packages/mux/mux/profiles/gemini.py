@@ -27,8 +27,10 @@ INLINE_REUSE = Profile(
         # tests/drivers/gemini/test_core.py proves actions, nulls and revisions.
         "required_actions": "native",
         "usage_observations": "emulated",
-        "skills_bundle": "unsupported",  # resource PR supplies inline bundles
-        "artifacts": "unsupported",  # resource PR supplies snapshot download
+        # source-G-agent.txt inline SKILL.md + source-G-env.txt Files snapshot;
+        # tests/drivers/gemini/test_resources.py checks pins, bytes and scope.
+        "skills_bundle": "emulated",
+        "artifacts": "emulated",
         "vaults": "unsupported",
         "memory_stores": "unsupported",
         "steer": "unsupported",

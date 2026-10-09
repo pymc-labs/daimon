@@ -42,7 +42,7 @@ async def test_executable_probe_uses_real_driver_and_store(fixture: str) -> None
 EXPECTED_DEFERRED = {
     "C02": (
         PendingKind.ADAPTER_DEPENDENCY,
-        "Environment snapshot resource port is scheduled for PR3.",
+        "Snapshot bytes implemented; clock-driven expiry and unexpected-loss proof absent.",
     ),
     "C04": (
         PendingKind.ADAPTER_DEPENDENCY,
@@ -58,11 +58,11 @@ EXPECTED_DEFERRED = {
     ),
     "C09": (
         PendingKind.CAPABILITY_UNAVAILABLE,
-        "No provider vault API; snapshot artifact support is deferred to PR3.",
+        "Snapshot downloads are implemented; no provider vault API.",
     ),
     "C11": (
         PendingKind.ADAPTER_DEPENDENCY,
-        "Driver inline skill bundle port is scheduled for PR3.",
+        "Conformance bridge for interaction-time inline skill deployment is absent.",
     ),
 }
 

@@ -1328,6 +1328,8 @@ class TestInvokerAccessPolicy:
         await db_session.commit()
         mock_resolve.return_value = _stub_resolved_config()
         mock_is_over_cap.return_value = True
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
 
         bot = make_bot(_make_runtime(tenant.id, db_session_factory))
         message = _make_channel_message(author_id=111)

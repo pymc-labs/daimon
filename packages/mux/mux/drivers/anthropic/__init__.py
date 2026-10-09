@@ -18,6 +18,7 @@ from mux.contracts.ports import (
     SkillVersions,
     Usage,
 )
+from mux.contracts.ports import MemoryStores as CoreMemoryStores
 from mux.contracts.ports import PlatformExport as CorePlatformExport
 from mux.contracts.ports import Vaults as CoreVaults
 from mux.contracts.profile import Profile
@@ -27,7 +28,9 @@ from mux.drivers.anthropic.resources._secrets import SecretResolver
 from mux.drivers.anthropic.resources.agents import AnthropicAgents
 from mux.drivers.anthropic.resources.artifacts import AnthropicArtifacts
 from mux.drivers.anthropic.resources.artifacts import Artifacts as NativeArtifacts
-from mux.drivers.anthropic.resources.environments import AnthropicEnvironments
+from mux.drivers.anthropic.resources.environments import AnthropicEnvironments, EnvironmentReads
+from mux.drivers.anthropic.resources.memory_stores import AnthropicMemoryStores
+from mux.drivers.anthropic.resources.memory_stores import MemoryStores as NativeMemoryStores
 from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport, PlatformExport
 from mux.drivers.anthropic.resources.sessions_admin import AnthropicSessionAdmin
 from mux.drivers.anthropic.resources.sessions_admin import (
@@ -40,8 +43,14 @@ from mux.drivers.anthropic.resources.skills import (
 )
 from mux.drivers.anthropic.resources.vaults import AnthropicVaults, Vaults
 from mux.drivers.anthropic.resources.walk import AnthropicResourceWalk, ResourceWalk
-from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions, SessionWalk
+from mux.drivers.anthropic.sessions_lifecycle import (
+    AnthropicSessions,
+    AnthropicWorkspaceTransfer,
+    SessionWalk,
+    WorkspaceTransfer,
+)
 from mux.drivers.anthropic.turn import AnthropicEvents
+from mux.drivers.anthropic.usage import AnthropicUsage, UsageWalk
 from mux.errors import ExtensionVersionError, UnsupportedCapability
 from mux.profiles.anthropic import MANAGED_AGENTS
 
@@ -84,7 +93,6 @@ class AnthropicManagedAgents:
         native_versions = AnthropicSkillVersions(client, authorization)
         self._skills = skills or native_skills
         self._models = models
-        self._usage = usage
         native_vaults = AnthropicVaults(client, self.account_scope_id, secrets, authorization)
         self.session_admin = AnthropicSessionAdmin(
             client, self.account_scope_id, secrets, authorization
@@ -97,12 +105,21 @@ class AnthropicManagedAgents:
             secrets=secrets,
         )
         self._sessions = sessions or native_sessions
+        native_usage = AnthropicUsage(client, self.account_scope_id, authorization)
+        self._usage = usage if usage is not None else native_usage
+        native_memory = AnthropicMemoryStores(client, self.account_scope_id, authorization)
         native_export = AnthropicPlatformExport(client)
         self._extensions: dict[tuple[type[object], str, int], object] = {
             (SessionWalk, "anthropic.session_walk", 1): native_sessions,
+            (WorkspaceTransfer, "anthropic.workspace_transfer", 1): AnthropicWorkspaceTransfer(
+                self.account_scope_id, authorization
+            ),
             (Outputs, "anthropic.outputs", 1): AnthropicOutputs(
                 client, self.account_scope_id, authorization, secrets
             ),
+            (EnvironmentReads, "anthropic.environment_reads", 1): self.environments,
+            (CoreMemoryStores, "anthropic.memory_stores", 1): native_memory,
+            (NativeMemoryStores, "anthropic.memory_stores", 1): native_memory,
             (NativeArtifacts, "anthropic.artifacts", 1): native_artifacts,
             (Vaults, "anthropic.vaults", 1): native_vaults,
             (CoreVaults, "anthropic.vaults", 1): native_vaults,
@@ -115,6 +132,7 @@ class AnthropicManagedAgents:
             (CorePlatformExport, "anthropic.platform_export", 1): native_export,
             (SkillVersions, "anthropic.skills_versions", 1): native_versions,
             (NativeSkillVersions, "anthropic.skills_versions", 1): native_versions,
+            (UsageWalk, "anthropic.usage_walk", 1): native_usage,
         }
 
     @property

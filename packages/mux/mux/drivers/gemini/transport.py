@@ -7,6 +7,7 @@ from typing import Protocol, cast
 
 import httpx
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai._interactions import APIConnectionError, APIError, APIStatusError
 from pydantic import JsonValue
 
@@ -21,6 +22,7 @@ class Transport(Protocol):
     async def create(self, request: Mapping[str, JsonValue]) -> Object: ...
     async def get(self, interaction_id: str) -> Object: ...
     async def cancel(self, interaction_id: str) -> Object: ...
+    async def download_snapshot(self, environment_id: str) -> bytes: ...
     async def open_stream(
         self, interaction_id: str, *, after: str | None = None
     ) -> AsyncIterator[Object]: ...
@@ -39,7 +41,11 @@ def string(value: JsonValue) -> str:
 
 
 def normalize_error(error: Exception) -> ProviderError:
-    status = error.status_code if isinstance(error, APIStatusError) else None
+    status = (
+        error.status_code
+        if isinstance(error, APIStatusError)
+        else (error.code if isinstance(error, genai_errors.APIError) else None)
+    )
     categories: dict[int, ProviderErrorCategory] = {
         400: "invalid_request",
         401: "auth",
@@ -61,7 +67,7 @@ def normalize_error(error: Exception) -> ProviderError:
 async def provider_call[T](call: Awaitable[T]) -> T:
     try:
         return await call
-    except (APIError, httpx.HTTPError) as error:
+    except (APIError, genai_errors.APIError, httpx.HTTPError) as error:
         raise normalize_error(error) from None
 
 
@@ -111,6 +117,10 @@ class SDKTransport:
         # attempts=1 still retries once. Set the Interactions edge to zero.
         nextgen = client.aio._nextgen_client  # pyright: ignore[reportPrivateUsage]
         self._interactions = nextgen.with_options(max_retries=0).interactions
+        self._files = client.aio.files
+
+    async def download_snapshot(self, environment_id: str) -> bytes:
+        return await provider_call(self._files.download(file=f"files/environment-{environment_id}"))
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
         response = await provider_call(

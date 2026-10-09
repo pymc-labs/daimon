@@ -522,6 +522,7 @@ mirroring and rollback; vault discovery retains its existing exact-name inventor
 check. Tenantless established creation uses a named legacy host capability.
 Workspace export/restore remain unsupported lifecycle methods and fail explicitly. The driver keeps no operation cache
 and makes no request during construction.
+
 ## Accounting observations
 
 The Anthropic usage driver converts each model-request end event into one
@@ -558,6 +559,26 @@ transport. It verifies complete legacy-row snapshots, exact Decimal amounts for
 by restart. The hook supplies database facts rather than a verdict. Missing host
 evidence leaves C12 pending; the generic reference transport does not certify a
 host ledger. No provider request is made by the accounting bridge itself.
+Headless session assembly retrieves its agent and environment through the
+existing resource ports, in the same order, and decodes their native snapshots
+at the M0 host edge. Tenant callers use their existing tenant/account context
+and authorized IDs; tenantless callers retain the explicitly tracked
+`headless_runner:run_turn:tenantless` host authorization seam until they supply
+that context. No provider lookups or retry policy are added.
+
+The Anthropic usage port reads model-request spans with the shared observation
+converter. Its typed walk keeps the SDK async paginator, ascending order and
+model-request filter, including early closure and errors on later pages. Scope
+and session-reference checks run before requests; the optional model identity
+comes from the caller's existing session snapshot, without another lookup.
+
+The usage factory registers both the core usage port and `anthropic.usage_walk`
+version 1. Backfill validates a session's tenant stamp against the deployment's
+known tenants before granting that session to the model-span reader. The host
+restores the existing SDK exception type at its M0 boundary.
+The complete billing inventory uses `anthropic.session_walk@1` with an explicit
+workspace scope and the original argument-free native session list. The host
+retains tenant validation, incremental cutoffs and billing-exempt handling.
 
 ### Gemini inline reuse
 
@@ -597,9 +618,30 @@ public raw handles, null usage incorrectly converted to zero, queued ambiguous
 sends, premature occupancy release, unconditional admission, supported migration,
 and ignored transport faults. C10's admission faults are a documented no-op:
 the real profile statically refuses the required memory store before any writes.
-C08 and C11 await driver update/inline-bundle ports; the provider documents those
-capabilities. C04 awaits ambiguous accepted-POST reconciliation, rather than a
+C08 awaits the next-turn update port. The resource layer implements inline
+bundles; C11 awaits a conformance bridge for interaction-time deployment. The
+provider documents both capabilities. C04 awaits ambiguous accepted-POST reconciliation, rather than a
 host journal bridge. C05's durable saved-item/SSE-gap proof remains deferred.
+
+Gemini resource ports emulate a scoped skill catalogue and host artifact uploads.
+Skill bundles require a root `SKILL.md`, canonical relative paths and UTF-8
+contents, with at most 256 files and 2 MiB total. Agents use explicit immutable
+version pins; publishing changes future pins only. UTF-8 uploaded files mount
+as inline environment sources. Binary uploads are downloadable from host storage,
+but binary inline mounts are refused. Conflicting source targets are rejected.
+
+Workspace artifact discovery downloads the current environment's binary tar
+snapshot through the Files API. Its roster includes workspace files and inputs;
+the host selects which files to deliver. Pagination keeps a stable discovered roster;
+downloads fetch a fresh snapshot and require the original file digest. Missing
+workspace snapshots expose `ContinuityLost`; changed or missing files fail visibly.
+Historical per-turn snapshots, native vaults and workspace-file deletion are
+unsupported. Snapshot parsing accepts plain tar or gzip-compressed tar, bounds decompression
+before parsing metadata, and limits archive/expanded data to 64 MiB, each file
+to 16 MiB and members to 2048, and rejects traversal, links and duplicate paths.
+The SDK buffers network bytes before these parser limits apply. Host uploads
+also have a 16 MiB limit. This resource support requires injected transactional
+host storage and does not enable a new default backend or production host wiring.
 
 ## OpenAI driver core
 
@@ -738,3 +780,52 @@ written evidence and reconstructed normalized text before export and replay.
 Replay feeds a caller-supplied offline event fake and recomputes fixture checks;
 PENDING never certifies. Native HTTP/SSE codec certification is separate work.
 See `packages/mux/mux/conformance/README.md` for the APIs and limitations.
+
+## Persistent memory and resource identity reads
+
+Persistent memory provisioning, orphan cleanup, archival and memory command
+reads use `anthropic.memory_stores@1`. The driver preserves the SDK's memory
+beta header, prefix entries, pagination stop rules and selected full-content
+reads. Warm provisioning performs no provider request. A lost binding race or
+failed insert deletes only the newly created orphan; agent archival clears its
+binding even when the provider reports the store missing. Session archival
+does not archive or delete shared memory.
+
+Resolver reads retain partial native SDK environment snapshots when configuration
+is omitted or null; admission still reads metadata and archive state without an
+additional request. Resolver reads keep the host's existing TTL caches and in-flight coordination;
+the driver introduces no cache or replay layer. Owned resolver, setup, report
+reader and OAuth/token attachment callers pass their tenant scope through
+reads, writes and version-conflict retries. Memory command and MCP attachment
+helpers accept explicit scopes while retaining named legacy authorization
+seams for existing adapter callers without scope arguments. Conditional memory
+writes are unsupported and fail before provider I/O.
+
+M0 memory listing/content reads and environment identity retrieval preserve the
+SDK's partial native response snapshots through operation-specific driver
+extensions (`anthropic.memory_stores@1` native reads/walks and
+`anthropic.environment_reads@1`). The compatibility edge reconstructs SDK records without requiring
+unused paths, identifiers, configuration or timestamps. Prefix and unknown list
+rows retain their original discriminator and pagination behavior. Tenant and
+account checks still run before requests, and environment metadata checks still
+run after the existing response. Neutral resource records remain validated.
+Thread handoff collects session seals through scoped lifecycle reads before its
+policy transaction. Bundle reuploads use the native outputs extension and share
+the Artifacts upload request, archive bytes and retention queue. Checkpoint billing,
+access rechecks and the full/transcript/history fallback ladder remain host policy.
+
+Workspace transfer uses `anthropic.workspace_transfer@1` to carry the inline
+full/transcript/history rung. The closed schema stays in the driver. Pure native
+export declares its archive, digest, transcript presence and losses with
+`best_effort` consistency; restore verifies the payload, source authorization
+and accepted losses, then returns neutral mounts for the existing create call.
+No manifest upload, provider lookup, second session create or first send is added.
+The host retains the one billed checkpoint, its access fence, fallback notices,
+quoted transcript and system-message policy. Generic lifecycle export/restore
+stay unsupported; this explicit native extension handles the existing MA ladder.
+
+Workspace rehosting uses the native outputs extension's ID-only upload result.
+The request helper is shared with the generic Artifacts port; beta headers,
+multipart bytes and download/delete/upload ordering stay unchanged. Successful
+partial upload replies do not require a filename, media type or timestamp before
+the uploaded file is mounted and queued for cleanup.

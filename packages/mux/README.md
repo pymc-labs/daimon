@@ -104,11 +104,20 @@ delegated to session administration. Closed `anthropic.session_create@1` and
 `anthropic.session_resource_create@1` configs preserve omitted and explicit empty
 fields, agent overrides and mount ordering. Session specs carry extensions and
 records carry an opaque optional native snapshot for the temporary host codec.
+
 Anthropic model spans convert to `UsageObservation` in the usage driver,
 retaining event IDs, timestamps and the untouched native meter. Neutral input
 counts include cache stages; the host projects them into its existing billing
 and telemetry columns. Temporary host compatibility entrypoints accept existing
 SDK callers while turn and adapter ports migrate.
+
+The Anthropic usage implementation supplies scoped page reads and a typed
+`UsageWalk` for model-request spans. Both use the shared pure converter and
+preserve the SDK paginator, native event time, meter and revision 1. Model
+identity may come from an existing session snapshot without a provider lookup.
+Billing reconciliation combines this span walk with `anthropic.session_walk@1`
+under an explicit workspace scope. Tenant, watermark and billing-exempt policy
+remain in the host, including its handling of unknown native session statuses.
 
 Gemini's explicitly constructed `GeminiManagedAgents` driver runs the non-core
 `gemini.inline_reuse` profile. The host injects transactional driver storage,
@@ -119,6 +128,15 @@ configuration records. Turns respecify that configuration and reuse both
 continuity raises `ContinuityLost` instead of provisioning a fresh workspace.
 The scripted transport and memory storage are offline test tools, not a
 production persistence implementation or a live certification.
+
+Gemini skills are host-stored, immutable text bundle versions, deployed as inline
+`.agents/skills/<id>/` files when an interaction first creates its workspace.
+Existing pins do not follow later publications. Uploaded artifact bytes remain
+in the injected host storage; UTF-8 uploads can seed inline workspace files.
+Workspace artifact discovery uses the documented Files API workspace tar snapshot.
+Downloads verify the discovered content digest; unavailable or changed files
+produce typed errors. Unsafe, oversized or malformed archives are refused without
+extracting files to disk. Native vaults and workspace-file deletion are unsupported.
 
 ### OpenAI driver core
 
@@ -163,3 +181,38 @@ pass; thirteen declare typed pending dependencies or unsupported capabilities.
 Broken driver variants must fail shared fixture checks. Registration adds no
 provider discovery, host wiring or live certification; see the driver README
 for the complete matrix and cleanup context.
+`anthropic.memory_stores@1` supplies memory store creation, reads, archival and
+deletion, plus a native prefix walk for the temporary host compatibility edge.
+Memory paths and prefixes are distinct owned records; SDK objects remain inside
+the driver. The existing client supplies retries and its agent-memory beta
+header. Operation keys pass through without caching or deduplication, and
+conditional writes fail before I/O. Tenant and account checks apply to every
+store reference, with tagged-record and authorized-list checks after native
+reads.
+
+Environment identity reads retain omitted or null native configuration fields,
+including the SDK snapshot and field-presence semantics used by host caches.
+
+M0 memory listing/content reads and environment identity retrieval preserve the
+SDK's partial native response snapshots through operation-specific driver
+extensions (`anthropic.memory_stores@1` native reads/walks and
+`anthropic.environment_reads@1`). The compatibility edge reconstructs SDK records without requiring
+unused paths, identifiers, configuration or timestamps. Prefix and unknown list
+rows retain their original discriminator and pagination behavior. Tenant and
+account checks still run before requests, and environment metadata checks still
+run after the existing response. Neutral resource records remain validated.
+Thread handoff uses lifecycle reads with its tenant/account context. Workspace
+bundle reuploads use the native outputs extension with the existing Files API
+headers and bytes. Rehosting consumes only the returned ID, so a partial upload
+reply still produces the full handoff and cleanup entry. The request helper is
+shared with Artifacts; the host retains checkpoint billing and fallback policy.
+
+Workspace transfer uses `anthropic.workspace_transfer@1` to carry the inline
+full/transcript/history rung. The closed schema stays in the driver. Pure native
+export declares its archive, digest, transcript presence and losses with
+`best_effort` consistency; restore verifies the payload, source authorization
+and accepted losses, then returns neutral mounts for the existing create call.
+No manifest upload, provider lookup, second session create or first send is added.
+The host retains the one billed checkpoint, its access fence, fallback notices,
+quoted transcript and system-message policy. Generic lifecycle export/restore
+stay unsupported; this explicit native extension handles the existing MA ladder.

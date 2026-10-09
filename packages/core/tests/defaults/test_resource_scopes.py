@@ -433,6 +433,7 @@ def test_core_platform_scopes_are_limited_to_workspace_operations() -> None:
         Scan(path.relative_to(core).as_posix()).visit(ast.parse(path.read_text()))
     assert calls == Counter(
         {
+            ("usage_sweep.py", "sweep_headless_usage"): 1,
             ("defaults/ma_index.py", "list_agents_by_tenants"): 1,
             ("defaults/ma_index.py", "list_referenced_skill_ids"): 1,
             ("defaults/ma_index.py", "_collect_skills_page"): 1,

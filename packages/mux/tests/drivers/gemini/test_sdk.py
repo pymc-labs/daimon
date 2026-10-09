@@ -134,3 +134,78 @@ async def test_sdk_open_stream_closes_http_response_without_iteration() -> None:
         await close_iterator(opened)
         assert body.closed
         await client.aio.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 403, 404, 429, 503])
+async def test_sdk_binary_workspace_snapshot_uses_documented_download(status: int) -> None:
+    captured: list[httpx.Request] = []
+    data = b"\x00\xffraw-snapshot\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return (
+            httpx.Response(status, content=data)
+            if status == 200
+            else httpx.Response(status, json={"error": {"message": "SECRET echo", "code": status}})
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        transport = SDKTransport(client)
+        if status == 200:
+            assert await transport.download_snapshot("e1") == data
+        else:
+            with pytest.raises(ProviderError) as exc:
+                await transport.download_snapshot("e1")
+            assert (
+                exc.value.category
+                == {403: "permission", 404: "not_found", 429: "rate_limited", 503: "overloaded"}[
+                    status
+                ]
+            )
+            assert "SECRET" not in str(exc.value) and exc.value.__cause__ is None
+        assert len(captured) == 1
+        assert captured[0].method == "GET"
+        assert captured[0].url.path == "/v1beta/files/environment-e1:download"
+        assert captured[0].url.params["alt"] == "media"
+        await client.aio.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sdk_interrupted_snapshot_body_is_typed_and_connection_is_closed() -> None:
+    class BrokenBody(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b"\x00\xffpartial binary archive"
+            raise httpx.ReadError("SECRET echoed in failed body")
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    body = BrokenBody()
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, stream=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(client).download_snapshot("e1")
+        assert exc.value.category == "transient_network"
+        assert "SECRET" not in str(exc.value) and exc.value.__cause__ is None
+        assert len(calls) == 1 and body.closed
+        await client.aio.aclose()

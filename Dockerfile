@@ -4,7 +4,7 @@
 # Ruff, pyright, import-linter and pytest settings change far more often than
 # dependencies. COPY keys on content, so dropping them here keeps the builder
 # below cached across those edits.
-FROM python:3.12-slim AS manifest
+FROM mirror.gcr.io/library/python:3.12-slim AS manifest
 COPY pyproject.toml /src/pyproject.toml
 RUN awk '/^\[/ { keep = /^\[(project|dependency-groups|tool\.uv)[].]/ } keep' \
     /src/pyproject.toml > /pyproject.toml
@@ -12,7 +12,7 @@ RUN awk '/^\[/ { keep = /^\[(project|dependency-groups|tool\.uv)[].]/ } keep' \
 # ---------------------------------------------------------------------------
 # Stage 1: builder — install build deps + compile third-party wheels
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim AS builder
+FROM mirror.gcr.io/library/python:3.12-slim AS builder
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -38,7 +38,7 @@ RUN uv sync --frozen --no-dev --extra billing --no-install-workspace
 # ---------------------------------------------------------------------------
 # Stage 2: runtime — slim image, no build tools
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim
+FROM mirror.gcr.io/library/python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

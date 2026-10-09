@@ -4,10 +4,11 @@ import hashlib
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import cast
+from typing import Protocol, cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment
+from anthropic.types.beta.beta_environment import Config
 from anthropic.types.beta.environment_create_params import EnvironmentCreateParams
 from anthropic.types.beta.environment_list_params import EnvironmentListParams
 from anthropic.types.beta.environment_update_params import EnvironmentUpdateParams
@@ -28,6 +29,7 @@ from mux.drivers.anthropic.resources._authorization import (
     visible,
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
+from mux.drivers.anthropic.resources._native import NativeSnapshot, native_snapshot
 from mux.drivers.anthropic.schemas import EnvironmentConfig
 from mux.errors import UnsupportedCapability
 
@@ -70,6 +72,10 @@ def environment_payload(spec: EnvironmentSpec | EnvironmentPatch) -> dict[str, o
 
 
 def environment_record(item: BetaEnvironment, account_scope_id: str, scope: Scope) -> Environment:
+    # SDK response construction permits missing/null required fields. Legacy
+    # identity reads only need metadata and archive state; retain their exact
+    # native snapshot without requiring or inventing configuration.
+    config = cast(Config | None, item.config)
     return Environment.model_validate(
         {
             "ref": {
@@ -91,15 +97,29 @@ def environment_record(item: BetaEnvironment, account_scope_id: str, scope: Scop
                 "description": item.description,
                 "metadata": item.metadata,
                 "scope": item.scope,
-                "execution": "self_hosted" if item.config.type == "self_hosted" else "hosted",
-                "native_config": {
-                    "namespace": "anthropic.environment_config",
-                    "version": 1,
-                    "value": {"config": item.config.model_dump(mode="json", exclude_unset=True)},
-                },
+                "execution": (
+                    "none"
+                    if config is None
+                    else "self_hosted"
+                    if config.type == "self_hosted"
+                    else "hosted"
+                ),
+                "native_config": (
+                    None
+                    if config is None
+                    else {
+                        "namespace": "anthropic.environment_config",
+                        "version": 1,
+                        "value": {"config": config.model_dump(mode="json", exclude_unset=True)},
+                    }
+                ),
             },
         }
     )
+
+
+class EnvironmentReads(Protocol):
+    async def retrieve_native(self, scope: Scope, ref: ResourceRef) -> NativeSnapshot: ...
 
 
 class AnthropicEnvironments:
@@ -124,12 +144,22 @@ class AnthropicEnvironments:
         check_record(scope, item.id, item.metadata)
         return environment_record(item, self._account_scope_id, scope)
 
-    async def retrieve(self, scope: Scope, ref: ResourceRef) -> Environment:
+    async def _retrieve_sdk(self, scope: Scope, ref: ResourceRef) -> BetaEnvironment:
         authorize(self._authorization, scope, "environment", ref.id)
         check_ref(scope, ref, self._account_scope_id, "environment")
         item = await provider_call(self._client.beta.environments.retrieve(ref.id))
-        check_record(scope, item.id, item.metadata)
-        return environment_record(item, self._account_scope_id, scope)
+        check_record(scope, ref.id, item.metadata)
+        return item
+
+    async def retrieve_native(self, scope: Scope, ref: ResourceRef) -> NativeSnapshot:
+        # Admission/liveness uses metadata/archive state, not configuration or dates.
+        # Keep the exact SDK snapshot, including omitted fields and explicit nulls.
+        return native_snapshot(await self._retrieve_sdk(scope, ref))
+
+    async def retrieve(self, scope: Scope, ref: ResourceRef) -> Environment:
+        return environment_record(
+            await self._retrieve_sdk(scope, ref), self._account_scope_id, scope
+        )
 
     async def list(
         self, scope: Scope, *, filters: EnvironmentFilter, page: PageRequest

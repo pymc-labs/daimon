@@ -76,12 +76,18 @@ class AnthropicArtifacts:
     async def upload(
         self, scope: Scope, body: AsyncIterator[bytes], *, filename: str, media_type: str, key: str
     ) -> Artifact:
+        return self._artifact(
+            scope, await self._upload_file(scope, body, filename=filename, media_type=media_type)
+        )
+
+    async def _upload_file(
+        self, scope: Scope, body: AsyncIterator[bytes], *, filename: str, media_type: str
+    ) -> FileMetadata:
         authorize(self._authorization, scope, "file")
         content = b"".join([chunk async for chunk in body])
-        item = await provider_call(
+        return await provider_call(
             self._client.beta.files.upload(file=(filename, content, media_type))
         )
-        return self._artifact(scope, item)
 
     async def upload_credential_file(
         self, scope: Scope, config: CredentialFileUpload, *, key: str

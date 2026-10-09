@@ -91,6 +91,7 @@ async def connect_mcp_server_with_token(
                     url=mcp_server_url,
                     replace_allowed=replace_allowed,
                     shares_token=True,
+                    scope=scope,
                 )
             except McpServerReplaceRefusedError:
                 raise

@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their reasons and blocking certification without hiding other probe failures.
 
 - Register opt-in OpenAI offline conformance with five shared-fixture passes, thirteen typed pending reasons and broken-driver regressions, without provider calls or host activation.
+- Add scoped Gemini inline skill bundles, host artifact uploads and verified binary workspace snapshots, with immutable pins and explicit unsupported vault operations.
+
 - Add an opt-in Gemini inline-reuse driver with offline transport probes, explicit continuity loss, normalized turn events and revisioned usage; Anthropic remains the default.
 - Filter completed Gemini function calls from required actions, defer open saved steps, and persist parsed usage timestamp watermarks without duplicate charges.
 - Register offline Gemini conformance probes with accurate typed deferred reasons and a pinned seven-pass, eleven-pending matrix; admission and fixture-family mutants reject broken drivers, and incomplete scenarios cannot certify.
@@ -36,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the OpenAI hosted profile non-core until its skills and artifact ports land; refuse required unimplemented vault, multiagent and whole-workspace export/import capabilities.
 - Resolve OpenAI required-action turn identity from the documented nested session payload and suppress stale actions after root completion.
 - Route CLI GitHub grant cleanup through tenant-scoped session and vault archive ports while preserving revocation order, operator output and cleanup errors.
+- Keep workspace rehosting successful for partial upload responses by consuming
+  only the returned file ID, retaining the original transfer result and cleanup.
+
 - Preserve partial session output listings through the native port, including
   pending entries and downloadable files without unused creation timestamps.
 
@@ -50,11 +55,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discord, Slack, Teams and scheduler agent operations now consume tenant-scoped neutral resource ports.
 - Preserve original credential JSON key order and redact alternate quote-escaped secret echoes; verify `.env` upload filename, media type and bytes at the host call site.
 
+- Route persistent memory, resolver reads, setup identity reads and report reader/MCP attachment writes through resource ports with unchanged request and cleanup behavior.
+- Preserve partial memory and environment identity responses accepted by the SDK, including ignored prefix rows and missing unused fields.
+
 - Advertise closed session create, resource-mount and update configuration namespaces for backend admission.
 - Expose scoped workspace session enumeration through the native SDK paginator,
   preserving full native records and pagination stop rules for billing sweeps.
+- Carry workspace transfer rungs through typed native export/restore declarations
+  with explicit losses and scoped output ports, preserving checkpoint billing
+  and successor first-send framing without a manifest upload.
+
 - Route session output polling, download and deletion through scoped native ports,
   preserving Files API beta headers, settle timing and post-before-delete delivery.
+- Route handoff session reads and bundle reuploads through scoped ports, preserving
+  conservative seals, uploaded bytes and the cleanup queue.
 
 - Plan native session tool/MCP changes before one in-place apply call, preserving
   busy deferral, mount deletion, repository-token rotation and inherited seals.
@@ -68,6 +82,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route vault bootstrap, credential mirroring, MCP OAuth writes and secret file
   upload through resource ports while preserving request order, locking, retries
   and cleanup; keep credential material out of SDK errors and DEBUG logs.
+- Route the usage sweep's workspace session inventory and billed and exempt model spans through scoped neutral ports with existing requests and debit keys.
+
+- Add a scoped Anthropic model-span usage port that retains native pagination, event identities and meters.
+
+- Route headless agent and environment retrieval through the neutral resource ports with the existing requests and SDK error behavior.
+
 - Accept provider-neutral usage observations while preserving historical usage rows, debit keys, prices and timestamps.
 
 - Verify legacy skill upload filenames, media types and archive bytes at import and repository-sync call sites.
