@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
+- An offline Managed Agents call inventory and production call ratchet protect
+  the neutral-core extraction boundary without changing runtime behavior.
 - Agent identity can be disabled for selected Discord guilds or Slack workspaces
   while remaining enabled elsewhere in the deployment.
 - Discord and Slack GitHub setup panels now manage connected repos, agent grants,
