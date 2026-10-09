@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Discord agent posts and MCP tools now wait at most two seconds for a new channel webhook, then post through the bot with the agent name while creation continues in the background. Creation is deduplicated per channel, 429 retries respect a cooldown, and new channels create one webhook.
 - **The scheduler's usage sweep no longer re-replays every model call it has
   already metered.** It asks the API for `span.model_request_end` events only
   and skips events already in `usage_events` before writing, so the startup and
@@ -28,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Name an agent with `@bot agent-name: request` on Discord, Slack or Teams, or mention its managed Discord role. Named turns use the normal admission checks and keep the named agent for later replies in the thread. An agent with a home is hidden outside it; an unknown name follows ordinary routing. An existing thread points a different named agent to Hand over or `hand_off_task`, and a channel with `readers: own` names its own agent when another is requested. Discord manages mentionable roles only for agents without a home and with a runnable channel; a background sweep backfills, renames and removes those roles.
 - Named-agent refusals use the same short copy on Discord, Slack and Teams. Discord shows a notice card, Slack uses Block Kit and Teams uses an Adaptive Card. Discord and Slack put the existing Hand over action on a thread-switch notice. Discord read and search tools name the missing channel permissions in two short lines.
+- With agent identity enabled, replies to recorded Discord agent posts and replies in threads with recorded agent roots may use that post's agent. An explicit name wins. Admission silently drops an authored candidate that is hidden, unavailable or conflicts with the thread, and logs the reason.
+- MCP browser pages now share a responsive Daimon shell with Daimon's face in
+  the page header, local Inter font, brand colours, and inline action icons.
+  The picker uses separate desktop, tablet, and phone layouts. GitHub and Slack
+  page copy has been rewritten. The GitHub picker shows access
+  before the repo list on narrow screens, keeps selections across search, and
+  locks controls during Connect. Billing, Slack installation, personal GitHub
+  linking, and MCP connection pages use the same shell. Tailwind CSS is
+  generated from the server templates with a pinned standalone CLI and checked
+  in CI.
 - Agent identity can be disabled for selected Discord guilds or Slack workspaces
   while remaining enabled elsewhere in the deployment.
 - Discord and Slack GitHub setup panels now manage connected repos, agent grants,

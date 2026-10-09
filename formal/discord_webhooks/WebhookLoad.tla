@@ -181,4 +181,55 @@ NoBusyRetry == \A t \in Turns: rejections[t] <= 1
 FallbackRoute == \A t \in Turns: forcedBot[t] => route[t] = "bot"
 PoolWithinChannelCap == \A c \in Channels: pool[c] <= ChannelCap
 BoundedPosting == \A t \in Turns: status[t] = "posted" => postedAt[t] < DelayBound
+
+\* Creation uses a separate channel bucket. A 429 occupies it and gives a
+\* 33-window retry (66 seconds). These operators use the existing state and
+\* leave the posting-bucket checks above unchanged for the older configs.
+CreateHit429(c) ==
+    /\ c \in Channels /\ window = 0 /\ pool[c] = 0
+    /\ hookUsed[c][1] = 0
+    /\ hookUsed' = [hookUsed EXCEPT ![c][1] = 1]
+    /\ retryAt' = [t \in Turns |-> IF Place[t] = c THEN 33 ELSE retryAt[t]]
+    /\ rejections' = [t \in Turns |-> IF Place[t] = c THEN 1 ELSE rejections[t]]
+    /\ UNCHANGED <<window, pool, botUsed, route, status, postedAt,
+                   attempts, deliveries, opsDone, forcedBot>>
+
+CreateAfterRetry(c) ==
+    /\ c \in Channels /\ pool[c] = 0
+    /\ \E t \in Turns: Place[t] = c /\ retryAt[t] > 0
+                         /\ window >= retryAt[t]
+    /\ hookUsed[c][1] = 0
+    /\ pool' = [pool EXCEPT ![c] = 1]
+    /\ hookUsed' = [hookUsed EXCEPT ![c][1] = 1]
+    /\ UNCHANGED <<window, botUsed, route, status, retryAt, postedAt,
+                   attempts, rejections, deliveries, opsDone, forcedBot>>
+
+ChooseAfterCreate(t, block) ==
+    /\ t \in Turns /\ status[t] = "queued" /\ route[t] = "none"
+    /\ retryAt[t] > 0
+    /\ IF block THEN pool[Place[t]] > 0 ELSE TRUE
+    /\ route' = [route EXCEPT ![t] = IF block THEN "hook" ELSE "bot"]
+    /\ forcedBot' = [forcedBot EXCEPT ![t] = ~block]
+    /\ UNCHANGED <<window, pool, hookUsed, botUsed, status,
+                   retryAt, postedAt, attempts, rejections, deliveries, opsDone>>
+
+CreationNextWindow(block) ==
+    /\ \E t \in Turns: status[t] = "queued"
+    /\ \A t \in Turns: retryAt[t] > 0
+    /\ \A t \in Turns: window < retryAt[t] \/ pool[Place[t]] > 0
+    /\ IF block THEN TRUE ELSE \A t \in Turns: route[t] # "none"
+    /\ IF block THEN \A t \in Turns: pool[Place[t]] = 0 \/ route[t] # "none" ELSE TRUE
+    /\ \A t \in Turns: ~Eligible(t)
+    /\ window' = window + 1
+    /\ hookUsed' = [c \in Channels |-> [h \in 1..MaxHooks |-> 0]]
+    /\ botUsed' = 0
+    /\ UNCHANGED <<pool, route, status, retryAt, postedAt, attempts,
+                   rejections, deliveries, opsDone, forcedBot>>
+
+CreationNext(block) ==
+    \/ \E c \in Channels: CreateHit429(c) \/ CreateAfterRetry(c)
+    \/ \E t \in Turns: ChooseAfterCreate(t, block) \/ PostBot(t) \/ PostHook(t)
+    \/ CreationNextWindow(block)
+CreationSafeSpec == Init /\ [][CreationNext(FALSE)]_vars
+CreationUnsafeSpec == Init /\ [][CreationNext(TRUE)]_vars
 =================================================================
