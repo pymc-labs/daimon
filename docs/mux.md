@@ -536,3 +536,15 @@ pricing also accepts the existing structural four-stage usage values during
 the M0 migration. Unknown token stages remain unpriced and cannot be written
 as measured billing rows. Higher observation revisions require the accounting
 outbox rather than a second turn debit.
+
+### Gemini inline reuse
+
+The Gemini driver is available only through explicit construction and the
+non-core `gemini.inline_reuse` profile. It retains interaction history and
+workspace references between turns, and exposes workspace expiry as a visible
+continuity failure. Saved interaction steps supply authoritative events;
+streamed deltas remain previews. Interaction usage preserves missing token
+counts, raw meters and correction revisions. Gemini's separately reported
+response and thought tokens are combined into inclusive neutral output tokens.
+Unsupported capabilities fail admission or refuse before provider mutation.
+Existing default resolution continues to select Anthropic.

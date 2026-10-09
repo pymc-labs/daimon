@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add an opt-in Gemini inline-reuse driver with offline transport probes, explicit continuity loss, normalized turn events and revisioned usage; Anthropic remains the default.
+
 - Route CLI agent, environment and skill operations through tenant-scoped neutral resource ports, preserving requests, output and SDK error handling.
 - MCP agent, environment and skill operations now consume tenant-scoped neutral resource ports.
 - Discord, Slack, Teams and scheduler agent operations now consume tenant-scoped neutral resource ports.
