@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Notebooks now come out in PyMC Labs house style by default. The `pymc-artifact-style` default skill gains a "Marimo notebooks" section with a builder that wraps your content cells in a style cell (embedded Inter and JetBrains Mono, wordmark header, key-number cards, callouts, rules-only tables, palette charts), and `marimo_notebooks` tells the agent to use it. Folded in from Rocco De Rosa's `pymc-marimo-style` (pymc-labs/eap-agent#60). Tables now size to their columns, so the rules no longer run past a narrow table.
+
 ### Fixed
 
 - Hackathon staging layouts accept the existing QA admin bot and recognize Discord Administrator permissions, so private team roles can be provisioned without the roleless fallback.
