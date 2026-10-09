@@ -1684,7 +1684,7 @@ async def test_skill_repo_modal_passes_seeded_names_and_admin_status_to_the_sync
     interaction = _admin_interaction() if is_admin else _member_interaction()
     await modal.on_submit(_as_card_interaction(interaction))
 
-    assert sync.call_args.kwargs["seeded_skill_names"] == frozenset({"eda"})
+    assert set(sync.call_args.kwargs["seeded_skills"]) == {"eda"}
     assert sync.call_args.kwargs["is_admin"] is is_admin
 
 

@@ -41,8 +41,9 @@ from daimon.core.stores.domain import (
     CredentialRequestRow,
     McpOAuthFlowRow,
     RepoAccessProof,
+    SeededSkillRow,
 )
-from daimon.core.stores.seeded_skills import list_seeded_skill_names
+from daimon.core.stores.seeded_skills import list_seeded_skills
 from daimon.core.turn_keys import list_turn_key_names
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -348,8 +349,8 @@ async def write_skill_repo_submit(
     row: CredentialRequestRow,
     ma_secret_ref: str,
     proof: RepoAccessProof,
-) -> frozenset[str]:
-    """Store the skill repo credential and read the seeded-name fence together."""
+) -> dict[str, SeededSkillRow]:
+    """Store the skill repo credential and read the seeded-skill fence together."""
     url, branch, path = split_skill_repo_target(row.target)
     await set_skill_repo_credential(
         session,
@@ -361,7 +362,7 @@ async def write_skill_repo_submit(
         ma_secret_ref=ma_secret_ref,
         proof=proof,
     )
-    return await list_seeded_skill_names(session, tenant_id=row.tenant_id)
+    return await list_seeded_skills(session, tenant_id=row.tenant_id)
 
 
 async def prepare_mcp_submit(

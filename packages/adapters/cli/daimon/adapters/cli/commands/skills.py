@@ -50,7 +50,7 @@ from daimon.core.skills.ingest import SkillBundle
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.specs import SkillRepo
 from daimon.core.stores.identity import get_or_create_cli_principal
-from daimon.core.stores.seeded_skills import list_seeded_skill_names
+from daimon.core.stores.seeded_skills import list_seeded_skills
 from rich.console import Console
 from rich.table import Table
 
@@ -105,7 +105,7 @@ async def sync_skills(
         await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
-        seeded_skill_names = await list_seeded_skill_names(session, tenant_id=tenant_id)
+        seeded_skills = await list_seeded_skills(session, tenant_id=tenant_id)
     # Session closed. Fetch + sync below.
 
     async def _run(http: httpx.AsyncClient) -> list[ResourceOutcome]:
@@ -116,7 +116,7 @@ async def sync_skills(
             branch=branch,
             path=path,
             tenant_id=tenant_id,
-            seeded_skill_names=seeded_skill_names,
+            seeded_skills=seeded_skills,
             # The operator owns the library.
             is_admin=True,
         )

@@ -66,7 +66,7 @@ async def test_successful_sync() -> None:
             url="https://github.com/org/repo",
             branch="main",
             tenant_id=_TENANT,
-            seeded_skill_names=frozenset(),
+            seeded_skills={},
             is_admin=True,
         )
 
@@ -93,7 +93,7 @@ async def test_path_escape_raises_daimon_error() -> None:
                         url="https://github.com/org/repo",
                         path="../etc",
                         tenant_id=_TENANT,
-                        seeded_skill_names=frozenset(),
+                        seeded_skills={},
                         is_admin=True,
                     )
 
@@ -121,7 +121,7 @@ async def test_missing_path_raises_daimon_error() -> None:
                         url="https://github.com/org/repo",
                         path="nonexistent",
                         tenant_id=_TENANT,
-                        seeded_skill_names=frozenset(),
+                        seeded_skills={},
                         is_admin=True,
                     )
 
@@ -158,7 +158,7 @@ async def test_cleanup_runs_on_sync_error() -> None:
                     url="https://github.com/org/repo",
                     branch="main",
                     tenant_id=_TENANT,
-                    seeded_skill_names=frozenset(),
+                    seeded_skills={},
                     is_admin=True,
                 )
 

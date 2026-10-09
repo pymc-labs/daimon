@@ -61,7 +61,6 @@ from daimon.core.credential_submit import (
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
-from daimon.core.defaults.report import Action
 from daimon.core.env_file import (
     MAX_ENV_FILE_BYTES,
     EnvEntry,
@@ -107,7 +106,7 @@ from daimon.core.posted_controls.teams_card import (
     teams_wording,
 )
 from daimon.core.skills.pipeline import run_skill_sync
-from daimon.core.skills.sync import summarize_failed_imports
+from daimon.core.skills.sync import in_library, summarize_failed_imports
 from daimon.core.stores import credential_requests as store
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
@@ -809,7 +808,7 @@ class TeamsCredentialRequests:
                 branch=branch,
                 path=path,
                 tenant_id=consumed.tenant_id,
-                seeded_skill_names=seeded,
+                seeded_skills=seeded,
                 is_admin=is_admin,
                 token=pat,
             )
@@ -819,7 +818,7 @@ class TeamsCredentialRequests:
             if not stored:
                 return await self._refuse(consumed, "target_unavailable", service_url)
             return await self._skills_partial(consumed, owner_repo, None, service_url)
-        imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
+        imported = [o for o in outcomes if in_library(o)]
         failure_detail = summarize_failed_imports(outcomes)
         if not imported:
             # Nothing reached the library, which an applied card must not claim.

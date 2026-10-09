@@ -939,7 +939,7 @@ async def test_skill_repo_submission_passes_seeded_names_and_admin_status_to_the
 
     await _submit_skill_repo(runtime, token)
 
-    assert sync.call_args.kwargs["seeded_skill_names"] == frozenset({"eda"})
+    assert set(sync.call_args.kwargs["seeded_skills"]) == {"eda"}
     assert sync.call_args.kwargs["is_admin"] is is_admin
 
 

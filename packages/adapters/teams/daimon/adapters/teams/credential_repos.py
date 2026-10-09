@@ -17,11 +17,12 @@ from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAge
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.defaults.report import Action, ResourceOutcome
+from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import upsert_credential_encrypted
 from daimon.core.ma import update_agent_with_version_retry
+from daimon.core.skills.sync import library_skill_ids
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 
 log = structlog.get_logger()
@@ -66,11 +67,7 @@ async def attach_imported_skills(
 ) -> SkillAttach:
     """Attach the just-imported skills to the agent the request named. Never raises:
     the import already succeeded, so a failure here is partial and reported."""
-    skill_ids = sorted(
-        o.anthropic_id
-        for o in outcomes
-        if o.anthropic_id is not None and o.action in (Action.CREATED, Action.UPDATED)
-    )
+    skill_ids = library_skill_ids(outcomes)
     if not skill_ids:
         return SkillAttach(note="Nothing new to attach.", attached=False, agent_name=None)
     agent = await find_agent_by_derived_uuid(

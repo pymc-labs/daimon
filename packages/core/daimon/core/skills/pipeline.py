@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import uuid
+from collections.abc import Mapping
 
 import httpx
 import structlog
@@ -13,6 +14,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.skills.discover import discover_skills
 from daimon.core.skills.fetch import fetch_repo
 from daimon.core.skills.sync import sync_skills
+from daimon.core.stores.domain import SeededSkillRow
 
 _log = structlog.get_logger(__name__)
 
@@ -25,7 +27,7 @@ async def run_skill_sync(
     branch: str = "main",
     path: str = "",
     tenant_id: uuid.UUID,
-    seeded_skill_names: frozenset[str],
+    seeded_skills: Mapping[str, SeededSkillRow],
     is_admin: bool,
     token: str | None = None,
     max_tarball_bytes: int = 50 * 1024 * 1024,
@@ -49,8 +51,8 @@ async def run_skill_sync(
             path: Optional subdirectory to scope discovery to. Empty string means
                   discover from repo root.
             tenant_id: Owning tenant — determines the canonical title prefix.
-            seeded_skill_names: Names ``sync_skills`` refuses because a
-                default skill already owns them.
+            seeded_skills: This tenant's seeded skills by name, which
+                ``sync_skills`` matches but never replaces.
             is_admin: Whether the importer may replace an existing library
                 skill (see ``sync_skills``).
             max_tarball_bytes: Raw tarball size cap passed through to ``fetch_repo``
@@ -83,7 +85,7 @@ async def run_skill_sync(
             client,
             found,
             tenant_id=tenant_id,
-            seeded_skill_names=seeded_skill_names,
+            seeded_skills=seeded_skills,
             is_admin=is_admin,
         )
     finally:
