@@ -6,7 +6,7 @@ import json
 
 import pytest
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ModelRef
+from mux.contracts.ids import ModelRef, Page, PageRequest, SkillRef
 from mux.contracts.resources import AgentPatch, AgentSpec, EnvironmentSpec, SkillUpload
 from mux.profiles import MANAGED_AGENTS
 from pydantic import ValidationError
@@ -48,3 +48,27 @@ def test_skill_upload_carries_binary_bytes_through_json() -> None:
 def test_anthropic_offers_the_agent_tools_and_platform_export_extensions() -> None:
     for namespace in ("anthropic.agent_tools", "anthropic.platform_export"):
         assert MANAGED_AGENTS.offered_extension(namespace, 1).namespace == namespace
+
+
+def test_page_request_sends_nothing_unless_asked() -> None:
+    assert PageRequest().model_dump(exclude_none=True) == {}
+    assert PageRequest(limit=1000).model_dump(exclude_none=True) == {"limit": 1000}
+
+
+def test_page_cursor_agrees_with_has_more() -> None:
+    last = Page[SkillRef](data=(SkillRef(id="s"),) * 2, has_more=False)
+    assert last.next_cursor is None and len(last.data) == 2
+    with pytest.raises(ValidationError, match="has_more"):
+        Page[SkillRef](data=(), has_more=False, next_cursor="c")
+    with pytest.raises(ValidationError, match="has_more"):
+        Page[SkillRef](data=(), has_more=True)
+
+
+def test_skill_ref_may_leave_the_version_to_the_provider() -> None:
+    ref = SkillRef(id="skill_1", source="anthropic")
+    assert ref.version is None and ref.digest is None
+
+
+def test_patch_metadata_can_delete_a_key() -> None:
+    patch = AgentPatch(metadata={"stale": None, "kept": "v"})
+    assert patch.model_dump(exclude_unset=True) == {"metadata": {"stale": None, "kept": "v"}}

@@ -88,7 +88,7 @@ class AgentPatch(Contract):
     tools: tuple[ToolSpec, ...] | None = None
     mcp_servers: tuple[MCPConnection, ...] | None = None
     skills: tuple[SkillRef, ...] | None = None
-    metadata: FrozenMap[str, str] | None = None
+    metadata: FrozenMap[str, str | None] | None = None
     extensions: ExtensionsByNamespace = None
 
 
@@ -101,6 +101,9 @@ class Agent(Contract):
     lifecycle: Lifecycle = "active"
     created_at: datetime
     updated_at: datetime | None = None
+    archived_at: datetime | None = None
+    native: JsonValue | None = None
+    """The provider's own record, filled by the driver and opaque to the host."""
 
 
 class AgentFilter(Contract):
@@ -146,7 +149,8 @@ class EnvironmentPatch(Contract):
     sources: tuple[WorkspaceSource, ...] | None = None
     network: NetworkPolicy | None = None
     packages: FrozenMap[str, tuple[str, ...]] | None = None
-    metadata: FrozenMap[str, str] | None = None
+    metadata: FrozenMap[str, str | None] | None = None
+    native_config: ExtensionConfig | None = None
     extensions: ExtensionsByNamespace = None
 
 
@@ -157,6 +161,9 @@ class Environment(Contract):
     lifecycle: Lifecycle = "active"
     created_at: datetime
     updated_at: datetime | None = None
+    archived_at: datetime | None = None
+    native: JsonValue | None = None
+    """The provider's own record, filled by the driver and opaque to the host."""
 
 
 class EnvironmentFilter(Contract):
@@ -289,6 +296,8 @@ class Artifact(Contract):
     session: ResourceRef | None = None
     turn_id: str | None = None
     created_at: datetime
+    native: JsonValue | None = None
+    """The provider's own record, filled by the driver and opaque to the host."""
 
 
 class SkillUploadFile(Contract):
@@ -325,14 +334,20 @@ class Skill(Contract):
     metadata: FrozenMap[str, str] | None = None
     created_at: datetime
     updated_at: datetime | None = None
+    native: JsonValue | None = None
+    """The provider's own record, filled by the driver and opaque to the host."""
 
 
 class SkillVersion(Contract):
+    """One published version; `ref.version` is set."""
+
     ref: SkillRef
     version: str
     name: str | None = None
     description: str | None = None
     created_at: datetime
+    native: JsonValue | None = None
+    """The provider's own record, filled by the driver and opaque to the host."""
 
 
 class ModelInfo(Contract):
@@ -380,6 +395,9 @@ class MemoryStore(Contract):
     description: str | None = None
     created_at: datetime
     updated_at: datetime | None = None
+    archived_at: datetime | None = None
+    native: JsonValue | None = None
+    """The provider's own record, filled by the driver and opaque to the host."""
 
 
 class Memory(Contract):

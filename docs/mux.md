@@ -108,14 +108,19 @@ as `account_scope_id`. That is not a thread binding: a `ProviderBinding`
 In a spec, `None` means "not set": the driver sends nothing and the
 provider's default applies, while an explicitly empty tuple or mapping is
 sent as empty. Agent and environment patches carry `extensions` keyed by
-namespace, each replacing that namespace's config. Records carry
-`created_at` and, where the provider reports it, `updated_at`. A `Page` has
-`next_cursor=None` exactly on its last page.
+namespace, each replacing that namespace's config. In a patch's `metadata`, a key mapped to `None` deletes that key. Records carry
+`created_at` and, where the provider reports them, `updated_at` and
+`archived_at`, plus an optional `native` copy of the provider's own record
+that only the driver reads. A `PageRequest` field left as `None` is not sent.
+A `Page` carries the provider's `has_more`, and `next_cursor` is set exactly
+when it is true.
 
 `Skills.create` makes a new skill and `Skills.publish_version` adds a version
-to an existing one. Both take the bundle inline as a `SkillUpload` (file
-bytes in the same request, never a separate upload first). `Skills.list`
-returns full `Skill` records.
+to an existing one, returning the full `SkillVersion`. Both take the bundle
+inline as a `SkillUpload` (file bytes in the same request, never a separate
+upload first). `Skills.list` returns full `Skill` records. A `SkillRef` may
+leave `version` unset, so the provider uses the skill's latest version, as
+existing agent configurations do.
 
 Native features are typed extension ports addressed by
 `(port type, namespace, version)`. Anthropic offers `agent_tools`,
