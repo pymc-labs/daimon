@@ -1222,12 +1222,23 @@ admission before any of this runs.
   Discord `/github home` and Slack `/github`, plus `/agent-setup` on both,
   expose connected repos, agent grants, personal links, waiting requests, and
   disconnects.
+  Connect links appear as buttons where the person asked. Discord slash
+  commands answer ephemerally; a conversational mention posts a requester-bound
+  button in the thread and mints the single-use invitation only when that
+  requester clicks it. The click reveals the URL ephemerally. Slack slash
+  commands and mentions use `chat.postEphemeral` in the originating channel or
+  thread. Neither platform sends a GitHub setup DM. After confirmation,
+  `requested_work` resumes the calling agent's task in its original thread.
+  A bare connect posts one confirmation: Slack uses `chat.postEphemeral`, while
+  Discord uses an interaction follow-up until it expires and then a count-only
+  line in the origin thread or channel. Failed notices back off and expire
+  after eight attempts or 24 hours.
   The connection page offers a searchable repo picker and confirms each repo
   against the signed-in GitHub account. The same browser can safely repeat a
   successful submission; a signed invitation receipt also handles concurrent
-  submissions. New installation repos queue private admin notices after the
-  UTC day closes. Confirmed installation removal cancels affected requests and
-  notifies known admins.
+  submissions. New installation repos appear in the GitHub setup panel after
+  the UTC day closes. Confirmed installation removal cancels affected requests
+  and offers an ephemeral reconnect button when an admin next opens setup.
 
 - **Scheduled routines** go through
   `packages/core/daimon/core/headless_runner.py`, which creates a session with

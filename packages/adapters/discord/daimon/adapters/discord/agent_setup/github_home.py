@@ -27,7 +27,6 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access_requests import list_asker_requests
 from daimon.core.stores.github_connected_repos import summary as connected_summary
 from daimon.core.stores.github_links import account_link_status
-from daimon.core.stores.github_new_repo_notices import NewRepoNoticeGroup
 from daimon.core.stores.github_personal_links import mint_link
 from daimon.core.stores.identity import get_or_create_platform_principal
 
@@ -48,23 +47,8 @@ def connect_button_view(url: str, *, timeout: float | None = None) -> discord.ui
 class GitHubLinkView(discord.ui.View):
     """A private browser link displayed as a button."""
 
-    def __init__(
-        self,
-        url: str,
-        *,
-        user_id: int,
-        runtime: DiscordRuntime | None = None,
-        state: PanelState | None = None,
-        notice_group: NewRepoNoticeGroup | None = None,
-        notice_visible_names: tuple[str, ...] = (),
-    ) -> None:
+    def __init__(self, url: str) -> None:
         super().__init__(timeout=600)
-        self.url = url
-        self.user_id = user_id
-        self.runtime = runtime
-        self.state = state
-        self.notice_group = notice_group
-        self.notice_visible_names = notice_visible_names
         self.add_item(connect_button(url))
 
 
@@ -233,9 +217,7 @@ class GitHubHomeView(PanelViewBase):
             return
         await interaction.followup.send(
             embed=github_embed(CONNECT_COPY, state="waiting"),
-            view=GitHubLinkView(
-                url, user_id=interaction.user.id, runtime=self.runtime, state=self.state
-            ),
+            view=GitHubLinkView(url),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )

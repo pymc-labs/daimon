@@ -451,7 +451,9 @@ async def record_delivery(
             platform_user_id=platform_user_id,
         )
         session.add(row)
-    elif row.dismissed_at is not None or row.message_id not in (None, message_id):
+    elif row.dismissed_at is not None or (
+        request.platform != "slack" and row.message_id not in (None, message_id)
+    ):
         return False
     row.message_id = message_id
     row.delivered_at = datetime.now(UTC)

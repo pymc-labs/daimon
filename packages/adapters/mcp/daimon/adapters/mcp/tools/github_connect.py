@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Literal
 
 import discord
@@ -26,10 +27,11 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.github_connect import (
     CLIENT_AGENT_MESSAGE,
     ClientAgentConnectionError,
-    digest,
+    create_discord_connect_intent,
     mint_invitation,
     record_connect_request,
     require_app_eligible_agent,
+    revoke_discord_connect_intent,
     revoke_invitation,
     set_invitation_encrypted_token,
 )
@@ -52,7 +54,7 @@ async def _post_discord_connect_card(
     *,
     thread_id: str,
     requester_id: str,
-    token_hash: str,
+    intent_id: uuid.UUID,
     agent_name: str,
 ) -> None:
     view = discord.ui.View(timeout=None)
@@ -60,7 +62,7 @@ async def _post_discord_connect_card(
         discord.ui.Button(
             label="Connect GitHub",
             style=discord.ButtonStyle.primary,
-            custom_id=f"gh_connect:{requester_id}:{token_hash}",
+            custom_id=f"gh_connect:{requester_id}:{intent_id.hex}",
         )
     )
     async with rest_client(_require_bot_token(runtime)) as client:
@@ -166,23 +168,41 @@ async def _github_connect_impl(
                 reason="admin requested",
             )
             return ConnectResult(status="ask_admin", message="Ask an admin")
-        token = await mint_invitation(
-            session,
-            tenant_id=auth.tenant_id,
-            requester_account_id=auth.account_id,
-            requester_label=auth.platform_user_id,
-            requester_platform_user_id=auth.platform_user_id,
-            agent_id=agent_id,
-            agent_name=agent.name,
-            origin_platform=auth.platform,
-            origin_parent_channel_id=origin.parent_channel_id,
-            origin_thread_id=origin.thread_id,
-            origin_ma_agent_id=str(agent.id),
-            requested_work=requested_work,
-        )
-        await set_invitation_encrypted_token(
-            session, token=token, encrypted_token=encrypt_token(runtime.fernet, token)
-        )
+        intent_id: uuid.UUID | None = None
+        token: str | None = None
+        if auth.platform == "discord":
+            intent_id = await create_discord_connect_intent(
+                session,
+                tenant_id=auth.tenant_id,
+                requester_account_id=auth.account_id,
+                requester_platform_user_id=auth.platform_user_id,
+                agent_id=agent_id,
+                agent_name=agent.name,
+                parent_channel_id=origin.parent_channel_id,
+                thread_id=origin.thread_id,
+                origin_ma_agent_id=origin.responder_ma_agent_id,
+                origin_responder_name=origin.responder_name,
+                requested_work=requested_work,
+            )
+        else:
+            token = await mint_invitation(
+                session,
+                tenant_id=auth.tenant_id,
+                requester_account_id=auth.account_id,
+                requester_label=auth.platform_user_id,
+                requester_platform_user_id=auth.platform_user_id,
+                agent_id=agent_id,
+                agent_name=agent.name,
+                origin_platform=auth.platform,
+                origin_parent_channel_id=origin.parent_channel_id,
+                origin_thread_id=origin.thread_id,
+                origin_ma_agent_id=origin.responder_ma_agent_id,
+                origin_responder_name=origin.responder_name,
+                requested_work=requested_work,
+            )
+            await set_invitation_encrypted_token(
+                session, token=token, encrypted_token=encrypt_token(runtime.fernet, token)
+            )
         await append_event(
             session,
             tenant_id=auth.tenant_id,
@@ -193,37 +213,41 @@ async def _github_connect_impl(
             tool_name="github_connect",
             operation="github_connect",
             outcome="allowed",
-            reason="admin link minted",
+            reason="admin connect button posted" if intent_id else "admin link minted",
         )
-    url = f"{root}/oauth/github/connect/{token}"
     try:
         if auth.platform == "discord":
+            assert intent_id is not None
             await _post_discord_connect_card(
                 runtime,
                 auth,
                 thread_id=origin.thread_id,
                 requester_id=auth.platform_user_id,
-                token_hash=digest(token),
+                intent_id=intent_id,
                 agent_name=agent.name,
             )
         else:
+            assert token is not None
             await _post_slack_connect_card(
                 runtime,
                 auth,
                 channel_id=origin.parent_channel_id,
                 thread_id=origin.thread_id,
                 requester_id=auth.platform_user_id,
-                url=url,
+                url=f"{root}/oauth/github/connect/{token}",
                 agent_name=agent.name,
             )
     except Exception:
         async with runtime.session_factory.begin() as session:
-            await revoke_invitation(session, token=token)
+            if intent_id is not None:
+                await revoke_discord_connect_intent(session, intent_id=intent_id)
+            elif token is not None:
+                await revoke_invitation(session, token=token)
         return ConnectResult(
             status="delivery_failed",
             message="I couldn't show the GitHub connection button. Try again.",
         )
-    return ConnectResult(status="sent", message="I showed the GitHub connection button.")
+    return ConnectResult(status="sent", message="Posted a Connect GitHub button for you here.")
 
 
 def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:

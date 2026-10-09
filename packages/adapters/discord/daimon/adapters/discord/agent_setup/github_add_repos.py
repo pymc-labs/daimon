@@ -297,7 +297,7 @@ class GitHubAddReposView(PanelViewBase):
                 f"Connect GitHub for {self.agent.name}.",
                 state="waiting",
             ),
-            view=GitHubLinkView(url, user_id=interaction.user.id),
+            view=GitHubLinkView(url),
             ephemeral=True,
         )
 

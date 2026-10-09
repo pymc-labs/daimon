@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import json
 import time
 import uuid
 from collections.abc import Coroutine
@@ -212,8 +213,6 @@ from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
-from daimon.core.github_new_repo_delivery import run_new_repo_notice_poller
-from daimon.core.github_removal_delivery import run_removal_notice_poller
 from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
@@ -224,8 +223,6 @@ from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role, TaskContinuationRow
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_connect_notices import ConnectNotice
-from daimon.core.stores.github_new_repo_notices import NewRepoNoticeGroup
-from daimon.core.stores.github_removal_notices import RemovalNotice
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.slack_connect_prompts import mark_connect_prompted, was_connect_prompted
 from daimon.core.stores.slack_event_dedup import insert_if_new
@@ -466,26 +463,6 @@ class SlackApp:
             )
         )
 
-    def start_github_new_repo_poller(self) -> asyncio.Task[None]:
-        return self._spawn(
-            run_new_repo_notice_poller(
-                self.runtime.sessionmaker,
-                platform="slack",
-                deliver=self._send_new_repo_group,
-                should_stop=lambda: self.draining,
-            )
-        )
-
-    def start_github_removal_poller(self) -> asyncio.Task[None]:
-        return self._spawn(
-            run_removal_notice_poller(
-                self.runtime.sessionmaker,
-                platform="slack",
-                deliver=self._send_github_removal_notice,
-                should_stop=lambda: self.draining,
-            )
-        )
-
     def start_connect_notice_poller(self) -> asyncio.Task[None]:
         return self._spawn(
             run_connect_notice_poller(
@@ -522,8 +499,19 @@ class SlackApp:
                         timeout=aiohttp.ClientTimeout(total=10),
                     ) as response,
                 ):
-                    if response.status < 300 and await response.text() == "ok":
-                        return True
+                    if response.status < 300:
+                        body = await response.text()
+                        if not body.lstrip().startswith("{"):
+                            return True
+                        try:
+                            parsed = cast(object, json.loads(body))
+                            if not isinstance(parsed, dict):
+                                return True
+                            payload = cast(dict[str, object], parsed)
+                            if payload.get("ok", True):
+                                return True
+                        except ValueError:
+                            return True
                     if response.status >= 500:
                         return False
             if notice.origin_parent_channel_id is None:
@@ -546,16 +534,6 @@ class SlackApp:
             return False
         except SlackApiError as error:
             return cast(str, error.response["error"]) in ("user_not_found", "account_inactive")
-
-    async def _send_new_repo_group(self, group: NewRepoNoticeGroup) -> bool:
-        from daimon.adapters.slack.agent_setup.github_new_repo import send_group_dm
-
-        return await send_group_dm(self.runtime, group)
-
-    async def _send_github_removal_notice(self, notice: RemovalNotice) -> bool:
-        from daimon.adapters.slack.agent_setup.github_removal import send_removal_dm
-
-        return await send_removal_dm(self.runtime, notice)
 
     async def _post_github_request_expiry(self, request: AccessRequest) -> bool:
         try:

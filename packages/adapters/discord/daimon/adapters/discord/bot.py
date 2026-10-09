@@ -81,8 +81,6 @@ from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError, TurnError
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
-from daimon.core.github_new_repo_delivery import run_new_repo_notice_poller
-from daimon.core.github_removal_delivery import run_removal_notice_poller
 from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
@@ -94,8 +92,6 @@ from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_connect_notices import ConnectNotice
-from daimon.core.stores.github_new_repo_notices import NewRepoNoticeGroup
-from daimon.core.stores.github_removal_notices import RemovalNotice
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenants import (
     get_tenant_liveness,
@@ -724,22 +720,6 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker,
                     platform="discord",
                     post=self._post_github_request_expiry,
-                    should_stop=lambda: self.draining or self.is_closed(),
-                )
-            )
-            self._spawn(
-                run_new_repo_notice_poller(
-                    self.runtime.sessionmaker,
-                    platform="discord",
-                    deliver=self._send_new_repo_group,
-                    should_stop=lambda: self.draining or self.is_closed(),
-                )
-            )
-            self._spawn(
-                run_removal_notice_poller(
-                    self.runtime.sessionmaker,
-                    platform="discord",
-                    deliver=self._send_github_removal_notice,
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
@@ -2232,16 +2212,6 @@ class DaimonBot(commands.Bot):
         except discord.HTTPException:
             return False
 
-    async def _send_new_repo_group(self, group: NewRepoNoticeGroup) -> bool:
-        from daimon.adapters.discord.agent_setup.github_new_repo import send_group_dm
-
-        return await send_group_dm(self, self.runtime, group)
-
-    async def _send_github_removal_notice(self, notice: RemovalNotice) -> bool:
-        from daimon.adapters.discord.agent_setup.github_removal import send_removal_dm
-
-        return await send_removal_dm(self, self.runtime, notice)
-
     async def _send_connect_notice(self, notice: ConnectNotice) -> bool:
         from daimon.core.stores.tenants import get_tenant
 
@@ -2275,6 +2245,8 @@ class DaimonBot(commands.Bot):
                 ):
                     if response.status < 300:
                         return True
+                    if response.status == 429:
+                        return False
                     if response.status >= 500:
                         return False
             destination_id = notice.origin_thread_id or notice.origin_parent_channel_id

@@ -1,8 +1,9 @@
-"""Actions on the private GitHub request cards sent to Discord DMs."""
+"""Actions on requester-bound GitHub cards in the originating Discord thread."""
 
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
 from daimon.adapters.discord.checks import channel_admin_caller, is_member_guild_admin
@@ -19,6 +20,7 @@ from daimon.core.stores.github_access_requests import (
     lookup_request,
     set_status,
 )
+from daimon.core.stores.github_personal_links import mint_link
 from daimon.core.stores.github_request_actions import (
     approve_connected_request,
     approve_connection_request,
@@ -39,7 +41,7 @@ async def update_requester_card(
     link_url: str | None = None,
     skip_account_id: uuid.UUID | None = None,
 ) -> None:
-    """Keep the asker's existing private card in step with an admin decision."""
+    """Keep the asker's in-thread card in step with an admin decision."""
     async with runtime.sessionmaker() as session:
         request = await lookup_request(session, request_id=request_id)
         if request is None or request.requester_account_id == skip_account_id:
@@ -53,13 +55,16 @@ async def update_requester_card(
     if delivery is None or delivery.message_id is None:
         return
     try:
-        user = await client.fetch_user(int(request.requester_platform_user_id))
-        dm = await user.create_dm()
+        thread = await client.fetch_channel(int(request.thread_id))
+        if not isinstance(thread, discord.Thread):
+            return
         view = discord.ui.View(timeout=None) if can_cancel or link_url else None
         if view is not None and link_url:
-            from daimon.adapters.discord.agent_setup.github_home import connect_button
-
-            view.add_item(connect_button(link_url))
+            view.add_item(
+                discord.ui.Button(
+                    label="Connect GitHub", custom_id=f"github_request:{request.id}:link"
+                )
+            )
         if view is not None and can_cancel:
             view.add_item(
                 discord.ui.Button(
@@ -74,7 +79,7 @@ async def update_requester_card(
             if can_cancel
             else "success"
         )
-        await dm.get_partial_message(int(delivery.message_id)).edit(
+        await thread.get_partial_message(int(delivery.message_id)).edit(
             content=None,
             embed=github_embed(text, state=state),
             view=view,
@@ -90,7 +95,14 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
     if not custom_id.startswith("github_request:"):
         return False
     parts = custom_id.split(":")
-    if len(parts) != 3 or parts[2] not in {"approve", "connect", "decline", "hide", "cancel"}:
+    if len(parts) != 3 or parts[2] not in {
+        "approve",
+        "connect",
+        "decline",
+        "hide",
+        "cancel",
+        "link",
+    }:
         await interaction.response.send_message("This request is unavailable.", ephemeral=True)
         return True
     try:
@@ -133,6 +145,33 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         await interaction.response.send_message("This request is unavailable.", ephemeral=True)
         return True
     action = parts[2]
+    if action == "link":
+        if principal.account_id != request.requester_account_id:
+            await interaction.response.send_message(
+                "Only the requester can use this.", ephemeral=True
+            )
+            return True
+        root = runtime.settings.mcp.app_root_url
+        if root is None:
+            await interaction.response.send_message(
+                "GitHub linking is unavailable.", ephemeral=True
+            )
+            return True
+        async with runtime.sessionmaker.begin() as session:
+            url = await mint_link(
+                session,
+                tenant_id=request.tenant_id,
+                account_id=principal.account_id,
+                platform="discord",
+                platform_user_id=str(interaction.user.id),
+                root_url=root,
+            )
+        from daimon.adapters.discord.agent_setup.github_home import connect_button_view
+
+        await interaction.response.send_message(
+            "Connect GitHub.", view=connect_button_view(url), ephemeral=True
+        )
+        return True
     if action == "cancel":
         async with runtime.sessionmaker.begin() as session:
             cancelled = await cancel_request(
@@ -286,6 +325,10 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 verified_tenant_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
                 workspace_label=guild.name,
                 requester_label=member.display_name,
+                origin_parent_channel_id=request.parent_channel_id,
+                origin_thread_id=request.thread_id,
+                origin_followup_token=f"{interaction.application_id}:{interaction.token}",
+                origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
             )
             await approve_connection_request(
                 session,
@@ -298,11 +341,13 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         return True
     from daimon.adapters.discord.agent_setup.github_home import connect_button_view
 
-    view = connect_button_view(url)
     await interaction.response.edit_message(
         content=None,
         embed=github_embed("Waiting for GitHub confirmation.", state="waiting"),
-        view=view,
+        view=None,
+    )
+    await interaction.followup.send(
+        "Connect GitHub.", view=connect_button_view(url), ephemeral=True
     )
     await update_requester_card(
         interaction.client,

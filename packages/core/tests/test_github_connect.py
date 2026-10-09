@@ -24,6 +24,7 @@ from daimon.core._models import (
     AgentRepoBinding,
     AgentSkillRepoCredential,
     CliPrincipal,
+    GitHubConnectClickIntent,
     GitHubConnectFlow,
     GitHubConnectInvitation,
     GitHubConnectRequest,
@@ -58,6 +59,7 @@ from daimon.core.stores import (
     github_issued_tokens,
     github_links,
 )
+from daimon.core.stores.github_connect_notices import ConnectNotice, expire_old
 from daimon.core.stores.task_continuations import get_continuation
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -84,6 +86,7 @@ async def test_connect_followup_resumes_task_once_and_keeps_repo_names_private(
         origin_parent_channel_id="100",
         origin_thread_id="200",
         origin_ma_agent_id="ma-agent",
+        origin_responder_name="CallingBot",
         requested_work="Review the issue",
     )
     invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
@@ -103,6 +106,7 @@ async def test_connect_followup_resumes_task_once_and_keeps_repo_names_private(
     assert wake.reason == "github_access_ready"
     assert wake.requested_work == "Review the issue"
     assert wake.thread_id == "200"
+    assert wake.target_name == "CallingBot"
     assert "private/secret" not in wake.model_dump_json()
     assert await claim_next(db_session, platform="discord", now=datetime.now(UTC)) is None
     await github_connect.queue_connect_followup(db_session, invitation=invitation, repos=[repo])
@@ -140,10 +144,116 @@ async def test_bare_connect_notice_claim_is_single_and_failure_retries(
     assert first is not None and first.text == "Connected private/repo, Read only. Ready."
     assert await claim_next(db_session, platform="slack", now=datetime.now(UTC)) is None
     await settle(db_session, notice=first, delivered=False, now=datetime.now(UTC))
-    retry = await claim_next(db_session, platform="slack", now=datetime.now(UTC))
+    assert await claim_next(db_session, platform="slack", now=datetime.now(UTC)) is None
+    retry = await claim_next(
+        db_session, platform="slack", now=datetime.now(UTC) + timedelta(minutes=3)
+    )
     assert retry is not None
     await settle(db_session, notice=retry, delivered=True, now=datetime.now(UTC))
     assert await claim_next(db_session, platform="slack", now=datetime.now(UTC)) is None
+
+
+@pytest.mark.asyncio
+async def test_failed_notice_backs_off_while_another_delivers_and_expires(
+    db_session: AsyncSession,
+) -> None:
+    now = datetime.now(UTC)
+    tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="slack", external_id="T1"))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    tokens = [
+        await github_connect.mint_invitation(
+            db_session,
+            tenant_id=tenant_id,
+            requester_account_id=admin_id,
+            requester_platform_user_id="U1",
+            origin_platform="slack",
+        )
+        for _ in range(2)
+    ]
+    repo = github_connect.RepoConfirmation(
+        repo_id=1, owner_id=1, installation_id=1, full_name="private/repo", max_access="read"
+    )
+    for index, token in enumerate(tokens):
+        invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
+        assert invitation is not None
+        row = await db_session.get(GitHubConnectInvitation, invitation.token_hash)
+        assert row is not None
+        row.used_at = now - timedelta(seconds=2 - index)
+        await github_connect.queue_connect_followup(db_session, invitation=invitation, repos=[repo])
+    first = await claim_next(db_session, platform="slack", now=now)
+    assert first is not None and first.token_hash == github_connect.digest(tokens[0])
+    await settle(db_session, notice=first, delivered=False, now=now)
+    second = await claim_next(db_session, platform="slack", now=now)
+    assert second is not None and second.token_hash == github_connect.digest(tokens[1])
+    await settle(db_session, notice=second, delivered=True, now=now)
+    assert await claim_next(db_session, platform="slack", now=now) is None
+    assert (
+        await claim_next(db_session, platform="slack", now=now + timedelta(minutes=3)) is not None
+    )
+    old = await db_session.get(GitHubConnectInvitation, github_connect.digest(tokens[0]))
+    assert old is not None
+    old.used_at = now - timedelta(hours=25)
+    old.encrypted_origin_followup = b"spent"
+    await expire_old(db_session, platform="slack", now=now)
+    assert old.notice_delivered_at is not None
+    assert old.encrypted_origin_followup is None
+
+
+def test_connect_notice_mixed_access_label() -> None:
+    notice = ConnectNotice(
+        token_hash="a",
+        tenant_id=uuid.uuid4(),
+        requester_platform_user_id="U1",
+        agent_name="ResearchBot",
+        connected_repos=[
+            {"name": "private/read", "access": "read"},
+            {"name": "private/write", "access": "write"},
+        ],
+        notice_claimed_at=datetime.now(UTC),
+    )
+    assert notice.text == "Connected private/read, private/write, Mixed access. Ready."
+    assert notice.public_text == "Connected 2 repo(s), Mixed access. Ready."
+
+
+@pytest.mark.asyncio
+async def test_requested_work_without_thread_queues_bare_notice(db_session: AsyncSession) -> None:
+    tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="slack", external_id="T1"))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    token = await github_connect.mint_invitation(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=admin_id,
+        requester_platform_user_id="U1",
+        origin_platform="slack",
+        origin_ma_agent_id="caller",
+        origin_responder_name="CallerBot",
+        requested_work="  Review the open issue  ",
+    )
+    invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
+    assert invitation is not None and invitation.requested_work == "Review the open issue"
+    row = await db_session.get(GitHubConnectInvitation, invitation.token_hash)
+    assert row is not None
+    row.used_at = datetime.now(UTC)
+    repo = github_connect.RepoConfirmation(
+        repo_id=1, owner_id=1, installation_id=1, full_name="private/repo", max_access="read"
+    )
+    await github_connect.queue_connect_followup(db_session, invitation=invitation, repos=[repo])
+    assert row.requested_work is None
+    assert await claim_next(db_session, platform="slack", now=datetime.now(UTC)) is not None
+    invalid = await github_connect.mint_invitation(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=admin_id,
+        requested_work=" short ",
+    )
+    invalid_row = await github_connect.get_invitation(db_session, github_connect.digest(invalid))
+    assert invalid_row is not None and invalid_row.requested_work is None
 
 
 @pytest.mark.asyncio
@@ -155,24 +265,24 @@ async def test_discord_connect_button_reveals_only_to_requester_in_origin_thread
     await db_session.flush()
     db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
     await db_session.flush()
-    token = await github_connect.mint_invitation(
+    intent_id = await github_connect.create_discord_connect_intent(
         db_session,
         tenant_id=tenant_id,
         requester_account_id=admin_id,
         requester_platform_user_id="456",
         agent_id=agent_id,
         agent_name="ResearchBot",
-        origin_platform="discord",
-        origin_parent_channel_id="100",
-        origin_thread_id="200",
+        parent_channel_id="100",
+        thread_id="200",
+        origin_ma_agent_id="ma-agent",
+        origin_responder_name="CallingBot",
+        requested_work=None,
     )
-    await github_connect.set_invitation_encrypted_token(
-        db_session, token=token, encrypted_token=b"encrypted-link"
-    )
-    token_hash = github_connect.digest(token)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
     args = dict(
-        token_hash=token_hash,
+        intent_id=intent_id,
         tenant_id=tenant_id,
+        fernet=fernet,
         encrypted_followup=b"encrypted-interaction",
         followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
     )
@@ -188,10 +298,20 @@ async def test_discord_connect_button_reveals_only_to_requester_in_origin_thread
         )
         is None
     )
-    assert await github_connect.bind_discord_connect_click(
+    first = await github_connect.bind_discord_connect_click(
         db_session, requester_platform_user_id="456", thread_id="200", **args
-    ) == (b"encrypted-link", "ResearchBot")
-    invitation = await github_connect.get_invitation(db_session, token_hash)
+    )
+    assert first is not None and first[1] == "ResearchBot"
+    assert (
+        await github_connect.bind_discord_connect_click(
+            db_session, requester_platform_user_id="456", thread_id="200", **args
+        )
+        == first
+    )
+    intent = await db_session.get(GitHubConnectClickIntent, intent_id)
+    assert intent is not None and intent.encrypted_token == first[0]
+    token = github_connect.decrypt_token(fernet, first[0])
+    invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
     assert invitation is not None
     assert invitation.encrypted_origin_followup == b"encrypted-interaction"
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from daimon.adapters.discord.agent_setup.github_embed_panel import (
     EmbedActionRow,
@@ -396,6 +397,10 @@ class GitHubWaitingView(PanelViewBase):
                         verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
                         workspace_label=interaction.guild.name if interaction.guild else None,
                         requester_label=interaction.user.display_name,
+                        origin_parent_channel_id=str(interaction.channel_id),
+                        origin_thread_id=str(interaction.channel_id),
+                        origin_followup_token=f"{interaction.application_id}:{interaction.token}",
+                        origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
                     )
                     changed = await approve_connection_request(
                         session,

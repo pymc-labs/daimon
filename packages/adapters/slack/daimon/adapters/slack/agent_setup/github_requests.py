@@ -1,8 +1,9 @@
-"""Actions on private Slack GitHub request cards."""
+"""Actions on ephemeral Slack GitHub request cards."""
 
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from daimon.adapters.slack.admin import resolve_is_admin
@@ -30,11 +31,12 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 
 async def _replace_card(
-    client: AsyncWebClient, *, channel_id: str, message_id: str, text: str
+    client: AsyncWebClient, *, channel_id: str, thread_id: str, user_id: str, text: str
 ) -> None:
-    await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
+    await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
         channel=channel_id,
-        ts=message_id,
+        thread_ts=thread_id,
+        user=user_id,
         text=text,
         blocks=github_card_blocks(text),
     )
@@ -51,7 +53,7 @@ async def update_requester_card(
     link_url: str | None = None,
     skip_account_id: uuid.UUID | None = None,
 ) -> None:
-    """Edit the private requester card after an admin decision."""
+    """Post an updated ephemeral requester card at the original conversation."""
     async with runtime.sessionmaker() as session:
         request = await lookup_request(session, request_id=request_id)
         if request is None or request.tenant_id != tenant_id:
@@ -64,20 +66,9 @@ async def update_requester_card(
             request_id=request_id,
             recipient_account_id=request.requester_account_id,
         )
-    if delivery is None or delivery.message_id is None:
+    if delivery is None:
         return
     try:
-        opened = await client.conversations_open(  # pyright: ignore[reportUnknownMemberType]
-            users=request.requester_platform_user_id
-        )
-        raw_channel: object = opened.get("channel")
-        dm_channel = (
-            str(cast("dict[str, object]", raw_channel).get("id") or "")
-            if isinstance(raw_channel, dict)
-            else ""
-        )
-        if not dm_channel:
-            return
         buttons: list[dict[str, Any]] = []
         if can_cancel or link_url:
             if link_url:
@@ -86,7 +77,7 @@ async def update_requester_card(
                         "type": "button",
                         "action_id": "github_personal__open",
                         "url": link_url,
-                        "text": {"type": "plain_text", "text": "Connect GitHub"},
+                        "text": {"type": "plain_text", "text": "Get a new link"},
                     }
                 )
             if can_cancel:
@@ -99,9 +90,10 @@ async def update_requester_card(
                     }
                 )
         blocks = github_card_blocks(text, buttons=buttons)
-        await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
-            channel=dm_channel,
-            ts=delivery.message_id,
+        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+            channel=request.parent_channel_id,
+            thread_ts=request.thread_id,
+            user=request.requester_platform_user_id,
             text=text,
             blocks=blocks,
         )
@@ -154,7 +146,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
         or principal is None
         or delivery is None
         or delivery.dismissed_at is not None
-        or delivery.message_id != message_id
+        or request.parent_channel_id != channel_id
     ):
         await post_ephemeral(
             client, channel_id=channel_id, user_id=user_id, text="This request is unavailable."
@@ -172,7 +164,8 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
         await _replace_card(
             client,
             channel_id=channel_id,
-            message_id=message_id,
+            thread_id=request.thread_id,
+            user_id=user_id,
             text="Request cancelled." if changed else "This request is unavailable.",
         )
         return
@@ -187,7 +180,8 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
         await _replace_card(
             client,
             channel_id=channel_id,
-            message_id=message_id,
+            thread_id=request.thread_id,
+            user_id=user_id,
             text="Hidden for you." if changed else "This request is unavailable.",
         )
         return
@@ -212,7 +206,8 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
         await _replace_card(
             client,
             channel_id=channel_id,
-            message_id=message_id,
+            thread_id=request.thread_id,
+            user_id=user_id,
             text="Declined." if changed else "This request is unavailable.",
         )
         if changed:
@@ -246,7 +241,8 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
         await _replace_card(
             client,
             channel_id=channel_id,
-            message_id=message_id,
+            thread_id=request.thread_id,
+            user_id=user_id,
             text=(
                 f"✓ Added. {request.agent_name} is continuing."
                 if changed
@@ -282,6 +278,14 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 verified_tenant_admin=is_admin,
                 requester_label=str(user.get("name") or user_id),
                 workspace_label=str(team.get("name") or team_id),
+                origin_parent_channel_id=request.parent_channel_id,
+                origin_thread_id=request.thread_id,
+                origin_followup_token=str(payload.get("response_url") or "") or None,
+                origin_followup_expires_at=(
+                    datetime.now(UTC) + timedelta(minutes=30)
+                    if payload.get("response_url")
+                    else None
+                ),
             )
             await approve_connection_request(
                 session,
@@ -300,10 +304,13 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     await _replace_card(
         client,
         channel_id=channel_id,
-        message_id=message_id,
+        thread_id=request.thread_id,
+        user_id=user_id,
         text="Waiting for GitHub confirmation.",
     )
-    await send_link(client, channel_id=channel_id, user_id=user_id, url=url)
+    await send_link(
+        client, channel_id=channel_id, thread_id=request.thread_id, user_id=user_id, url=url
+    )
     await update_requester_card(
         runtime,
         client,

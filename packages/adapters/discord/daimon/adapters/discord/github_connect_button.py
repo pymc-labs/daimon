@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Self, cast
 
@@ -17,7 +18,7 @@ import discord
 from discord.ext import commands
 
 _log = structlog.get_logger(__name__)
-CUSTOM_ID_TEMPLATE = r"gh_connect:(?P<requester>[0-9]+):(?P<token>[0-9a-f]{64})"
+CUSTOM_ID_TEMPLATE = r"gh_connect:(?P<requester>[0-9]+):(?P<intent>[0-9a-f]{32})"
 
 
 class GitHubConnectButton(
@@ -25,15 +26,15 @@ class GitHubConnectButton(
 ):
     """Reveal one invitation only to its requester, even after a bot restart."""
 
-    def __init__(self, *, requester_id: str, token_hash: str) -> None:
+    def __init__(self, *, requester_id: str, intent_id: uuid.UUID) -> None:
         button: discord.ui.Button[discord.ui.View] = discord.ui.Button(
             label="Connect GitHub",
             style=discord.ButtonStyle.primary,
-            custom_id=f"gh_connect:{requester_id}:{token_hash}",
+            custom_id=f"gh_connect:{requester_id}:{intent_id.hex}",
         )
         super().__init__(button)
         self.requester_id = requester_id
-        self.token_hash = token_hash
+        self.intent_id = intent_id
 
     @classmethod
     async def from_custom_id(  # type: ignore[override]
@@ -43,7 +44,7 @@ class GitHubConnectButton(
         match: re.Match[str],
         /,
     ) -> Self:
-        return cls(requester_id=match["requester"], token_hash=match["token"])
+        return cls(requester_id=match["requester"], intent_id=uuid.UUID(hex=match["intent"]))
 
     async def callback(  # type: ignore[override]
         self, interaction: discord.Interaction[commands.Bot]
@@ -85,12 +86,13 @@ class GitHubConnectButton(
         async with bot.runtime.sessionmaker.begin() as session:
             link = await bind_discord_connect_click(
                 session,
-                token_hash=self.token_hash,
+                intent_id=self.intent_id,
                 tenant_id=derive_tenant_uuid(
                     platform="discord", workspace_id=str(interaction.guild_id)
                 ),
                 requester_platform_user_id=self.requester_id,
                 thread_id=str(interaction.channel_id),
+                fernet=credentials,
                 encrypted_followup=encrypt_token(
                     credentials, f"{interaction.application_id}:{interaction.token}"
                 ),

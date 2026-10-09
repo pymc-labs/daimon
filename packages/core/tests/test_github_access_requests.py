@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from daimon.core._models import Account, Tenant, TenantGitHubRepo
+from daimon.core._models import Account, GitHubAccessRequest, Tenant, TenantGitHubRepo
 from daimon.core.github_request_cards import admin_card, requester_card
 from daimon.core.github_request_expiry import poll_expired_requests_once
 from daimon.core.stores import github_access, github_app_installations
@@ -113,6 +113,21 @@ async def test_request_collects_repos_and_is_asker_bound(db_session: AsyncSessio
         platform_user_id="admin",
         message_id="dm-2",
     )
+    request_row = await db_session.get(GitHubAccessRequest, repeated.id)
+    assert request_row is not None
+    request_row.platform = "slack"
+    assert await record_delivery(
+        db_session,
+        tenant_id=tenant_id,
+        request_id=repeated.id,
+        recipient_account_id=other_id,
+        platform_user_id="admin",
+        message_id="ephemeral-2",
+    )
+    delivered = await get_delivery(
+        db_session, tenant_id=tenant_id, request_id=repeated.id, recipient_account_id=other_id
+    )
+    assert delivered is not None and delivered.message_id == "ephemeral-2"
     assert await dismiss_delivery(
         db_session, tenant_id=tenant_id, request_id=repeated.id, account_id=other_id
     )

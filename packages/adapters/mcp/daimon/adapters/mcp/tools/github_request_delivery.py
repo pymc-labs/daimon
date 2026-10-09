@@ -1,9 +1,8 @@
-"""Private, editable GitHub request cards sent from the active MCP turn."""
+"""GitHub request cards delivered where the person asked."""
 
 from __future__ import annotations
 
 import uuid
-from typing import cast
 
 import discord
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -13,6 +12,7 @@ from daimon.core.github_request_cards import RequestCard
 from daimon.core.stores.github_access_requests import (
     get_delivery,
     lock_delivery_slot,
+    lookup_request,
     record_delivery,
 )
 from slack_sdk.errors import SlackApiError
@@ -58,7 +58,9 @@ def _discord_view(
         if label in _LINK_LABELS and link_url:
             view.add_item(
                 discord.ui.Button(
-                    label="Connect GitHub", style=discord.ButtonStyle.link, url=link_url
+                    label=label,
+                    style=discord.ButtonStyle.primary,
+                    custom_id=f"github_request:{request_id}:link",
                 )
             )
         elif label in _DECISIONS:
@@ -87,7 +89,7 @@ def _slack_blocks(
                     "type": "button",
                     "action_id": "github_request__link",
                     "url": link_url,
-                    "text": {"type": "plain_text", "text": "Connect GitHub"},
+                    "text": {"type": "plain_text", "text": label},
                 }
             )
         elif label in _DECISIONS:
@@ -124,7 +126,7 @@ async def deliver_private_request_card(
     card: RequestCard,
     link_url: str | None = None,
 ) -> bool:
-    """Post or edit the one DM card for this request and recipient."""
+    """Post in the originating thread or ephemerally to this recipient."""
     async with runtime.session_factory.begin() as session:
         await lock_delivery_slot(
             session, request_id=request_id, recipient_account_id=recipient_account_id
@@ -135,6 +137,9 @@ async def deliver_private_request_card(
             request_id=request_id,
             recipient_account_id=recipient_account_id,
         )
+        request = await lookup_request(session, request_id=request_id)
+        if request is None or request.tenant_id != tenant_id:
+            return False
         if delivery is not None and delivery.dismissed_at is not None:
             return False
         try:
@@ -143,8 +148,9 @@ async def deliver_private_request_card(
                     return False
                 token = runtime.settings.discord.bot_token.get_secret_value()
                 async with rest_client(token) as client:
-                    user = await client.fetch_user(int(platform_user_id))
-                    channel = await user.create_dm()
+                    channel = await client.fetch_channel(int(request.thread_id))
+                    if not isinstance(channel, discord.Thread):
+                        return False
                     view = _discord_view(card, request_id=request_id, link_url=link_url)
                     if delivery is not None and delivery.message_id is not None:
                         message = channel.get_partial_message(int(delivery.message_id))
@@ -163,30 +169,15 @@ async def deliver_private_request_card(
                     message_id = str(message.id)
             elif platform == "slack":
                 client = await slack_web_client(runtime, team_id=workspace_id)
-                opened = await client.conversations_open(users=platform_user_id)  # pyright: ignore[reportUnknownMemberType]
-                opened_channel: object = opened.get("channel")
-                channel_id = (
-                    str(cast("dict[str, object]", opened_channel).get("id") or "")
-                    if isinstance(opened_channel, dict)
-                    else ""
-                )
-                if not channel_id:
-                    return False
                 blocks = _slack_blocks(card, request_id=request_id, link_url=link_url)
-                if delivery is not None and delivery.message_id is not None:
-                    await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
-                        channel=channel_id,
-                        ts=delivery.message_id,
-                        text=card.text,
-                        blocks=blocks,
-                    )
-                    return True
-                sent = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel_id,
+                sent = await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=request.parent_channel_id,
+                    thread_ts=request.thread_id,
+                    user=platform_user_id,
                     text=card.text,
                     blocks=blocks,
                 )
-                message_id = str(sent.get("ts") or "")
+                message_id = str(sent.get("message_ts") or sent.get("ts") or uuid.uuid4())
             else:
                 return False
         except (discord.HTTPException, SlackApiError, ValueError):

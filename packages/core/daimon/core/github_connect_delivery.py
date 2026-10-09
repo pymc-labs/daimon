@@ -1,4 +1,4 @@
-"""Drain private confirmations for bare self-serve GitHub connections."""
+"""Drain confirmations for bare self-serve GitHub connections."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import structlog
-from daimon.core.stores.github_connect_notices import ConnectNotice, claim_next, settle
+from daimon.core.stores.github_connect_notices import ConnectNotice, claim_next, expire_old, settle
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -20,18 +20,23 @@ async def poll_once(
     platform: Literal["discord", "slack"],
     deliver: Callable[[ConnectNotice], Awaitable[bool]],
 ) -> int:
-    async with sessionmaker.begin() as session:
-        notice = await claim_next(session, platform=platform, now=datetime.now(UTC))
-    if notice is None:
-        return 0
-    try:
-        landed = await deliver(notice)
-    except Exception:
-        _log.exception("github_connect.delivery_failed", platform=platform)
-        landed = False
-    async with sessionmaker.begin() as session:
-        await settle(session, notice=notice, delivered=landed, now=datetime.now(UTC))
-    return int(landed)
+    delivered = 0
+    for _ in range(25):
+        async with sessionmaker.begin() as session:
+            now = datetime.now(UTC)
+            await expire_old(session, platform=platform, now=now)
+            notice = await claim_next(session, platform=platform, now=now)
+        if notice is None:
+            break
+        try:
+            landed = await deliver(notice)
+        except Exception:
+            _log.exception("github_connect.delivery_failed", platform=platform)
+            landed = False
+        async with sessionmaker.begin() as session:
+            await settle(session, notice=notice, delivered=landed, now=datetime.now(UTC))
+        delivered += int(landed)
+    return delivered
 
 
 async def run_connect_notice_poller(

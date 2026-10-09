@@ -2577,15 +2577,41 @@ class GitHubConnectInvitation(Base):
     origin_parent_channel_id: Mapped[str | None] = mapped_column(Text)
     origin_thread_id: Mapped[str | None] = mapped_column(Text)
     origin_ma_agent_id: Mapped[str | None] = mapped_column(Text)
+    origin_responder_name: Mapped[str | None] = mapped_column(Text)
     requested_work: Mapped[str | None] = mapped_column(Text)
     encrypted_origin_followup: Mapped[bytes | None] = mapped_column(LargeBinary)
     origin_followup_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     connected_repos: Mapped[list[dict[str, str]] | None] = mapped_column(JSONB)
     notice_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notice_delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notice_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    notice_next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GitHubConnectClickIntent(Base):
+    """Opaque requester-bound Discord button that mints on first click."""
+
+    __tablename__ = "github_connect_click_intents"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    requester_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    origin_parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    origin_thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    origin_ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    origin_responder_name: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_work: Mapped[str | None] = mapped_column(Text)
+    encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class GitHubConnectFlow(Base):
@@ -2759,7 +2785,7 @@ class GitHubAccessRequest(Base):
 
 
 class GitHubAccessRequestDelivery(Base):
-    """One private card per request and recipient, editable on later repo needs."""
+    """One request card slot per recipient in the originating conversation."""
 
     __tablename__ = "github_access_request_deliveries"
     __table_args__ = (PrimaryKeyConstraint("request_id", "recipient_account_id"),)

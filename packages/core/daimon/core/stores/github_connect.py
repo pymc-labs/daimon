@@ -8,6 +8,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
+from cryptography.fernet import MultiFernet
 from daimon.core._models import (
     Account,
     AccountGitHubLink,
@@ -17,6 +18,7 @@ from daimon.core._models import (
     AgentSkillRepoCredential,
     CliPrincipal,
     GitHubAppInstallation,
+    GitHubConnectClickIntent,
     GitHubConnectFlow,
     GitHubConnectInvitation,
     GitHubConnectRequest,
@@ -25,6 +27,8 @@ from daimon.core._models import (
     TenantGitHubRepo,
     ThreadSession,
 )
+from daimon.core.continuity.continuation import sanitize_requested_work
+from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import agent_files, agent_github_binding, github_access
 from daimon.core.stores.access_policy import load_access_policy
@@ -142,12 +146,15 @@ class Invitation(BaseModel):
     origin_parent_channel_id: str | None
     origin_thread_id: str | None
     origin_ma_agent_id: str | None
+    origin_responder_name: str | None
     requested_work: str | None
     encrypted_origin_followup: bytes | None
     origin_followup_expires_at: datetime | None
     connected_repos: list[dict[str, str]] | None
     notice_claimed_at: datetime | None
     notice_delivered_at: datetime | None
+    notice_attempts: int
+    notice_next_attempt_at: datetime | None
     encrypted_token: bytes | None
     expires_at: datetime
     used_at: datetime | None
@@ -180,6 +187,7 @@ async def mint_invitation(
     origin_parent_channel_id: str | None = None,
     origin_thread_id: str | None = None,
     origin_ma_agent_id: str | None = None,
+    origin_responder_name: str | None = None,
     requested_work: str | None = None,
     encrypted_origin_followup: bytes | None = None,
     origin_followup_expires_at: datetime | None = None,
@@ -220,7 +228,11 @@ async def mint_invitation(
             origin_parent_channel_id=origin_parent_channel_id,
             origin_thread_id=origin_thread_id,
             origin_ma_agent_id=origin_ma_agent_id,
-            requested_work=requested_work[:500] if requested_work else None,
+            origin_responder_name=origin_responder_name,
+            requested_work=sanitize_requested_work(
+                requested_work.strip()[:500] if requested_work else None,
+                echoes=tuple(name for name in (agent_name, origin_responder_name) if name),
+            ),
             encrypted_origin_followup=encrypted_origin_followup,
             origin_followup_expires_at=origin_followup_expires_at,
             expires_at=datetime.now(UTC) + timedelta(days=7),
@@ -392,13 +404,23 @@ async def queue_connect_followup(
         or row.connected_repos is not None
     ):
         return
-    row.connected_repos = [{"name": repo.full_name, "access": repo.max_access} for repo in repos]
+    granted: list[dict[str, str]] = []
+    for repo in repos:
+        if row.agent_id is None:
+            granted.append({"name": repo.full_name, "access": repo.max_access})
+            continue
+        grant = await session.get(AgentGitHubGrant, (row.tenant_id, row.agent_id, repo.repo_id))
+        if grant is not None and not grant.staged:
+            granted.append({"name": repo.full_name, "access": grant.ceiling_access})
+    row.connected_repos = granted
+    if not row.origin_thread_id:
+        row.requested_work = None
     if (
         row.requested_work
         and row.origin_parent_channel_id
         and row.origin_thread_id
         and row.origin_ma_agent_id
-        and row.agent_name
+        and row.origin_responder_name
     ):
         await record_continuation(
             session,
@@ -409,7 +431,7 @@ async def queue_connect_followup(
             requester_account_id=row.requester_account_id,
             requester_external_user_id=invitation.requester_platform_user_id,
             target_ma_agent_id=row.origin_ma_agent_id,
-            target_name=row.agent_name,
+            target_name=row.origin_responder_name,
             reason="github_access_ready",
             idempotency_key=uuid.uuid5(uuid.NAMESPACE_URL, f"github-connect:{row.token_hash}"),
             requested_work=row.requested_work,
@@ -661,34 +683,112 @@ async def set_invitation_encrypted_token(
     row.encrypted_token = encrypted_token
 
 
+async def create_discord_connect_intent(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    requester_account_id: uuid.UUID,
+    requester_platform_user_id: str,
+    agent_id: uuid.UUID,
+    agent_name: str,
+    parent_channel_id: str,
+    thread_id: str,
+    origin_ma_agent_id: str,
+    origin_responder_name: str,
+    requested_work: str | None,
+) -> uuid.UUID:
+    await session.execute(
+        delete(GitHubConnectClickIntent).where(
+            GitHubConnectClickIntent.expires_at <= datetime.now(UTC)
+        )
+    )
+    intent_id = uuid.uuid4()
+    session.add(
+        GitHubConnectClickIntent(
+            id=intent_id,
+            tenant_id=tenant_id,
+            requester_account_id=requester_account_id,
+            requester_platform_user_id=requester_platform_user_id,
+            agent_id=agent_id,
+            agent_name=agent_name,
+            origin_parent_channel_id=parent_channel_id,
+            origin_thread_id=thread_id,
+            origin_ma_agent_id=origin_ma_agent_id,
+            origin_responder_name=origin_responder_name,
+            requested_work=requested_work,
+            expires_at=datetime.now(UTC) + timedelta(days=7),
+        )
+    )
+    await session.flush()
+    return intent_id
+
+
+async def revoke_discord_connect_intent(session: AsyncSession, *, intent_id: uuid.UUID) -> None:
+    await session.execute(
+        delete(GitHubConnectClickIntent).where(GitHubConnectClickIntent.id == intent_id)
+    )
+
+
 async def bind_discord_connect_click(
     session: AsyncSession,
     *,
-    token_hash: str,
+    intent_id: uuid.UUID,
     tenant_id: uuid.UUID,
     requester_platform_user_id: str,
     thread_id: str,
+    fernet: MultiFernet,
     encrypted_followup: bytes,
     followup_expires_at: datetime,
 ) -> tuple[bytes, str | None] | None:
-    """Fetch a still-live link for its requester and remember this private click."""
-    row = await session.get(GitHubConnectInvitation, token_hash, with_for_update=True)
+    """Mint once on the first authorized click and reuse that invitation."""
+    intent = await session.get(GitHubConnectClickIntent, intent_id, with_for_update=True)
     if (
-        row is None
-        or row.tenant_id != tenant_id
-        or row.origin_platform != "discord"
-        or row.operator_issued
-        or row.requester_platform_user_id != requester_platform_user_id
-        or row.origin_thread_id != thread_id
-        or row.used_at is not None
-        or row.expires_at <= datetime.now(UTC)
-        or row.encrypted_token is None
+        intent is None
+        or intent.tenant_id != tenant_id
+        or intent.requester_platform_user_id != requester_platform_user_id
+        or intent.origin_thread_id != thread_id
+        or intent.expires_at <= datetime.now(UTC)
     ):
+        return None
+    if intent.encrypted_token is None:
+        token = await mint_invitation(
+            session,
+            tenant_id=tenant_id,
+            requester_account_id=intent.requester_account_id,
+            requester_platform_user_id=requester_platform_user_id,
+            agent_id=intent.agent_id,
+            agent_name=intent.agent_name,
+            origin_platform="discord",
+            origin_parent_channel_id=intent.origin_parent_channel_id,
+            origin_thread_id=intent.origin_thread_id,
+            origin_ma_agent_id=intent.origin_ma_agent_id,
+            origin_responder_name=intent.origin_responder_name,
+            requested_work=intent.requested_work,
+        )
+        encrypted_token = encrypt_token(fernet, token)
+        intent.encrypted_token = encrypted_token
+        await set_invitation_encrypted_token(session, token=token, encrypted_token=encrypted_token)
+        await append_event(
+            session,
+            tenant_id=tenant_id,
+            account_id=intent.requester_account_id,
+            agent_id=intent.agent_id,
+            platform="discord",
+            platform_user_id=requester_platform_user_id,
+            tool_name="github_connect",
+            operation="github_connect",
+            outcome="allowed",
+            reason="admin link minted",
+        )
+    else:
+        token = decrypt_token(fernet, intent.encrypted_token)
+    row = await session.get(GitHubConnectInvitation, digest(token), with_for_update=True)
+    if row is None or row.used_at is not None or row.expires_at <= datetime.now(UTC):
         return None
     row.encrypted_origin_followup = encrypted_followup
     row.origin_followup_expires_at = followup_expires_at
     await session.flush()
-    return row.encrypted_token, row.agent_name
+    return intent.encrypted_token, intent.agent_name
 
 
 async def requester_linked_github_user_id(

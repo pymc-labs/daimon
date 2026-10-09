@@ -1,5 +1,6 @@
 """The shared Discord button never reveals its URL to another person."""
 
+import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -20,7 +21,7 @@ class _Sessions:
 
 @pytest.mark.asyncio
 async def test_other_member_gets_only_ephemeral_refusal() -> None:
-    button = button_module.GitHubConnectButton(requester_id="456", token_hash="a" * 64)
+    button = button_module.GitHubConnectButton(requester_id="456", intent_id=uuid.UUID(int=1))
     interaction = AsyncMock()
     interaction.user.id = 999
     await button._reveal(interaction)  # pyright: ignore[reportPrivateUsage]
@@ -52,7 +53,7 @@ async def test_requester_gets_ephemeral_link_and_click_sets_followup(
     interaction.application_id = 1234
     interaction.token = "interaction-token"
     interaction.client.runtime = runtime
-    button = button_module.GitHubConnectButton(requester_id="456", token_hash="a" * 64)
+    button = button_module.GitHubConnectButton(requester_id="456", intent_id=uuid.UUID(int=1))
     assert len(button.item.custom_id or "") <= 100
     await button._reveal(interaction)  # pyright: ignore[reportPrivateUsage]
     interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)

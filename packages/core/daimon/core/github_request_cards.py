@@ -1,4 +1,4 @@
-"""Shared private GitHub request wording for Discord and Slack."""
+"""GitHub request wording for requester-bound Discord and ephemeral Slack cards."""
 
 from __future__ import annotations
 

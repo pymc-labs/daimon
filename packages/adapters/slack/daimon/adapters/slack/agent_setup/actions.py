@@ -86,7 +86,12 @@ from daimon.adapters.slack.agent_setup.coding_tools import (
     handle_revoke_token_click,
 )
 from daimon.adapters.slack.agent_setup.github_link import send_link
-from daimon.adapters.slack.agent_setup.github_new_repo import send_pending_notice
+from daimon.adapters.slack.agent_setup.github_new_repo import (
+    send_pending_notice as send_pending_new_repo_notice,
+)
+from daimon.adapters.slack.agent_setup.github_removal import (
+    send_pending_notice as send_pending_removal_notice,
+)
 from daimon.adapters.slack.agent_setup.github_repos_actions import handle as handle_github_repos
 from daimon.adapters.slack.agent_setup.panel_views import (
     build_agents_view,
@@ -382,7 +387,10 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
             view=rendered,
         )
         if is_admin:
-            await send_pending_notice(
+            await send_pending_new_repo_notice(
+                runtime, client, team_id=team_id, channel_id=channel_id, user_id=user_id
+            )
+            await send_pending_removal_notice(
                 runtime, client, team_id=team_id, channel_id=channel_id, user_id=user_id
             )
 

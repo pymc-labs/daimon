@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
 from daimon.adapters.slack.admin import resolve_is_admin
@@ -155,6 +156,12 @@ async def _handle_add(
                     agent_name=meta.agent_name,
                     origin_parent_channel_id=channel_id,
                     origin_thread_id=meta.thread_id,
+                    origin_followup_token=str(payload.get("response_url") or "") or None,
+                    origin_followup_expires_at=(
+                        datetime.now(UTC) + timedelta(minutes=30)
+                        if payload.get("response_url")
+                        else None
+                    ),
                 )
         except ValueError as error:
             await post_ephemeral(

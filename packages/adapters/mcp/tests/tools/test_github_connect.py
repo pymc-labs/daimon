@@ -26,7 +26,6 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
-from daimon.core.stores.github_connect import get_invitation
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -62,7 +61,7 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
         discord_auth,  # type: ignore[arg-type]
         thread_id="789",
         requester_id="456",
-        token_hash="a" * 64,
+        intent_id=uuid.UUID(int=1),
         agent_name="ResearchBot",
     )
     text = thread.send.await_args.args[0]
@@ -70,7 +69,7 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
     assert text == "Connect GitHub for ResearchBot."
     assert "https://" not in text
     item = kwargs["view"].children[0]
-    assert item.custom_id == f"gh_connect:456:{'a' * 64}"
+    assert item.custom_id == f"gh_connect:456:{uuid.UUID(int=1).hex}"
     assert item.url is None
 
     slack_client = SimpleNamespace(chat_postEphemeral=AsyncMock(), conversations_open=AsyncMock())
@@ -121,14 +120,14 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
         fernet=fernet,
     )
     origin = SimpleNamespace(
-        configuration_target_name=None,
-        configuration_target_ma_agent_id=None,
+        configuration_target_name="ConnectedBot",
+        configuration_target_ma_agent_id="agent_connected",
         responder_name="ResearchBot",
         responder_ma_agent_id="agent_research",
         parent_channel_id="channel",
         thread_id="thread",
     )
-    agent = SimpleNamespace(id="agent_research", name="ResearchBot")
+    agent = SimpleNamespace(id="agent_connected", name="ConnectedBot")
     delivery = AsyncMock()
     monkeypatch.setattr(connect_tool, "require_turn_origin", AsyncMock(return_value=origin))
     monkeypatch.setattr(connect_tool, "resolve_setup_agent", AsyncMock(return_value=agent))
@@ -179,19 +178,26 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
     assert result.status == "sent" and "http" not in result.message
     delivery.assert_awaited_once()
     assert delivery.await_args is not None
-    assert delivery.await_args.kwargs["agent_name"] == "ResearchBot"
+    assert delivery.await_args.kwargs["agent_name"] == "ConnectedBot"
     assert delivery.await_args.kwargs["requester_id"] == "123"
     assert delivery.await_args.kwargs["thread_id"] == "thread"
     assert "url" not in delivery.await_args.kwargs
-    token_hash = delivery.await_args.kwargs["token_hash"]
-    assert token_hash not in result.model_dump_json()
+    intent_id = delivery.await_args.kwargs["intent_id"]
+    assert str(intent_id) not in result.model_dump_json()
     async with committing_sessionmaker() as session:
-        invitation = await get_invitation(session, token_hash)
-        assert invitation is not None
-        assert invitation.encrypted_token is not None
-        assert invitation.requested_work == "Review the issue after GitHub is connected"
-        assert invitation.origin_thread_id == "thread"
-        assert invitation.origin_ma_agent_id == "agent_research"
+        intent = (
+            await session.execute(
+                text(
+                    "SELECT encrypted_token, requested_work, origin_thread_id, "
+                    "origin_ma_agent_id FROM github_connect_click_intents WHERE id = :id"
+                ),
+                {"id": intent_id},
+            )
+        ).one_or_none()
+        assert intent is not None and intent.encrypted_token is None
+        assert intent.requested_work == "Review the issue after GitHub is connected"
+        assert intent.origin_thread_id == "thread"
+        assert intent.origin_ma_agent_id == "agent_research"
     delivery.side_effect = ToolError("thread unavailable")
     blocked = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime, admin, origin_context_id=str(uuid.uuid4())
@@ -199,15 +205,21 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
     assert blocked.status == "delivery_failed"
     assert blocked.message == "I couldn't show the GitHub connection button. Try again."
     assert delivery.await_args is not None
-    blocked_hash = delivery.await_args.kwargs["token_hash"]
+    blocked_id = delivery.await_args.kwargs["intent_id"]
     async with committing_sessionmaker() as session:
-        assert await get_invitation(session, blocked_hash) is None
+        assert (
+            await session.scalar(
+                text("SELECT id FROM github_connect_click_intents WHERE id = :id"),
+                {"id": blocked_id},
+            )
+            is None
+        )
     async with committing_sessionmaker.begin() as session:
         await set_access_policy(
             session,
             tenant_id=tenant.id,
             policy=TenantAccessPolicy.model_validate(
-                {"agent_rules": {"ResearchBot": {"runs_in": ["client-channel"]}}}
+                {"agent_rules": {"ConnectedBot": {"runs_in": ["client-channel"]}}}
             ),
         )
     delivery.reset_mock()
