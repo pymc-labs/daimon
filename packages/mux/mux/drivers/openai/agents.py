@@ -24,6 +24,7 @@ from mux.drivers.openai._common import (
     text,
     timestamp,
 )
+from mux.drivers.openai.skill_bindings import KEY, decode, encode, verify_pins
 from mux.drivers.openai.transport import Object, object_json, segment
 from mux.errors import ScopeViolation
 
@@ -31,13 +32,20 @@ from mux.errors import ScopeViolation
 def agent_body(spec: AgentSpec, context: Context) -> Object:
     if spec.model.provider != "openai":
         raise context.unsupported("model_provider")
-    if spec.description is not None or spec.model.options or spec.skills or spec.extensions:
+    if spec.description is not None or spec.model.options or spec.extensions:
         raise context.unsupported("agent_configuration")
     body: Object = {"name": spec.name, "model": spec.model.id}
     if spec.system is not None:
         body["instructions"] = spec.system
     if spec.metadata is not None:
         body["metadata"] = dict(spec.metadata)
+    if spec.metadata is not None and KEY in spec.metadata:
+        raise context.unsupported("reserved_skill_metadata")
+    if spec.skills is not None:
+        body["metadata"] = {
+            **object_json(body.get("metadata") or {}),
+            KEY: encode(spec.skills, context),
+        }
     tools: list[JsonValue] = []
     for tool in spec.tools or ():
         if tool.permission != "auto":
@@ -60,7 +68,7 @@ def agent_body(spec: AgentSpec, context: Context) -> Object:
         else:
             raise context.unsupported("agent_tool")
     for mcp in spec.mcp_servers or ():
-        if mcp.credential_ref is not None or mcp.tool_policy:
+        if mcp.credential_ref is not None or mcp.tool_policy or mcp.transport != "streamable_http":
             raise context.unsupported("mcp_credentials")
         tools.append(
             {
@@ -103,6 +111,7 @@ def agent_spec(raw: Object) -> AgentSpec:
             "tools": tuple(tools) if "tools" in raw else None,
             "mcp_servers": tuple(servers) if "tools" in raw else None,
             "metadata": raw.get("metadata"),
+            "skills": decode(raw.get("metadata")),
         }
     )
 
@@ -124,6 +133,8 @@ class OpenAIAgents:
     async def create(self, scope: Scope, spec: AgentSpec, *, key: str) -> Agent:
         self._c.authorize(scope, "agent")
         body = agent_body(spec, self._c)
+        if spec.skills is not None:
+            await verify_pins(spec.skills, scope, self._c)
         body["metadata"] = {
             **object_json(body.get("metadata") or {}),
             "mux_tenant": scope.tenant_id,

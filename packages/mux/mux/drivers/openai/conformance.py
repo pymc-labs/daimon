@@ -31,7 +31,7 @@ from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.state.memory import CrashPoint
 from mux.state.store import StateStore
 
-SCRIPTED_FIXTURES = frozenset({"C05", "C06", "C10", "C15", "C16"})
+SCRIPTED_FIXTURES = frozenset({"C05", "C06", "C09", "C10", "C15", "C16"})
 
 PENDING: Mapping[str, PendingReason] = MappingProxyType(
     {
@@ -41,7 +41,7 @@ PENDING: Mapping[str, PendingReason] = MappingProxyType(
         ),
         "C02": PendingReason(
             PendingKind.ADAPTER_DEPENDENCY,
-            "PR3 artifacts absent; native hosted expiry classification unverified",
+            "native hosted expiry classification and host session preparation unverified",
         ),
         "C03": PendingReason(
             PendingKind.ADAPTER_DEPENDENCY,
@@ -59,13 +59,9 @@ PENDING: Mapping[str, PendingReason] = MappingProxyType(
             PendingKind.CAPABILITY_UNAVAILABLE,
             "conditional required-mount replacement refused; host preparation adapter absent",
         ),
-        "C09": PendingReason(
-            PendingKind.ADAPTER_DEPENDENCY,
-            "binary artifacts and shared-vault deletion retention need PR3 resource ports",
-        ),
         "C11": PendingReason(
             PendingKind.ADAPTER_DEPENDENCY,
-            "PR3 skills plus deployed repository/MCP bindings are not available in core",
+            "deployed repository/MCP bindings and separate display titles are unavailable",
         ),
         "C12": PendingReason(
             PendingKind.ADAPTER_DEPENDENCY,
@@ -205,6 +201,7 @@ class OpenAIScriptedTransport:
             "status": "in_progress" if self._status() == "in_progress" else "idle",
             "required_actions": [],
             "metadata": {"mux_tenant": "tenant"},
+            "vault_ids": ["shared-vault"] if self.fixture == "C09" else [],
         }
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
@@ -214,6 +211,38 @@ class OpenAIScriptedTransport:
             return httpx.Response(
                 400, json={"error": {"code": "invalid_beta", "message": "fixture"}}
             )
+        if self.fixture == "C09":
+            if path.startswith("/agents/sessions/session/artifacts"):
+                if path.endswith("/content"):
+                    size = 17 if "download_interrupted" in self.faults else 256
+                    return httpx.Response(200, content=bytes(range(size)))
+                second = bool(request.url.params.get("after"))
+                listing = path.endswith("/artifacts")
+                identity = ("second" if second else "first") if listing else path.rsplit("/", 1)[-1]
+                artifact: Object = {
+                    "id": identity,
+                    "session_id": "session",
+                    "turn_id": "root",
+                    "environment_id": "environment",
+                    "size_bytes": 256,
+                    "created_at": 0,
+                    "path": "/workspace/outputs/" + identity + ".bin",
+                }
+                if listing:
+                    return httpx.Response(
+                        200,
+                        json={
+                            "data": [artifact],
+                            "has_more": not second,
+                            "last_id": identity,
+                        },
+                    )
+                return httpx.Response(200, json=artifact)
+            if request.method == "DELETE" and path in (
+                "/agents/sessions/session",
+                "/vaults/shared-vault",
+            ):
+                return httpx.Response(200, json={})
         if path == "/agents/sessions/session/events" and request.method == "GET":
             if (
                 request.url.params.get("stream") != "true"
@@ -296,6 +325,9 @@ class OpenAIScriptedTransport:
             scope=SCOPE,
             foreign_scope=SCOPE.model_copy(update={"tenant_id": "foreign"}),
             session=session,
+            shared_resources=(REF.model_copy(update={"id": "shared-vault", "kind": "vault"}),)
+            if fixture_id == "C09"
+            else (),
             desired=SessionSpec(
                 agent=REF.model_copy(update={"id": "agent", "kind": "agent"}),
                 agent_revision=Revision(local=0),
@@ -304,7 +336,12 @@ class OpenAIScriptedTransport:
         )
 
     def fault(self, name: str) -> None:
-        if name not in ("observed_stop", "admission_unknown", "admission_unsupported"):
+        if name not in (
+            "observed_stop",
+            "admission_unknown",
+            "admission_unsupported",
+            "download_interrupted",
+        ):
             raise ValueError("fault is not scripted by this core adapter")
         # Admission uses a fixed, evidence-backed profile. These two fixture
         # labels cannot alter native capabilities or driver projected state.
@@ -317,7 +354,15 @@ class OpenAIScriptedTransport:
 
     @property
     def deleted_resources(self) -> tuple[ResourceRef, ...]:
-        return ()
+        deleted: list[ResourceRef] = []
+        for request in self.requests:
+            if request.method == "DELETE":
+                path = request.url.path.removeprefix("/v1")
+                if path == "/agents/sessions/session":
+                    deleted.append(REF)
+                elif path == "/vaults/shared-vault":
+                    deleted.append(REF.model_copy(update={"id": "shared-vault", "kind": "vault"}))
+        return tuple(deleted)
 
     @property
     def skill_uploads(self) -> tuple[SkillUpload, ...]:

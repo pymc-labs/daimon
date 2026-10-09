@@ -70,15 +70,17 @@ def test_profile_must_belong_to_its_backend(config: BackendConfig) -> None:
 
 
 def test_default_profiles_exist_and_are_core() -> None:
-    assert "openai" not in DEFAULT_PROFILES
+    assert DEFAULT_PROFILES["openai"] == "openai.persistent_workspace"
     for backend, profile_id in DEFAULT_PROFILES.items():
         assert PROFILES[profile_id].provider == backend
         assert PROFILES[profile_id].core
 
 
-def test_openai_without_profile_is_refused_until_resources_land() -> None:
-    with pytest.raises(InvalidConfig, match="no default profile"):
-        resolve_default(BackendConfig(backend="openai", model="gpt-6"))
+def test_openai_without_profile_resolves_its_verified_core_resource_profile() -> None:
+    resolved = resolve_default(BackendConfig(backend="openai", model="gpt-6"))
+    assert resolved.profile == "openai.persistent_workspace"
+    assert resolved.model == "gpt-6"
+    assert PROFILES[resolved.profile].core
 
 
 def test_optional_requirement_needs_a_fallback() -> None:

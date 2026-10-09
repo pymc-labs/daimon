@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
+from typing import IO
 
 import pytest
 from mux.contracts.ids import ResourceRef, Scope
@@ -126,6 +127,19 @@ class FakeTransport:
     hold: bool = False
     request_keys: list[str | None] = field(default_factory=lambda: list[str | None]())
 
+    async def multipart(
+        self,
+        path: str,
+        *,
+        files: tuple[tuple[str, str, bytes | IO[bytes], str], ...],
+        fields: Mapping[str, str],
+        key: str,
+    ) -> Object:
+        raise AssertionError("resource probes must use the actual SDK with MockTransport")
+
+    async def download(self, path: str) -> AsyncIterator[bytes]:
+        raise AssertionError("resource probes must use the actual SDK with MockTransport")
+
     async def request(
         self,
         method: Method,
@@ -154,6 +168,20 @@ class FakeTransport:
 def transport() -> FakeTransport:
     return FakeTransport(
         responses={
+            ("GET", "/agents/a"): {
+                "id": "a",
+                "name": "fixture",
+                "model": "fixture",
+                "created_at": 0,
+                "metadata": {"mux_tenant": "t"},
+            },
+            ("GET", "/agents/agent"): {
+                "id": "agent",
+                "name": "fixture",
+                "model": "fixture",
+                "created_at": 0,
+                "metadata": {"mux_tenant": "t"},
+            },
             ("GET", "/agents/sessions/s"): native_session(),
             ("GET", "/agents/sessions/s/turns"): page(turn()),
             ("GET", "/agents/sessions/s/turns/root"): turn(),

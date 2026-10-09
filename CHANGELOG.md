@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expose standalone manual probe budgets and durable spend receipts independently
   of recorders, retaining reset/rollback protection and conservative accounting.
 
+- Add OpenAI default skills/artifact/vault ports with immutable hosted skill pins, exact binary downloads and scoped credential handling; restore its explicitly selected core profile with offline evidence.
+- Document observed OpenAI Agents model eligibility and the guarded Luna lifecycle smoke without changing production model defaults or claiming a live conformance certificate.
+
 - Report adapter-declared conformance gaps as typed PENDING results, retaining
   their reasons and blocking certification without hiding other probe failures.
 
