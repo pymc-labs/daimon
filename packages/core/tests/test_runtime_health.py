@@ -77,6 +77,7 @@ async def test_health_interval_and_emitted_shape(monkeypatch: pytest.MonkeyPatch
             "prep_gate",
             "loop_lag_ms",
             "turns_in_flight",
+            "turn_queue",
         }
         assert fields["turns_in_flight"] == {"global": 2, "per_tenant_max": 1}
         assert set(fields["db_pool"]) == {"checkedout", "overflow", "size"}

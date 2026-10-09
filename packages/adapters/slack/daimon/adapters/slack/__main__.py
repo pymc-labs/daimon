@@ -122,7 +122,7 @@ async def main() -> None:
                 "slack",
                 cast(AsyncEngine, runtime.sessionmaker.kw["bind"]),
                 settings.observability.health_interval_s,
-                lambda: (sum(app._inflight.values()), max(app._inflight.values(), default=0)),  # pyright: ignore[reportPrivateUsage]
+                lambda: (app.turn_queue.in_flight(), app.turn_queue.in_flight_max()),
             ):
                 await stop.wait()  # released by _shutdown after drain completes
         finally:

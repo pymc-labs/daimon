@@ -401,8 +401,8 @@ class DiscordSettings(BaseModel):
         ge=1,
         description=(
             "Maximum Discord agent turns running across all guilds and DMs in this process. "
-            "Unset leaves deployment-wide admission unlimited. Excess turns are refused "
-            "with a retry notice; continuation wakes keep their existing admission path."
+            "Unset leaves deployment-wide admission unlimited. Excess turns wait in the "
+            "turn queue (see turn_queue); continuation wakes keep their existing admission path."
         ),
     )
     turn_card_unrecoverable_after_s: int = Field(
@@ -1272,6 +1272,49 @@ class AgentIdentitySettings(BaseModel):
         return value
 
 
+class TurnQueueSettings(BaseModel):
+    """The queue a turn waits in when the concurrency caps are full (``DAIMON_TURN_QUEUE__*``).
+
+    One in-memory queue per adapter process, served round-robin across tenants
+    and FIFO within one. A queued turn shows the ordinary status card; nothing
+    tells the person it is queued.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Queue turns that arrive while the global or the per-tenant concurrency cap "
+            "is full, and start them as slots free. Set false to refuse them with the "
+            "plain capacity notice instead."
+        ),
+    )
+    max_per_tenant: int = Field(
+        default=50,
+        ge=0,
+        description=(
+            "Most turns one tenant (Discord server, Slack workspace, Teams tenant) may "
+            "have waiting in one adapter process. A turn beyond it is refused with the "
+            "plain capacity notice."
+        ),
+    )
+    max_total: int = Field(
+        default=500,
+        ge=0,
+        description=(
+            "Most turns waiting across all tenants in one adapter process. A turn beyond "
+            "it is refused with the plain capacity notice."
+        ),
+    )
+    max_wait_s: float = Field(
+        default=300.0,
+        gt=0,
+        description=(
+            "Seconds a queued turn may wait for a slot. A safeguard only: the turn then "
+            "leaves the queue and its card ends with the ordinary error."
+        ),
+    )
+
+
 class Settings(BaseSettings):
     security_audit_retention_days: int = Field(
         default=90,
@@ -1356,6 +1399,7 @@ class Settings(BaseSettings):
     billing: BillingSettings = Field(default_factory=BillingSettings)
     support: SupportSettings = Field(default_factory=SupportSettings)
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
+    turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
     tool_safety: ToolSafetyPolicy = Field(
         default_factory=ToolSafetyPolicy,
         description=(

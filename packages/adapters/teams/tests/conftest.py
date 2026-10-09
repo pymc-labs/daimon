@@ -20,7 +20,12 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.config import SupportSettings, TeamsSettings, ThreadParticipationSettings
+from daimon.core.config import (
+    SupportSettings,
+    TeamsSettings,
+    ThreadParticipationSettings,
+    TurnQueueSettings,
+)
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
@@ -393,6 +398,7 @@ def build_teams_runtime(
     settings = MagicMock()
     settings.agent_identity.enabled = False
     settings.teams = teams or teams_settings()
+    settings.turn_queue = TurnQueueSettings()
     settings.crypto.keys = ()
     settings.mcp.public_url = None
     settings.defaults_root = MagicMock()

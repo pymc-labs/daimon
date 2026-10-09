@@ -31,6 +31,7 @@ from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.errors import AdmissionDenialReason, SessionAgentMismatch, SessionBusyError
 from daimon.core.turn.notices import admission_refusal_text
+from daimon.core.turn.slots import release_turn_slot
 from daimon.testing.factories import make_account
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -310,11 +311,16 @@ async def test_a_due_timer_waits_while_the_tenant_is_at_its_turn_cap(
         ran.append(inbound)
 
     with patch.object(TeamsApp, "_run_turn", _turn):
-        teams._inflight[TENANT] = teams._teams.max_concurrent_turns_per_tenant
+        held = [
+            teams.turn_queue.claim(TENANT)
+            for _ in range(teams._teams.max_concurrent_turns_per_tenant)
+        ]
         await _poll(db_session_factory, teams)
         assert ran == [], "no wake runs over the cap"
         assert (await _status(db_session_factory, key))[0] == "pending", "the timer stays due"
-        del teams._inflight[TENANT]
+        assert teams.turn_queue.depth() == 0, "a wake is retried by the next poll, not queued"
+        for ticket in held:
+            ticket.release()
         await _poll(db_session_factory, teams)
     assert len(ran) == 1, "the next poll under the cap runs it"
     assert await _status(db_session_factory, key) == ("delivered", None)
@@ -376,7 +382,8 @@ async def test_a_wake_deferred_behind_a_turn_keeps_the_saved_input_and_the_cap(
         ran.append(thread_id)
 
     with patch.object(TeamsApp, "_dispatch_continuations", _dispatch):
-        teams._inflight[TENANT] = teams._teams.max_concurrent_turns_per_tenant
+        for _ in range(teams._teams.max_concurrent_turns_per_tenant):
+            teams.turn_queue.claim(TENANT)
         teams._release(CONVERSATION_ID)
         teams._release(THREAD_ID)
         await asyncio.gather(*teams._tasks)
@@ -413,3 +420,46 @@ async def test_start_runs_the_teams_wake_poller_until_drain(
     await teams.drain(timeout=1.0)
     assert no_boot_provisioning.call_args.kwargs["admin_user_ids"] == (AAD_OBJECT_ID,)
     assert kwargs["should_stop"]() is True, "drain stops the poller"
+
+
+@pytest.mark.parametrize("miss", ["queue_full", "timed_out"])
+async def test_a_handoff_refused_at_re_admission_is_not_marked_delivered(
+    db_session_factory: async_sessionmaker[AsyncSession], miss: str
+) -> None:
+    """The turn that recorded the handoff returns its slot when it ends; the
+    handoff turn re-enters admission and finds no room. It never ran, so its
+    row goes back to pending for the next turn, never "delivered"."""
+    sender = FakeSender()
+    teams, account_id = await _app(db_session_factory, sender)
+    real_run_turn = TeamsApp._run_turn
+    keys: list[uuid.UUID] = []
+    calls = 0
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID, **kw: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            await real_run_turn(self, inbound, tenant_id, **kw)
+            return
+        keys.append(await _hand_off(db_session_factory, account_id, inbound.thread_id))
+        release_turn_slot()  # the first turn ends and returns its slot
+        # Other chats take every slot meanwhile.
+        for _ in range(teams._teams.max_concurrent_turns_per_tenant):
+            teams.turn_queue.claim(TENANT)
+        if miss == "queue_full":
+            teams.turn_queue.max_queued_per_tenant = 0
+        else:
+            teams.turn_queue.max_wait_s = 0.01
+
+    with (
+        patched_admission(),
+        # The handoff runs as its target, so admission resolves that agent.
+        patch("daimon.core.turn.admission.resolve_agent", AsyncMock(return_value=_TARGET)),
+        patch.object(TeamsApp, "_run_turn", _turn),
+    ):
+        await teams._orchestrate(make_inbound("hand this to stats-bot"), TENANT)
+
+    assert calls == 2, "the handoff turn was attempted"
+    status, _reason = await _status(db_session_factory, keys[0])
+    assert status == "pending", "work that never ran is offered again, not settled delivered"
+    assert teams.turn_queue.depth() == 0

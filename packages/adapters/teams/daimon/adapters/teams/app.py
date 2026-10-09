@@ -28,7 +28,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.budget_notice import with_budget_notifier
-from daimon.adapters.teams.card import enable_files_card
+from daimon.adapters.teams.card import CANCELLED_NOTICE, enable_files_card
 from daimon.adapters.teams.card_actions import stored_external, toast
 from daimon.adapters.teams.channel_admin_groups import owned_team_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
@@ -130,14 +130,20 @@ from daimon.core.turn.errors import (
     SessionAgentMismatch,
     SessionBusyError,
     SessionPreparationFailed,
+    TurnNotStarted,
 )
-from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import protection_state
 from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn.slots import (
+    QUEUE_TIMED_OUT_TEXT,
+    holding,
+    release_turn_slot,
+    wait_for_slot,
+)
 from daimon.core.turn.state import ToolUseBlock, daimon_tool_arguments
 from daimon.core.turn.thread_queue import (
     ThreadQueue,
@@ -153,6 +159,7 @@ from daimon.core.turn_origin import (
     render_turn_origin,
     turn_origin,
 )
+from daimon.core.turn_queue import TurnQueue, TurnTicket
 from microsoft_teams.api import (
     Account,
     AdaptiveCardInvokeActivity,
@@ -305,7 +312,8 @@ class TeamsApp:
         self.confirmations = TeamsConfirmationCards(self._sender)
         self._processing: set[str] = set()
         self._pending: dict[str, list[TeamsInbound]] = {}
-        self._inflight: dict[uuid.UUID, int] = {}
+        # Per-tenant turn slots, with the queue a turn waits in at the cap.
+        self.turn_queue = TurnQueue.from_settings(runtime.settings.turn_queue, platform="teams")
         # cancel_key (the card intent id) -> (cancel Event, author's Entra id).
         self._cancel_registry: dict[str, tuple[asyncio.Event, str]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
@@ -592,8 +600,10 @@ class TeamsApp:
         cap = await self._turn_cap(tenant_id)
         if self.draining or key in self._processing:
             return  # a mention landed while the classifier was deciding
-        count = self._inflight.get(tenant_id, 0)
-        if not should_admit_turn(current_in_flight=count, cap=cap):
+        # Nobody asked for this turn, so nobody waits on it: a free slot or
+        # a silent refusal, never the queue.
+        ticket = self.turn_queue.try_claim(tenant_id, cap=cap)
+        if ticket is None:
             record_refusal(
                 self.runtime.sessionmaker,
                 tenant_id=tenant_id,
@@ -602,11 +612,15 @@ class TeamsApp:
                 thread_id=trigger.thread_id,
             )
             log.info(
-                "turn.skipped.concurrency_shed", tenant_id=str(tenant_id), in_flight=count, cap=cap
+                "turn.skipped.concurrency_shed",
+                tenant_id=str(tenant_id),
+                in_flight=self.turn_queue.in_flight(tenant_id),
+                cap=cap,
+                reason="unprompted_at_cap",
             )
             return
         self._last_message_at[key] = datetime.now(UTC)
-        async with self._holding(key, tenant_id):
+        async with self._holding(key, ticket):
             # Written on admission, not on answer: a turn that ends silent still spent.
             if self._participation is not None:
                 await self._participation.record(trigger, tenant_id)
@@ -757,8 +771,10 @@ class TeamsApp:
             self._thread_queue.enqueue(key, inbound)
             self._supersede_batch(inbound)
             return
-        count = self._inflight.get(tenant_id, 0)
-        if not should_admit_turn(current_in_flight=count, cap=cap):
+        # Over the cap the turn queues: it posts the ordinary card and waits
+        # after it (`wait_for_slot` in _run_turn). Only a full queue refuses.
+        ticket = self.turn_queue.admit(tenant_id, cap=cap, conversation_id=key)
+        if ticket is None:
             record_refusal(
                 self.runtime.sessionmaker,
                 tenant_id=tenant_id,
@@ -767,13 +783,17 @@ class TeamsApp:
                 thread_id=inbound.thread_id,
             )
             log.info(
-                "turn.skipped.concurrency_shed", tenant_id=str(tenant_id), in_flight=count, cap=cap
+                "turn.skipped.concurrency_shed",
+                tenant_id=str(tenant_id),
+                in_flight=self.turn_queue.in_flight(tenant_id),
+                cap=cap,
+                reason="queue_full",
             )
             await self._say(inbound, _SHED)
             return
         self._last_message_at[key] = datetime.now(UTC)
         self._supersede_batch(inbound)
-        async with self._holding(key, tenant_id):
+        async with self._holding(key, ticket):
             await self._run_turns(key, tenant_id, [inbound])
 
     def _supersede_batch(self, inbound: TeamsInbound) -> None:
@@ -785,16 +805,15 @@ class TeamsApp:
             self._participation.cancel(inbound.conversation_id)
 
     @contextlib.asynccontextmanager
-    async def _holding(self, key: str, tenant_id: uuid.UUID) -> AsyncIterator[None]:
-        """Hold a chat and a tenant turn slot; on exit, answer what could not run."""
-        self._inflight[tenant_id] = self._inflight.get(tenant_id, 0) + 1
+    async def _holding(self, key: str, ticket: TurnTicket) -> AsyncIterator[None]:
+        """Hold a chat and a turn slot (or a place in the queue); on exit, answer
+        what could not run."""
         self._thread_queue.claim(key)
         try:
-            yield
+            with holding(ticket):
+                yield
         finally:
             self._release(key)
-            if (remaining := self._inflight.pop(tenant_id, 1) - 1) > 0:
-                self._inflight[tenant_id] = remaining
             for item in self._pending.pop(key, []):
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
                     await self._say(item, _FAILED)
@@ -830,18 +849,25 @@ class TeamsApp:
         reraise: bool = False,
         continuation: TaskContinuationRow | None = None,
     ) -> None:
-        """The turn inside one outcome observation, so a failure before bind still records."""
-        with observe_turn(
-            self.runtime.sessionmaker,
-            tenant_id=tenant_id,
-            platform="teams",
-            channel_id=inbound.channel_id,
-            thread_id=inbound.thread_id,
-            origin="chat" if continuation is None else "handoff",
-        ):
-            await self._run_turn_observed(
-                inbound, tenant_id, handoff=handoff, reraise=reraise, continuation=continuation
-            )
+        """The turn inside one outcome observation, so a failure before bind still records.
+
+        One slot per turn: when it ends, the next turn in the chat (a drained
+        follow-up or a continuation) re-enters admission (`wait_for_slot`).
+        """
+        try:
+            with observe_turn(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="teams",
+                channel_id=inbound.channel_id,
+                thread_id=inbound.thread_id,
+                origin="chat" if continuation is None else "handoff",
+            ):
+                await self._run_turn_observed(
+                    inbound, tenant_id, handoff=handoff, reraise=reraise, continuation=continuation
+                )
+        finally:
+            release_turn_slot()
 
     async def _run_turn_observed(
         self,
@@ -962,6 +988,29 @@ class TeamsApp:
                         )
                     if not recorded:
                         raise DaimonError("Teams card intent could not record its message id")
+                # Over the cap the turn waits here, behind its ordinary card:
+                # the queue is never shown.
+                slot = await wait_for_slot(
+                    cancel, sessionmaker=self.runtime.sessionmaker, tenant_id=tenant_id
+                )
+                if slot != "started":
+                    await lifecycle.close_with_notice(
+                        {
+                            "cancelled": CANCELLED_NOTICE,
+                            "timed_out": QUEUE_TIMED_OUT_TEXT,
+                            "balance_depleted": admission_refusal_text(
+                                "balance_depleted", TEAMS_REFUSAL_NOUNS
+                            ),
+                            "queue_full": _SHED,
+                        }[slot]
+                    )
+                    if reraise:
+                        # A continuation that never ran must not settle as
+                        # delivered: tell its dispatcher.
+                        if slot == "balance_depleted":
+                            raise AdmissionDenied(reason="balance_depleted")
+                        raise TurnNotStarted(slot)
+                    return
                 await self._bind_and_run(
                     inbound,
                     tenant_id,
@@ -976,7 +1025,7 @@ class TeamsApp:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                if reraise and isinstance(exc, _BIND_REFUSALS):
+                if reraise and isinstance(exc, (*_BIND_REFUSALS, TurnNotStarted, AdmissionDenied)):
                     raise  # Already told the person; the dispatcher settles it.
                 # The card exists: collapse it rather than post a second message.
                 log.error(
@@ -1323,21 +1372,34 @@ class TeamsApp:
             _, previous_url, previous_capped = previous or (tenant_id, None, True)
             return tenant_id, request[1] or previous_url, request[2] and previous_capped
 
-        if not claim_dispatch(
-            self._processing,
-            conversation_id,
-            self._deferred_dispatch,
-            thread_id,
-            (tenant_id, service_url, capped),
-            merge=merge,
-            claim_slot=False,
-            admit=lambda: (
-                not capped
-                or should_admit_turn(current_in_flight=self._inflight.get(tenant_id, 0), cap=cap)
-            ),
+        ticket: TurnTicket | None = None
+
+        def admit_slot() -> bool:
+            # A capped wake takes a free slot or waits for the next release;
+            # an uncapped one always runs but still counts.
+            nonlocal ticket
+            ticket = (
+                self.turn_queue.try_claim(tenant_id, cap=cap)
+                if capped
+                else self.turn_queue.claim(tenant_id)
+            )
+            return ticket is not None
+
+        if (
+            not claim_dispatch(
+                self._processing,
+                conversation_id,
+                self._deferred_dispatch,
+                thread_id,
+                (tenant_id, service_url, capped),
+                merge=merge,
+                claim_slot=False,
+                admit=admit_slot,
+            )
+            or ticket is None
         ):
             return
-        async with self._holding(conversation_id, tenant_id):
+        async with self._holding(conversation_id, ticket):
 
             async def drain() -> None:
                 queued = _compose_queued(self._pending.pop(conversation_id, []))

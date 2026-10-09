@@ -15,6 +15,7 @@ from daimon.adapters.discord.commands import direct_messages as dm_module
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn_queue import TurnQueue
 from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -126,7 +127,9 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
     bot.get_guild.return_value = guild
-    bot.try_claim_global_turn.return_value = True
+    bot.turn_queue = TurnQueue(
+        platform="discord", global_cap=1, max_queued_per_tenant=1, max_queued=1, max_wait_s=60
+    )
     message = MagicMock()
     message.author.bot = False
     message.author.id = 999
@@ -140,4 +143,4 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
 
     (reply,), _ = message.channel.send.await_args
     assert reply == _OVER_BUDGET, "the member is told why the DM stopped"
-    bot.release_global_turn.assert_called_once()
+    assert bot.turn_queue.in_flight() == 0, "the slot is returned"

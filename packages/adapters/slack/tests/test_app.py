@@ -3149,7 +3149,7 @@ async def test_orchestrate_eyes_reaction_transport_error_does_not_leak_thread_sl
     assert thread_ts not in app._processing, (  # pyright: ignore[reportPrivateUsage]
         "thread slot must be released even when the eyes reaction raises a transport error"
     )
-    assert tenant_id not in app._inflight, (  # pyright: ignore[reportPrivateUsage]
+    assert app.turn_queue.in_flight(tenant_id) == 0, (
         "tenant in-flight slot must be released even when the eyes reaction raises a transport error"
     )
 
@@ -3177,8 +3177,11 @@ async def test_orchestrate_tenant_cap_when_exhausted_sends_ephemeral_and_skips_t
 
     app, _ = make_orchestrate_app(db_session_factory, max_concurrent_turns_per_tenant=3)
 
-    # Saturate the tenant in-flight count.
-    app._inflight[tenant_id] = cap  # pyright: ignore[reportPrivateUsage]
+    # Saturate the tenant's slots and leave no queue room: the plain refusal
+    # is the last resort once the queue is full.
+    app.turn_queue.max_queued_per_tenant = 0
+    for _ in range(cap):
+        app.turn_queue.claim(tenant_id)
 
     event: dict[str, Any] = {
         "type": "app_mention",
@@ -5647,7 +5650,9 @@ async def test_orchestrate_tenant_cap_when_in_thread_sheds_in_thread(
     await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
 
     app, _ = make_orchestrate_app(db_session_factory, max_concurrent_turns_per_tenant=cap)
-    app._inflight[tenant_id] = cap  # pyright: ignore[reportPrivateUsage]
+    app.turn_queue.max_queued_per_tenant = 0
+    for _ in range(cap):
+        app.turn_queue.claim(tenant_id)
 
     event: dict[str, Any] = {
         "type": "app_mention",
@@ -5701,8 +5706,8 @@ async def test_ceiling_breach_releases_tenant_slot_and_thread_flag(
     _orchestrate's try -- it has no except) and the pump-phase return
     (run.py:355-372, which falls out the bottom normally instead of raising).
 
-    Reading app._inflight alone is a weak assertion -- it would pass a
-    _release_inflight that decrements without popping the key at zero. The
+    Reading the in-flight count alone is a weak assertion -- it would pass a
+    release that never hands the slot on. The
     assertion that actually retires the design doc's "three wedged threads
     freeze the whole workspace" concern is behavioural: with
     max_concurrent_turns_per_tenant=1, a SECOND mention on the SAME tenant
@@ -5801,9 +5806,8 @@ async def test_ceiling_breach_releases_tenant_slot_and_thread_flag(
             _make_event(thread_ts_1), team_id=team_id
         )
 
-        assert tenant_id not in app._inflight, (  # pyright: ignore[reportPrivateUsage]
-            "a ceiling breach must POP the tenant's in-flight key at zero, not "
-            "merely decrement it to zero -- _release_inflight's own contract"
+        assert app.turn_queue.in_flight(tenant_id) == 0, (
+            "a ceiling breach must return the tenant's slot"
         )
         assert thread_ts_1 not in app._processing, (  # pyright: ignore[reportPrivateUsage]
             "a ceiling breach must discard the per-thread processing flag"
@@ -5831,7 +5835,7 @@ async def test_ceiling_breach_releases_tenant_slot_and_thread_flag(
     assert shed_ephemeral == [], (
         "the second mention must not receive the concurrency-shed ephemeral notice"
     )
-    assert tenant_id not in app._inflight  # pyright: ignore[reportPrivateUsage]
+    assert app.turn_queue.in_flight(tenant_id) == 0
     assert thread_ts_2 not in app._processing  # pyright: ignore[reportPrivateUsage]
 
 
@@ -6491,7 +6495,8 @@ async def test_the_shed_notice_is_not_posted_into_a_protected_channel(
         )
         await s.commit()
     app, _ = make_orchestrate_app(db_session_factory, max_concurrent_turns_per_tenant=1)
-    app._inflight[tenant_id] = 1  # pyright: ignore[reportPrivateUsage]  # saturate the cap
+    app.turn_queue.max_queued_per_tenant = 0  # saturate the cap, no queue room
+    app.turn_queue.claim(tenant_id)
     event: dict[str, Any] = {
         "type": "app_mention",
         "ts": event_ts,
@@ -6851,3 +6856,103 @@ async def test_handle_app_mention_auth_test_failure_drops_without_raising(
         "a failed auth.test must not post an error reply into a thread that may "
         "never have mentioned the bot"
     )
+
+
+# ---------------------------------------------------------------------------
+# Over the cap a mention queues behind the ordinary card
+# ---------------------------------------------------------------------------
+
+
+def _slack_requests(fake_slack_web_client: Any, method: str) -> list[dict[str, Any]]:
+    return [
+        req.kwargs["json"]
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == URL(f"https://slack.com/api/{method}")
+        for req in reqs
+    ]
+
+
+@pytest.mark.parametrize("stop", [False, True], ids=["starts-on-free-slot", "stopped-while-queued"])
+async def test_orchestrate_over_the_tenant_cap_queues_behind_the_ordinary_card(
+    stop: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    team_id = f"T_ORCH_QUEUE_{int(stop)}"
+    channel = "C_TEST"
+    event_ts = "9000000070.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(
+        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    )
+    app, _ = make_orchestrate_app(db_session_factory, max_concurrent_turns_per_tenant=1)
+    held = app.turn_queue.claim(tenant_id)  # the workspace's one slot is taken
+
+    async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
+        state = TurnState(content=[TextBlock(kind="text", text="Hello!")])
+        await lifecycle.on_terminal_success(state)
+        return state
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": event_ts,
+        "event_ts": event_ts,
+        "channel": channel,
+        "user": "U_TEST_QUEUE",
+        "text": "<@U_BOT> hello",
+    }
+    with (
+        patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as agent,
+        patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock) as env,
+        patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as create,
+        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+    ):
+        agent.return_value = "agent_queue_id"
+        env.return_value = "env_queue_id"
+        create.return_value = ma_session(
+            id="sess-queue-001",
+            agent=ma_session_agent(id="agent_queue_id"),
+            environment_id="env_queue_id",
+        )
+        mock_run_turn.side_effect = _fake_run_turn
+        turn = asyncio.create_task(
+            app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                event,
+                team_id=team_id,
+                channel=channel,
+                event_ts=event_ts,
+                web_client=fake_slack_web_client.client,
+                tenant_id=tenant_id,
+            )
+        )
+        for _ in range(300):
+            if app._cancel_registry:  # pyright: ignore[reportPrivateUsage]
+                break
+            await asyncio.sleep(0.01)
+        assert app._cancel_registry, "the card and its Stop are up while it waits"  # pyright: ignore[reportPrivateUsage]
+        assert app.turn_queue.depth(tenant_id) == 1
+        await asyncio.sleep(0.05)
+        create.assert_not_called()
+        assert _slack_requests(fake_slack_web_client, "chat.postEphemeral") == [], (
+            "no capacity notice: the queue is backstage"
+        )
+        card = json.dumps(_slack_requests(fake_slack_web_client, "chat.postMessage"))
+        assert "Working on it" in card
+        assert "slot" not in card.lower() and "queue" not in card.lower()
+
+        if stop:
+            ((cancel, _author),) = app._cancel_registry.values()  # pyright: ignore[reportPrivateUsage]
+            cancel.set()
+            await asyncio.wait_for(turn, 10)
+            held.release()
+            await asyncio.sleep(0.05)
+            mock_run_turn.assert_not_called()
+            updates = json.dumps(_slack_requests(fake_slack_web_client, "chat.update"))
+            assert "Stopped." in updates
+        else:
+            held.release()
+            await asyncio.wait_for(turn, 10)
+            mock_run_turn.assert_awaited_once()
+    assert app.turn_queue.in_flight() == 0
+    assert app.turn_queue.depth() == 0

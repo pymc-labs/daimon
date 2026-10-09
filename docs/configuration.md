@@ -40,6 +40,7 @@ typo is silent — check the spelling here.
 - [Billing Policy](#billing-policy)
 - [Support](#support)
 - [Thread Naming](#thread-naming)
+- [Turn Queue](#turn-queue)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
 - [Scheduler](#scheduler)
@@ -422,8 +423,8 @@ once. Caps one noisy guild from starving others on the shared Anthropic key.
 `int | None` · optional · default unset
 
 Maximum Discord agent turns running across all guilds and DMs in this process. Unset
-leaves deployment-wide admission unlimited. Excess turns are refused with a retry
-notice; continuation wakes keep their existing admission path.
+leaves deployment-wide admission unlimited. Excess turns wait in the turn queue (see
+turn_queue); continuation wakes keep their existing admission path.
 
 ### `DAIMON_DISCORD__TURN_CARD_UNRECOVERABLE_AFTER_S`
 
@@ -1096,6 +1097,45 @@ here. Bounds the per-thread naming cost.
 Seconds to wait for the naming model before the thread opens under the static title. The
 thread is created only after this call, so this is the most a mention can wait before
 anything appears.
+
+## Turn Queue
+
+Read from `daimon.core.config.TurnQueueSettings`. Prefix `DAIMON_TURN_QUEUE__`.
+
+The queue a turn waits in when the concurrency caps are full (``DAIMON_TURN_QUEUE__*``).
+
+One in-memory queue per adapter process, served round-robin across tenants and FIFO
+within one. A queued turn shows the ordinary status card; nothing tells the person it is
+queued.
+
+### `DAIMON_TURN_QUEUE__ENABLED`
+
+`bool` · optional · default `True`
+
+Queue turns that arrive while the global or the per-tenant concurrency cap is full, and
+start them as slots free. Set false to refuse them with the plain capacity notice
+instead.
+
+### `DAIMON_TURN_QUEUE__MAX_PER_TENANT`
+
+`int` · optional · default `50`
+
+Most turns one tenant (Discord server, Slack workspace, Teams tenant) may have waiting
+in one adapter process. A turn beyond it is refused with the plain capacity notice.
+
+### `DAIMON_TURN_QUEUE__MAX_TOTAL`
+
+`int` · optional · default `500`
+
+Most turns waiting across all tenants in one adapter process. A turn beyond it is
+refused with the plain capacity notice.
+
+### `DAIMON_TURN_QUEUE__MAX_WAIT_S`
+
+`float` · optional · default `300.0`
+
+Seconds a queued turn may wait for a slot. A safeguard only: the turn then leaves the
+queue and its card ends with the ordinary error.
 
 ## Tool Safety
 
