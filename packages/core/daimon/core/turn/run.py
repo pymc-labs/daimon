@@ -54,6 +54,7 @@ from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.errors import SessionBusyError
+from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
 from daimon.core.turn.lifecycle import (
     Acknowledgment,
     InterruptSource,
@@ -276,6 +277,7 @@ async def _replay_previous_session(
     *,
     session_id: str,
     from_agent_name: str,
+    io: TurnIO | None = None,
 ) -> str | None:
     """The lost session's conversation as a quoted block, or None.
 
@@ -291,7 +293,11 @@ async def _replay_previous_session(
     history rung rather than surfacing.
     """
     try:
-        events = await replay_events(anthropic, session_id=session_id)
+        events = (
+            await io.replay()
+            if io is not None
+            else await replay_events(anthropic, session_id=session_id)
+        )
     except (_anthropic.APIError, TurnError) as err:
         log.info(
             "turn.recovery_transcript_unavailable",
@@ -335,7 +341,7 @@ Short: the caller is usually unwinding a ceiling or a cancel."""
 
 
 async def _archive_orphaned_session(
-    anthropic: _anthropic.AsyncAnthropic, *, session_id: str
+    anthropic: _anthropic.AsyncAnthropic, *, session_id: str, io: TurnIO | None = None
 ) -> None:
     """Best-effort archive of an upstream session no mapping row names.
 
@@ -345,7 +351,7 @@ async def _archive_orphaned_session(
     swallowed: the error being unwound is the one the caller must see.
     """
     archive_task = asyncio.create_task(
-        anthropic.beta.sessions.archive(session_id), name="turn.orphan_session_archive"
+        (io or LegacyTurnIO(anthropic, session_id)).archive(), name="turn.orphan_session_archive"
     )
     deadline = asyncio.get_running_loop().time() + _ORPHAN_ARCHIVE_TIMEOUT_S
 
@@ -524,6 +530,11 @@ async def _replace_dead_session_locked(
                 deps.anthropic,
                 session_id=dead_session_id,
                 from_agent_name=from_agent_name,
+                io=turn_io(
+                    deps.anthropic,
+                    dead_session_id,
+                    **_turn_port_kwargs(deps, admission, dead_session_id, tenant_id=tenant_id),
+                ),
             )
 
             # What the successor actually inherited, recorded on its row as the
@@ -562,7 +573,26 @@ async def _replace_dead_session_locked(
         # created (a ceiling, a cancel, a failed insert or commit). No row
         # names that session any more, so nothing else would ever archive it.
         if created is not None:
-            await _archive_orphaned_session(deps.anthropic, session_id=created.ma_session_id)
+            try:
+                await _archive_orphaned_session(
+                    deps.anthropic,
+                    session_id=created.ma_session_id,
+                    io=turn_io(
+                        deps.anthropic,
+                        created.ma_session_id,
+                        **_turn_port_kwargs(
+                            deps, admission, created.ma_session_id, tenant_id=tenant_id
+                        ),
+                    ),
+                )
+            except Exception as cleanup_error:
+                # Binding validation can fail before the archive task exists.
+                # Preserve the recovery error while denying unauthorized I/O.
+                log.warning(
+                    "turn.recovery_orphan_archive_failed",
+                    session_id=created.ma_session_id,
+                    error=str(cleanup_error)[:200],
+                )
         raise
 
     return _Replacement(

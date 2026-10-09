@@ -84,7 +84,7 @@ Anthropic has no root-turn IDs, resumable SSE cursor or atomic turn precondition
 `EventNormalizer` can receive the host's root identity; a chronological history
 walk otherwise anchors turns on user input or the first running record. Pending
 actions whose source call is outside that walk remain native. SSE cursors, turn
-preconditions, reconciliation and stop waiting remain explicitly unsupported.
+preconditions, reconciliation remains explicitly unsupported.
 The closed `anthropic.session_system_message@1` input schema carries only
 privileged text framing and validates the final-event ordering before I/O. The cancellation
 and host bridge units provide their policies separately.
@@ -230,3 +230,9 @@ durable SSE gap markers and restart/deduplication checks. Its adapter declares
 `item`. The matrix is eight PASS and ten typed PENDING. Snapshot tests alone
 do not certify C09's missing vault/session-deletion requirements, and host
 scenarios stay pending until their actual host evidence is connected.
+
+Cancellation receipts never establish a stopped turn. `Events.wait_stopped`
+requires an authoritative root idle or termination record before its deadline,
+ignores previews and interrupt echoes, and closes the private stream on every
+exit. The typed `anthropic.event_history@1` extension normalizes a full SDK
+paginator walk without changing its request or termination rules.

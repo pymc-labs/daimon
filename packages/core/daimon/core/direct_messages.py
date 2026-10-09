@@ -14,8 +14,10 @@ from daimon.core.access_policy import (
     DM_SCOPE_PREFIX,
     TenantAccessPolicy,
 )
+from daimon.core.config import load_turn_settings
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
+from daimon.core.mux_backend import resource_scope
 from daimon.core.permissions import dm_source_limited, limited_ids
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import load_access_policy
@@ -39,6 +41,7 @@ from daimon.core.turn.admission import Admission, DmSource, admit
 from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import DmSourceSealedError
+from daimon.core.turn.io import turn_io
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
@@ -108,7 +111,25 @@ async def _quarantine(deps: TurnDeps, conversation: DirectMessageRow) -> None:
         retired = await quarantine_conversation(session, conversation=conversation)
     for session_id in retired:
         with suppress(anthropic.APIError):
-            await deps.anthropic.beta.sessions.archive(session_id)
+            selected = deps.turn_path or load_turn_settings().path
+            scope = resource_scope(
+                tenant_id=str(conversation.tenant_id),
+                account_id=str(conversation.account_id),
+                authorization_id="sealed-dm-retirement",
+            )
+            ref = (
+                deps.backend_session_ref(session_id, scope)
+                if selected == "mux" and deps.backend_session_ref is not None
+                else None
+            )
+            await turn_io(
+                deps.anthropic,
+                session_id,
+                path=selected,
+                backend=deps.backend,
+                scope=scope,
+                session_ref=ref,
+            ).archive()
     raise DaimonError(SEALED_SINCE_MESSAGE)
 
 

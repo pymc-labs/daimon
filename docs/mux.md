@@ -753,8 +753,8 @@ first SSE event. It closes abandoned streams on cancellation and preserves the
 existing per-call read timeout. A temporary host edge decodes the opaque native
 JSON snapshot for existing reducers and hooks; SDK objects never cross neutral
 ports. Normalized root outcomes select the host termination reason after its
-existing failure refinements. Replay/cancel/orphan helpers move in the next
-turn unit. No StateStore journal or additional database writes are introduced.
+existing failure refinements. Replay, cancellation and orphan cleanup use the same bound session ports.
+No StateStore journal or additional database writes are introduced.
 
 The Anthropic-only `anthropic.session_system_message@1` config carries privileged
 text framing for the initial handoff batch. Its closed schema accepts text
@@ -852,3 +852,31 @@ a model. No configuration continues to choose Anthropic and per-caller threads.
 C09 passes offline; host certification and twelve fixture dependencies remain
 pending. The guarded live smoke returned `invalid_request`; it establishes no live
 certificate. See the driver README for the evidence table and operation refusals.
+
+### Turn cancellation and replay
+
+On the experimental mux path, a cancel receipt reports request acceptance or
+uncertainty; it never proves interruption. Stop waiting observes an authoritative
+root idle or termination event and closes its stream on EOF, deadline or caller
+cancellation. Interrupt echoes, previews, subagent completion and a running
+status do not confirm a stop. A missing observation remains INTERRUPT_TIMEOUT.
+Anthropic root idle after cancellation retains the legacy interrupted outcome;
+independent session termination remains SESSION_TERMINATED.
+
+The typed `anthropic.event_history@1` extension walks the existing SDK paginator
+with one normalizer across pages. Reconnect replay preserves native pagination,
+HTTP requests, event identity and existing reducers' de-duplication. Recovery
+transcript reads and orphan archives use the admitted tenant/account scope;
+sealed-DM retirement uses the conversation owner. Archives retain the existing
+bounded, shielded cleanup and background completion logging. Sessions archive
+comes from the existing resource driver; turn code adds no lifecycle port.
+
+PR3 caller coordination includes the CLI's direct turn entry at
+`packages/adapters/cli/daimon/adapters/cli/run/command.py:131`: mux must pass the
+actual authorized tenant/account scope before provider I/O. N7 owns that
+adapter change; the core bridge refuses a missing scope rather than supplying
+a legacy-host authorization escape. The default legacy caller stays unchanged.
+
+Headless routine turns on the mux path pass the caller's authorized tenant and
+account to the shared turn driver. A missing identity is rejected before session
+assembly or provider I/O. The default legacy path retains its existing requests.

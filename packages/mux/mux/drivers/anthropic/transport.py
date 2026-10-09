@@ -13,6 +13,7 @@ import httpx
 from anthropic import AsyncAnthropic, AsyncStream
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsEventParams,
+    BetaManagedAgentsSessionEvent,
     BetaManagedAgentsStreamSessionEvents,
 )
 
@@ -47,3 +48,17 @@ class LegacyTurnTransport:
             stop_reason = getattr(event, "stop_reason", None)
             return getattr(stop_reason, "type", None) != "requires_action"
         return False
+
+    async def replay(self) -> list[BetaManagedAgentsSessionEvent]:
+        events: list[BetaManagedAgentsSessionEvent] = []
+        async for event in self._client.beta.sessions.events.list(session_id=self._session_id):
+            events.append(event)
+        return events
+
+    async def open_interrupt_stream(self) -> AsyncStream[BetaManagedAgentsStreamSessionEvents]:
+        # Interrupt waiting historically uses the client's default timeout,
+        # unlike the live turn stream's explicit read timeout.
+        return await self._client.beta.sessions.events.stream(session_id=self._session_id)
+
+    async def archive(self) -> None:
+        await self._client.beta.sessions.archive(self._session_id)

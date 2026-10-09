@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
+from typing import Protocol
 
 import httpx
 from anthropic import (
@@ -22,6 +24,7 @@ from mux.contracts.ids import Page, PageRequest, ResourceRef, Scope
 from mux.contracts.receipts import CancelReceipt, SendReceipt, StopObservation
 from mux.contracts.resources import ProjectionSnapshot
 from mux.drivers.anthropic.actions import translate_inputs
+from mux.drivers.anthropic.cancel import observed_stop
 from mux.drivers.anthropic.normalize import EventNormalizer, object_json
 from mux.drivers.anthropic.resources._authorization import (
     ResourceAuthorization,
@@ -30,6 +33,44 @@ from mux.drivers.anthropic.resources._authorization import (
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.errors import ProviderError, UnsupportedCapability
+
+
+class EventHistoryWalk(Protocol):
+    """Anthropic's full chronological event walk, as owned records."""
+
+    def walk(self, scope: Scope, session: ResourceRef) -> AsyncIterator[Event]: ...
+
+
+class AnthropicEventHistoryWalk:
+    """One normalizer across the SDK's paginator, with its original kwargs."""
+
+    def __init__(
+        self,
+        client: AsyncAnthropic,
+        account_scope_id: str,
+        authorization: ResourceAuthorization | None = None,
+    ) -> None:
+        self._client = client
+        self._account_scope_id = account_scope_id
+        self._authorization = authorization
+
+    async def walk(self, scope: Scope, session: ResourceRef) -> AsyncIterator[Event]:
+        check_ref(scope, session, self._account_scope_id, "session")
+        authorize(self._authorization, scope, "session", session.id)
+        normalizer = EventNormalizer(session)
+        try:
+            async for native in provider_iter(
+                self._client.beta.sessions.events.list(session_id=session.id)
+            ):
+                yield normalizer.normalize(
+                    object_json(native.model_dump(mode="json")), observed_at=datetime.now(UTC)
+                )
+        except httpx.HTTPError as error:
+            raise ProviderError("transient_network", retryable=True) from error
+        except (ValueError, KeyError, TypeError) as error:
+            raise ProviderError(
+                "upstream", retryable=False, native_code="malformed_event"
+            ) from error
 
 
 class _NormalizedStream(AsyncIterator[Event]):
@@ -238,6 +279,29 @@ class AnthropicEvents:
         self, scope: Scope, receipt: CancelReceipt, *, deadline: datetime
     ) -> StopObservation:
         self._check(scope, receipt.session)
-        # Stop reconciliation and interrupt truth are the next cancellation PR;
-        # never convert a request acknowledgment into a stop observation.
-        raise UnsupportedCapability(("wait_stopped",), "anthropic.managed_agents")
+        remaining = (deadline - datetime.now(UTC)).total_seconds()
+        stream: AsyncIterator[Event] | None = None
+        try:
+            if remaining > 0:
+                async with asyncio.timeout(remaining):
+                    # Preserve interrupt waiting's SDK timeout policy; the
+                    # live turn's explicit read timeout belongs to open_stream.
+                    native_stream = await provider_call(
+                        self._client.beta.sessions.events.stream(session_id=receipt.session.id)
+                    )
+                    stream = _NormalizedStream(native_stream, receipt.session, False)
+                    async for event in stream:
+                        if (stop := observed_stop(event, receipt)) is not None:
+                            return stop
+        except TimeoutError:
+            pass
+        finally:
+            if stream is not None:
+                assert isinstance(stream, _NormalizedStream)
+                await stream.aclose()
+        return StopObservation(
+            receipt_operation_id=receipt.operation_id,
+            stopped=False,
+            outcome=None,
+            observed_at=datetime.now(UTC),
+        )

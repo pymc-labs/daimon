@@ -57,7 +57,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from cryptography.fernet import MultiFernet
-from daimon.core.config import GithubAppSettings, McpSettings
+from daimon.core.config import GithubAppSettings, McpSettings, load_turn_settings
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
@@ -78,6 +78,7 @@ from daimon.core.turn.posture import (
 )
 from daimon.core.turn.state import TurnState, extract_final_response
 from mux.contracts.ids import Scope
+from mux.errors import ScopeViolation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -305,6 +306,18 @@ async def run_turn_impl(
     ``origin_place`` stamps where the routine fires (`routine_origin`), so its
     transcript reads only where a turn there would, and only by its owner.
     """
+    turn_scope: Scope | None = None
+    if load_turn_settings().path == "mux":
+        if tenant_id is None or account_id is None:
+            raise ScopeViolation(
+                agent_id, "mux headless turns require the authorized tenant/account"
+            )
+        turn_scope = resource_scope(
+            tenant_id=str(tenant_id),
+            account_id=str(account_id),
+            authorization_id="headless-turn",
+        )
+
     effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
     # Decided before the session exists so the session carries it: an
     # unrecorded run is stamped exempt, and the usage sweep then skips it
@@ -407,6 +420,7 @@ async def run_turn_impl(
         # bespoke loop) is fully delegated below.
         state: TurnState = await drive_turn(
             anthropic=anthropic,
+            scope=turn_scope,
             session_id=session.id,
             user_message=context_prompt(origin, system=session.agent.system) + trigger_message,
             lifecycle=_NoOpLifecycle(),
