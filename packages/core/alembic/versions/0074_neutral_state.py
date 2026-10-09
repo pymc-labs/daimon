@@ -321,8 +321,20 @@ def finish() -> None:
 
     The tenant FKs take SHARE ROW EXCLUSIVE on `tenants` (blocking tenant
     writes); the nullable ADD COLUMNs take ACCESS EXCLUSIVE on `thread_sessions`.
-    Validating the FKs scans only the new tables.
+    Validating the FKs scans only the new tables. A tenant deleted while
+    the backfill ran is gone from `tenants` but not from the snapshot, so its
+    backfilled rows are dropped first, under the same lock, so no deletion
+    can slip in between.
     """
+    connection = op.get_bind()
+    connection.execute(sa.text("LOCK TABLE tenants IN SHARE ROW EXCLUSIVE MODE"))
+    # Cascades to provider_binding and journal_session through binding_id.
+    connection.execute(
+        sa.text(
+            "DELETE FROM provider_binding_slot s"
+            " WHERE NOT EXISTS (SELECT 1 FROM tenants t WHERE t.id = s.tenant_id)"
+        )
+    )
     for table in _TENANT_TABLES:
         op.create_foreign_key(
             f"{table}_tenant_id_fkey", table, "tenants", ["tenant_id"], ["id"], ondelete="CASCADE"

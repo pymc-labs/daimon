@@ -370,7 +370,7 @@ async def _seed(engine: AsyncEngine, rows: int) -> uuid.UUID:
             text(
                 "INSERT INTO thread_sessions (tenant_id, platform, thread_id, account_id,"
                 " ma_session_id, channel_id, status, created_at)"
-                " SELECT :tenant, 'discord', 'th' || (n / 3), :account, 's' || n, 'chan',"
+                " SELECT CAST(:tenant AS uuid), 'discord', 'th' || (n / 3), :account, CAST(:tenant AS text) || '-s' || n, 'chan',"
                 " CASE WHEN n % 3 = 2 THEN 'live' ELSE 'dead' END,"
                 " CAST(:t0 AS timestamptz) + n * interval '1 second'"
                 " FROM generate_series(1, :rows) AS n"
@@ -434,6 +434,42 @@ async def test_a_legacy_write_during_the_backfill_cannot_split_its_snapshot() ->
             assert unowned == 0
             sessions = set(await session.scalars(text("SELECT session_id FROM journal_session")))
             assert not sessions & {"s_new", "s_newer", "s_newer_a"}
+
+
+async def test_a_tenant_deleted_during_the_backfill_does_not_fail_the_migration() -> None:
+    migration = _migration()
+    async with _private_schema() as (engine, thread_engine):
+        await _migrate(engine, migration, "downgrade")
+        kept = await _seed(engine, 6)
+        doomed = await _seed(engine, 6)
+        capture = migration.capture
+
+        def capture_then_delete() -> None:
+            capture()
+
+            async def delete_tenant() -> None:
+                deleter = thread_engine()
+                async with deleter.begin() as conn:
+                    await conn.execute(text("DELETE FROM tenants WHERE id = :t"), {"t": doomed})
+                await deleter.dispose()
+
+            deleter_thread = threading.Thread(target=lambda: asyncio.run(delete_tenant()))
+            deleter_thread.start()
+            deleter_thread.join()
+
+        setattr(migration, "capture", capture_then_delete)  # noqa: B010 - patching a module
+        await _migrate(engine, migration, "upgrade")
+
+        async with AsyncSession(engine) as session:
+            tenants = set(
+                await session.scalars(text("SELECT DISTINCT tenant_id FROM provider_binding_slot"))
+            )
+            assert tenants == {kept}
+            for table in ("provider_binding", "journal_session"):
+                orphans = await session.scalar(
+                    text(f"SELECT count(*) FROM {table} WHERE tenant_id = :t"), {"t": doomed}
+                )
+                assert orphans == 0
 
 
 @pytest.mark.slow
