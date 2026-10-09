@@ -44,6 +44,7 @@ from daimon.core.channel_environments import (
     environment_option_value,
 )
 from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleStatus
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, build_connect_card
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
@@ -70,8 +71,6 @@ __all__ = [
     "ACTION_AVATAR_DETAILS",
     "ACTION_AVATAR_RESET",
     "CALLBACK_AVATAR_UPLOAD",
-    "AVATAR_FILE_INPUT_ID",
-    "build_avatar_upload_form",
     "build_avatar_status_view",
     "ACTION_ENVIRONMENT",
     "ACTION_EXPAND_KEYS",
@@ -118,11 +117,10 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 ACTION_DETAILS: Final = "agent_setup__details"
-ACTION_AVATAR_CHANGE: Final = "agent_setup__avatar_change"
+ACTION_AVATAR_CHANGE: Final = "agent_setup__avatar_change"  # stale panels only; refused
 ACTION_AVATAR_RESET: Final = "agent_setup__avatar_reset"
 ACTION_AVATAR_DETAILS: Final = "agent_setup__avatar_details"
-CALLBACK_AVATAR_UPLOAD: Final = "agent_setup__avatar_upload"
-AVATAR_FILE_INPUT_ID: Final = "agent_setup__avatar_file"
+CALLBACK_AVATAR_UPLOAD: Final = "agent_setup__avatar_upload"  # stale forms only; refused
 """Open one agent's Details. The button's `value` is the agent name."""
 
 ACTION_ROUTING: Final = "agent_setup__routing"
@@ -149,6 +147,7 @@ def build_github_home_view(
     meta: PanelMetadata,
     *,
     connected_count: int,
+    public_base_url: str | None = None,
     is_admin: bool = True,
     owners: tuple[str, ...] = (),
     agent_count: int = 0,
@@ -180,7 +179,11 @@ def build_github_home_view(
             {
                 "type": "button",
                 "action_id": "github_link__open",
-                "text": {"type": "plain_text", "text": "Continue"},
+                "text": {
+                    "type": "plain_text",
+                    "text": f"{CONNECT_GITHUB_EMOJI} Connect GitHub",
+                    "emoji": True,
+                },
                 "url": pending_url,
             },
             _button(action_id=ACTION_GITHUB_START, label="Start over"),
@@ -202,17 +205,56 @@ def build_github_home_view(
         ]
     else:
         summary = "Connect repos here, then choose which agents can use them."
-        actions = [_button(action_id=ACTION_GITHUB_START, label="Connect GitHub")]
+        actions = [
+            _button(action_id=ACTION_GITHUB_START, label=f"{CONNECT_GITHUB_EMOJI} Connect GitHub")
+        ]
     actions.append(_button(action_id=ACTION_GITHUB_BACK, label="◀ Back"))
     status = f"Linked as @{linked_login}" if linked_login else "GitHub isn't linked."
     fields = [{"type": "mrkdwn", "text": f"*Personal link*\n{status}"}]
     if connected_count:
         fields.insert(0, {"type": "mrkdwn", "text": f"*Agents*\n{agent_count} using these repos"})
-    blocks: list[dict[str, Any]] = [
-        _section(summary),
-        {"type": "section", "fields": fields},
-        {"type": "divider"},
-    ]
+    blocks: list[dict[str, Any]] = []
+    if is_admin and not connected_count and public_base_url:
+        card = build_connect_card(
+            agent_name=None,
+            identity_enabled=False,
+            avatar_url=None,
+            public_base_url=public_base_url,
+        )
+        blocks.extend(
+            [
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "image",
+                            "image_url": card.author_icon_url,
+                            "alt_text": card.author_name,
+                        },
+                        {"type": "plain_text", "text": card.author_name},
+                    ],
+                },
+                {"type": "header", "text": {"type": "plain_text", "text": card.title}},
+                {
+                    "type": "section",
+                    "text": {"type": "plain_text", "text": card.description},
+                    "accessory": {
+                        "type": "image",
+                        "image_url": card.github_mark_url,
+                        "alt_text": "GitHub",
+                    },
+                },
+            ]
+        )
+        if card.detail:
+            blocks.append({"type": "section", "text": {"type": "plain_text", "text": card.detail}})
+        if card.footer:
+            blocks.append(
+                {"type": "context", "elements": [{"type": "plain_text", "text": card.footer}]}
+            )
+    else:
+        blocks.append(_section(summary))
+    blocks.extend([{"type": "section", "fields": fields}, {"type": "divider"}])
     if actions:
         blocks.append({"type": "actions", "elements": actions})
     personal = [
@@ -635,7 +677,6 @@ def build_details_view(
             {
                 "type": "actions",
                 "elements": [
-                    _button(action_id=ACTION_AVATAR_CHANGE, label="Change", value=details.name),
                     reset_button,
                     _button(action_id=ACTION_AVATAR_DETAILS, label="Details", value=details.name),
                 ],
@@ -672,33 +713,6 @@ def build_details_view(
     )
 
 
-def build_avatar_upload_form(*, meta: PanelMetadata) -> dict[str, Any]:
-    """A single image upload for the agent in the details view."""
-    return finish_modal(
-        title="Change picture",
-        blocks=[
-            _section("Choose a picture. Up to 2 MB."),
-            {
-                "type": "input",
-                "block_id": AVATAR_FILE_INPUT_ID,
-                "label": {"type": "plain_text", "text": "Picture"},
-                "element": {
-                    "type": "file_input",
-                    "action_id": AVATAR_FILE_INPUT_ID,
-                    "filetypes": ["png", "jpg", "jpeg", "gif", "webp"],
-                    "max_files": 1,
-                },
-            },
-            {"type": "divider"},
-            _context("File types: PNG, JPG, GIF or WebP."),
-        ],
-        private_metadata=encode_panel_metadata(meta),
-        callback_id=CALLBACK_AVATAR_UPLOAD,
-        close="Cancel",
-        submit="Save",
-    )
-
-
 def build_avatar_details_view(*, meta: PanelMetadata) -> dict[str, Any]:
     """Keep public-image and cache guidance behind Details."""
     return finish_modal(
@@ -715,41 +729,14 @@ def build_avatar_details_view(*, meta: PanelMetadata) -> dict[str, Any]:
     )
 
 
-def build_avatar_status_view(
-    *, meta: PanelMetadata, message: str, external_id: str | None = None, retry: bool = False
-) -> dict[str, Any]:
-    """Show upload progress or a result in the submitted modal itself."""
-    title, separator, next_step = message.partition(". ")
-    view = finish_modal(
+def build_avatar_status_view(*, meta: PanelMetadata, message: str) -> dict[str, Any]:
+    """Show a one-line picture refusal in the modal it came from."""
+    return finish_modal(
         title="Picture",
-        blocks=[
-            _section(title + ("." if separator else "")),
-            *([_section(next_step)] if next_step else []),
-            {"type": "divider"},
-            *(
-                [
-                    {
-                        "type": "actions",
-                        "elements": [
-                            _button(
-                                action_id=ACTION_AVATAR_CHANGE,
-                                label="Choose picture",
-                                value=meta.agent_name or "",
-                            )
-                        ],
-                    },
-                ]
-                if retry
-                else []
-            ),
-            _context("Agent setup"),
-        ],
+        blocks=[_section(message)],
         private_metadata=encode_panel_metadata(meta),
         callback_id=CALLBACK_AVATAR_UPLOAD,
     )
-    if external_id is not None:
-        view["external_id"] = external_id
-    return view
 
 
 def _answers_text(details: AgentDetails) -> str:

@@ -1,4 +1,4 @@
-"""Shared private GitHub request wording for Discord and Slack."""
+"""GitHub request wording for requester-bound Discord and ephemeral Slack cards."""
 
 from __future__ import annotations
 
@@ -13,6 +13,12 @@ class RequestCard:
     text: str
     primary: str | None
     secondary: tuple[str, ...] = ()
+    names_repos: bool = False
+
+
+def slack_mrkdwn_escape(value: str) -> str:
+    """Escape Slack mrkdwn control characters without HTML-escaping quotes."""
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def requester_card(
@@ -22,11 +28,20 @@ def requester_card(
     asker_is_admin: bool,
     needs_more_ability: bool = False,
     ability: Literal["read", "write"],
+    admin_status: Literal["unseen", "recent", "unavailable"] | None = None,
 ) -> RequestCard:
     """A name is shown only after a caller proved it is connected here."""
     if request.status == "waiting_github":
         return RequestCard("Waiting for GitHub confirmation.", None, ("Cancel request",))
     if not asker_is_admin:
+        if admin_status == "unseen":
+            return RequestCard(
+                "No admin can see this channel. Ask an admin to open /github.",
+                None,
+                ("Cancel request",),
+            )
+        if admin_status == "recent":
+            return RequestCard("Admins were notified recently.", None, ("Cancel request",))
         if request.admin_notified_at is None:
             return RequestCard(
                 "Admin unavailable. Ask an admin to open `/github`.",
@@ -56,7 +71,9 @@ def requester_card(
     detail = f"Can: {level}."
     if not connected_names:
         detail = "GitHub will ask someone who manages it to confirm.\n" + detail
-    return RequestCard(f"{title}\n{detail}", action, ("Cancel request",))
+    return RequestCard(
+        f"{title}\n{detail}", action, ("Cancel request",), names_repos=bool(connected_names)
+    )
 
 
 def admin_card(
@@ -85,4 +102,5 @@ def admin_card(
         f"{heading}\n{names}\nCan: {level}",
         action,
         ("Decline", "Hide for me"),
+        names_repos=bool(connected_names),
     )

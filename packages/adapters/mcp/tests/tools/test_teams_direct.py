@@ -99,6 +99,16 @@ async def test_a_dm_opens_the_recipients_1_1_chat_and_posts_there(
     assert result.message_ids == ["m-2"]
 
 
+async def test_direct_message_uses_plain_text(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    fake = _Fake({_CALLER, _RECIPIENT})
+    await _call(fake, db_session, sessionmaker)
+    posted = fake.posts[1][1]
+    assert posted["text"] == "hello"
+    assert "attachments" not in posted
+
+
 @pytest.mark.parametrize("roster", [{_CALLER}, {_RECIPIENT}])
 async def test_both_people_must_share_a_team_with_daimon(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession], roster: set[str]

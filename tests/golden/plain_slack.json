@@ -598,16 +598,7 @@
             {
               "elements": [
                 {
-                  "text": "test-agent",
-                  "type": "mrkdwn"
-                }
-              ],
-              "type": "context"
-            },
-            {
-              "elements": [
-                {
-                  "text": "*Details*\nTime: 0s\nCost: $0.001\nTokens: 100 in / 50 out\nBalance: $100.00 left",
+                  "text": "test-agent\u2003\u20030s\u2003\u2003$0.001 used\u2003\u2003$100.00 left",
                   "type": "mrkdwn"
                 }
               ],

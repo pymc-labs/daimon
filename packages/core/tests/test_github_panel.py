@@ -23,6 +23,7 @@ from daimon.core._models import (
     TenantGitHubRepo,
 )
 from daimon.core.config import Settings
+from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_new_repo_delivery import poll_new_repo_notices_once
 from daimon.core.github_panel import (
     activate_grants,
@@ -637,10 +638,22 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
         platform="discord",
         platform_user_id="clicker",
         verified_tenant_admin=True,
+        origin_parent_channel_id="100",
+        origin_thread_id="200",
+        origin_followup_token="123:interaction-token",
+        origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
     )
     invitation = await get_invitation(db_session, digest(url.rsplit("/", 1)[-1]))
     assert invitation is not None
     assert invitation.requester_label == "clicker"
+    assert (invitation.origin_parent_channel_id, invitation.origin_thread_id) == ("100", "200")
+    assert invitation.encrypted_origin_followup is not None
+    assert (
+        decrypt_token(
+            build_multifernet((key.get_secret_value(),)), invitation.encrypted_origin_followup
+        )
+        == "123:interaction-token"
+    )
     grouped_url = await connect_link(
         db_session,
         settings=settings,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -27,6 +28,29 @@ from daimon.core.roster import RosterAgent
 from daimon.core.stores.github_access import AuthorizedRepo
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_new_repo_notices import NewRepoNotice, NewRepoNoticeGroup
+
+
+@pytest.mark.asyncio
+async def test_new_repo_notice_defers_before_database_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interaction = MagicMock()
+    interaction.data = {"custom_id": f"github_notice:{uuid.uuid4()}:2026-10-08:connect"}
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    @asynccontextmanager
+    async def sessionmaker():  # type: ignore[no-untyped-def]
+        yield object()
+
+    async def get_tenant(_session: object, _tenant_id: uuid.UUID) -> None:
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+
+    monkeypatch.setattr(notice_module, "get_tenant", get_tenant)
+    monkeypatch.setattr(notice_module, "notices_for_day", AsyncMock(return_value=None))
+    runtime = SimpleNamespace(sessionmaker=sessionmaker)
+    assert await notice_module.handle_dm_notice(interaction, runtime)  # type: ignore[arg-type]
+    interaction.followup.send.assert_awaited_once_with("This card is unavailable.", ephemeral=True)
 
 
 @pytest.mark.asyncio
@@ -263,6 +287,14 @@ def test_discord_github_home_and_destructive_confirmations() -> None:
         item.label for item in empty_home.walk_children() if isinstance(item, discord.ui.Button)
     }
     assert "Connect GitHub" in empty_labels
+    assert (
+        next(
+            item
+            for item in empty_home.walk_children()
+            if isinstance(item, discord.ui.Button) and item.label == "Connect GitHub"
+        ).emoji.name
+        == "🔗"
+    )
     pending = GitHubHomeView(
         state,
         runtime=MagicMock(),
@@ -273,14 +305,13 @@ def test_discord_github_home_and_destructive_confirmations() -> None:
     pending_labels = [
         item.label for item in pending.walk_children() if isinstance(item, discord.ui.Button)
     ]
-    assert "Continue" in pending_labels and "Start over" in pending_labels
+    assert "Connect GitHub" in pending_labels and "Start over" in pending_labels
     assert "Choose agent" not in pending_labels
-    link = GitHubLinkView("https://example.invalid/connect", user_id=7)
+    link = GitHubLinkView("https://example.invalid/connect")
     assert {item.label for item in link.children if isinstance(item, discord.ui.Button)} == {
-        "Open GitHub ↗",
-        "Copy link",
-        "◀ Back",
+        "Connect GitHub",
     }
+    assert link.children[0].emoji.name == "🔗"
 
 
 @pytest.mark.asyncio
@@ -575,10 +606,12 @@ def test_discord_new_repo_card_hides_unverified_name() -> None:
     group = NewRepoNoticeGroup(notices=(notice,))
     generic = notice_module.NewRepoCard(MagicMock(), group, 7)
     assert [item.label for item in generic.children if isinstance(item, discord.ui.Button)] == [
-        "Connect more repos"
+        "Connect more repos",
+        "Back",
     ]
     named = notice_module.NewRepoCard(MagicMock(), group, 7, visible_names=("example/private",))
     assert [item.label for item in named.children if isinstance(item, discord.ui.Button)] == [
         "Connect repo",
         "Not now",
+        "Back",
     ]

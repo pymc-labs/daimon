@@ -40,6 +40,7 @@ typo is silent — check the spelling here.
 - [Billing Policy](#billing-policy)
 - [Support](#support)
 - [Thread Naming](#thread-naming)
+- [Turn Queue](#turn-queue)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
 - [Scheduler](#scheduler)
@@ -405,10 +406,10 @@ Discord bot token. Required to run the Discord adapter.
 
 `float` · optional · default `3.0`
 
-Seconds after an admitted opening mention before replying in the parent channel that its
-Discord thread is still opening. Includes thread naming and Discord rate-limit waits.
-Set to 0 to reply immediately. The notice is edited with a thread link or retry guidance
-when creation finishes.
+Seconds after an admitted opening mention before reacting to it to show that its Discord
+thread is still opening. Includes thread naming and Discord rate-limit waits. Set to 0
+to react immediately. The reaction is removed when creation finishes; a failed creation
+is answered with a visible error reply.
 
 ### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS_PER_TENANT`
 
@@ -422,8 +423,8 @@ once. Caps one noisy guild from starving others on the shared Anthropic key.
 `int | None` · optional · default unset
 
 Maximum Discord agent turns running across all guilds and DMs in this process. Unset
-leaves deployment-wide admission unlimited. Excess turns are refused with a retry
-notice; continuation wakes keep their existing admission path.
+leaves deployment-wide admission unlimited. Excess turns wait in the turn queue (see
+turn_queue); continuation wakes keep their existing admission path.
 
 ### `DAIMON_DISCORD__TURN_CARD_UNRECOVERABLE_AFTER_S`
 
@@ -998,34 +999,32 @@ Human-support escalation: where requests land, and how many each user gets.
 request eat the tenant's ability to run turns, and would give a paid-up tenant unlimited
 support. Different unit, different table.
 
-Discord and Teams requests go to `escalation_channel_id` (a Teams `19:…` channel is
-posted by the Teams bot, any other id is a Discord channel); Slack requests go only to
-`slack_escalation_channel_id`, never to that channel. An unset channel disables the
-affordance it serves entirely rather than recording requests nobody will ever see.
-Failing closed is the honest behaviour: an escalate button that reaches no one is worse
-than no button, because the person believes they have asked for help. Every platform
-spends the same per-user, per-tenant allowance from one ledger.
+Each platform's requests go only to its own channel: Discord's to
+`escalation_channel_id`, Slack's to `slack_escalation_channel_id`, Teams' to
+`teams_escalation_channel_id`. An unset channel disables the affordance it serves
+entirely rather than recording requests nobody will ever see. Failing closed is the
+honest behaviour: an escalate button that reaches no one is worse than no button,
+because the person believes they have asked for help. Every platform spends the same
+per-user, per-tenant allowance from one ledger.
 
 ### `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`
 
 `str | None` · optional · default unset
 
-Channel id where human-support requests from Discord and Teams are posted: a Discord
-channel id, or a Teams channel id (`19:…`) that the Teams bot posts in. Teams requests
-reach a Discord channel only when the Discord bot token is also set; a Teams channel
-turns Ask a human off on Discord, which cannot post there. Unset (the default) disables
-the escalate affordance on Discord and Teams — a request that reaches nobody is worse
-than no button at all. A channel rather than operator DMs: it survives one person's DMs
-being closed, and it leaves a shared record anyone on the rota can pick up. The bot must
-be able to post there.
+Discord channel id where human-support requests from Discord are posted (the unprefixed
+name predates per-platform channels). A Teams id (`19:…`) left here is ignored. Unset
+(the default) disables the escalate affordance on Discord — a request that reaches
+nobody is worse than no button at all. A channel rather than operator DMs: it survives
+one person's DMs being closed, and it leaves a shared record anyone on the rota can pick
+up. The bot must be able to post there.
 
 ### `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID`
 
 `str | None` · optional · default unset
 
 Slack channel id where human-support requests from Slack are posted. Unset (the default)
-disables the Ask the team button on Slack. Slack requests never go to the Discord
-channel, nor Discord requests here. The bot must be a member of the channel.
+disables the Ask the team button on Slack. Slack requests never go to another platform's
+channel, nor theirs here. The bot must be a member of the channel.
 
 ### `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID`
 
@@ -1035,6 +1034,15 @@ Slack workspace id (T…) that owns DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID,
 deployment installed in several workspaces: every workspace's requests are posted with
 that workspace's bot token. Unset posts with the requesting workspace's own token, which
 suits a single-workspace install. Daimon must be installed in the named workspace.
+
+### `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`
+
+`str | None` · optional · default unset
+
+Teams channel id (`19:…`) where human-support requests from Teams are posted. Unset (the
+default) disables Ask a person on Teams. Teams requests never go to the Discord or Slack
+channel, nor theirs here. The Teams bot must be a member of the channel's team (and of
+the channel, if it is private).
 
 ### `DAIMON_SUPPORT__CREDITS_PER_USER`
 
@@ -1051,10 +1059,11 @@ ledgers. 0 disables escalation.
 Per-tenant switch, keyed by tenant UUID: true also posts every submitted 👎 "What went
 wrong?" form (the reasons, the text, the person, the agent and a link to the answer) to
 the channel Ask a human posts to: DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID for Slack,
-DAIMON_SUPPORT__ESCALATION_CHANNEL_ID for Discord (a Discord channel) and Teams (a Teams
-or Discord channel). Missing/false (the default) keeps the form in the database only.
-The form tells the person their answers are shared when it is on. Spends no support
-credit. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a JSON object.
+DAIMON_SUPPORT__ESCALATION_CHANNEL_ID for Discord and
+DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID for Teams. Missing/false (the default) keeps
+the form in the database only. The form tells the person their answers are shared when
+it is on. Spends no support credit. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a
+JSON object.
 
 ## Thread Naming
 
@@ -1088,6 +1097,45 @@ here. Bounds the per-thread naming cost.
 Seconds to wait for the naming model before the thread opens under the static title. The
 thread is created only after this call, so this is the most a mention can wait before
 anything appears.
+
+## Turn Queue
+
+Read from `daimon.core.config.TurnQueueSettings`. Prefix `DAIMON_TURN_QUEUE__`.
+
+The queue a turn waits in when the concurrency caps are full (``DAIMON_TURN_QUEUE__*``).
+
+One in-memory queue per adapter process, served round-robin across tenants and FIFO
+within one. A queued turn shows the ordinary status card; nothing tells the person it is
+queued.
+
+### `DAIMON_TURN_QUEUE__ENABLED`
+
+`bool` · optional · default `True`
+
+Queue turns that arrive while the global or the per-tenant concurrency cap is full, and
+start them as slots free. Set false to refuse them with the plain capacity notice
+instead.
+
+### `DAIMON_TURN_QUEUE__MAX_PER_TENANT`
+
+`int` · optional · default `50`
+
+Most turns one tenant (Discord server, Slack workspace, Teams tenant) may have waiting
+in one adapter process. A turn beyond it is refused with the plain capacity notice.
+
+### `DAIMON_TURN_QUEUE__MAX_TOTAL`
+
+`int` · optional · default `500`
+
+Most turns waiting across all tenants in one adapter process. A turn beyond it is
+refused with the plain capacity notice.
+
+### `DAIMON_TURN_QUEUE__MAX_WAIT_S`
+
+`float` · optional · default `300.0`
+
+Seconds a queued turn may wait for a slot. A safeguard only: the turn then leaves the
+queue and its card ends with the ordinary error.
 
 ## Tool Safety
 
@@ -1133,6 +1181,14 @@ Servers or server/tool pairs that are always refused, e.g. ["hubspot/delete_deal
 Servers or server/tool pairs whose writes may run in routines and other unattended runs,
 e.g. ["linear/create_issue"]. "*" allows every write there. Daimon's own add_skill never
 confirms unattended.
+
+### `DAIMON_TOOL_SAFETY__CONFIRMATION_TIMEOUT_S`
+
+`int` · optional · default `600`
+
+How long an approval card waits for the requester's Approve or Deny, in seconds, before
+it expires and the call is refused. Production keeps the 10-minute default; staging can
+set it short (60-90) so a precheck or load test does not hold a turn for ten minutes.
 
 ## Artifacts
 

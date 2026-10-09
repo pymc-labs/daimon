@@ -17,16 +17,8 @@
                   '`rid: 01TESTREQUESTID0000000000`',
                 ]),
               ),
-              tuple(
-                'Details',
-                list([
-                  'Time: 15s',
-                  'Cost: $0.003',
-                  'Tokens: 500 in / 80 out',
-                ]),
-              ),
             ]),
-            'footer': 'Atlas',
+            'footer': 'Atlas\u2003\u200315s\u2003\u2003$0.003 used',
             'title': 'Something went wrong.',
           }),
         ]),
@@ -78,16 +70,8 @@
             'color': 5763719,
             'description': None,
             'fields': list([
-              tuple(
-                'Details',
-                list([
-                  'Time: 11s',
-                  'Cost: $0.008',
-                  'Tokens: 1.5k in / 320 out',
-                ]),
-              ),
             ]),
-            'footer': 'Atlas',
+            'footer': 'Atlas\u2003\u200311s\u2003\u2003$0.008 used',
             'title': None,
           }),
         ]),

@@ -116,9 +116,11 @@ Two consequences worth knowing before you add a model:
 `DAIMON_BILLING__MARKUP` (default `1.0`, pass-through) multiplies the cost
 before it is debited, in `debit_amount` in
 `packages/core/daimon/core/tenant_balance.py`, quantized to six decimal
-places. It is applied to the ledger only. Every reporting surface reprices raw
-`usage_events` rows, so what a panel shows is provider cost, not what the
-tenant was charged.
+places. It is applied to the ledger and to the finished-turn summary line,
+whose `used` is the turn's debit (its whole-turn cost times `markup`, so it can
+differ from the sum of the per-call debits by at most $0.001). Every other
+reporting surface reprices raw `usage_events` rows, so what a panel or
+`get_turn_cost` shows is provider cost, not what the tenant was charged.
 
 ## The gates, in order
 
@@ -146,9 +148,16 @@ its budget window against the budget's limit; see
 [channel budgets](#channel-budgets). A DM moved with `/dm` counts toward the
 channel it came from. A turn with no channel (an older DM, an MCP turn from
 a key not minted in a channel) and a channel with no budget are never gated.
-On Discord and Slack, a finished turn shows the remaining active channel
-budget on its status card. A channel without an active budget shows the
-tenant's prepaid balance when one exists.
+On Discord and Slack, a finished turn ends with one summary line: the agent,
+the turn's time, what it was debited (its model cost times `markup`) and the
+money left, for example
+`Ada  12s  $0.042 used  $41.20 left`, under the turn's last message: the last
+chunk of a long answer or, on Discord, a file posted after it. Em spaces set
+the fields apart. The
+money left is the active channel budget's remainder; a channel without an
+active budget shows the tenant's prepaid balance when one exists. An unpriced
+model drops the cost, and an operator-funded tenant outside a budgeted channel
+drops the money left.
 
 A denial raises `AdmissionDenied` carrying only the reason literal
 (`balance_depleted`, `cap_exceeded` or `channel_budget_exceeded`); the wording
@@ -175,8 +184,9 @@ Two boundaries of the design worth stating plainly:
   admitted while the balance was still positive runs to completion, so a chat
   tenant can overdraw by up to its effective concurrent-turn cap (the adapter's
   `max_concurrent_turns_per_tenant`, default 3, or the tenant's `turn-cap`
-  override) times one turn's cost. Discord's optional process-wide limit refuses
-  excess guild mentions and DMs before `admit()`. An MCP `start_turn` session is
+  override) times one turn's cost. A turn over that cap waits in the turn
+  queue after `admit()`; it runs the balance gate again once it holds a slot,
+  so queued turns do not widen the bound. An MCP `start_turn` session is
   worse. Its spend
   reaches the ledger only when the scheduler's usage sweep next reads the
   session: up to two sweep passes plus one tick interval later.

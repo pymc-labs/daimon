@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Protocol
 
+import structlog
 from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt, PendingConfirmations
 from daimon.core.posted_controls.confirmation import (
     EXPIRED_MESSAGE,
@@ -19,6 +20,93 @@ from daimon.core.posted_controls.confirmation import (
     NOT_YOURS_MESSAGE,
     ConfirmationCardState,
 )
+
+_log = structlog.get_logger(__name__)
+
+#: Every card edit not yet finished, held so none is collected mid-flight.
+_BACKGROUND_EDITS: set[asyncio.Future[object]] = set()
+#: The latest edit per card, so edits to one card land in call order.
+_LAST_EDIT: dict[object, asyncio.Future[object]] = {}
+
+
+def pending_card_edits() -> int:
+    """Card edits still finishing in the background (for tests and health)."""
+    return len(_BACKGROUND_EDITS)
+
+
+def cancel_pending_card_edits() -> None:
+    """Cancel every unfinished card edit; for test isolation only."""
+    for task in list(_BACKGROUND_EDITS):
+        task.cancel()
+    _BACKGROUND_EDITS.clear()
+    _LAST_EDIT.clear()
+
+
+def queue_card_edit(
+    edit: Awaitable[object],
+    *,
+    card_key: object,
+    failure_errors: tuple[type[BaseException], ...],
+    failed_event: str,
+) -> asyncio.Future[object]:
+    """Queue a card edit behind the card's previous one, synchronously.
+
+    Edits to one card (`card_key`) run one after another in call order, so a
+    slow Approved edit can never land after the Stopped edit that followed it.
+    The edit is registered and tracked before this returns, so a caller can
+    queue it and return at once (Teams answers a click this way), and
+    cancelling a caller neither drops the edit nor hides its failure.
+    """
+    previous = _LAST_EDIT.get(card_key)
+
+    async def _in_order() -> object:
+        if previous is not None and not previous.done():
+            # Strict: a later state must never land before an earlier one.
+            # Platform clients time out their own calls, so this ends.
+            await asyncio.wait({previous})
+        return await edit
+
+    task: asyncio.Future[object] = asyncio.ensure_future(_in_order())
+    _LAST_EDIT[card_key] = task
+    _BACKGROUND_EDITS.add(task)
+
+    def _finished(done: asyncio.Future[object]) -> None:
+        _BACKGROUND_EDITS.discard(done)
+        if _LAST_EDIT.get(card_key) is done:
+            del _LAST_EDIT[card_key]
+        if done.cancelled():
+            return
+        err = done.exception()
+        if err is not None:
+            _log.warning(failed_event, error=str(err) or type(err).__name__)
+            if not isinstance(err, failure_errors):
+                _log.error("tool_confirmation.edit_unexpected_error", event_name=failed_event)
+
+    task.add_done_callback(_finished)
+    return task
+
+
+async def edit_card_within(
+    edit: Awaitable[object],
+    *,
+    card_key: object,
+    budget_s: float,
+    failure_errors: tuple[type[BaseException], ...],
+    failed_event: str,
+) -> None:
+    """Queue a card edit (`queue_card_edit`), waiting at most `budget_s` for it.
+
+    Retiring or answering a card runs while a turn is being stopped or timed
+    out, so a slow platform must not hold the turn. Cancelling the edit at the
+    budget left the card showing live buttons under load (staging, 2026-10-09:
+    two of six expiries timed out at 2s). The edit now completes on its own.
+    """
+    task = queue_card_edit(
+        edit, card_key=card_key, failure_errors=failure_errors, failed_event=failed_event
+    )
+    done, _ = await asyncio.wait({task}, timeout=budget_s)
+    if not done:
+        _log.info("tool_confirmation.edit_deferred", edit_event=failed_event, budget_s=budget_s)
 
 
 class PromptCard(Protocol):

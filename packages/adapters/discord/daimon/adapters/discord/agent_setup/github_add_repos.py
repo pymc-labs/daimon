@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
 from daimon.adapters.discord.agent_setup.github_embed_panel import (
@@ -14,8 +15,9 @@ from daimon.adapters.discord.agent_setup.github_repos import GitHubReposView
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_identity import identity_enabled_for
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, build_connect_card
 from daimon.core.github_panel import (
-    CONNECT_COPY,
     GrantsPanel,
     RepoChoice,
     activate_grants,
@@ -118,6 +120,7 @@ class GitHubAddReposView(PanelViewBase):
             if state.is_admin:
                 connect: discord.ui.Button[GitHubAddReposView] = discord.ui.Button(
                     label="Connect more repos" if panel.repos else "Connect GitHub",
+                    emoji=CONNECT_GITHUB_EMOJI if not panel.repos else None,
                     style=(
                         discord.ButtonStyle.secondary
                         if panel.repos
@@ -168,6 +171,23 @@ class GitHubAddReposView(PanelViewBase):
             self._add_back(back_actions, target="pick")
             container.add_item(back_actions)
         self.add_item(container)
+        if (
+            step == "pick"
+            and state.is_admin
+            and not panel.repos
+            and runtime.settings.mcp.app_root_url
+        ):
+            from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
+
+            enabled = identity_enabled_for(runtime.settings, "discord", state.guild_id)
+            self.embed = connect_embed(
+                build_connect_card(
+                    agent_name=agent.name,
+                    identity_enabled=enabled,
+                    avatar_url=state.avatar_urls.get(agent.name),
+                    public_base_url=str(runtime.settings.mcp.app_root_url),
+                )
+            )
 
     def _ability_label(self) -> str:
         return "Read only" if self.ability == "read" else "Read and write"
@@ -259,8 +279,9 @@ class GitHubAddReposView(PanelViewBase):
                 "Only a server admin can connect repos.", ephemeral=True
             )
             return
-        from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
+        from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
         from daimon.adapters.discord.agent_setup.github_home import GitHubLinkView
+        from daimon.core.github_connect_cards import resolve_connect_card
 
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
         agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=self.agent.ma_agent_id)
@@ -284,17 +305,25 @@ class GitHubAddReposView(PanelViewBase):
                     requester_label=interaction.user.display_name,
                     agent_id=agent_id,
                     agent_name=self.agent.name,
+                    origin_parent_channel_id=str(interaction.channel_id),
+                    origin_thread_id=str(interaction.channel_id),
+                    origin_followup_token=f"{interaction.application_id}:{interaction.token}",
+                    origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
                 )
         except ValueError as error:
             await interaction.followup.send(safe_github_error(error), ephemeral=True)
             return
+        card = await resolve_connect_card(
+            self.runtime.sessionmaker,
+            self.runtime.settings,
+            tenant_id=tenant_id,
+            platform="discord",
+            workspace_id=str(self.state.guild_id),
+            agent_name=self.agent.name,
+        )
         await interaction.followup.send(
-            embed=github_embed(
-                f"Opens GitHub to pick repos for {self.agent.name}.\n"
-                f"Nothing is shared until you confirm.\n{CONNECT_COPY}",
-                state="waiting",
-            ),
-            view=GitHubLinkView(url, user_id=interaction.user.id),
+            embed=connect_embed(card),
+            view=GitHubLinkView(url),
             ephemeral=True,
         )
 

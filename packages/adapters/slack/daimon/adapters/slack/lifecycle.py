@@ -41,6 +41,7 @@ import dataclasses
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -80,9 +81,11 @@ from daimon.core.channel_tidy import record_turn_post
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import fit_notice, render_termination_notice
+from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
@@ -166,6 +169,7 @@ class SlackTurnLifecycle:
         author_id: str,
         agent_name: str,
         model_id: str,
+        markup: Decimal = Decimal(1),
         register: Callable[[str, asyncio.Event, str], None],
         deregister: Callable[[str], None],
         register_pending: Callable[[str, asyncio.Event, str], None] | None = None,
@@ -207,6 +211,7 @@ class SlackTurnLifecycle:
         self._cancel = cancel
         self._author_id = author_id
         self._model_id = model_id
+        self._markup = markup
         self._register = register
         self._deregister = deregister
         self._register_pending = register_pending
@@ -400,12 +405,12 @@ class SlackTurnLifecycle:
             self._last_flush = now
 
     def _apply_usage(self, state: TurnState) -> None:
-        """Fold accumulated token totals + priced cost onto the Block Kit state.
+        """Price accumulated token totals onto the Block Kit state.
 
         Reconstructs a per-turn BetaManagedAgentsSpanModelUsage from the four
         cache-split totals and prices it through cost_of, so the displayed cost
         matches the billing ledger to the cent. An unpriced model yields None
-        cost — Details omits the cost line.
+        cost and the summary line omits it.
         """
         t = state.usage_totals
         usage = BetaManagedAgentsSpanModelUsage(
@@ -416,13 +421,10 @@ class SlackTurnLifecycle:
             speed="standard",
         )
         cost = cost_of(usage, MODEL_PRICING.get(self._model_id))
-        merged_in = t.input_tokens + t.cache_creation_input_tokens + t.cache_read_input_tokens
-        self._state = dataclasses.replace(
-            self._state,
-            usage_in=merged_in,
-            usage_out=t.output_tokens,
-            cost_str=format_cost(cost),
-        )
+        if cost is not None:
+            # What the tenant is debited, markup included, so `used` matches `left`.
+            cost = float(debit_amount(cost, markup=self._markup))
+        self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
 
     async def _post_or_update(self, blocks: list[dict[str, Any]], text: str) -> None:
         """Post the status message the first time, or update it in place after.
@@ -523,6 +525,18 @@ class SlackTurnLifecycle:
                 },
             ],
             "Stopped. Send a message to start again.",
+        )
+
+    async def end_unstarted(self, *, stopped: bool, text: str = QUEUE_TIMED_OUT_TEXT) -> None:
+        """End a card whose turn never started: Stop while it waited for a slot
+        (the stopped turn's words), or `text` (the ordinary error after the
+        queue's max wait, or a refusal)."""
+        if stopped:
+            await self._flush_cancelled()
+            return
+        self._terminal = True
+        await self._post_or_update(
+            [{"type": "section", "text": {"type": "mrkdwn", "text": text}}], text
         )
 
     async def _repair_terminal_flush(self, text: str) -> None:
@@ -668,13 +682,14 @@ class SlackTurnLifecycle:
                     continue
                 blocks: list[dict[str, Any]] = [block]
                 notification_chunk = chunk
-                if index == 0:
-                    if mention and block.get("type") == "table":
-                        blocks.insert(0, {"type": "markdown", "text": mention})
-                        notification_chunk = f"{mention}\n{chunk}"
+                if index == 0 and mention and block.get("type") == "table":
+                    blocks.insert(0, {"type": "markdown", "text": mention})
+                    notification_chunk = f"{mention}\n{chunk}"
+                if index == len(deliveries) - 1:
+                    # The summary line closes the answer, under its last chunk.
                     blocks.extend(to_blocks(self._state, now=self._clock(), answer_visible=True))
-                if index == len(deliveries) - 1 and not cancelled:
-                    blocks.append(self._feedback_block())
+                    if not cancelled:
+                        blocks.append(self._feedback_block())
                 try:
                     if index == 0 and not notify_on_completion:
                         await self._post_or_update(blocks, _notification_text(notification_chunk))

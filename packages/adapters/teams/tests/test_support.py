@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import re
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
@@ -25,7 +27,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_platform_principal
-from pydantic import SecretStr
+from microsoft_teams.common.http.client import MiddlewareContext
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -61,16 +63,33 @@ def _running(
     *,
     channel: str = OPS,
     credits: int | None = 3,
-    http: httpx.AsyncClient | None = None,
 ) -> AbstractAsyncContextManager[TeamsHttpService]:
-    runtime = build_teams_runtime(db_factory, http_client=http)
+    runtime = build_teams_runtime(db_factory)
     runtime.settings.support = (
-        SupportSettings(escalation_channel_id=channel)
+        SupportSettings(teams_escalation_channel_id=channel)
         if credits is None
-        else SupportSettings(escalation_channel_id=channel, credits_per_user=credits)
+        else SupportSettings(teams_escalation_channel_id=channel, credits_per_user=credits)
     )
-    cast(Any, runtime.settings).discord = SimpleNamespace(bot_token=SecretStr("discord-token"))
     return running_service(runtime, fake)
+
+
+@dataclasses.dataclass
+class _OpsFake(TeamsApiFake):
+    """A post in the support channel sets `posting`, waits for `release`, fails when `fail`."""
+
+    posting: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+    release: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+    fail: bool = False
+
+    async def send(
+        self, context: MiddlewareContext, next: Callable[[], Awaitable[httpx.Response]]
+    ) -> httpx.Response:
+        if context.method == "POST" and f"/conversations/{OPS}/activities" in context.url:
+            self.posting.set()
+            await self.release.wait()
+            if self.fail:
+                return httpx.Response(500, request=httpx.Request(context.method, context.url))
+        return await super().send(context, next)
 
 
 async def _form(service: TeamsHttpService, fake: TeamsApiFake, activity: dict[str, object]) -> str:
@@ -195,55 +214,32 @@ async def test_an_empty_request_is_refused_and_records_nothing(
     assert support.USAGE in reply and await _rows(db_session_factory) == []
 
 
-async def test_a_discord_channel_gets_the_request_through_the_discord_bot(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
-) -> None:
-    sent: list[httpx.Request] = []
-
-    def discord(request: httpx.Request) -> httpx.Response:
-        sent.append(request)
-        return httpx.Response(200, json={"id": "1"})
-
-    http = httpx.AsyncClient(transport=httpx.MockTransport(discord))
-    async with _running(db_session_factory, teams_api_fake, channel="123456789", http=http) as svc:
-        card = await _form(svc, teams_api_fake, make_message_activity(text="support"))
-        await _send(svc, _token(card), "@everyone help")
-    [request] = sent
-    assert str(request.url) == "https://discord.com/api/v10/channels/123456789/messages"
-    assert json.loads(request.content)["allowed_mentions"] == {"parse": []}, "a note pings no one"
-
-
 async def test_a_failed_post_keeps_the_request_undelivered(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    def refuse(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500)
-
-    http = httpx.AsyncClient(transport=httpx.MockTransport(refuse))
-    async with _running(db_session_factory, teams_api_fake, channel="123456789", http=http) as svc:
-        card = await _form(svc, teams_api_fake, make_message_activity(text="support"))
+    fake = _OpsFake(fail=True)
+    fake.release.set()
+    async with _running(db_session_factory, fake) as svc:
+        card = await _form(svc, fake, make_message_activity(text="support"))
         reply = await _send(svc, _token(card), "help")
+    assert fake.posting.is_set(), "the post was tried, and failed"
     assert support.RECEIVED.format(remaining=2) in reply, "recorded, whatever delivery does"
     [row] = await _rows(db_session_factory)
     assert row.delivered_at is None, "kept as undelivered"
 
 
 async def test_the_request_is_answered_before_its_delivery_lands(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    release = asyncio.Event()
-
-    async def slow(request: httpx.Request) -> httpx.Response:
-        await release.wait()
-        return httpx.Response(200, json={"id": "1"})
-
-    http = httpx.AsyncClient(transport=httpx.MockTransport(slow))
-    async with _running(db_session_factory, teams_api_fake, channel="123456789", http=http) as svc:
-        card = await _form(svc, teams_api_fake, make_message_activity(text="support"))
+    fake = _OpsFake()
+    async with _running(db_session_factory, fake) as svc:
+        card = await _form(svc, fake, make_message_activity(text="support"))
         click = make_card_action("support", "send", ask=_token(card), note="help")
         reply = json.dumps(await post_activity(svc, click), ensure_ascii=False)
+        async with asyncio.timeout(10):
+            await fake.posting.wait()  # the policy read is done; the post is in flight
         [pending] = await _rows(db_session_factory)
-        release.set()
+        fake.release.set()
         await _delivered(svc)
 
     assert support.RECEIVED.format(remaining=2) in reply, "the invoke does not wait for the post"
@@ -253,23 +249,41 @@ async def test_the_request_is_answered_before_its_delivery_lands(
 
 
 @pytest.mark.parametrize(
-    ("channel", "credits", "discord", "on"),
+    ("teams_channel", "discord_channel", "credits", "on"),
     [
-        (None, 3, True, False),
-        (OPS, 0, True, False),
-        ("123", 3, False, False),
-        ("123", 3, True, True),
-        (OPS, 3, False, True),
+        (None, None, 3, False),
+        (OPS, None, 0, False),
+        (None, "123", 3, False),
+        (OPS, "123", 3, True),
+        (OPS, None, 3, True),
     ],
 )
-def test_the_command_exists_only_when_a_request_can_reach_someone(
-    channel: str | None, credits: int, discord: bool, on: bool
+def test_the_command_exists_only_with_a_teams_channel_and_credits(
+    teams_channel: str | None, discord_channel: str | None, credits: int, on: bool
 ) -> None:
+    """Discord's channel is Discord's: Teams never posts there, as Slack never does."""
     settings: Any = SimpleNamespace(
-        support=SupportSettings(escalation_channel_id=channel, credits_per_user=credits),
-        discord=object() if discord else None,
+        support=SupportSettings(
+            teams_escalation_channel_id=teams_channel,
+            escalation_channel_id=discord_channel,
+            credits_per_user=credits,
+        )
     )
     assert support.enabled(settings) is on
+
+
+def test_routed_feedback_needs_the_teams_channel() -> None:
+    """A tenant's 👎 forms never go to Discord's channel, which Teams once posted to."""
+    tenant = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    routed = {tenant: True}
+    discord_only: Any = SimpleNamespace(
+        support=SupportSettings(escalation_channel_id="123", feedback_to_support=routed)
+    )
+    teams: Any = SimpleNamespace(
+        support=SupportSettings(teams_escalation_channel_id=OPS, feedback_to_support=routed)
+    )
+    assert not support.routes_feedback(discord_only, tenant)
+    assert support.routes_feedback(teams, tenant)
 
 
 def _ask(op: str, **data: object) -> dict[str, object]:

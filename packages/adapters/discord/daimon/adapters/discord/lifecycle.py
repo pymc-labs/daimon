@@ -17,8 +17,9 @@ from __future__ import annotations
 import dataclasses
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import structlog
@@ -37,6 +38,10 @@ from daimon.adapters.discord.embed import (
     update_activity,
 )
 from daimon.adapters.discord.errors import bound_request_id
+from daimon.adapters.discord.feedback_seed import (
+    seed_feedback_reactions,
+    unseed_feedback_reactions,
+)
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.agent_post_identity import fallback_name_prefix
@@ -44,6 +49,7 @@ from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import render_termination_notice
@@ -146,6 +152,7 @@ class DiscordTurnLifecycle:
         agent_name: str,
         fallback_active: Callable[[], bool] | None = None,
         model_id: str,
+        markup: Decimal = Decimal(1),
         cancel_view: discord.ui.View | None = None,
         requester_id: int | None = None,
         trigger_message: discord.Message | None = None,
@@ -184,6 +191,7 @@ class DiscordTurnLifecycle:
         self._fallback_active = fallback_active
         self._name_prefix_sent = False
         self._model_id = model_id
+        self._markup = markup
         self._clock = clock
         self._state = EmbedState(
             phase=TurnPhase.THINKING,
@@ -199,6 +207,16 @@ class DiscordTurnLifecycle:
         # into the real answer, so a recovered turn looks like a normal one.
         self._message_ref: discord.Message | None = adopt_message_ref
         self._card_message_ref: discord.Message | None = adopt_message_ref
+        self._terminal_embed: discord.Embed | None = None
+        # The answer message that carries the summary, once there is one.
+        self._summary_ref: discord.Message | None = None
+        # What the summary's holder keeps when the summary leaves: nothing, or a
+        # tool-only card's "Done." without its footer.
+        self._holder_rest: list[discord.Embed] = []
+        # A snowflake just past the turn's end: posts before it belong to the turn.
+        self._ended_before: int | None = None
+        # The newest Discord-side moment this turn's own sends and edits carried.
+        self._discord_mark: int | None = None
         self._card_discard_failed = False
         self._last_flush: float = 0.0
         self._terminal: bool = False
@@ -275,7 +293,9 @@ class DiscordTurnLifecycle:
         """
         if self._unprompted:
             kwargs["silent"] = True
-        return await self._send(**kwargs)
+        sent = await self._send(**kwargs)
+        self._note_discord_time(getattr(sent, "id", None))
+        return sent
 
     async def _edit_message(
         self,
@@ -284,6 +304,9 @@ class DiscordTurnLifecycle:
     ) -> None:
         assert message is not None
         replacement = await self._edit(message, **kwargs)
+        edited_at = getattr(replacement, "edited_at", None)
+        if isinstance(edited_at, datetime):
+            self._note_discord_time(discord.utils.time_snowflake(edited_at, high=True))
         if isinstance(replacement, discord.Message) and replacement.id != message.id:
             self._message_ref = replacement
             if self._on_replacement is not None:
@@ -326,15 +349,14 @@ class DiscordTurnLifecycle:
         # else: within debounce window — skip
 
     def _apply_usage(self, state: TurnState) -> None:
-        """Fold the turn's accumulated token totals + priced cost onto the
-        embed state before a terminal flush.
+        """Price the turn's accumulated token totals onto the embed state before a
+        terminal flush.
 
         Reconstructs a per-turn ``BetaManagedAgentsSpanModelUsage`` from the four
         cache-split totals and prices it through the same ``cost_of`` the billing
-        ledger uses, so the Details cost matches the ledger to the cent. The
-        displayed input count stays merged (input + cache_creation + cache_read);
-        only the cost math is stage-split, inside ``cost_of``. An unpriced model
-        yields ``cost_of`` -> None -> ``cost_str`` None -> Details omits the cost.
+        ledger uses, so the footer cost matches the ledger to the cent. An unpriced
+        model yields ``cost_of`` -> None -> ``cost_str`` None -> the footer omits
+        the cost.
         """
         t = state.usage_totals
         usage = BetaManagedAgentsSpanModelUsage(
@@ -345,13 +367,10 @@ class DiscordTurnLifecycle:
             speed="standard",
         )
         cost = cost_of(usage, MODEL_PRICING.get(self._model_id))
-        merged_in = t.input_tokens + t.cache_creation_input_tokens + t.cache_read_input_tokens
-        self._state = dataclasses.replace(
-            self._state,
-            usage_in=merged_in,
-            usage_out=t.output_tokens,
-            cost_str=format_cost(cost),
-        )
+        if cost is not None:
+            # What the tenant is debited, markup included, so `used` matches `left`.
+            cost = float(debit_amount(cost, markup=self._markup))
+        self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
 
     async def _flush_terminal(self) -> None:
         """Unconditionally flush terminal state as a single collapsed embed,
@@ -374,6 +393,7 @@ class DiscordTurnLifecycle:
         now = self._clock()
         data = to_embed_data(self._state, now=now)
         embed = build_discord_embed(data)
+        self._terminal_embed = embed
         if self._message_ref is None:
             self._message_ref = await self._send_message(embeds=[embed], view=None)
             self._card_message_ref = self._message_ref
@@ -409,7 +429,31 @@ class DiscordTurnLifecycle:
                 )
             log.info("turn.sealed_response_posted", block_index=index, chars=len(text))
 
+    def _note_discord_time(self, snowflake: object) -> None:
+        if isinstance(snowflake, int) and (
+            self._discord_mark is None or snowflake > self._discord_mark
+        ):
+            self._discord_mark = snowflake
+
+    def _mark_ended(self) -> None:
+        """Close the turn's window on Discord's clock; the host's only if Discord gave none.
+
+        The host clock is the fallback for a terminal path that neither sends
+        nor edits (an unprompted turn whose card is deleted).
+        """
+        if self._discord_mark is not None:
+            self._ended_before = self._discord_mark + 1
+        else:
+            self._ended_before = discord.utils.time_snowflake(datetime.now(UTC), high=True)
+
     async def on_terminal_success(self, state: TurnState) -> None:
+        self._discord_mark = None  # only the terminal sends and edits close the window
+        try:
+            await self._deliver_success(state)
+        finally:
+            self._mark_ended()
+
+    async def _deliver_success(self, state: TurnState) -> None:
         await self._persist_sealed_responses(state)
         if self._unprompted and not extract_final_response(state.content):
             # No final answer on a turn nobody asked for: leave the thread as
@@ -449,6 +493,14 @@ class DiscordTurnLifecycle:
                 await self._edit_message(
                     self._message_ref, embed=build_discord_embed(done_data), view=None
                 )
+                # The card stays as "Done."; only its summary footer may move under the files.
+                self._terminal_embed = build_discord_embed(
+                    dataclasses.replace(done_data, description="")
+                )
+                self._summary_ref = self._message_ref
+                self._holder_rest = [
+                    build_discord_embed(dataclasses.replace(done_data, footer=None))
+                ]
                 # #79: a tool-only turn has no reply to hang the notice under,
                 # so a dropped server is named on its own line.
                 tool_only_notice = render_degraded_notice(state.mcp_failures)
@@ -509,12 +561,15 @@ class DiscordTurnLifecycle:
             else split_for_discord_safe(response_text)
         )
 
+        summary = self._terminal_embed
+
         async def deliver_first(content: str, files: list[discord.File]) -> None:
             if notify:
                 self._message_ref = await self._send_message(
                     content=content,
                     allowed_mentions=mentions,
                     **({"files": files} if files else {}),
+                    **({"embeds": [summary]} if summary and len(chunks) == 1 else {}),
                 )
             else:
                 await self._edit_message(
@@ -523,6 +578,8 @@ class DiscordTurnLifecycle:
                     view=None,
                     allowed_mentions=mentions,
                     **({"attachments": files} if files else {}),
+                    # A long answer ends on its last chunk, so the summary moves there.
+                    **({"embeds": []} if len(chunks) > 1 else {}),
                 )
 
         try:
@@ -538,11 +595,70 @@ class DiscordTurnLifecycle:
             )
             await deliver_first(chunks[0], [])
         self._revealed_first_chunk = chunks[0]
-        # Overflow: subsequent chunks posted as new messages
-        for chunk in chunks[1:]:
-            await self._send_message(content=chunk, allowed_mentions=discord.AllowedMentions.none())
+        self._summary_ref = self._message_ref
+        # Overflow: subsequent chunks posted as new messages, the summary under the last.
+        for i, chunk in enumerate(chunks[1:], start=2):
+            last = summary is not None and i == len(chunks)
+            sent = await self._send_message(
+                content=chunk,
+                allowed_mentions=discord.AllowedMentions.none(),
+                **({"embeds": [summary]} if last else {}),
+            )
+            if last:
+                self._summary_ref = sent
+        if notify:
+            # The ping posted the answer below the card, so the card goes.
+            await self._delete_card()
 
         log.info("turn.terminal_success")
+
+    @property
+    def feedback_message_id(self) -> str | None:
+        """Where the vote emoji go: the message carrying the summary line."""
+        if self._summary_ref is not None:
+            return str(self._summary_ref.id)
+        return self.final_message_id
+
+    @property
+    def turn_window(self) -> tuple[int, int] | None:
+        """Message ids bounding the turn's own posts: after its card, before its end."""
+        card = self._card_message_ref
+        if card is None or self._ended_before is None:
+            return None
+        return card.id, self._ended_before
+
+    async def move_summary_last(
+        self, thread: discord.Thread, *, swept: Collection[int] = ()
+    ) -> None:
+        """Re-seat the summary under the turn's last post, once nothing more will come.
+
+        Files and the agent's own posts land below the answer, so the summary
+        would otherwise sit mid-turn. It moves only onto a plain message the bot
+        itself posted for this turn: inside the turn's window, or one of
+        ``swept``, the files its output sweep posted. Anything else (a person's
+        reply, a newer turn's post, a webhook post) leaves it where it is.
+        """
+        holder, embed, window = self._summary_ref, self._terminal_embed, self.turn_window
+        if holder is None or embed is None or window is None:
+            return
+        try:
+            latest = [message async for message in thread.history(limit=1)]
+            if not latest:
+                return
+            last = latest[0]
+            ours = last.id in swept or holder.id < last.id < window[1]
+            if not ours or last.author.id != thread.guild.me.id or last.embeds:
+                return
+            await last.edit(embeds=[embed])
+            await self._edit_message(holder, embeds=self._holder_rest)
+            if self._was_answered:
+                # The vote emoji sit with the summary, under the turn's last post.
+                await unseed_feedback_reactions(holder, me=thread.guild.me)
+                await seed_feedback_reactions(thread, message_id=str(last.id))
+        except discord.HTTPException as exc:
+            log.warning("turn.summary_move_failed", error_type=type(exc).__name__)
+            return
+        self._summary_ref = last
 
     async def prepend_revealed_answer(self, notice: str) -> bool:
         """Edit `notice` in above an answer already on screen; False if it cannot go there.
@@ -583,6 +699,13 @@ class DiscordTurnLifecycle:
         return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
+        self._discord_mark = None  # only the terminal sends and edits close the window
+        try:
+            await self._deliver_failure(state, err)
+        finally:
+            self._mark_ended()
+
+    async def _deliver_failure(self, state: TurnState, err: Exception) -> None:
         if (limit := spend_limit_error(err)) is not None:
             log.error(
                 "anthropic.spend_limit_reached",
@@ -656,6 +779,16 @@ class DiscordTurnLifecycle:
             self._card_discard_failed = True
             log.info("turn.embed_discard_failed", exc_info=True)
         self._message_ref = None
+
+    async def _delete_card(self) -> None:
+        """Delete the finished card once the answer is posted below it. Best effort."""
+        card = self._card_message_ref
+        if card is None or self._delete is None or card is self._message_ref:
+            return
+        try:
+            await self._delete(card)
+        except Exception:  # the answer is already posted; a stale card must not fail the turn
+            log.info("turn.card_delete_failed", exc_info=True)
 
     async def on_reconnect(self, reason: ReconnectReason) -> None:
         pass

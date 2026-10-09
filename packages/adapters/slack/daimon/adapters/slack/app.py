@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import json
 import time
 import uuid
 from collections.abc import Coroutine
@@ -34,11 +35,7 @@ from daimon.adapters.slack.agent_setup.add_skill import (
     evaluate_add_skill_submission,
     run_add_skill_submission,
 )
-from daimon.adapters.slack.agent_setup.avatar import (
-    AvatarSubmission,
-    evaluate_avatar_submission,
-    run_avatar_submission,
-)
+from daimon.adapters.slack.agent_setup.avatar import evaluate_avatar_submission
 from daimon.adapters.slack.agent_setup.channel_admins import (
     ChannelAdminsSubmission,
     evaluate_channel_admins_submission,
@@ -210,9 +207,8 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError
+from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
-from daimon.core.github_new_repo_delivery import run_new_repo_notice_poller
-from daimon.core.github_removal_delivery import run_removal_notice_poller
 from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
@@ -224,8 +220,7 @@ from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role, TaskContinuationRow
 from daimon.core.stores.github_access_requests import AccessRequest
-from daimon.core.stores.github_new_repo_notices import NewRepoNoticeGroup
-from daimon.core.stores.github_removal_notices import RemovalNotice
+from daimon.core.stores.github_connect_notices import ConnectNotice
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.slack_connect_prompts import mark_connect_prompted, was_connect_prompted
 from daimon.core.stores.slack_event_dedup import insert_if_new
@@ -255,12 +250,17 @@ from daimon.core.turn.errors import (
     SessionBusyError,
     SessionPreparationFailed,
 )
-from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
 from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn.slots import (
+    QUEUE_TIMED_OUT_TEXT,
+    holding,
+    release_turn_slot,
+    wait_for_slot,
+)
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
     ThreadQueue,
@@ -276,6 +276,7 @@ from daimon.core.turn_origin import (
     render_turn_origin,
     turn_origin,
 )
+from daimon.core.turn_queue import TurnQueue
 from mux.errors import ScopeViolation
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
@@ -285,6 +286,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
+TENANT_CAP_NOTICE = "This workspace has too many chats in flight right now — try again in a moment."
 
 # Grace window for graceful shutdown drain. Must be strictly less
 # than the deployment's 60s kill timeout to leave headroom for client.close()
@@ -399,8 +401,8 @@ class SlackApp:
         # `_release_thread`). Last writer wins; a dispatch reads every pending
         # row for the thread, so one entry is enough.
         self._deferred_dispatch: dict[str, dict[str, Any]] = {}
-        # Per-tenant in-flight cap.
-        self._inflight: dict[uuid.UUID, int] = {}
+        # Per-tenant turn slots, with the queue a turn waits in at the cap.
+        self.turn_queue = TurnQueue.from_settings(runtime.settings.turn_queue, platform="slack")
         # Background task references (prevent GC before done-callbacks fire).
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # Mention handlers can be acked and running before they acquire a
@@ -460,35 +462,77 @@ class SlackApp:
             )
         )
 
-    def start_github_new_repo_poller(self) -> asyncio.Task[None]:
+    def start_connect_notice_poller(self) -> asyncio.Task[None]:
         return self._spawn(
-            run_new_repo_notice_poller(
+            run_connect_notice_poller(
                 self.runtime.sessionmaker,
                 platform="slack",
-                deliver=self._send_new_repo_group,
+                deliver=self._send_connect_notice,
                 should_stop=lambda: self.draining,
             )
         )
 
-    def start_github_removal_poller(self) -> asyncio.Task[None]:
-        return self._spawn(
-            run_removal_notice_poller(
-                self.runtime.sessionmaker,
-                platform="slack",
-                deliver=self._send_github_removal_notice,
-                should_stop=lambda: self.draining,
-            )
-        )
-
-    async def _send_new_repo_group(self, group: NewRepoNoticeGroup) -> bool:
-        from daimon.adapters.slack.agent_setup.github_new_repo import send_group_dm
-
-        return await send_group_dm(self.runtime, group)
-
-    async def _send_github_removal_notice(self, notice: RemovalNotice) -> bool:
-        from daimon.adapters.slack.agent_setup.github_removal import send_removal_dm
-
-        return await send_removal_dm(self.runtime, notice)
+    async def _send_connect_notice(self, notice: ConnectNotice) -> bool:
+        async with self.runtime.sessionmaker() as session:
+            tenant = await get_tenant(session, notice.tenant_id)
+        if tenant is None:
+            return True
+        client = await resolve_web_client(self.runtime, team_id=tenant.external_id)
+        if client is None:
+            return False
+        try:
+            if (
+                notice.encrypted_origin_followup is not None
+                and notice.origin_followup_expires_at is not None
+                and datetime.now(UTC) < notice.origin_followup_expires_at
+            ):
+                credentials = build_multifernet(
+                    tuple(key.get_secret_value() for key in self.runtime.settings.crypto.keys)
+                )
+                response_url = decrypt_token(credentials, notice.encrypted_origin_followup)
+                async with (
+                    aiohttp.ClientSession() as followup_client,
+                    followup_client.post(
+                        response_url,
+                        json={"text": notice.text, "response_type": "ephemeral"},
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as response,
+                ):
+                    if response.status < 300:
+                        body = await response.text()
+                        if not body.lstrip().startswith("{"):
+                            return True
+                        try:
+                            parsed = cast(object, json.loads(body))
+                            if not isinstance(parsed, dict):
+                                return True
+                            payload = cast(dict[str, object], parsed)
+                            if payload.get("ok", True):
+                                return True
+                        except ValueError:
+                            return True
+                    if response.status >= 500:
+                        return False
+            if notice.origin_parent_channel_id is None:
+                return True  # Old invitations have no private origin; never open a DM.
+            if notice.origin_thread_id is not None:
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=notice.origin_parent_channel_id,
+                    user=notice.requester_platform_user_id,
+                    thread_ts=notice.origin_thread_id,
+                    text=notice.text,
+                )
+            else:
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=notice.origin_parent_channel_id,
+                    user=notice.requester_platform_user_id,
+                    text=notice.text,
+                )
+            return True
+        except aiohttp.ClientError:
+            return False
+        except SlackApiError as error:
+            return cast(str, error.response["error"]) in ("user_not_found", "account_inactive")
 
     async def _post_github_request_expiry(self, request: AccessRequest) -> bool:
         try:
@@ -1023,27 +1067,12 @@ class SlackApp:
 
                     self._spawn(_run_add_skill())
             elif cb_id == CALLBACK_AVATAR_UPLOAD:
-                _av = evaluate_avatar_submission(payload)
                 await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id, payload=_av.response_payload)
+                    SocketModeResponse(
+                        envelope_id=req.envelope_id,
+                        payload=evaluate_avatar_submission(payload),
+                    )
                 )
-                if _av.proceed:
-                    _av_team: dict[str, Any] = payload.get("team") or {}
-                    _av_user: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_avatar(
-                        *,
-                        _t: str = str(_av_team.get("id") or ""),
-                        _u: str = str(_av_user.get("id") or ""),
-                        _s: AvatarSubmission = _av,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is not None:
-                            await run_avatar_submission(
-                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
-                            )
-
-                    self._spawn(_run_avatar())
             elif cb_id == "feedback_text":
                 # Pure evaluate (no I/O) — must run before the single ack.
                 _fb_decision = evaluate_feedback_text_submission(payload)
@@ -1241,15 +1270,6 @@ class SlackApp:
     def _deregister_cancel(self, status_ts: str) -> None:
         """Remove a turn's cancel registry entry on turn completion."""
         self._cancel_registry.pop(status_ts, None)
-
-    def _release_inflight(self, tenant_id: uuid.UUID) -> None:
-        """Release one per-tenant in-flight slot, dropping the key at zero.
-
-        Mirrors Discord's ``_release_inflight`` (bot.py:452-456).
-        """
-        self._inflight[tenant_id] = self._inflight.get(tenant_id, 1) - 1
-        if self._inflight[tenant_id] <= 0:
-            self._inflight.pop(tenant_id, None)
 
     async def _handle_teardown(self, *, team_id: str, event_time: datetime | None = None) -> None:
         """Archive the install: soft-archive the tenant, delete the bot token.
@@ -1646,10 +1666,13 @@ class SlackApp:
                 )
             return
 
-        # (2) Per-tenant concurrency cap.
-        # Read-check-increment in ONE synchronous span — no await between.
-        count = self._inflight.get(tenant_id, 0)
-        if not should_admit_turn(current_in_flight=count, cap=cap):
+        # (2) Per-tenant turn slot. Admission is one synchronous span (no await
+        # between the queue check above and the claim). Over the cap the turn
+        # queues: it posts the ordinary card and waits after it
+        # (`wait_for_slot` in _run_thread_turn). Only a full queue refuses.
+        ticket = self.turn_queue.admit(tenant_id, cap=cap, team_id=team_id, channel_id=channel)
+        if ticket is None:
+            count = self.turn_queue.in_flight(tenant_id)
             # The rejection below is an ephemeral — it appears in no channel
             # history and no API read. The structured log and outcome row are the server-side
             # trace a shed turn leaves; without it a shed mention is
@@ -1669,6 +1692,7 @@ class SlackApp:
                 thread_id=thread_id,
                 in_flight=count,
                 cap=cap,
+                reason="queue_full",
             )
             # Even an ephemeral notice stays out of a protected channel. This
             # branch always returns, so awaiting here can't race the queue check.
@@ -1684,78 +1708,75 @@ class SlackApp:
                 user=str(event.get("user") or ""),
                 # Real thread only — a shed root mention has no thread yet.
                 thread_ts=event.get("thread_ts"),
-                text=(
-                    "This workspace has too many chats in flight right now — try again in a moment."
-                ),
+                text=TENANT_CAP_NOTICE,
             )
             return
-        self._inflight[tenant_id] = count + 1
 
         # (3) Run turn + (4) drain loop, (5) finally release.
-        self._processing.add(thread_id)
-        try:
-            # A protected channel hears nothing from the agent: no reply, no
-            # acknowledgement, role, refusal or error notice. Checked right after
-            # the thread is claimed -- an await before the claim would let a
-            # second mention slip past the queue check -- and before anything
-            # is posted; the finally releases the claim.
-            if await turn_target_protected(
-                self.runtime.sessionmaker,
-                tenant_id=tenant_id,
-                channel_id=channel,
-                thread_id=thread_id,
-            ):
-                log.info(
-                    "turn.skipped.writers_none",
-                    tenant_id=str(tenant_id),
-                    team_id=team_id,
+        with holding(ticket):
+            self._processing.add(thread_id)
+            try:
+                # A protected channel hears nothing from the agent: no reply, no
+                # acknowledgement, role, refusal or error notice. Checked right after
+                # the thread is claimed -- an await before the claim would let a
+                # second mention slip past the queue check -- and before anything
+                # is posted; the finally releases the claim.
+                if await turn_target_protected(
+                    self.runtime.sessionmaker,
+                    tenant_id=tenant_id,
                     channel_id=channel,
                     thread_id=thread_id,
-                )
-                return
-            # Immediate ack: session cold-start (defaults reconcile + MA session
-            # create) can take seconds before the first status message posts.
-            # Inside the try/finally so a transport error here still releases
-            # the thread-processing flag and tenant in-flight slot.
-            with contextlib.suppress(SlackApiError, aiohttp.ClientError, asyncio.TimeoutError):
-                await web_client.reactions_add(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                ):
+                    log.info(
+                        "turn.skipped.writers_none",
+                        tenant_id=str(tenant_id),
+                        team_id=team_id,
+                        channel_id=channel,
+                        thread_id=thread_id,
+                    )
+                    return
+                # Immediate ack: session cold-start (defaults reconcile + MA session
+                # create) can take seconds before the first status message posts.
+                # Inside the try/finally so a transport error here still releases
+                # the thread-processing flag and tenant in-flight slot.
+                with contextlib.suppress(SlackApiError, aiohttp.ClientError, asyncio.TimeoutError):
+                    await web_client.reactions_add(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                        channel=channel,
+                        timestamp=event_ts,
+                        name="eyes",
+                    )
+                with contextlib.suppress(
+                    SlackApiError, SQLAlchemyError, aiohttp.ClientError, asyncio.TimeoutError
+                ):
+                    await self._maybe_post_connect_nudge(
+                        web_client,
+                        team_id=team_id,
+                        slack_user_id=str(event.get("user") or ""),
+                        channel=channel,
+                        thread_ts=thread_id,
+                    )
+                await self._run_thread_turn(
+                    event,
                     channel=channel,
-                    timestamp=event_ts,
-                    name="eyes",
-                )
-            with contextlib.suppress(
-                SlackApiError, SQLAlchemyError, aiohttp.ClientError, asyncio.TimeoutError
-            ):
-                await self._maybe_post_connect_nudge(
-                    web_client,
+                    web_client=web_client,
+                    tenant_id=tenant_id,
+                    thread_id=thread_id,
                     team_id=team_id,
-                    slack_user_id=str(event.get("user") or ""),
-                    channel=channel,
-                    thread_ts=thread_id,
+                    files=_collect_files([event]),
                 )
-            await self._run_thread_turn(
-                event,
-                channel=channel,
-                web_client=web_client,
-                tenant_id=tenant_id,
-                thread_id=thread_id,
-                team_id=team_id,
-                files=_collect_files([event]),
-            )
-            await self._drain_pending_mentions(
-                channel=channel,
-                web_client=web_client,
-                tenant_id=tenant_id,
-                thread_id=thread_id,
-                team_id=team_id,
-            )
-        finally:
-            self._release_thread(thread_id)
-            still_pending = self._pending.pop(thread_id, [])
-            self._release_inflight(tenant_id)
-            await self._notify_undrained_mentions(
-                still_pending, channel=channel, web_client=web_client, thread_id=thread_id
-            )
+                await self._drain_pending_mentions(
+                    channel=channel,
+                    web_client=web_client,
+                    tenant_id=tenant_id,
+                    thread_id=thread_id,
+                    team_id=team_id,
+                )
+            finally:
+                self._release_thread(thread_id)
+                still_pending = self._pending.pop(thread_id, [])
+                await self._notify_undrained_mentions(
+                    still_pending, channel=channel, web_client=web_client, thread_id=thread_id
+                )
 
     @property
     def _thread_queue(self) -> ThreadQueue[str, dict[str, Any]]:
@@ -1902,23 +1923,28 @@ class SlackApp:
         content_override: str | None = None,
         files: list[SlackFile] | None = None,
     ) -> None:
-        with observe_turn(
-            self.runtime.sessionmaker,
-            tenant_id=tenant_id,
-            platform="slack",
-            channel_id=channel,
-            thread_id=thread_id,
-        ):
-            return await self._run_thread_turn_observed(
-                event,
-                channel=channel,
-                web_client=web_client,
+        try:
+            with observe_turn(
+                self.runtime.sessionmaker,
                 tenant_id=tenant_id,
+                platform="slack",
+                channel_id=channel,
                 thread_id=thread_id,
-                team_id=team_id,
-                content_override=content_override,
-                files=files,
-            )
+            ):
+                return await self._run_thread_turn_observed(
+                    event,
+                    channel=channel,
+                    web_client=web_client,
+                    tenant_id=tenant_id,
+                    thread_id=thread_id,
+                    team_id=team_id,
+                    content_override=content_override,
+                    files=files,
+                )
+        finally:
+            # One slot per turn: a drained follow-up re-enters admission
+            # instead of keeping the slot (wait_for_slot).
+            release_turn_slot()
 
     async def _run_thread_turn_observed(
         self,
@@ -2166,6 +2192,7 @@ class SlackApp:
             trigger_ts=str(event.get("ts") or "") or None,
             agent_name=_lc_agent_name,
             model_id=_lc_model_id,
+            markup=self.runtime.turn_deps.markup,
             register=self._register_cancel,
             deregister=self._deregister_cancel,
             register_pending=self._register_cancel,
@@ -2238,6 +2265,25 @@ class SlackApp:
         # SQLAlchemyError -- a missed clear is recovered by the next boot sweep.
         intent_terminal = False
         try:
+            # Over the cap the turn waits here, behind its ordinary card: the
+            # queue is never shown. Before the ceiling clock starts, so the
+            # wait does not eat the turn's budget.
+            slot = await wait_for_slot(
+                cancel_event, sessionmaker=self.runtime.sessionmaker, tenant_id=tenant_id
+            )
+            if slot != "started":
+                await lifecycle.end_unstarted(
+                    stopped=slot == "cancelled",
+                    text={
+                        "balance_depleted": admission_refusal_message(
+                            "balance_depleted", self.runtime.settings
+                        ),
+                        "queue_full": TENANT_CAP_NOTICE,
+                    }.get(slot, QUEUE_TIMED_OUT_TEXT),
+                )
+                intent_terminal = True
+                return
+
             # One shared ceiling deadline for THIS turn, computed once the clock
             # starts (D-03/D-04): right after admission passes, not before --
             # admit() itself is deliberately outside the ceiling. Passed as the
@@ -2625,6 +2671,7 @@ class SlackApp:
                     trigger_ts=str(event.get("ts") or "") or None,
                     agent_name=_lc_agent_name,
                     model_id=_lc_model_id,
+                    markup=self.runtime.turn_deps.markup,
                     register=self._register_cancel,
                     deregister=self._deregister_cancel,
                     register_pending=self._register_cancel,
@@ -3062,6 +3109,7 @@ class SlackApp:
             is True,
             agent_name=follow_admission.agent.name,
             model_id=follow_admission.agent.model.id,
+            markup=self.runtime.turn_deps.markup,
             register=self._register_cancel,
             deregister=self._deregister_cancel,
             register_pending=self._register_cancel,
@@ -3096,13 +3144,6 @@ class SlackApp:
                     now=datetime.now(UTC),
                 )
                 await _at_session.commit()
-
-        if row.reason == "github_access_ready":
-            await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                channel=channel,
-                thread_ts=thread_id,
-                text="Access is ready, continuing.",
-            )
 
         handoff_notice = (
             build_handoff_notice(
@@ -3157,6 +3198,7 @@ class SlackApp:
                 is True,
                 agent_name=follow_admission.agent.name,
                 model_id=follow_admission.agent.model.id,
+                markup=self.runtime.turn_deps.markup,
                 register=self._register_cancel,
                 deregister=self._deregister_cancel,
                 register_pending=self._register_cancel,

@@ -173,20 +173,7 @@
     dict({
       'elements': list([
         dict({
-          'text': 'Atlas',
-          'type': 'mrkdwn',
-        }),
-      ]),
-      'type': 'context',
-    }),
-    dict({
-      'elements': list([
-        dict({
-          'text': '''
-            *Details*
-            Time: 42s
-            Tokens: 1.5k in / 320 out
-          ''',
+          'text': 'Atlas\u2003\u200342s',
           'type': 'mrkdwn',
         }),
       ]),
@@ -209,21 +196,7 @@
     dict({
       'elements': list([
         dict({
-          'text': 'Atlas',
-          'type': 'mrkdwn',
-        }),
-      ]),
-      'type': 'context',
-    }),
-    dict({
-      'elements': list([
-        dict({
-          'text': '''
-            *Details*
-            Time: 42s
-            Cost: $0.04
-            Tokens: 1.5k in / 320 out
-          ''',
+          'text': 'Atlas\u2003\u200342s\u2003\u2003$0.04 used',
           'type': 'mrkdwn',
         }),
       ]),
@@ -253,20 +226,7 @@
     dict({
       'elements': list([
         dict({
-          'text': 'Atlas',
-          'type': 'mrkdwn',
-        }),
-      ]),
-      'type': 'context',
-    }),
-    dict({
-      'elements': list([
-        dict({
-          'text': '''
-            *Details*
-            Time: 12s
-            Tokens: 100 in / 50 out
-          ''',
+          'text': 'Atlas\u2003\u200312s',
           'type': 'mrkdwn',
         }),
       ]),

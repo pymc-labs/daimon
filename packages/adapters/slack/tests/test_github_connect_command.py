@@ -9,8 +9,10 @@ from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
+from cryptography.fernet import Fernet
 from daimon.adapters.slack import github_connect as github_command
 from daimon.adapters.slack.runtime import SlackRuntime
+from pydantic import SecretStr
 
 
 class _Sessions:
@@ -39,6 +41,7 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
                 client_id="client",
                 client_secret="secret",
             ),
+            crypto=SimpleNamespace(keys=[SecretStr(Fernet.generate_key().decode())]),
         ),
         anthropic=object(),
         sessionmaker=_Sessions(),
@@ -63,13 +66,23 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(github_command, "append_event", audit)
     await github_command.handle_github_command(
         cast(SlackRuntime, runtime),
-        {"team_id": "T1", "user_id": "U1", "channel_id": "C1", "text": "connect ResearchBot"},
+        {
+            "team_id": "T1",
+            "user_id": "U1",
+            "channel_id": "C1",
+            "text": "connect ResearchBot",
+            "response_url": "https://hooks.slack.com/services/test",
+        },
     )
     kwargs = client.chat_postEphemeral.await_args.kwargs
     assert kwargs["channel"] == "C1" and kwargs["user"] == "U1"
     assert "https://" not in kwargs["text"]
-    button = kwargs["blocks"][1]["elements"][0]
-    assert button["text"]["text"] == "Connect GitHub"
+    assert kwargs["attachments"][0]["color"] == "#0C1F40"
+    button = next(
+        block for block in kwargs["attachments"][0]["blocks"] if block["type"] == "actions"
+    )["elements"][0]
+    assert button["text"] == {"type": "plain_text", "text": "🔗 Connect GitHub", "emoji": True}
     assert button["url"] == "https://mcp.test/oauth/github/connect/private-token"
     assert audit.await_args.kwargs["reason"] == "admin link minted"
     assert audit.await_args.kwargs["platform"] == "slack"
+    assert github_command.mint_invitation.await_args.kwargs["encrypted_origin_followup"]

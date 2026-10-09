@@ -1,4 +1,4 @@
-"""0075 neutral state: backfill, existing thread_sessions readers, down/up twice."""
+"""0077 neutral state: backfill, existing thread_sessions readers, down/up twice."""
 
 import asyncio
 import importlib.util
@@ -38,7 +38,7 @@ ACCOUNT_B = uuid.uuid4()
 
 
 def _migration() -> ModuleType:
-    path = Path(__file__).parents[1] / "alembic/versions/0075_neutral_state.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0077_neutral_state.py"
     spec = importlib.util.spec_from_file_location("neutral_state_migration", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import anthropic
@@ -9,9 +10,10 @@ import httpx
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.ma_index import list_agents_by_tenant
+from daimon.core.github_connect_cards import connect_attachment, resolve_connect_card
+from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.roster import load_roster
 from daimon.core.stores.accounts import set_role
@@ -41,12 +43,12 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
     if client is None:
         return
 
-    async def reply(message: str, *, blocks: list[dict[str, Any]] | None = None) -> None:
+    async def reply(message: str, *, attachments: list[dict[str, Any]] | None = None) -> None:
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             user=user_id,
             text=message,
-            blocks=blocks,
+            attachments=attachments,
             unfurl_links=False,
             unfurl_media=False,
         )
@@ -128,8 +130,26 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 tenant_id=tenant_id,
                 requester_account_id=principal.account_id,
                 requester_label=user_id,
+                requester_platform_user_id=user_id,
                 agent_id=agent_id,
                 agent_name=target_name,
+                origin_platform="slack",
+                origin_parent_channel_id=channel_id,
+                encrypted_origin_followup=(
+                    encrypt_token(
+                        build_multifernet(
+                            tuple(key.get_secret_value() for key in runtime.settings.crypto.keys)
+                        ),
+                        str(payload["response_url"]),
+                    )
+                    if payload.get("response_url")
+                    else None
+                ),
+                origin_followup_expires_at=(
+                    datetime.now(UTC) + timedelta(minutes=30)
+                    if payload.get("response_url")
+                    else None
+                ),
             )
             await append_event(
                 session,
@@ -143,24 +163,17 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 outcome="allowed",
                 reason="admin link minted",
             )
-        message = (
-            f"Opens GitHub to pick repos for {target_name}.\nNothing is shared until you confirm."
+        card = await resolve_connect_card(
+            runtime.sessionmaker,
+            runtime.settings,
+            tenant_id=tenant_id,
+            platform="slack",
+            workspace_id=team_id,
+            agent_name=target_name,
         )
         await reply(
-            message,
-            blocks=[
-                {"type": "section", "text": {"type": "mrkdwn", "text": escape_mrkdwn(message)}},
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Connect GitHub"},
-                            "url": f"{root}/oauth/github/connect/{token}",
-                        }
-                    ],
-                },
-            ],
+            "Connect GitHub",
+            attachments=[connect_attachment(f"{root}/oauth/github/connect/{token}", card=card)],
         )
     except ClientAgentConnectionError:
         await reply(CLIENT_AGENT_MESSAGE)

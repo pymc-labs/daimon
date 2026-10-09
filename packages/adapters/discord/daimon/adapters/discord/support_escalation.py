@@ -87,10 +87,10 @@ _RECORDED_UNDELIVERED = RECORDED_UNDELIVERED
 def discord_channel(support: SupportSettings) -> str | None:
     """Ask a human's escalation channel when the Discord bot can post in it, else None.
 
-    A deployment running the Discord and Teams bots shares
-    `escalation_channel_id`. A Teams channel (`19:…`) there belongs to the
-    Teams bot, so Discord offers no Ask a human rather than spending credits
-    on requests it could never deliver.
+    Teams once shared `escalation_channel_id`; its channel now has its own
+    setting. A Teams id (`19:…`) left here from then is not Discord's, so
+    Discord offers no Ask a human rather than spending credits on requests it
+    could never deliver.
     """
     channel = support.escalation_channel_id
     return None if channel is None or channel.startswith("19:") else channel

@@ -14,7 +14,8 @@ github_oauth_states (both kinds where the table permits) -> credential_requests
 (platform only, platform-user-scoped) -> routines (platform only) ->
 principal_links -> principal row -> platform_user_names (platform only,
 platform-user-scoped, after the principal row on purpose: see the call).
-Account-level deletes (mcp_tokens, message_feedback, user_configs, accounts)
+Account-level deletes (mcp_tokens, GitHub connect requests and click intents,
+message_feedback, user_configs, accounts)
 run in `purge_account` after all principal rows are gone; mcp_tokens and
 message_feedback are keyed by account_id and are deleted before delete_account
 so their CASCADE FKs to accounts.id are satisfied. message_feedback is deleted
@@ -148,6 +149,7 @@ class PurgeReport(BaseModel):
     user_skills: int = 0
     github_credentials: int = 0
     github_connect_requests: int = 0
+    github_connect_click_intents: int = 0
     github_user_links: int = 0
     github_oauth_states: int = 0
     mcp_tokens: int = 0
@@ -174,6 +176,9 @@ class PurgeReport(BaseModel):
             user_skills=self.user_skills + other.user_skills,
             github_credentials=self.github_credentials + other.github_credentials,
             github_connect_requests=self.github_connect_requests + other.github_connect_requests,
+            github_connect_click_intents=(
+                self.github_connect_click_intents + other.github_connect_click_intents
+            ),
             github_user_links=self.github_user_links + other.github_user_links,
             github_oauth_states=self.github_oauth_states + other.github_oauth_states,
             mcp_tokens=self.mcp_tokens + other.mcp_tokens,
@@ -517,6 +522,11 @@ async def purge_account(
         github_connect_requests_count = await github_connect_store.delete_requests_for_account(
             session, account_id=account_id
         )
+        github_connect_click_intents_count = (
+            await github_connect_store.delete_click_intents_for_account(
+                session, account_id=account_id
+            )
+        )
         # message_feedback: account-id-keyed OR'd with the account's
         # (tenant, platform-user) keys — a vote cast before the person had an
         # accounts row carries a null account_id and is only reachable via the
@@ -564,6 +574,7 @@ async def purge_account(
             PurgeReport(
                 mcp_tokens=mcp_tokens_count,
                 github_connect_requests=github_connect_requests_count,
+                github_connect_click_intents=github_connect_click_intents_count,
                 message_feedback=message_feedback_count,
                 support_escalations=support_escalations_count,
                 user_configs=user_cfg_count,

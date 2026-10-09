@@ -197,7 +197,7 @@ second call is a restart). The memory store runs them in
 `packages/mux/tests`, and Daimon's Postgres store runs the same checks.
 
 Daimon's Postgres store is `daimon.core.stores.mux_state.PostgresStateStore`,
-over the tables of migration `0075_neutral_state`. Races are settled by the
+over the tables of migration `0077_neutral_state`. Races are settled by the
 database (unique constraints, row locks, and an advisory lock per usage
 observation), and lease expiry follows the database's wall clock, read
 after the locks a decision depends on are held. Its module

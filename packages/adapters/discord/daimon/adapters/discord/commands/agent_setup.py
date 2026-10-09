@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 import anthropic
 import structlog
-from daimon.adapters.discord.agent_setup.avatar import upload_agent_avatar
-from daimon.adapters.discord.agent_setup.github_new_repo import send_pending_notice
+from daimon.adapters.discord.agent_setup.github_new_repo import (
+    send_pending_notice as send_pending_new_repo_notice,
+)
+from daimon.adapters.discord.agent_setup.github_removal import (
+    send_pending_notice as send_pending_removal_notice,
+)
 from daimon.adapters.discord.agent_setup.hydrate import load_roster_state
 from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.checks import (
@@ -17,6 +21,7 @@ from daimon.adapters.discord.checks import (
 )
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_identity import CUSTOM_PICTURES_OFF
 from daimon.core.errors import DaimonError
 from daimon.core.stores.tenants import get_tenant
 
@@ -39,6 +44,19 @@ def _not_ready_message(provision_status: str) -> str:
     return "This install is still being set up — try again in a moment."
 
 
+def _has_stale_picture_options(interaction: BotInteraction) -> bool:
+    """Pure: whether a client still sends the removed `agent` or `avatar` options.
+
+    Until Discord propagates the new command shape, an invocation can carry them.
+    """
+    data = cast(dict[str, Any], interaction.data if isinstance(interaction.data, dict) else {})
+    options = cast(list[object], data.get("options") or [])
+    return any(
+        isinstance(option, dict) and cast(dict[str, Any], option).get("name") in {"agent", "avatar"}
+        for option in options
+    )
+
+
 def _get_runtime(interaction: BotInteraction) -> DiscordRuntime:
     return cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]  # DaimonBot.runtime not on Bot type
 
@@ -55,17 +73,14 @@ class AgentSetupCog(commands.Cog):
         name="agent-setup",
         description="See your agents, who answers where, and make changes",
     )
-    @app_commands.describe(
-        agent="Agent whose picture to change (fallback: use with avatar)",
-        avatar="Picture file, up to 2 MB (fallback: use with agent)",
-    )
     @require_registered_guild
     async def agent_setup(
         self,
         interaction: BotInteraction,
-        agent: str | None = None,
-        avatar: discord.Attachment | None = None,
     ) -> None:
+        if _has_stale_picture_options(interaction):
+            await interaction.response.send_message(CUSTOM_PICTURES_OFF, ephemeral=True)
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         rid = generate_request_id()
         try:
@@ -83,25 +98,6 @@ class AgentSetupCog(commands.Cog):
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
-            if agent is not None or avatar is not None:
-                if not agent or avatar is None:
-                    await interaction.edit_original_response(
-                        content="Choose an agent and picture file.",
-                        allowed_mentions=discord.AllowedMentions.none(),
-                    )
-                    return
-                message, _ = await upload_agent_avatar(
-                    interaction,
-                    runtime,
-                    tenant_id=tenant_id,
-                    agent_name=agent,
-                    attachment=avatar,
-                )
-                await interaction.edit_original_response(
-                    content=message,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                return
             state = await load_roster_state(
                 runtime, interaction, tenant_id=tenant_id, is_admin=is_admin
             )
@@ -114,6 +110,7 @@ class AgentSetupCog(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             if is_admin:
-                await send_pending_notice(runtime, interaction, tenant_id=tenant_id)
+                await send_pending_new_repo_notice(runtime, interaction, tenant_id=tenant_id)
+                await send_pending_removal_notice(runtime, interaction, tenant_id=tenant_id)
         except (DaimonError, anthropic.APIError, discord.HTTPException) as exc:
             await interaction.followup.send(render_error(exc, request_id=rid), ephemeral=True)

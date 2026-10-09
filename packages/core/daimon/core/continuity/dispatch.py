@@ -36,7 +36,12 @@ from daimon.core.continuity.wakes import (
 from daimon.core.errors import DaimonError
 from daimon.core.stores.domain import ChatPlatform, TaskContinuationRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
-from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
+from daimon.core.turn.errors import (
+    AdmissionDenied,
+    SessionBusyError,
+    SessionPreparationFailed,
+    TurnNotStarted,
+)
 from daimon.core.turn.protection import protection_state
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -213,6 +218,13 @@ async def dispatch_pending_continuations(
             await notify(row, exc.message, reason="skip_target_changed")
             if not settle_before_notice:
                 await _settle(sessionmaker, claim, "skip_target_changed", now)
+        except TurnNotStarted as exc:
+            # The turn never got a slot. A capacity miss goes back to pending,
+            # like a busy thread; a Stop settles it, not delivered.
+            if exc.capacity:
+                await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
+            else:
+                await _settle(sessionmaker, claim, f"not_started:{exc.result}", now)
         except AdmissionDenied as exc:
             # Held to the same gates as a mention, and not retried.
             await _settle(sessionmaker, claim, f"admission_denied:{exc.reason}", now)

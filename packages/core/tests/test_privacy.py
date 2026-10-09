@@ -797,12 +797,27 @@ async def test_github_connect_request_is_previewed_and_purged(
         agent_id=uuid.uuid4(),
         agent_name="ResearchBot",
     )
+    await github_connect_store.create_discord_connect_intent(
+        db_session,
+        tenant_id=tenant.id,
+        requester_account_id=account.id,
+        requester_platform_user_id="123",
+        agent_id=uuid.uuid4(),
+        agent_name="ResearchBot",
+        parent_channel_id="456",
+        thread_id="789",
+        origin_ma_agent_id="agent_1",
+        origin_responder_name="ResearchBot",
+        requested_work=None,
+    )
     await db_session.commit()
 
     preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
     assert preview.github_connect_requests.count == 1
+    assert preview.github_connect_click_intents.count == 1
     report = await purge_account(sm=db_session_factory, account_id=account.id)
     assert report.db.github_connect_requests == 1
+    assert report.db.github_connect_click_intents == 1
 
 
 async def test_collect_purge_preview_matches_purge_account_coverage_field_for_field() -> None:
@@ -828,6 +843,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "user_skills": "user_skills",
         "github_credentials": "github_credentials",
         "github_connect_requests": "github_connect_requests",
+        "github_connect_click_intents": "github_connect_click_intents",
         "github_user_links": "github_user_links",
         "github_oauth_states": "github_oauth_states",
         "mcp_tokens": "mcp_tokens",
@@ -883,6 +899,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "user_skills": "principal_id",
         "github_credentials": "principal_id",
         "github_connect_requests": "requester_account_id FK -> accounts.id",
+        "github_connect_click_intents": "requester_account_id FK -> accounts.id",
         "agent_github_binding": "principal_id",
         "mcp_tokens": "account_id FK -> accounts.id",
         "wizard_session": "account_id FK -> accounts.id",

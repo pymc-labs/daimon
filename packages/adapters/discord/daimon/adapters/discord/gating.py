@@ -13,7 +13,6 @@ def should_process_message(
     author_id: str,
     bot_mentioned: bool,
     reply_to_recorded_post: bool = False,
-    identity_enabled: bool = False,
     author_is_webhook: bool = False,
     guild_id: str | None,
     self_user_id: str | None = None,
@@ -28,7 +27,7 @@ def should_process_message(
         qa_bot_user_ids=qa_bot_user_ids,
     ):
         return False
-    if not (bot_mentioned or (identity_enabled and reply_to_recorded_post)):
+    if not (bot_mentioned or reply_to_recorded_post):
         return False
     return guild_id is not None
 
