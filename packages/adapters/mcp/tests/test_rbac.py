@@ -587,6 +587,16 @@ async def test_channel_admin_discovers_channel_default_tools_but_not_admin_ones(
     assert "### set_channel_environment" not in await _search(
         app, member, "set channel environment"
     ), "a member without a grant may not"
+    for tool, query in (
+        ("add_channel_skill", "add channel skill"),
+        ("remove_channel_skill", "remove channel skill"),
+    ):
+        assert f"### {tool}" in await _search(app, channel_admin, query), (
+            f"a channel admin may change their channel's skills with {tool}"
+        )
+        assert f"### {tool}" not in await _search(app, member, query), (
+            f"a member without a grant does not see {tool}"
+        )
     assert "### set_channel_rule" not in await _search(
         app, channel_admin, "set who can read or post in a channel"
     ), "channel rules stay with server admins"
@@ -595,8 +605,6 @@ async def test_channel_admin_discovers_channel_default_tools_but_not_admin_ones(
         ("clear_channel_budget", "clear channel budget"),
         ("list_channel_budgets", "list channel budgets"),
         ("redeem_promo_code", "redeem promo code"),
-        ("add_channel_skill", "add channel skill"),
-        ("remove_channel_skill", "remove channel skill"),
     ):
         assert f"### {tool}" not in await _search(app, channel_admin, query), (
             f"{tool} stays with server admins"

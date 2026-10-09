@@ -41,6 +41,8 @@ from daimon.adapters.discord.agent_setup.channel_skills_view import (
     CHANNEL_SKILLS_LABEL,
     ChannelSkillsView,
     load_channel_skills,
+    may_change_channel_skills,
+    refuse_unless_may_change_skills,
 )
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.operator_tokens_view import (
@@ -369,7 +371,7 @@ class RoutingView(PanelViewBase):
     edits who runs a channel rather than who answers in it, and Isolation,
     which keeps this channel's own agents inside it. They and this channel's
     admins get an environment select for this channel, which changes where its
-    turns run rather than who answers.
+    turns run rather than who answers, and Channel skills.
     """
 
     def __init__(
@@ -381,8 +383,10 @@ class RoutingView(PanelViewBase):
         lines: Sequence[RoutingLine] | None = None,
         server_default: RoutingLine | None = None,
         environment_picker: EnvironmentPicker | None = None,
+        may_set_skills: bool = False,
     ) -> None:
         super().__init__(state, runtime=runtime, allowed_user_id=allowed_user_id)
+        self.may_set_skills = may_set_skills
         answering_map = state.answering_map
         assert answering_map is not None, "RoutingView needs a loaded AnsweringMap on the state"
         if lines is None:
@@ -436,7 +440,7 @@ class RoutingView(PanelViewBase):
             nav_row.add_item(tokens_button)
         nav_row.add_item(self.done_button())  # pyright: ignore[reportArgumentType]  # Button[Self] is the same runtime item
         container.add_item(nav_row)
-        if state.is_admin and state.channel_id:
+        if may_set_skills and state.channel_id:
             skills_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
             skills_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 label=CHANNEL_SKILLS_LABEL, style=discord.ButtonStyle.secondary
@@ -459,6 +463,7 @@ class RoutingView(PanelViewBase):
             lines=self.lines,
             server_default=self.server_default,
             environment_picker=self.environment_picker,
+            may_set_skills=self.may_set_skills,
         )
 
     async def _on_previous(self, interaction: discord.Interaction) -> None:
@@ -557,8 +562,10 @@ class RoutingView(PanelViewBase):
         )
 
     async def _on_channel_skills(self, interaction: discord.Interaction) -> None:
-        """Open this channel's skills screen; Manage Server is re-checked live."""
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        """Open this channel's skills screen; who may is re-checked live."""
+        if await refuse_unless_may_change_skills(
+            interaction, runtime=self.runtime, state=self.state
+        ):
             return
         await interaction.response.defer()
         rows = await load_channel_skills(self.runtime, state=self.state)
@@ -623,4 +630,7 @@ async def build_routing_view(
         lines=lines,
         server_default=server_default,
         environment_picker=await load_environment_picker(interaction, runtime=runtime, state=state),
+        may_set_skills=await may_change_channel_skills(
+            interaction, runtime=runtime, state=state, live=False
+        ),
     )

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import itertools
 import uuid
 from unittest.mock import MagicMock
 
 import httpx
+import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.agents import (
@@ -23,6 +25,7 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ROOM = "111111111111111111"
@@ -123,3 +126,9 @@ async def test_create_agent_records_the_channel_a_channel_admin_made_it_for(
     assert await made_for(auth(admin=True), origins[THREAD]) is None, (
         "a server admin's agent reaches a channel by being made its default"
     )
+    granted = dataclasses.replace(auth(), administered_channel_ids=frozenset({ROOM}))
+    before = len(created)
+    with pytest.raises(ToolError, match="needs this turn's origin_context_id"):
+        await made_for(granted, None)
+    assert len(created) == before, "a channel admin's chat create without its origin makes nothing"
+    assert await made_for(granted, origins[THREAD]) == ROOM, "with it, the agent is theirs"

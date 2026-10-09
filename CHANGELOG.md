@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Channel admins can add skills in the channels they administer.** A channel
+  admin may now add and remove a channel's extra skills (Channel skills on the
+  Discord panel's Who answers where, and the `*_channel_skill(s)` MCP tools),
+  which before needed a server admin even though they reach only that
+  channel's turns. When Add skill on an agent is refused, the Discord panel
+  now says why: an agent that answers only in their channels but isn't theirs,
+  or another person's conversation or routine with it. A channel admin's chat
+  `create_agent` without its `origin_context_id` is refused rather than making
+  an agent that silently isn't theirs to set up.
 - Hackathon staging layouts accept the existing QA admin bot and recognize Discord Administrator permissions, so private team roles can be provisioned without the roleless fallback.
 
 - The file-handling skill now tells agents to export only the current turn's finished deliverables, keeping working directories and already delivered files out of outputs to avoid duplicate attachments.

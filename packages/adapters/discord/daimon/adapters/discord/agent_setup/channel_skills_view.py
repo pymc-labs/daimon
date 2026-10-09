@@ -1,7 +1,7 @@
 """Channel skills: extra skills this channel's agent runs with, here only.
 
-Reached from Who answers where, by server admins only; a channel's own admins
-can't change them. Every click and submit re-checks Manage Server live, and
+Reached from Who answers where, by server admins and this channel's admins
+(`may_set_channel_skills`). Every click and submit re-checks both live, and
 each write is audited (`panel_audit`). What a channel may add is
 `daimon.core.channel_skills`'s.
 """
@@ -14,12 +14,12 @@ from typing import Any, Final
 
 import anthropic
 import structlog
+from daimon.adapters.discord.agent_setup.channel_environment import load_picker_subject
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.channel_skills import REFUSALS, add_skill_to_channel
+from daimon.core.channel_skills import REFUSALS, add_skill_to_channel, may_set_channel_skills
 from daimon.core.errors import SkillsListTruncatedError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.panel_audit import record_panel_write
@@ -36,7 +36,11 @@ BACK_LABEL: Final = "◀ Back"
 MAX_LISTED: Final = 20
 EXPLAINER: Final = (
     "-# Added to whatever agent answers in this channel, here only, from the next message. "
-    "A workspace library skill, or one uploaded to this channel's agent. Server admins only."
+    "A workspace library skill, or one uploaded to this channel's agent. Server admins and "
+    "this channel's admins only."
+)
+REFUSED_MESSAGE: Final = (
+    "Changing this channel's skills needs Manage Server or an admin of this channel."
 )
 UNREADABLE: Final = "This server's skills could not all be read. Nothing changed."
 
@@ -54,6 +58,33 @@ def build_channel_skills_container(
     container.add_item(hairline())
     container.add_item(discord.ui.TextDisplay(EXPLAINER))
     return container
+
+
+async def may_change_channel_skills(
+    interaction: discord.Interaction, *, runtime: DiscordRuntime, state: PanelState, live: bool
+) -> bool:
+    """Server admin, or an admin of the panel's channel.
+
+    ``live`` reads Manage Server off the member, as clicks and submits must;
+    rendering the button trusts the panel state.
+    """
+    if not state.channel_id:
+        return False
+    subject = await load_picker_subject(interaction, runtime=runtime, state=state, live=live)
+    return bool(may_set_channel_skills(subject, str(state.channel_id)))
+
+
+async def refuse_unless_may_change_skills(
+    interaction: discord.Interaction, *, runtime: DiscordRuntime, state: PanelState
+) -> bool:
+    """True, after answering with the refusal, when the caller may not change them now.
+
+    Call it before any ``defer()`` or response, so the refusal owns the first response.
+    """
+    if await may_change_channel_skills(interaction, runtime=runtime, state=state, live=True):
+        return False
+    await interaction.response.send_message(REFUSED_MESSAGE, ephemeral=True)
+    return True
 
 
 async def load_channel_skills(
@@ -143,14 +174,18 @@ class ChannelSkillsView(PanelViewBase):
         await self.swap_to(interaction, routing)
 
     async def _on_add(self, interaction: discord.Interaction) -> None:
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_unless_may_change_skills(
+            interaction, runtime=self.runtime, state=self.state
+        ):
             await self.audit(interaction)(outcome="denied", reason="needs_admin")
             return
         await interaction.response.send_modal(AddChannelSkillModal(self))
 
     async def _on_remove(self, interaction: discord.Interaction) -> None:
         audit = self.audit(interaction)
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_unless_may_change_skills(
+            interaction, runtime=self.runtime, state=self.state
+        ):
             await audit(outcome="denied", reason="needs_admin")
             return
         await interaction.response.defer()
@@ -183,7 +218,7 @@ class AddChannelSkillModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         view, state = self._view, self._view.state
         audit = view.audit(interaction)
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_unless_may_change_skills(interaction, runtime=view.runtime, state=state):
             await audit(outcome="denied", reason="needs_admin")
             return
         try:

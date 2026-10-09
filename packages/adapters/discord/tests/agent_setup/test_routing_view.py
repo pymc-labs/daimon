@@ -375,7 +375,12 @@ def test_routing_carries_no_pager_when_everything_fits(account_id: uuid.UUID) ->
 def test_routing_offers_channel_admins_to_server_admins(account_id: uuid.UUID) -> None:
     state = _state(_map(), account_id=account_id, is_admin=True)
     view = RoutingView(
-        state, runtime=_make_runtime(), allowed_user_id=42, lines=_lines(3), server_default=None
+        state,
+        runtime=_make_runtime(),
+        allowed_user_id=42,
+        lines=_lines(3),
+        server_default=None,
+        may_set_skills=True,
     )
     labels = {node.label for node in _walk(view) if isinstance(node, discord.ui.Button)}
     assert labels == {
@@ -386,6 +391,25 @@ def test_routing_offers_channel_admins_to_server_admins(account_id: uuid.UUID) -
         "Channel skills",
         "Done",
     }, "a server admin is also offered Channel admins, Permissions, Operator tokens and skills"
+
+
+def test_routing_offers_a_channel_admin_their_channels_skills_only(
+    account_id: uuid.UUID,
+) -> None:
+    """Channel skills reach only this channel's turns; the server-wide screens stay hidden."""
+    state = _state(_map(), account_id=account_id, is_admin=False)
+    view = RoutingView(
+        state,
+        runtime=_make_runtime(),
+        allowed_user_id=42,
+        lines=_lines(3),
+        server_default=None,
+        may_set_skills=True,
+    )
+    labels = {node.label for node in _walk(view) if isinstance(node, discord.ui.Button)}
+    assert labels == {"◀ Back", "Channel skills", "Done"}, (
+        "a channel admin is offered Channel skills and nothing a server admin alone may open"
+    )
 
 
 async def test_back_returns_to_the_roster_page_the_reader_left(account_id: uuid.UUID) -> None:

@@ -1,4 +1,4 @@
-"""The channel skills screen: server admins add and remove; anyone else is refused, audited."""
+"""The channel skills screen: server and channel admins add and remove; others are refused."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
@@ -66,6 +67,7 @@ def _interaction(*, admin: bool) -> MagicMock:
     interaction = MagicMock()
     interaction.user = MagicMock(spec=discord.Member)
     interaction.user.id = 42
+    interaction.user.roles = []
     interaction.user.guild_permissions.administrator = admin
     interaction.user.guild_permissions.manage_guild = False
     interaction.guild.owner_id = 999
@@ -120,10 +122,45 @@ async def test_a_server_admin_adds_then_removes_a_skill(
     ]
 
 
-async def test_anyone_without_manage_server_is_refused_and_audited(
+async def test_this_channels_admin_adds_then_removes_a_skill(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A channel's own admins hold no Manage Server, so they are refused too."""
+    """A channel's skills reach only its turns, so its admin changes them without Manage Server."""
+    tenant_id, view = await _view(db_session_factory)
+    async with db_session_factory.begin() as session:
+        await set_channel_admins(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            channel_id=str(CHANNEL_ID),
+            role_ids=[],
+            user_ids=["42"],
+            actor_account_id=None,
+        )
+    modal = AddChannelSkillModal(view)
+    modal.skill._value = "pdf-tools"  # pyright: ignore[reportPrivateUsage]
+    await modal.on_submit(_interaction(admin=False))
+    async with db_session_factory() as session:
+        rows = await list_channel_skills(session, tenant_id=tenant_id, platform="discord")
+    assert [r.skill_id for r in rows] == ["skill_lib"], "the channel admin's add is stored"
+
+    listed = ChannelSkillsView(view.state, runtime=view.runtime, allowed_user_id=42, rows=rows)
+    listed.remove_select._values = ["skill_lib"]  # pyright: ignore[reportPrivateUsage]
+    await listed._on_remove(_interaction(admin=False))  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as session:
+        remaining = await list_channel_skills(session, tenant_id=tenant_id, platform="discord")
+        events = await list_events(session, tenant_id=tenant_id)
+    assert remaining == [], "and so is their remove"
+    assert [e.outcome for e in events if e.tool_name == "panel:channel_skills"] == [
+        "allowed",
+        "allowed",
+    ], "both writes are audited"
+
+
+async def test_a_member_without_a_grant_is_refused_and_audited(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Neither Manage Server nor a grant on this channel: refused before anything is read."""
     tenant_id, view = await _view(db_session_factory)
     modal = AddChannelSkillModal(view)
     modal.skill._value = "pdf-tools"  # pyright: ignore[reportPrivateUsage]

@@ -1,4 +1,4 @@
-"""DB-backed tests for the channel skill MCP tools: server admins only, audited."""
+"""DB-backed tests for the channel skill MCP tools: server and channel admins, audited."""
 
 from __future__ import annotations
 
@@ -110,9 +110,10 @@ async def test_a_server_admin_adds_lists_and_removes_a_channel_skill(
         await _remove(runtime, admin, _CHANNEL, "pdf-tools")
 
 
-async def test_a_channel_admin_cannot_add_or_remove_even_their_own_channels_skills(
+async def test_a_channel_admin_changes_their_own_channels_skills(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A channel's skills reach only its turns, so its admin adds, lists and removes them."""
     tenant, account_id = await _seed(committing_sessionmaker)
     runtime = _runtime(committing_sessionmaker, tenant)
     channel_admin = dataclasses.replace(
@@ -121,20 +122,48 @@ async def test_a_channel_admin_cannot_add_or_remove_even_their_own_channels_skil
         administered_channel_ids=frozenset({_CHANNEL}),
     )
 
-    for change in (_add, _remove):
-        with capture_decision() as denied, pytest.raises(ToolError, match="needs a workspace"):
-            await change(runtime, channel_admin, _CHANNEL, "pdf-tools")
-        assert (denied.operation, denied.reason) == (
-            "set_channel_skills",
-            "authz:admin_required",
-        ), "the refusal is audited"
-    with pytest.raises(ToolError):
-        await _list(runtime, channel_admin, _CHANNEL)
+    with capture_decision() as allowed:
+        added = await _add(runtime, channel_admin, _CHANNEL, "pdf-tools")
+    assert (allowed.operation, allowed.denied) == ("set_channel_skills", False), (
+        "the channel admin's add is audited as allowed"
+    )
+    assert [s.skill_id for s in added.skills] == ["skill_lib"], "the library skill is added"
+    listed = await _list(runtime, channel_admin, _CHANNEL)
+    assert [s.name for s in listed.skills] == ["pdf-tools"], "they read their channel's skills"
+    removed = await _remove(runtime, channel_admin, _CHANNEL, "pdf-tools")
+    assert removed.skills == [], "and remove them"
+
+
+async def test_a_channel_admin_cannot_change_another_channels_skills(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A grant on one channel says nothing of another, and an agent key never acts as them."""
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant)
+    elsewhere = dataclasses.replace(
+        _auth(tenant, account_id, admin=False),
+        platform_user_id="u-ca",
+        administered_channel_ids=frozenset({"999"}),
+    )
+    keyed = dataclasses.replace(
+        elsewhere, administered_channel_ids=frozenset({_CHANNEL}), agent_id=uuid.uuid4()
+    )
+
+    for caller in (elsewhere, keyed):
+        for change in (_add, _remove):
+            with capture_decision() as denied, pytest.raises(ToolError, match="need a workspace"):
+                await change(runtime, caller, _CHANNEL, "pdf-tools")
+            assert (denied.operation, denied.reason) == (
+                "set_channel_skills",
+                "authz:admin_required",
+            ), "the refusal is audited"
+        with pytest.raises(ToolError, match="need a workspace"):
+            await _list(runtime, caller, _CHANNEL)
     async with committing_sessionmaker() as session:
         rows = await channel_skills.list_channel_skills(
             session, tenant_id=tenant.id, platform="discord"
         )
-    assert rows == []
+    assert rows == [], "nothing was written"
 
 
 async def test_an_isolated_agents_upload_is_left_out_of_a_listing_from_outside(

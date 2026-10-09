@@ -70,14 +70,15 @@ def _row(
     )
 
 
-def test_only_a_server_admin_may_set_a_channels_skills() -> None:
+def test_a_server_admin_or_that_channels_admin_may_set_a_channels_skills() -> None:
     admin = build_subject(is_admin=True, platform_user_id="U1")
     channel_admin = build_subject(
         is_admin=False, platform_user_id="U2", administered_channel_ids=frozenset({"C1"})
     )
-    assert may_set_channel_skills(admin, "C1")
-    refused = may_set_channel_skills(channel_admin, "C1")
-    assert not refused and refused.reason == "admin_required"
+    assert may_set_channel_skills(admin, "C1"), "a server admin sets any channel's skills"
+    assert may_set_channel_skills(channel_admin, "C1"), "a channel admin sets their own channel's"
+    refused = may_set_channel_skills(channel_admin, "C2")
+    assert not refused and refused.reason == "admin_required", "but no other channel's"
 
 
 async def test_a_library_skill_is_chosen_by_name_at_its_latest_version(

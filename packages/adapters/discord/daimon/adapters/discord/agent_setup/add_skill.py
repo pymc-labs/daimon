@@ -38,7 +38,7 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.operation_policy import decide_operation
+from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.roster import RosterAgent
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.add import add_agent_skill
@@ -69,7 +69,26 @@ _SHOWN_FILES: Final = 15
 _PATH_CHARS: Final = 80
 
 
-def needs_admin_message(agent_name: str) -> str:
+def needs_admin_message(agent_name: str, facts: TargetFacts) -> str:
+    """Why adding a skill to `agent_name` needs an admin, in the MCP refusal's order
+    (`require_skill_change`). The channel admin reasons are set only for a caller
+    with a grant. Pure."""
+    if facts.runs_unattended_beyond_caller:
+        return (
+            f"{agent_name} runs a routine or queued task for someone with wider rights than "
+            f"yours, so adding a skill needs {ADMIN_NOUN}."
+        )
+    if facts.has_unplaced_run:
+        return (
+            f"Someone else has a conversation or routine with {agent_name} that isn't tied to "
+            f"a channel, such as a DM, so adding a skill needs {ADMIN_NOUN}."
+        )
+    if facts.is_local_to_caller_channels:
+        return (
+            f"{agent_name} answers only in channels you administer, but it's yours to change "
+            f"only if it was made from one of them or {ADMIN_NOUN} made it their default. Ask "
+            f"{ADMIN_NOUN}, or ask me to make you a new agent here."
+        )
     return (
         f"Others use {agent_name} (a default, a thread, or someone else's routine or "
         f"conversation), so adding a skill needs {ADMIN_NOUN} or an admin of every channel "
@@ -144,7 +163,7 @@ async def skill_change_refusal(
         )
     if decide_operation("skill_add", is_admin=caller.is_server_admin, target=facts) == "allow":
         return None
-    return needs_admin_message(agent.name)
+    return needs_admin_message(agent.name, facts)
 
 
 class _AddRefused(Exception):

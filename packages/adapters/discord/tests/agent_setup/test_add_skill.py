@@ -40,9 +40,10 @@ from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.user_skills import load_user_skill
 from daimon.testing import ma_agent
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_tenant, make_thread_session
 from daimon.testing.ma import (
     FakeMAState,
     NotHandled,
@@ -283,6 +284,10 @@ async def test_a_channel_admin_may_add_to_an_agent_local_to_their_channel(
     member_bound = _interaction()
     await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(member_bound)
     member_bound.response.send_modal.assert_not_awaited()
+    assert (
+        "answers only in channels you administer"
+        in (member_bound.response.send_message.await_args.args[0])
+    ), "the refusal says the agent isn't theirs, not that they lack a channel's admin"
 
     await _route(
         world, ChannelScopeRef(tenant_id=world.tenant_id, channel_id=str(CHANNEL_ID)), by_admin=True
@@ -290,6 +295,34 @@ async def test_a_channel_admin_may_add_to_an_agent_local_to_their_channel(
     channel_admin = _interaction()
     await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(channel_admin)
     channel_admin.response.send_modal.assert_awaited_once()
+
+
+async def test_a_channel_admin_is_told_when_a_conversation_outside_a_channel_holds_it_back(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Another member's DM with the agent could be anywhere, and the refusal says so."""
+    world = await _world(db_session_factory)
+    agent = world.put_agent()
+    await _route(
+        world, ChannelScopeRef(tenant_id=world.tenant_id, channel_id=str(CHANNEL_ID)), by_admin=True
+    )
+    await _make_channel_admin(world, CHANNEL_ID)
+    async with db_session_factory.begin() as session:
+        tenant = await get_tenant(session, world.tenant_id)
+        assert tenant is not None, "the world's tenant exists"
+        other = await make_account(session, tenant=tenant)
+        await make_thread_session(
+            session, tenant=tenant, account=other, ma_agent_id="ag_helper", channel_id=None
+        )
+
+    channel_admin = _interaction()
+    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(channel_admin)
+
+    channel_admin.response.send_modal.assert_not_awaited()
+    assert (
+        "isn't tied to a channel, such as a DM"
+        in (channel_admin.response.send_message.await_args.args[0])
+    ), "the refusal names the conversation that keeps the agent outside their channels"
 
 
 def _modal(view: DetailsView, agent: RosterAgent, *, paste: str = "", upload: Any = None) -> Any:
