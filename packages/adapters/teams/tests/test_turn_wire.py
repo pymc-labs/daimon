@@ -218,18 +218,21 @@ async def test_answer_replaces_the_status_card_in_the_conversation_it_came_from(
     assert "AIGeneratedContent" in str(answer.body["entities"]), "labelled AI generated"
 
 
-async def test_with_support_on_the_answer_carries_an_ask_a_human_button_teams_accepts(
+async def test_with_support_on_an_ask_a_human_button_follows_the_answer_teams_accepts(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
+    """The answer edit stays text: Teams refuses one carrying a card too (400 BadSyntax)."""
     router = build_turn_router(str(TENANT), session_id=SESSION_ID)
     await _turn(db_session_factory, teams_api_fake, router, make_message_activity(), support=True)
 
-    _status, answer = teams_api_fake.activity_requests
-    assert answer.body["text"] == AGENT_TEXT, "the answer stays markdown text"
-    [button] = _actions(answer)
+    _status, answer, ask = teams_api_fake.activity_requests
+    assert answer.method == "PUT" and answer.body["text"] == AGENT_TEXT, "the card becomes text"
+    assert not answer.body.get("attachments"), "no card beside the answer's text"
+    assert _feedback(answer) == {"type": "custom"}, "the thumbs stay on the answer"
+    assert ask.method == "POST", "the button follows in a message of its own"
+    [button] = _actions(ask)
     assert (button["type"], button["title"]) == ("Action.Submit", card.ASK_HUMAN)
     assert button["data"]["msteams"]["type"] == "task/fetch", "it opens a dialog"
-    assert _feedback(answer) == {"type": "custom"}, "the thumbs stay beside it"
 
 
 def _echo_sessions(router: MARouter) -> None:

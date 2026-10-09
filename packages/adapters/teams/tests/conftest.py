@@ -233,6 +233,16 @@ async def bot_token() -> str:
     return "bot-token"
 
 
+def teams_update_error(body: dict[str, Any]) -> str | None:
+    """Why Teams refuses this edit, in its words; None when it takes it.
+
+    An edit replaces one Teams message, and text beside an attachment is two.
+    """
+    if body.get("text") and body.get("attachments"):
+        return "Activity resulted into multiple skype activities"
+    return None
+
+
 @dataclasses.dataclass
 class SentRequest:
     """One recorded outbound SDK HTTP call."""
@@ -304,6 +314,9 @@ class TeamsApiFake:
         if context.method == "POST" and httpx.URL(context.url).path.endswith("/v3/conversations"):
             return httpx.Response(200, json={"id": DIRECT_CHAT_ID}, request=request)
         if context.method == "PUT" and update:
+            if (refused := teams_update_error(body)) is not None:
+                error = {"error": {"code": "BadSyntax", "message": refused}}
+                return httpx.Response(400, json=error, request=request)
             return httpx.Response(200, json={"id": update.group(1)}, request=request)
         if context.method == "POST" and re.search(r"/conversations/[^/]+/activities$", context.url):
             self.posted += 1
@@ -348,6 +361,7 @@ def assert_teams_accepts(request: SentRequest) -> None:
     if request.method == "PUT":
         edited = re.search(r"/activities/([^/]+)$", httpx.URL(request.url).path)
         assert edited and request.body.get("id") == edited.group(1), "an edit names its activity"
+        assert teams_update_error(request.body) is None, "an edit stays one Teams message"
 
 
 def build_teams_client(fake: TeamsApiFake) -> Client:
@@ -359,7 +373,8 @@ def build_teams_client(fake: TeamsApiFake) -> Client:
 @dataclasses.dataclass
 class FakeSender:
     """A `TeamsSender` recording every send. Indices in `fail_on` raise; in
-    `timeout_on` they time out after landing (odd: httpx, even: asyncio)."""
+    `timeout_on` they time out after landing (odd: httpx, even: asyncio). An
+    edit Teams would refuse answers 400, as Teams does."""
 
     sent: list[tuple[str, MessageActivityInput, str | None]] = dataclasses.field(
         default_factory=list[tuple[str, MessageActivityInput, str | None]]
@@ -376,6 +391,11 @@ class FakeSender:
             raise httpx.ConnectError("unreachable")
         if index in self.timeout_on:
             raise httpx.ReadTimeout("slow") if index % 2 else TimeoutError()
+        body = activity.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if activity.id is not None and (refused := teams_update_error(body)) is not None:
+            request = httpx.Request("PUT", f"https://teams.test/activities/{activity.id}")
+            response = httpx.Response(400, json={"error": {"message": refused}}, request=request)
+            raise httpx.HTTPStatusError(refused, request=request, response=response)
         return SentActivity(id=activity.id or f"m-{index + 1}", activity_params=activity)
 
     @property

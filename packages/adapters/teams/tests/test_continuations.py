@@ -460,6 +460,9 @@ async def test_a_handoff_refused_at_re_admission_is_not_marked_delivered(
         await teams._orchestrate(make_inbound("hand this to stats-bot"), TENANT)
 
     assert calls == 2, "the handoff turn was attempted"
+    if miss == "timed_out":
+        notice = sender.activities[-1].model_dump_json(by_alias=True)
+        assert "Send a message to try again." in notice, "a 1:1 chat needs no mention"
     status, _reason = await _status(db_session_factory, keys[0])
     assert status == "pending", "work that never ran is offered again, not settled delivered"
     assert teams.turn_queue.depth() == 0

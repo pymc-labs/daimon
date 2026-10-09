@@ -20,11 +20,12 @@ Otherwise, or when no chat landed, this bot posts it in
 has its own. A channel read only from inside is marked in the post, so whoever
 picks it up answers there, and the form warns that the note leaves it.
 
-When it is, every answer also carries an Ask a human button (`card.ASK_HUMAN_DIALOG`),
+When it is, every answer also gets an Ask a human button (`card.ASK_HUMAN_DIALOG`),
 Slack's: it opens the same form in a dialog only the clicker sees, for the
 people who could have asked the agent there (`answer_access`), and the request
-links to that answer. One person asks once per answer: a second Send on it is
-told the first is in hand and spends nothing. Access is decided for the last
+links to the message the button is on, the answer or the one just below it.
+One person asks once per answer: a second Send on it is told the first is in
+hand and spends nothing. Access is decided for the last
 time under the ledger and policy locks, in the transaction that spends. The
 same post path carries a tenant's routed 👎 forms (`routes_feedback`,
 `feedback`), which spend no credit.

@@ -63,6 +63,7 @@ from daimon.adapters.teams.lifecycle import (
     TeamsSender,
     TeamsTurnLifecycle,
     TimedSender,
+    retry_hint,
 )
 from daimon.adapters.teams.names import remember_inbound
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
@@ -997,7 +998,9 @@ class TeamsApp:
                     await lifecycle.close_with_notice(
                         {
                             "cancelled": CANCELLED_NOTICE,
-                            "timed_out": QUEUE_TIMED_OUT_TEXT,
+                            "timed_out": retry_hint(
+                                QUEUE_TIMED_OUT_TEXT, direct_chat=inbound.kind == "dm"
+                            ),
                             "balance_depleted": admission_refusal_text(
                                 "balance_depleted", TEAMS_REFUSAL_NOUNS
                             ),

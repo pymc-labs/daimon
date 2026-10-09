@@ -95,6 +95,13 @@ class TimedSender:
         )
 
 
+def retry_hint(text: str, *, direct_chat: bool) -> str:
+    """`text` as a 1:1 chat reads it: nobody needs mentioning there."""
+    if not direct_chat:
+        return text
+    return text.replace("Mention me to try again.", "Send a message to try again.")
+
+
 class TeamsTurnLifecycle:
     """Implements `daimon.core.turn.lifecycle.TurnLifecycle`. One per turn attempt."""
 
@@ -118,7 +125,7 @@ class TeamsTurnLifecycle:
         direct_chat: bool = False,
     ) -> None:
         self._sender = sender
-        # Support is on: the answer carries an Ask a human button.
+        # Support is on: an Ask a human button follows the answer.
         self._ask_human = ask_human
         self._ping = completion_ping and not unprompted
         self._requester = requester if self._ping else None
@@ -287,9 +294,7 @@ class TeamsTurnLifecycle:
             for index, chunk in enumerate(chunks):
                 is_last = index == last
                 mention = self._requester if index == 0 else None
-                message = card.answer_message(
-                    chunk, is_last=is_last, mention=mention, ask_human=self._ask_human
-                )
+                message = card.answer_message(chunk, is_last=is_last, mention=mention)
                 if index == 0 and not fresh:
                     current = self._message_id = await self._edit(message, current)
                     self.card_closed = True
@@ -299,8 +304,10 @@ class TeamsTurnLifecycle:
                     self._answer_id, replaced = current, True
                 self._shown[current] = (chunk, is_last)
             self.final_message_id = current
-            if fresh:
+            if fresh:  # retire before the best-effort button so a lost post can't strand it
                 await self._retire_card()
+            if self._ask_human:
+                await self._offer_ask_human()
         except TEAMS_SEND_ERRORS as exc:
             log.error("teams.turn.answer_delivery_failed", exc_info=True)
             capture_exception_with_scope(exc)
@@ -321,13 +328,16 @@ class TeamsTurnLifecycle:
             # Collapse the card so it does not show a live turn forever.
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
                 failed_text = _DELIVERY_FAILED if answer else _FINISH_FAILED
-                if self._direct_chat:
-                    failed_text = failed_text.replace(
-                        "Mention me to try again.", "Send a message to try again."
-                    )
-                failed = card.notice_card(failed_text)
+                failed = card.notice_card(retry_hint(failed_text, direct_chat=self._direct_chat))
                 await self._send(failed, message_id=self._message_id)
                 self.card_closed = True
+
+    async def _offer_ask_human(self) -> None:
+        """Ask a human's button below the answer; best effort, the answer landed."""
+        try:
+            await self._send(card.ask_human_card(), message_id=None)
+        except TEAMS_SEND_ERRORS:
+            log.warning("teams.turn.ask_human_failed", exc_info=True)
 
     async def _retire_card(self) -> None:
         """Point the card at the answer posted below it; best effort, the answer landed."""
@@ -371,9 +381,7 @@ class TeamsTurnLifecycle:
                 rendered = card.rated(rendered) if rated else rendered
             else:
                 mention = self._requester if message_id == self._answer_id else None
-                rendered = card.answer_message(
-                    updated, is_last=shown[1], mention=mention, ask_human=self._ask_human
-                )
+                rendered = card.answer_message(updated, is_last=shown[1], mention=mention)
             try:
                 await self._edit(rendered, message_id)
             except _TIMEOUTS:
