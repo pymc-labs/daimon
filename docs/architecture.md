@@ -106,8 +106,9 @@ dynamic content before passing their trusted markup to the shell. The
 stylesheet and assets are served at `/web/` from the MCP package.
 
 `scripts/generate_web_css.py` compiles `static/input.css` using the pinned
-Tailwind v4 standalone Linux x64 CLI. The script verifies the binary's SHA-256,
-scans the production page modules, and writes the committed `static/web.css`.
+Tailwind v4 standalone Linux x64 CLI. Run the generator on Linux x64; it does
+not ship macOS binaries. The script verifies the binary's SHA-256, scans only
+the page modules listed in `input.css`, and writes the committed `static/web.css`.
 Run `uv run python scripts/generate_web_css.py` after editing styles; CI runs
 the same command with `--check`. The CLI is a build tool and is not part of the
 runtime image. The notebook and report hosts have their own page shells.

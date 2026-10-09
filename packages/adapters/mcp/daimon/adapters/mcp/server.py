@@ -117,6 +117,7 @@ from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, PlainTextResponse, Response
 from starlette.staticfiles import StaticFiles
+from starlette.types import Scope
 
 if TYPE_CHECKING:
     from stripe._http_client import HTTPClient as StripeHTTPClient
@@ -191,7 +192,25 @@ def _build_avatar_route(
 
 async def _web_face(_req: Request) -> FileResponse:
     """Serve the packaged face, sourced once from assets/daimon-face.png."""
-    return FileResponse(STATIC_DIR / "daimon-face.png", media_type="image/png")
+    return FileResponse(
+        STATIC_DIR / "daimon-face.png",
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+class _WebStaticFiles(StaticFiles):
+    """Give bundled, versioned web assets long-lived browser caching."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        if response.status_code in (200, 304):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
 
 def create_mcp_app(
@@ -480,7 +499,7 @@ def create_mcp_app(
     )
     app.state.mcp = mcp
     app.add_route("/web/daimon-face.png", _web_face, methods=["GET", "HEAD"])
-    app.mount("/web", StaticFiles(directory=STATIC_DIR), name="web")
+    app.mount("/web", _WebStaticFiles(directory=STATIC_DIR), name="web")
     app.add_route(
         "/uploads/{token}",
         build_upload_route(effective_sessionmaker),

@@ -1,5 +1,12 @@
-@import "tailwindcss";
-@source "../*.py";
+@import "tailwindcss" source(none);
+@source "../web_shell.py";
+@source "../branded_pages.py";
+@source "../github_pages.py";
+@source "../oauth_github.py";
+@source "../oauth_github_personal.py";
+@source "../oauth_slack.py";
+@source "../oauth_mcp.py";
+@source "../checkout.py";
 
 @font-face { font-family: Inter; src: url('./Inter-Regular.ttf'); font-style: normal; font-weight: 400; font-display: swap; }
 @font-face { font-family: Inter; src: url('./Inter-SemiBold.ttf'); font-style: normal; font-weight: 600; font-display: swap; }
@@ -140,6 +147,10 @@
 .gh-status-note { color: var(--muted-foreground); }
 .gh-spinner { width: 16px; height: 16px; border: 2px solid rgba(12,31,64,.24); border-top-color: var(--foreground); border-radius: 50%; animation: gh-spin .85s linear infinite; }
 @keyframes gh-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .gh-spinner { animation: none; }
+}
 @media (max-width: 900px) {
   .gh-picker-grid { grid-template-columns: 1fr; gap: 18px; }
   .gh-side { order: -1; }

@@ -26,8 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
-- MCP browser pages now share a responsive Daimon shell with the production
-  face, local Inter font, and brand colours. The GitHub picker shows access
+- MCP browser pages now share a responsive Daimon shell with Daimon's face in
+  the page header, local Inter font, and brand colours. GitHub and Slack page
+  copy has been rewritten. The GitHub picker shows access
   before the repo list on narrow screens, keeps selections across search, and
   locks controls during Connect. Billing, Slack installation, personal GitHub
   linking, and MCP connection pages use the same shell. Tailwind CSS is

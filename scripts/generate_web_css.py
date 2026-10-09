@@ -1,7 +1,8 @@
-"""Compile MCP browser CSS with the pinned Node-free Tailwind CLI.
+"""Compile MCP browser CSS with the pinned Linux x64 Node-free Tailwind CLI.
 
 Run: uv run python scripts/generate_web_css.py [--check]
 Set DAIMON_WEB_TAILWIND_CLI to an existing copy of the pinned binary.
+Use Linux x64 (locally or in CI); the downloaded binary is verified by SHA-256.
 """
 
 from __future__ import annotations
@@ -62,8 +63,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="fail if committed CSS is stale")
     args = parser.parse_args()
-    if '@source "../*.py"' not in SOURCE.read_text():
-        raise SystemExit("CSS source must scan the production page modules")
+    source = SOURCE.read_text()
+    if '@import "tailwindcss" source(none);' not in source or '@source "../*.py"' in source:
+        raise SystemExit("CSS source must scan only explicit production page modules")
     binary = _verified_binary()
     with tempfile.TemporaryDirectory() as temp:
         compiled = Path(temp) / "web.css"

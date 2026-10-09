@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 from pathlib import Path
 
 from starlette.responses import HTMLResponse
 
 STATIC_DIR = Path(__file__).with_name("static")
+CSS_SHA256 = hashlib.sha256((STATIC_DIR / "web.css").read_bytes()).hexdigest()
 
 
 def render_page(
@@ -38,7 +40,7 @@ def render_page(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="only light">
 <title>Daimon: {safe_title}</title>
-<link rel="stylesheet" href="/web/web.css"></head>
+<link rel="stylesheet" href="/web/web.css?v={CSS_SHA256}"></head>
 <body><header class="web-header"><div class="web-header-inner">
 <div class="web-brand"><img class="web-mark" src="/web/daimon-face.png" alt="Daimon">
 <span><strong>Daimon</strong><small>by PyMC Labs</small></span></div>{badge}

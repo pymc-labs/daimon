@@ -90,6 +90,12 @@ class _InstallationRequestPayload(BaseModel):
     account: _AccountLoginPayload | None = None
 
 
+@dataclass(frozen=True)
+class _PendingInstallationRequest:
+    found: bool
+    account_login: str | None = None
+
+
 def _error(
     message: str = "This link has expired.",
     status: int = 400,
@@ -498,7 +504,7 @@ async def _installations(client: httpx.AsyncClient, token: str) -> list[_Install
 
 async def has_pending_installation_request(
     client: httpx.AsyncClient, *, app_id: str, private_key: str, github_user_id: int
-) -> bool | str:
+) -> _PendingInstallationRequest:
     app_token = build_app_jwt(private_key, app_id, now=int(time.time()))
     requests = await list_github_pages(
         client, "/app/installation-requests", app_token, "installation_requests"
@@ -510,8 +516,8 @@ async def has_pending_installation_request(
         == github_user_id
     ]
     if len(matching) == 1 and matching[0].account and matching[0].account.login:
-        return matching[0].account.login
-    return bool(matching)
+        return _PendingInstallationRequest(True, matching[0].account.login)
+    return _PendingInstallationRequest(bool(matching))
 
 
 def build_oauth_github_routes(
@@ -939,7 +945,7 @@ def build_oauth_github_routes(
             f"{html.escape(root, quote=True)}/oauth/github/confirm?"
             f"{urlencode({'state': state, 'cancel': '1'})}"
         )
-        pending = False
+        pending = _PendingInstallationRequest(False)
         if not admin_repos and config.app_id is not None and config.private_key is not None:
             try:
                 async with factory() as client:
@@ -951,11 +957,11 @@ def build_oauth_github_routes(
                     )
             except (httpx.HTTPError, ValueError, KeyError, TypeError):
                 return _error("Couldn't reach GitHub", 502, retry_confirm_url)
-        if pending:
+        if pending.found:
             return _pending_page(
                 html.escape(retry_confirm_url, quote=True),
                 cancel_url,
-                pending if isinstance(pending, str) else None,
+                pending.account_login,
             )
         if not installations:
             return _install_page(install_url, cancel_url)

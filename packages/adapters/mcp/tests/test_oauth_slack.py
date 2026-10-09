@@ -35,6 +35,7 @@ from daimon.adapters.mcp.oauth_slack import (
     build_oauth_slack_routes,
 )
 from daimon.adapters.mcp.server import create_mcp_app
+from daimon.adapters.mcp.web_shell import CSS_SHA256
 from daimon.core.config import (
     AgentIdentitySettings,
     AnthropicSettings,
@@ -73,7 +74,7 @@ def test_page_shell_contains_doctype() -> None:
 def test_page_shell_contains_root_tokens() -> None:
     response = _page(title="test page", state_bar="", body_html="<p>hello</p>")
     body = response.body.decode()
-    assert 'href="/web/web.css"' in body
+    assert f'href="/web/web.css?v={CSS_SHA256}"' in body
     assert 'src="/web/daimon-face.png"' in body
 
 
@@ -86,7 +87,7 @@ def test_page_shell_contains_viewport_meta() -> None:
 def test_page_shell_button_min_height() -> None:
     response = _page(title="test page", state_bar="", body_html="<p>hello</p>")
     body = response.body.decode()
-    assert 'href="/web/web.css"' in body
+    assert f'href="/web/web.css?v={CSS_SHA256}"' in body
 
 
 def test_page_shell_system_ui_fallback() -> None:
@@ -818,6 +819,9 @@ async def test_shared_web_assets_are_served(
     assert hashlib.sha256(face.content).hexdigest() == (
         "a3a3305a7d9d3ec4420cdb420d4d27bc0d2f029b618a4a6dc7fb781556a7d73e"
     )
+    for response in (css, face, font):
+        assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
+        assert response.headers["x-content-type-options"] == "nosniff"
 
 
 async def test_slack_routes_not_mounted_without_slack_settings(

@@ -72,13 +72,6 @@ def _page(*, title: str, state_bar: str, body_html: str, status: int = 200) -> H
     )
 
 
-def render_branded_page(
-    *, title: str, state_bar: str, body_html: str, status: int = 200
-) -> HTMLResponse:
-    """Compatibility entry point for Slack authorization page rendering."""
-    return _page(title=title, state_bar=state_bar, body_html=body_html, status=status)
-
-
 # ---------------------------------------------------------------------------
 # Page renderers
 # ---------------------------------------------------------------------------

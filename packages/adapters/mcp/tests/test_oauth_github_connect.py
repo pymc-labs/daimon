@@ -91,15 +91,12 @@ async def test_pending_installation_request_matches_signed_in_person(
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        assert (
-            await oauth_github.has_pending_installation_request(
-                client, app_id="42", private_key="pem", github_user_id=17
-            )
-            == "example"
-        )
-        assert not await oauth_github.has_pending_installation_request(
+        assert await oauth_github.has_pending_installation_request(
+            client, app_id="42", private_key="pem", github_user_id=17
+        ) == oauth_github._PendingInstallationRequest(True, "example")
+        assert await oauth_github.has_pending_installation_request(
             client, app_id="42", private_key="pem", github_user_id=20
-        )
+        ) == oauth_github._PendingInstallationRequest(False)
 
 
 def test_pending_page_names_verified_organization_safely() -> None:
@@ -137,9 +134,9 @@ async def test_connection_happy_path_and_rechecks(
 
     async def pending_check(
         client: httpx.AsyncClient, *, app_id: str, private_key: str, github_user_id: int
-    ) -> bool:
+    ) -> oauth_github._PendingInstallationRequest:
         assert app_id == "42" and private_key == "pem" and github_user_id == 17
-        return approval_pending
+        return oauth_github._PendingInstallationRequest(approval_pending)
 
     monkeypatch.setattr(oauth_github, "has_pending_installation_request", pending_check)
 
