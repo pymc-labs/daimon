@@ -72,6 +72,28 @@ bold agent name on the first answer chunk.
 
 Setup and routines commands require Discord's `Manage Server` permission.
 
+### Rolling back named agent roles
+
+If rolling back a release with named agent roles, stop the Discord workers and
+wake pollers first. Before downgrading the `discord_agent_roles` migration, use
+the current release's CLI to preview the recorded roles and then remove them:
+
+```bash
+uv run daimon agents roles purge --all
+uv run daimon agents roles purge --all --apply
+```
+
+Use `discord WORKSPACE_ID` in place of `--all` to limit cleanup to one server.
+The command deletes only role IDs recorded by Daimon, then clears their rows.
+It is safe to run again: a role already missing from Discord is treated as
+removed, and a failed deletion keeps its row for a later retry. The bot needs
+`Manage Roles` in each server to delete them.
+
+Run the purge **before** the migration downgrade, which drops the role map.
+Roles left behind are inert to older Daimon code: they have no members and
+older code ignores role mentions. They still clutter the server's role list,
+and upgrading again would create duplicate roles because their IDs were lost.
+
 ## 3. Start the stack
 
 ```bash

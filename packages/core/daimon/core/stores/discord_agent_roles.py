@@ -73,3 +73,16 @@ async def delete_role(session: AsyncSession, *, tenant_id: uuid.UUID, ma_agent_i
             DiscordAgentRole.ma_agent_id == ma_agent_id,
         )
     )
+
+
+async def delete_role_if_matches(
+    session: AsyncSession, *, tenant_id: uuid.UUID, ma_agent_id: str, role_id: str
+) -> None:
+    """Clear only the role ID an operator just removed from Discord."""
+    await session.execute(
+        delete(DiscordAgentRole).where(
+            DiscordAgentRole.tenant_id == tenant_id,
+            DiscordAgentRole.ma_agent_id == ma_agent_id,
+            DiscordAgentRole.role_id == role_id,
+        )
+    )
