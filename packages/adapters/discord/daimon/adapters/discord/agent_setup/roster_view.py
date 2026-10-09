@@ -145,6 +145,16 @@ def _thread_line(state: PanelState) -> str | None:
     return f"-# In this thread **{responder}** answers while setting up **{context.target_name}**"
 
 
+def _webhook_fix_line(state: PanelState) -> str | None:
+    """The admin-only note that agents post as Daimon until webhooks are allowed."""
+    if state.webhook_fix_url is None:
+        return None
+    return (
+        "Agents answer as Daimon here because Daimon can't manage webhooks. "
+        f"Re-authorize Daimon to show each agent's name and face: {state.webhook_fix_url}"
+    )
+
+
 def _status_line(row: RosterRow) -> str:
     """The routing fact that most changes what the reader should do next."""
     if row.status == "answers_here":
@@ -173,6 +183,9 @@ def build_roster_container(
     thread_line = _thread_line(state)
     if thread_line is not None:
         container.add_item(discord.ui.TextDisplay(thread_line))
+    webhook_fix_line = _webhook_fix_line(state)
+    if webhook_fix_line is not None:
+        container.add_item(discord.ui.TextDisplay(webhook_fix_line))
     container.add_item(hairline())
     if not page.items:
         container.add_item(discord.ui.TextDisplay(EMPTY_ROSTER_COPY))

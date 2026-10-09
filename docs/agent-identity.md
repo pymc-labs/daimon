@@ -94,9 +94,18 @@ default) posts with no override, so it keeps the app's own name and icon.
   restart recovery) resolves the webhook the same way.
 - One transport, `DiscordPostTransport`, owns send, edit and delete for agent
   posts: webhook (`wait=True`, so the sent message is returned and recorded)
-  when available, else `thread.send` with `**Agent name**` prefixed to the
-  first chunk of each answer only. Fallback cases: DMs, missing Manage
-  Webhooks, the webhook limit, voice and stage text chats, locked threads.
+  when available, else `thread.send` with the agent's name as one subtext
+  line (`-# Agent name`) above the first chunk of each answer only. Fallback
+  cases: DMs, missing Manage Webhooks, the webhook limit, voice and stage text
+  chats, locked threads. After a 403 or the webhook limit (30007), a channel
+  backs off webhook lookup and creation for 60 seconds; on the bot, a role,
+  bot-member or channel-overwrite change that grants Manage Webhooks ends the
+  back-off early. The first fallback for want of Manage Webhooks logs
+  `discord.identity_fallback_no_manage_webhooks` once per guild per process.
+- When identity is on and the bot's server permissions lack Manage Webhooks,
+  `/agent-setup` shows admins one line saying agents answer as Daimon there,
+  with a re-authorize link that re-adds the bot with its full install
+  permissions. Members don't see it, and nothing is posted in channels.
   Edits and deletes go through the webhook when the message's `webhook_id` is
   ours (with the thread), through the bot otherwise. If our webhook was
   deleted, its old messages can no longer be edited: an edit that fails that

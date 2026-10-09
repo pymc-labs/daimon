@@ -22,7 +22,7 @@ from daimon.core.agent_post_identity import (
 
 _locks: dict[int, asyncio.Lock] = {}
 _lookup_unavailable_until: dict[int, float] = {}
-_LOOKUP_UNAVAILABLE_SECONDS = 600
+_LOOKUP_UNAVAILABLE_SECONDS = 60
 _CREATE_WAIT_SECONDS = 2.0
 _creation_tasks: dict[int, asyncio.Task[discord.Webhook | None]] = {}
 _created_hooks: dict[int, tuple[int, str]] = {}

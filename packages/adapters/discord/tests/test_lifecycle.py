@@ -699,8 +699,10 @@ class TestSealedResponsePersistence:
         await lc.on_render(_sealed_state("x" * 2100))
         chunks = [sent["content"] for sent in sends if "content" in sent]
         assert len(chunks) > 1
-        assert chunks[0].startswith("**test-agent**\n\n")
-        assert all(not chunk.startswith("**test-agent**\n\n") for chunk in chunks[1:])
+        assert chunks[0].startswith("-# test-agent\nx")
+        assert all(not chunk.startswith("-# test-agent\n") for chunk in chunks[1:])
+        assert all(len(chunk) <= 2000 for chunk in chunks)
+        assert "".join(chunks).removeprefix("-# test-agent\n") == "x" * 2100
 
     async def test_on_render_posts_sealed_answer_once(self) -> None:
         """A >=500-char text block sealed by a tool use posts as a permanent
