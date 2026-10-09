@@ -80,6 +80,9 @@ when the file is genuinely small or you genuinely need all of it.
 
 ## Files you produce for the user
 
-Write deliverables to `/mnt/session/outputs/` — files there are captured and can
-be handed back to the user. Do not read a file back purely to prove you wrote it;
-`ls -la` confirms it exists and costs nothing.
+Every new file written to `/mnt/session/outputs/` is posted to the thread after
+the turn, then removed from outputs. Write only this turn's finished deliverables
+there — the chart, notebook or PDF. Never copy a whole working/run directory into
+outputs or re-copy files already delivered. Keep working data elsewhere, such as
+`/workspace`. Do not read a file back purely to prove you wrote it; `ls -la`
+confirms it exists and costs nothing.
