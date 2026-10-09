@@ -13,6 +13,11 @@ from daimon.adapters.slack.agent_setup.github_link import send_link
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.github_connect_cards import (
+    ConnectCard,
+    connect_button_blocks,
+    resolve_connect_card,
+)
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.github_request_cards import slack_mrkdwn_escape
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -111,24 +116,20 @@ def _review_modal(
 
 
 async def _replace_modal(
-    client: AsyncWebClient, payload: dict[str, Any], text: str, *, url: str | None = None
+    client: AsyncWebClient,
+    payload: dict[str, Any],
+    text: str,
+    *,
+    url: str | None = None,
+    card: ConnectCard | None = None,
 ) -> None:
     view = cast("dict[str, Any]", payload.get("view") or {})
     blocks: list[dict[str, Any]] = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
     if url:
-        blocks.append(
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "action_id": "github_request__link",
-                        "url": url,
-                        "text": {"type": "plain_text", "text": "Connect GitHub"},
-                    }
-                ],
-            }
-        )
+        connect_blocks = connect_button_blocks(url, card=card)
+        actions = next(block for block in connect_blocks if block["type"] == "actions")
+        actions["elements"][0]["action_id"] = "github_request__link"
+        blocks = connect_blocks
     await client.views_update(  # pyright: ignore[reportUnknownMemberType]
         view_id=str(view.get("id") or ""),
         view={
@@ -360,7 +361,19 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
 
     async def respond(text: str, *, url: str | None = None) -> None:
         if modal:
-            await _replace_modal(client, payload, text, url=url)
+            card = (
+                await resolve_connect_card(
+                    runtime.sessionmaker,
+                    runtime.settings,
+                    tenant_id=tenant_id,
+                    platform="slack",
+                    workspace_id=team_id,
+                    agent_name=request.agent_name,
+                )
+                if url
+                else None
+            )
+            await _replace_modal(client, payload, text, url=url, card=card)
         else:
             await _replace_card(
                 client,

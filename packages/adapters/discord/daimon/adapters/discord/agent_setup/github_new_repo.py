@@ -13,7 +13,6 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_notice_visibility import new_repo_notice_copy, visible_new_repo_names
 from daimon.core.github_panel import (
-    CONNECT_COPY,
     connect_link,
     safe_github_error,
     sync_connect_admin,
@@ -133,9 +132,20 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
     except ValueError as error:
         await interaction.response.send_message(safe_github_error(error), ephemeral=True)
         return True
+    from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
+    from daimon.core.github_connect_cards import resolve_connect_card
+
+    card = await resolve_connect_card(
+        runtime.sessionmaker,
+        runtime.settings,
+        tenant_id=tenant_id,
+        platform="discord",
+        workspace_id=str(interaction.guild_id),
+        agent_name=None,
+    )
     view = connect_button_view(url)
     await interaction.response.send_message(
-        embed=github_embed("Connect GitHub to choose repos.", state="waiting"),
+        embed=connect_embed(card),
         view=view,
         ephemeral=True,
         allowed_mentions=discord.AllowedMentions.none(),
@@ -224,9 +234,20 @@ class NewRepoCard(discord.ui.View):
                 "GitHub connection is unavailable.", ephemeral=True
             )
             return
+        from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
+        from daimon.core.github_connect_cards import resolve_connect_card
+
+        card = await resolve_connect_card(
+            self.runtime.sessionmaker,
+            self.runtime.settings,
+            tenant_id=self.group.tenant_id,
+            platform="discord",
+            workspace_id=str(interaction.guild_id),
+            agent_name=None,
+        )
         await interaction.response.edit_message(
             content=None,
-            embed=github_embed(CONNECT_COPY, state="waiting"),
+            embed=connect_embed(card),
             view=GitHubLinkView(url),
             allowed_mentions=discord.AllowedMentions.none(),
         )

@@ -44,6 +44,7 @@ from daimon.core.channel_environments import (
     environment_option_value,
 )
 from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleStatus
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, build_connect_card
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
@@ -146,6 +147,7 @@ def build_github_home_view(
     meta: PanelMetadata,
     *,
     connected_count: int,
+    public_base_url: str | None = None,
     is_admin: bool = True,
     owners: tuple[str, ...] = (),
     agent_count: int = 0,
@@ -177,7 +179,11 @@ def build_github_home_view(
             {
                 "type": "button",
                 "action_id": "github_link__open",
-                "text": {"type": "plain_text", "text": "Connect GitHub"},
+                "text": {
+                    "type": "plain_text",
+                    "text": f"{CONNECT_GITHUB_EMOJI} Connect GitHub",
+                    "emoji": True,
+                },
                 "url": pending_url,
             },
             _button(action_id=ACTION_GITHUB_START, label="Start over"),
@@ -199,17 +205,56 @@ def build_github_home_view(
         ]
     else:
         summary = "Connect repos here, then choose which agents can use them."
-        actions = [_button(action_id=ACTION_GITHUB_START, label="Connect GitHub")]
+        actions = [
+            _button(action_id=ACTION_GITHUB_START, label=f"{CONNECT_GITHUB_EMOJI} Connect GitHub")
+        ]
     actions.append(_button(action_id=ACTION_GITHUB_BACK, label="◀ Back"))
     status = f"Linked as @{linked_login}" if linked_login else "GitHub isn't linked."
     fields = [{"type": "mrkdwn", "text": f"*Personal link*\n{status}"}]
     if connected_count:
         fields.insert(0, {"type": "mrkdwn", "text": f"*Agents*\n{agent_count} using these repos"})
-    blocks: list[dict[str, Any]] = [
-        _section(summary),
-        {"type": "section", "fields": fields},
-        {"type": "divider"},
-    ]
+    blocks: list[dict[str, Any]] = []
+    if is_admin and not connected_count and public_base_url:
+        card = build_connect_card(
+            agent_name=None,
+            identity_enabled=False,
+            avatar_url=None,
+            public_base_url=public_base_url,
+        )
+        blocks.extend(
+            [
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "image",
+                            "image_url": card.author_icon_url,
+                            "alt_text": card.author_name,
+                        },
+                        {"type": "plain_text", "text": card.author_name},
+                    ],
+                },
+                {"type": "header", "text": {"type": "plain_text", "text": card.title}},
+                {
+                    "type": "section",
+                    "text": {"type": "plain_text", "text": card.description},
+                    "accessory": {
+                        "type": "image",
+                        "image_url": card.github_mark_url,
+                        "alt_text": "GitHub",
+                    },
+                },
+            ]
+        )
+        if card.detail:
+            blocks.append({"type": "section", "text": {"type": "plain_text", "text": card.detail}})
+        if card.footer:
+            blocks.append(
+                {"type": "context", "elements": [{"type": "plain_text", "text": card.footer}]}
+            )
+    else:
+        blocks.append(_section(summary))
+    blocks.extend([{"type": "section", "fields": fields}, {"type": "divider"}])
     if actions:
         blocks.append({"type": "actions", "elements": actions})
     personal = [

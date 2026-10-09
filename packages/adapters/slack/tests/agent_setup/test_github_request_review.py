@@ -186,6 +186,25 @@ def test_slack_review_modal_escapes_only_mrkdwn_control_characters() -> None:
 
 
 @pytest.mark.asyncio
+async def test_slack_review_modal_connect_button_has_link_emoji() -> None:
+    client = SimpleNamespace(views_update=AsyncMock())
+    await module._replace_modal(  # type: ignore[attr-defined]
+        client,
+        {"view": {"id": "V1", "private_metadata": "{}"}},
+        "Ready.",
+        url="https://example.test/link",
+    )
+    view = client.views_update.await_args.kwargs["view"]
+    assert next(block for block in view["blocks"] if block["type"] == "actions")["elements"][0][
+        "text"
+    ] == {
+        "type": "plain_text",
+        "text": "🔗 Connect GitHub",
+        "emoji": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_ephemeral_try_again_is_a_link_button_without_message_payload() -> None:
     request_id = uuid.uuid4()
     blocks = _slack_blocks(

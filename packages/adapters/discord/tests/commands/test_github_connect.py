@@ -73,9 +73,11 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
     interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
     kwargs = interaction.followup.send.await_args.kwargs
     assert kwargs["ephemeral"] is True
-    assert "https://" not in interaction.followup.send.await_args.args[0]
+    assert interaction.followup.send.await_args.args == ()
+    assert kwargs["embed"].description == "Pick repos ResearchBot can use."
     button = kwargs["view"].children[0]
     assert button.label == "Connect GitHub"
+    assert button.emoji.name == "🔗"
     assert button.url == "https://mcp.test/oauth/github/connect/private-token"
     assert audit.await_args.kwargs["reason"] == "admin link minted"
     assert audit.await_args.kwargs["platform"] == "discord"

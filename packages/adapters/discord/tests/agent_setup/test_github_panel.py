@@ -263,6 +263,14 @@ def test_discord_github_home_and_destructive_confirmations() -> None:
         item.label for item in empty_home.walk_children() if isinstance(item, discord.ui.Button)
     }
     assert "Connect GitHub" in empty_labels
+    assert (
+        next(
+            item
+            for item in empty_home.walk_children()
+            if isinstance(item, discord.ui.Button) and item.label == "Connect GitHub"
+        ).emoji.name
+        == "🔗"
+    )
     pending = GitHubHomeView(
         state,
         runtime=MagicMock(),
@@ -279,6 +287,7 @@ def test_discord_github_home_and_destructive_confirmations() -> None:
     assert {item.label for item in link.children if isinstance(item, discord.ui.Button)} == {
         "Connect GitHub",
     }
+    assert link.children[0].emoji.name == "🔗"
 
 
 @pytest.mark.asyncio

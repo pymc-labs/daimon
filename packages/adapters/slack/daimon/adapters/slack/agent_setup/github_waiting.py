@@ -22,6 +22,7 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.github_connect_cards import resolve_connect_card
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.github_request_cards import admin_card
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
@@ -464,6 +465,14 @@ async def handle(
                     thread_id=meta.thread_id,
                     user_id=user_id,
                     url=url,
+                    card=await resolve_connect_card(
+                        runtime.sessionmaker,
+                        runtime.settings,
+                        tenant_id=tenant_id,
+                        platform="slack",
+                        workspace_id=meta.team_id,
+                        agent_name=request.agent_name,
+                    ),
                 )
                 if changed:
                     await update_requester_card(
@@ -521,6 +530,7 @@ async def handle(
             linked_login = await account_link_status(session, account_id=principal.account_id)
         view = panel_views.build_github_home_view(
             meta,
+            public_base_url=str(runtime.settings.mcp.app_root_url or ""),
             connected_count=home.count if home else 0,
             is_admin=is_admin,
             owners=home.owners if home else (),
