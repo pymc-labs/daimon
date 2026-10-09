@@ -126,6 +126,8 @@ async def _replace_modal(
     view = cast("dict[str, Any]", payload.get("view") or {})
     blocks: list[dict[str, Any]] = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
     if url:
+        if card is None:
+            raise ValueError("GitHub connection card is unavailable")
         connect_blocks = connect_button_blocks(url, card=card)
         actions = next(block for block in connect_blocks if block["type"] == "actions")
         actions["elements"][0]["action_id"] = "github_request__link"
@@ -495,7 +497,14 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     await respond("Waiting for GitHub confirmation.", url=url if modal else None)
     if not modal:
         await send_link(
-            client, channel_id=channel_id, thread_id=request.thread_id, user_id=user_id, url=url
+            client,
+            channel_id=channel_id,
+            thread_id=request.thread_id,
+            user_id=user_id,
+            url=url,
+            app_root_url=str(runtime.settings.mcp.app_root_url)
+            if runtime.settings.mcp.app_root_url
+            else None,
         )
     await update_requester_card(
         runtime,
