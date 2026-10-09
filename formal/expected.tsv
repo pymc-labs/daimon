@@ -20,6 +20,7 @@ approvals	Approvals	ApprovalsQuietBounded	clean	836	-	two extra idle cycles; ass
 approvals	Approvals	ApprovalsQuietLateBeyondBound	violates:ApprovedRunsInTurn	420	-	residual if MA takes a queued allow after the two-cycle bound
 approvals	Approvals	ApprovalsEarlyCard	clean	1034	-	retiring an unsent approval on refusal restores eventual card truth
 approvals	Approvals	ApprovalsEarlyCardOld	violates:EventualCardTruth	1061	-	old refusal path leaves an unsent approved card after turn end
+approvals	Approvals	ApprovalsReplayQueued	violates:NoFalseNotAccepted	1566	-	pre-fix replay counts queued confirmations as taken; the next one-per-pause idle ends the turn as a re-ask
 # ---- scheduler ----
 scheduler	RoutineScheduler	RoutineScheduler	clean	110	-	two schedulers, one lock: one dispatch per occurrence
 scheduler	RoutineScheduler	RoutineSchedulerProgress	clean	110	-	liveness under fairness: pending completes, first occurrence advances

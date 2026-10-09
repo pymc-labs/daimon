@@ -33,7 +33,7 @@ from daimon.core.posted_controls.confirmation import (
     build_confirmation_card,
     confirmation_card_text,
 )
-from daimon.core.posted_controls.lifecycle import PostedConfirmations
+from daimon.core.posted_controls.lifecycle import PostedConfirmations, edit_card_within
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -216,12 +216,10 @@ class TeamsConfirmationCards:
         edit = MessageActivityInput(id=posted.message_id).add_card(
             confirmation_adaptive_card(card, posted.prompt)
         )
-        try:
-            # Bounded: this also runs while a turn is being stopped or timed
-            # out, and a slow Teams must not hold that up.
-            await asyncio.wait_for(
-                self._sender.send(posted.conversation_id, edit, service_url=posted.service_url),
-                EDIT_TIMEOUT_S,
-            )
-        except TEAMS_SEND_ERRORS as err:
-            log.warning("teams.tool_confirmation.edit_failed", error=str(err) or type(err).__name__)
+        # Bounded for the turn, finished in the background (`edit_card_within`).
+        await edit_card_within(
+            self._sender.send(posted.conversation_id, edit, service_url=posted.service_url),
+            budget_s=EDIT_TIMEOUT_S,
+            failure_errors=TEAMS_SEND_ERRORS,
+            failed_event="teams.tool_confirmation.edit_failed",
+        )

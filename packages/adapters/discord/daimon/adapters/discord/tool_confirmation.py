@@ -30,7 +30,11 @@ from daimon.core.posted_controls.confirmation import (
     ConfirmationCardState,
     build_confirmation_card,
 )
-from daimon.core.posted_controls.lifecycle import settle_local_confirmation, wait_local_confirmation
+from daimon.core.posted_controls.lifecycle import (
+    edit_card_within,
+    settle_local_confirmation,
+    wait_local_confirmation,
+)
 
 import discord
 
@@ -193,15 +197,13 @@ async def _retire(
     message: discord.Message, prompt: ConfirmationPrompt, state: ConfirmationCardState
 ) -> None:
     card = build_confirmation_card(prompt, state=state)
-    try:
-        # Bounded: retiring is cosmetic, and runs while a turn is being
-        # stopped or timed out — a slow Discord must not hold that up.
-        await asyncio.wait_for(
-            message.edit(
-                view=_ConfirmationView(card, prompt, answer=None),
-                allowed_mentions=discord.AllowedMentions.none(),
-            ),
-            timeout=RETIRE_TIMEOUT_S,
-        )
-    except (discord.HTTPException, TimeoutError) as err:
-        log.warning("tool_confirmation.retire_failed", error=str(err) or type(err).__name__)
+    # Bounded for the turn, finished in the background (`edit_card_within`).
+    await edit_card_within(
+        message.edit(
+            view=_ConfirmationView(card, prompt, answer=None),
+            allowed_mentions=discord.AllowedMentions.none(),
+        ),
+        budget_s=RETIRE_TIMEOUT_S,
+        failure_errors=(discord.HTTPException,),
+        failed_event="tool_confirmation.retire_failed",
+    )

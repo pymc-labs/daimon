@@ -38,7 +38,7 @@ from daimon.core.posted_controls.confirmation import (
     parse_confirmation_custom_id,
     parse_details_custom_id,
 )
-from daimon.core.posted_controls.lifecycle import PostedConfirmations
+from daimon.core.posted_controls.lifecycle import PostedConfirmations, edit_card_within
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.webhook.async_client import AsyncWebhookClient
@@ -178,22 +178,20 @@ async def _edit(
     card = build_confirmation_card(
         posted.prompt, state=state, answered_by_platform_user_id=answered_by
     )
-    try:
-        # Bounded: this also runs while a turn is being stopped or timed out,
-        # and a slow Slack must not hold that up.
-        await asyncio.wait_for(
-            posted.client.chat_update(  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # slack_sdk **kwargs: Unknown
-                channel=posted.channel,
-                ts=posted.ts,
-                text=_plain_message_text(confirmation_card_text(card)),
-                attachments=_attachment(card, posted.prompt),
-                mrkdwn=False,
-                parse="none",
-            ),
-            timeout=EDIT_TIMEOUT_S,
-        )
-    except (SlackApiError, TimeoutError) as err:
-        log.warning("slack.tool_confirmation.edit_failed", error=str(err) or type(err).__name__)
+    # Bounded for the turn, finished in the background (`edit_card_within`).
+    await edit_card_within(
+        posted.client.chat_update(  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # slack_sdk **kwargs: Unknown
+            channel=posted.channel,
+            ts=posted.ts,
+            text=_plain_message_text(confirmation_card_text(card)),
+            attachments=_attachment(card, posted.prompt),
+            mrkdwn=False,
+            parse="none",
+        ),
+        budget_s=EDIT_TIMEOUT_S,
+        failure_errors=(SlackApiError,),
+        failed_event="slack.tool_confirmation.edit_failed",
+    )
 
 
 async def _ephemeral(posted: _PostedCard, user: str, text: str) -> None:

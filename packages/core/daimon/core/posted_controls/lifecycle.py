@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Protocol
 
+import structlog
 from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt, PendingConfirmations
 from daimon.core.posted_controls.confirmation import (
     EXPIRED_MESSAGE,
@@ -19,6 +20,56 @@ from daimon.core.posted_controls.confirmation import (
     NOT_YOURS_MESSAGE,
     ConfirmationCardState,
 )
+
+_log = structlog.get_logger(__name__)
+
+#: Card edits still running after their budget; held so they are not collected.
+_BACKGROUND_EDITS: set[asyncio.Future[object]] = set()
+
+
+def pending_card_edits() -> int:
+    """Card edits still finishing in the background (for tests and health)."""
+    return len(_BACKGROUND_EDITS)
+
+
+async def edit_card_within(
+    edit: Awaitable[object],
+    *,
+    budget_s: float,
+    failure_errors: tuple[type[BaseException], ...],
+    failed_event: str,
+) -> None:
+    """Wait up to `budget_s` for a card edit, then let it finish in the background.
+
+    Retiring or answering a card runs while a turn is being stopped or timed
+    out, so a slow platform must not hold the turn. Cancelling the edit at the
+    budget left the card showing live buttons under load (staging, 2026-10-09:
+    two of six expiries timed out at 2s). The edit now completes on its own,
+    and only a real failure is logged as `failed_event`.
+    """
+    task = asyncio.ensure_future(edit)
+
+    def _finished(done: asyncio.Future[object]) -> None:
+        _BACKGROUND_EDITS.discard(done)
+        if done.cancelled():
+            return
+        err = done.exception()
+        if err is not None:
+            _log.warning(failed_event, error=str(err) or type(err).__name__)
+
+    done, _ = await asyncio.wait({task}, timeout=budget_s)
+    if not done:
+        _BACKGROUND_EDITS.add(task)
+        task.add_done_callback(_finished)
+        _log.info("tool_confirmation.edit_deferred", edit_event=failed_event, budget_s=budget_s)
+        return
+    err = task.exception()
+    if err is None:
+        return
+    if isinstance(err, failure_errors):
+        _log.warning(failed_event, error=str(err) or type(err).__name__)
+        return
+    raise err
 
 
 class PromptCard(Protocol):
