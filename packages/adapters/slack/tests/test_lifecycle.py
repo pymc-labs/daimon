@@ -801,6 +801,25 @@ async def test_terminal_success_overflow_posts_and_widens_final_ts(
     assert lc.final_ts is not None, "final_ts must be set after overflow"
 
 
+async def test_long_answer_carries_the_summary_on_its_last_message(
+    fake_slack_web_client: Any,
+) -> None:
+    """The summary line closes the answer: it rides the last chunk, not the first."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="x" * 24000)]))
+
+    first = _last_update_blocks(fake_slack_web_client)
+    assert not any(block["type"] == "context" for block in first), "the first chunk is bare"
+    posts = fake_slack_web_client.mock.requests.get(("POST", _POST_URL), [])
+    last = posts[-1].kwargs["json"]["blocks"]
+    contexts = [block for block in last if block["type"] == "context"]
+    assert contexts, "the last chunk carries the summary"
+    assert contexts[0]["elements"][0]["text"].startswith(f"test-agent{GAP}"), "the summary line"
+
+
 async def test_terminal_success_bounds_notification_text_on_long_answers(
     fake_slack_web_client: Any,
 ) -> None:

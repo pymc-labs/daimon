@@ -375,6 +375,12 @@ def _compose_queued_content(messages: list[discord.Message]) -> str:
     return "\n\n".join(f"[{m.author.display_name}]: {m.content}" for m in messages)
 
 
+def _card_id(lifecycle: DiscordTurnLifecycle | None) -> int | None:
+    """The turn card's message id: the sweep looks for the agent's own posts after it."""
+    card = lifecycle.card_message_id if lifecycle is not None else None
+    return int(card) if card is not None else None
+
+
 def _log_bg_task_exception(task: asyncio.Task[None]) -> None:
     """Done-callback: surface escaped background-task exceptions immediately
     instead of asyncio's GC-time 'Task exception was never retrieved'."""
@@ -572,6 +578,7 @@ class DaimonBot(commands.Bot):
         thread: discord.Thread,
         tenant_id: uuid.UUID,
         session_id: str,
+        lifecycle: DiscordTurnLifecycle | None = None,
     ) -> None:
         # A previous sweep owns post-then-delete for this MA session until it finishes.
         if previous is not None:
@@ -584,6 +591,7 @@ class DaimonBot(commands.Bot):
                 session_id=session_id,
                 may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
                 notice_thread_ids=self._delivery_notice_thread_ids,
+                posted_after=_card_id(lifecycle),
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
             log.warning(
@@ -592,6 +600,8 @@ class DaimonBot(commands.Bot):
                 thread_id=thread.id,
                 error=str(exc)[:300],
             )
+        if lifecycle is not None:
+            await lifecycle.move_summary_last(thread)
 
     async def _archive_requested(self, origin_id: uuid.UUID) -> bool:
         """Whether the agent asked, during this turn, to archive its own thread.
@@ -651,13 +661,23 @@ class DaimonBot(commands.Bot):
                 self._spawn(self.on_message(queued))
 
     def _schedule_output_sweep(
-        self, outcome: RunOutcome, *, thread: discord.Thread, tenant_id: uuid.UUID
+        self,
+        outcome: RunOutcome,
+        *,
+        thread: discord.Thread,
+        tenant_id: uuid.UUID,
+        lifecycle: DiscordTurnLifecycle | None = None,
     ) -> None:
+        """Sweep the session's files, then seat the summary under the turn's last post."""
         if not any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
+            if lifecycle is not None:
+                self._spawn(lifecycle.move_summary_last(thread))
             return
         session_id = outcome.ma_session_id
         previous = self._output_sweeps.get(session_id)
-        task = self._spawn(self._sweep_session_outputs(previous, thread, tenant_id, session_id))
+        task = self._spawn(
+            self._sweep_session_outputs(previous, thread, tenant_id, session_id, lifecycle)
+        )
         self._output_sweeps[session_id] = task
         task.add_done_callback(functools.partial(self._forget_output_sweep, session_id))
 
@@ -2689,7 +2709,9 @@ class DaimonBot(commands.Bot):
                     await session.commit()
             if final_lifecycle.was_answered and final_lifecycle.final_message_id is not None:
                 await seed_feedback_reactions(thread, message_id=final_lifecycle.final_message_id)
-        self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)
+        self._schedule_output_sweep(
+            outcome, thread=thread, tenant_id=tenant_id, lifecycle=final_lifecycle
+        )
         if archive_after:
             await self._archive_after_outputs(outcome, thread)
 
@@ -3616,6 +3638,8 @@ class DaimonBot(commands.Bot):
             await self._dispatch_continuations(
                 tenant_id=tenant_id, thread=thread, guild_id=guild_id
             )
-        self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)
+        self._schedule_output_sweep(
+            outcome, thread=thread, tenant_id=tenant_id, lifecycle=final_lifecycle
+        )
         if archive_after:
             await self._archive_after_outputs(outcome, thread)

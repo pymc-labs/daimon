@@ -13,7 +13,8 @@ import types
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
+from unittest.mock import AsyncMock, MagicMock
 
 import daimon.adapters.discord.lifecycle as lifecycle_module
 import discord
@@ -332,6 +333,36 @@ class TestCleanReplace:
         # Overflow chunks posted as new sends (beyond the initial embed send)
         overflow_sends = len(sends) - initial_sends
         assert overflow_sends >= 1, "overflow chunks should be posted as new sends"
+
+    async def test_long_answer_carries_the_summary_on_its_last_message(self) -> None:
+        """The summary line closes the answer: it leaves the first chunk for the last."""
+        lc, sends, edits = _make_lifecycle()
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+        initial_sends = len(sends)
+
+        state = TurnState(content=[TextBlock(kind="text", text="x" * 4000)])
+        await lc.on_terminal_success(state)
+
+        first = edits[-1][1]
+        assert first.get("content", "").startswith("x"), "the first chunk replaces the card"
+        assert first.get("embeds") == [], "the first chunk drops the summary"
+        overflow = sends[initial_sends:]
+        assert len(overflow) >= 2, "4,000 characters overflow into at least two more messages"
+        assert all("embeds" not in send for send in overflow[:-1]), "middle chunks stay bare"
+        footer = overflow[-1]["embeds"][0].footer.text
+        assert footer is not None and footer.startswith("test-agent"), (
+            "the last chunk carries the summary"
+        )
+
+    async def test_short_answer_keeps_the_summary_on_its_one_message(self) -> None:
+        lc, _sends, edits = _make_lifecycle()
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+
+        await lc.on_terminal_success(_make_success_state())
+
+        assert "embeds" not in edits[-1][1], "a one-message answer keeps the card's summary"
 
     async def test_final_answer_with_everyone_disables_all_mention_channels(self) -> None:
         """T-22-01: a final answer containing ``@everyone`` (reachable via prompt
@@ -1038,6 +1069,80 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     await lc.on_render(TurnState())
     await lc.on_terminal_success(_make_success_state())
     assert "left" not in _terminal_footer(edits)
+
+
+def _move_fixture(
+    last: Any,
+) -> tuple[DiscordTurnLifecycle, list[tuple[Any, dict[str, Any]]], discord.Thread]:
+    """A lifecycle whose card is message 100, in a thread whose newest message is `last`."""
+    edits: list[tuple[Any, dict[str, Any]]] = []
+    card = types.SimpleNamespace(id=100)
+
+    async def send(**kwargs: Any) -> object:
+        return card
+
+    async def edit(ref: Any, **kwargs: Any) -> None:
+        edits.append((ref, kwargs))
+
+    lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
+
+    async def history(**kwargs: Any) -> Any:
+        assert kwargs == {"limit": 1}
+        if last is not None:
+            yield last
+
+    thread = MagicMock(spec=discord.Thread)
+    thread.guild.me.id = 42
+    thread.history = MagicMock(side_effect=history)
+    return lc, edits, cast(discord.Thread, thread)
+
+
+def _bot_post(message_id: int, *, author_id: int = 42, embeds: list[Any] | None = None) -> Any:
+    post = MagicMock()
+    post.id = message_id
+    post.author.id = author_id
+    post.embeds = embeds or []
+    post.edit = AsyncMock()
+    return post
+
+
+@pytest.mark.asyncio
+async def test_summary_moves_under_a_file_posted_after_the_answer() -> None:
+    """Files and the agent's own posts land below the answer; the summary follows them."""
+    file_post = _bot_post(200)
+    lc, edits, thread = _move_fixture(file_post)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(_make_success_state())
+
+    await lc.move_summary_last(thread)
+
+    summary = file_post.edit.await_args.kwargs["embeds"][0]
+    assert summary.footer.text.startswith("test-agent"), "the file post gains the summary"
+    assert edits[-1][1] == {"embeds": []}, "the answer gives it up"
+
+
+@pytest.mark.parametrize(
+    "last",
+    [
+        None,
+        _bot_post(200, author_id=7),
+        _bot_post(200, embeds=[object()]),
+        _bot_post(50),
+    ],
+    ids=["empty", "a-person", "a-newer-card", "older"],
+)
+@pytest.mark.asyncio
+async def test_summary_stays_put_unless_the_bot_posted_plainly_after_it(last: Any) -> None:
+    lc, edits, thread = _move_fixture(last)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(_make_success_state())
+    edits_before = len(edits)
+
+    await lc.move_summary_last(thread)
+
+    assert len(edits) == edits_before
+    if last is not None:
+        assert last.edit.await_count == 0
 
 
 class TestWasAnswered:

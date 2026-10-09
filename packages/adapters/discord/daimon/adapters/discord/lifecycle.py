@@ -199,6 +199,9 @@ class DiscordTurnLifecycle:
         # into the real answer, so a recovered turn looks like a normal one.
         self._message_ref: discord.Message | None = adopt_message_ref
         self._card_message_ref: discord.Message | None = adopt_message_ref
+        self._terminal_embed: discord.Embed | None = None
+        # The answer message that carries the summary, once there is one.
+        self._summary_ref: discord.Message | None = None
         self._card_discard_failed = False
         self._last_flush: float = 0.0
         self._terminal: bool = False
@@ -367,6 +370,7 @@ class DiscordTurnLifecycle:
         now = self._clock()
         data = to_embed_data(self._state, now=now)
         embed = build_discord_embed(data)
+        self._terminal_embed = embed
         if self._message_ref is None:
             self._message_ref = await self._send_message(embeds=[embed], view=None)
             self._card_message_ref = self._message_ref
@@ -516,6 +520,8 @@ class DiscordTurnLifecycle:
                     view=None,
                     allowed_mentions=mentions,
                     **({"attachments": files} if files else {}),
+                    # A long answer ends on its last chunk, so the summary moves there.
+                    **({"embeds": []} if len(chunks) > 1 else {}),
                 )
 
         try:
@@ -531,11 +537,46 @@ class DiscordTurnLifecycle:
             )
             await deliver_first(chunks[0], [])
         self._revealed_first_chunk = chunks[0]
-        # Overflow: subsequent chunks posted as new messages
-        for chunk in chunks[1:]:
-            await self._send_message(content=chunk, allowed_mentions=discord.AllowedMentions.none())
+        if not notify:
+            self._summary_ref = self._message_ref
+        # Overflow: subsequent chunks posted as new messages, the summary under the last.
+        summary = self._terminal_embed if not notify else None
+        for i, chunk in enumerate(chunks[1:], start=2):
+            last = summary is not None and i == len(chunks)
+            sent = await self._send_message(
+                content=chunk,
+                allowed_mentions=discord.AllowedMentions.none(),
+                **({"embeds": [summary]} if last else {}),
+            )
+            if last:
+                self._summary_ref = sent
 
         log.info("turn.terminal_success")
+
+    async def move_summary_last(self, thread: discord.Thread) -> None:
+        """Re-seat the summary under the turn's last post, once nothing more will come.
+
+        Files and the agent's own posts land below the answer, so the summary
+        would otherwise sit mid-turn. It moves only onto a plain message the bot
+        itself posted after the answer; anything else (a person's reply, a newer
+        turn's card, a webhook post) leaves it where it is.
+        """
+        holder, embed = self._summary_ref, self._terminal_embed
+        if holder is None or embed is None:
+            return
+        try:
+            latest = [message async for message in thread.history(limit=1)]
+            if not latest:
+                return
+            last = latest[0]
+            if last.id <= holder.id or last.author.id != thread.guild.me.id or last.embeds:
+                return
+            await last.edit(embeds=[embed])
+            await self._edit_message(holder, embeds=[])
+        except discord.HTTPException as exc:
+            log.warning("turn.summary_move_failed", error_type=type(exc).__name__)
+            return
+        self._summary_ref = last
 
     async def prepend_revealed_answer(self, notice: str) -> bool:
         """Edit `notice` in above an answer already on screen; False if it cannot go there.

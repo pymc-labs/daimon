@@ -148,7 +148,9 @@ channel it came from. A turn with no channel (an older DM, an MCP turn from
 a key not minted in a channel) and a channel with no budget are never gated.
 On Discord and Slack, a finished turn ends with one summary line: the agent,
 the turn's time, its cost and the money left, for example
-`Ada  12s  $0.042 used  $41.20 left`. Em spaces set the fields apart. The
+`Ada  12s  $0.042 used  $41.20 left`, under the turn's last message: the last
+chunk of a long answer or, on Discord, a file posted after it. Em spaces set
+the fields apart. The
 money left is the active channel budget's remainder; a channel without an
 active budget shows the tenant's prepaid balance when one exists. An unpriced
 model drops the cost, and an operator-funded tenant outside a budgeted channel

@@ -103,6 +103,70 @@ async def test_delivers_file_and_deletes_only_after_discord_post() -> None:
     assert deleted == ["file_chart"]
 
 
+def _history(*messages: object) -> MagicMock:
+    async def history(**kwargs: object):
+        assert kwargs["after"].id == 777, "only posts after the turn's card count"
+        for message in messages:
+            yield message
+
+    return MagicMock(side_effect=history)
+
+
+def _posted(*, author_id: int, filename: str, size: int, webhook: bool = False) -> MagicMock:
+    message = MagicMock()
+    message.author.id = author_id
+    message.webhook_id = 1 if webhook else None
+    message.application_id = author_id if webhook else None
+    attachment = MagicMock()
+    attachment.filename = filename
+    attachment.size = size
+    message.attachments = [attachment]
+    return message
+
+
+async def test_a_file_the_agent_already_posted_is_cleared_without_a_second_post() -> None:
+    client, deleted = _client_with_file(filename="chart", size_bytes=9, content=b"png-bytes")
+    thread = _thread()
+    thread.guild.me.id = 42
+    thread.history = _history(_posted(author_id=42, filename="chart.png", size=9))
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        posted_after=777,
+        sleep=_no_sleep,
+    )
+
+    assert thread.send.await_count == 0, "the agent's own post already delivered it"
+    assert deleted == ["file_chart"], "the listing entry is cleared as delivered"
+
+
+async def test_a_same_named_file_from_someone_else_or_another_size_still_posts() -> None:
+    client, deleted = _client_with_file(filename="chart", size_bytes=9, content=b"png-bytes")
+    thread = _thread()
+    thread.guild.me.id = 42
+    thread.history = _history(
+        _posted(author_id=7, filename="chart.png", size=9),
+        _posted(author_id=42, filename="chart.png", size=10),
+    )
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        posted_after=777,
+        sleep=_no_sleep,
+    )
+
+    assert thread.send.await_count == 1
+    assert deleted == ["file_chart"]
+
+
 async def test_oversize_uses_guild_limit_and_posts_skip_notice() -> None:
     client, deleted = _client_with_file(filename="big chart", size_bytes=10 * _MIB + 1)
     thread = _thread()
