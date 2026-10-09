@@ -1287,6 +1287,19 @@ class PendingFileDelete(Base):
     )
 
 
+class PrivacySessionDelete(Base):
+    """Durable MA erasure target; deliberately survives account and tenant removal."""
+
+    __tablename__ = "privacy_session_deletes"
+
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    pending_session_ids: Mapped[dict[str, list[str]]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class AgentRepoBinding(Base):
     """Per-(tenant, agent) git repo overlay binding."""
 

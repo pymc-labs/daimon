@@ -1168,6 +1168,10 @@ in FK-safe order in one transaction, and
 `packages/core/daimon/core/privacy.py` is its read-only mirror for the preview
 panel. A schema-reflecting drift-guard test fails when a new person-scoped
 table joins one path and not the other.
+Account erasure also queues its account and tenant IDs in the same transaction
+before removing principals. The scheduler retries Managed Agents session deletion
+on each tick, retaining the queue row through upstream errors and failed deletes
+until all enumerated sessions are deleted or confirmed gone.
 
 **In Managed Agents.** One deployment runs on one Anthropic key, so tenant
 separation inside the MA workspace is carried by metadata stamps defined in

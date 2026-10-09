@@ -81,6 +81,7 @@ from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.promo_settlement import settle_promo_credit
+from daimon.core.purge import sweep_privacy_session_deletes
 from daimon.core.routine_delivery import (
     DirectPost,
     agent_posted_to,
@@ -542,6 +543,16 @@ async def _sweep_pending_files(
         await sweep_pending_file_deletes(client, sm, now=datetime.now(UTC))
     except anthropic.APIError:
         log.exception("scheduler.sweep.failed")
+
+
+async def _sweep_privacy_deletes(
+    client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession]
+) -> None:
+    """Retain failed MA erasures for the next tick."""
+    try:
+        await sweep_privacy_session_deletes(client, sm)
+    except Exception:
+        log.exception("scheduler.privacy_delete_sweep.failed")
 
 
 async def _sweep_headless_usage(
@@ -1171,6 +1182,7 @@ async def run(
                 wait_for_completion=True,
             )
             await _sweep_pending_files(client, sm)
+            await _sweep_privacy_deletes(client, sm)
             await _usage_sweep_once(
                 enabled=scheduler_settings.usage_sweep_enabled,
                 sweep=lambda: _sweep_headless_usage(
@@ -1210,6 +1222,7 @@ async def run(
                 dispatcher=dispatcher,
             )
             await _sweep_pending_files(client, sm)
+            await _sweep_privacy_deletes(client, sm)
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)

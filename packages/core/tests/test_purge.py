@@ -25,6 +25,7 @@ from daimon.core._models import (
     MessageFeedback,
     PlatformPrincipal,
     PrincipalLink,
+    PrivacySessionDelete,
     Routine,
     TenantConfig,
     UserConfig,
@@ -36,6 +37,7 @@ from daimon.core.purge import (
     PurgeReport,
     purge_account,
     purge_principal,
+    sweep_privacy_session_deletes,
 )
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import github_credentials as github_credentials_store
@@ -562,6 +564,152 @@ async def test_purge_account_upstream_failure_after_commit_reports_upstream_erro
     assert (
         await db_session.execute(select(CliPrincipal).where(CliPrincipal.id == cli.id))
     ).scalar_one_or_none() is None, "cli principal must be gone"
+
+
+async def test_privacy_delete_can_retry_upstream_after_transient_failure(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A transient MA outage must not make an account's transcript impossible to erase."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_cli_principal(
+        db_session, os_user="cli-retry-upstream", tenant=tenant, account=account
+    )
+    await db_session.commit()
+
+    upstream_available = False
+    deleted_ids: list[str] = []
+    router = MARouter()
+    agent = ma_agent(
+        id="agent_privacy_retry", name="test-agent", metadata={"daimon_tenant": str(tenant.id)}
+    )
+    old_session = ma_session(
+        id="sesn_privacy_retry",
+        agent=agent,
+        environment_id="env_test1",
+        metadata={"daimon_account": str(account.id)},
+    )
+
+    def agents(request: httpx.Request, match: Any) -> httpx.Response:
+        if not upstream_available:
+            raise httpx.ConnectError("temporary outage", request=request)
+        return list_response([agent.model_dump(mode="json")])
+
+    def sessions(request: httpx.Request, match: Any) -> httpx.Response:
+        return list_response([old_session.model_dump(mode="json")])
+
+    def delete_session(request: httpx.Request, match: Any) -> httpx.Response:
+        deleted_ids.append(match.group(1))
+        return httpx.Response(200, json={"id": match.group(1), "type": "session_deleted"})
+
+    router.add("GET", r"/v1/agents", agents)
+    router.add("GET", r"/v1/sessions", sessions)
+    router.add("DELETE", r"/v1/sessions/([^/]+)", delete_session)
+    client = build_fake_anthropic(router.dispatch)
+
+    first = await purge_account(sm=db_session_factory, account_id=account.id, anthropic=client)
+    assert first.sessions.upstream_error is True
+    upstream_available = True
+    second = await purge_account(sm=db_session_factory, account_id=account.id, anthropic=client)
+
+    assert second.sessions.deleted == 1
+    assert len(deleted_ids) == 1
+
+
+async def test_privacy_delete_crash_before_upstream_is_recovered_by_sweep(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_cli_principal(db_session, os_user="cli-crash", tenant=tenant, account=account)
+    await db_session.commit()
+
+    await purge_account(sm=db_session_factory, account_id=account.id)
+    db_session.expire_all()
+    work = await db_session.get(PrivacySessionDelete, account.id)
+    assert work is not None and work.tenant_ids == [str(tenant.id)]
+
+    deleted_ids: list[str] = []
+    router = MARouter()
+    agent = ma_agent(id="agent_crash", metadata={"daimon_tenant": str(tenant.id)})
+    old_session = ma_session(
+        id="sesn_crash",
+        agent=agent,
+        environment_id="env_test1",
+        metadata={"daimon_account": str(account.id)},
+    )
+    router.add(
+        "GET", r"/v1/agents", lambda request, match: list_response([agent.model_dump(mode="json")])
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions",
+        lambda request, match: list_response([old_session.model_dump(mode="json")]),
+    )
+
+    def delete_session(request: httpx.Request, match: Any) -> httpx.Response:
+        deleted_ids.append(match.group(1))
+        return httpx.Response(200, json={"id": match.group(1), "type": "session_deleted"})
+
+    router.add("DELETE", r"/v1/sessions/([^/]+)", delete_session)
+    client = build_fake_anthropic(router.dispatch)
+    await sweep_privacy_session_deletes(client, db_session_factory)
+    assert deleted_ids == ["sesn_crash"]
+    db_session.expire_all()
+    assert await db_session.get(PrivacySessionDelete, account.id) is None
+    await sweep_privacy_session_deletes(client, db_session_factory)
+    assert deleted_ids == ["sesn_crash"]
+
+
+async def test_privacy_delete_failed_session_stays_queued(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_cli_principal(db_session, os_user="cli-failed", tenant=tenant, account=account)
+    await db_session.commit()
+
+    fail = True
+    router = MARouter()
+    agent = ma_agent(id="agent_failed", metadata={"daimon_tenant": str(tenant.id)})
+    old_session = ma_session(
+        id="sesn_failed",
+        agent=agent,
+        environment_id="env_test1",
+        metadata={"daimon_account": str(account.id)},
+    )
+    router.add(
+        "GET", r"/v1/agents", lambda request, match: list_response([agent.model_dump(mode="json")])
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions",
+        lambda request, match: list_response([old_session.model_dump(mode="json")] if fail else []),
+    )
+
+    def delete_session(request: httpx.Request, match: Any) -> httpx.Response:
+        if fail:
+            return httpx.Response(
+                503, json={"type": "error", "error": {"type": "api_error", "message": "retry"}}
+            )
+        return httpx.Response(
+            404, json={"type": "error", "error": {"type": "not_found_error", "message": "gone"}}
+        )
+
+    router.add("DELETE", r"/v1/sessions/([^/]+)", delete_session)
+    client = build_fake_anthropic(router.dispatch)
+    first = await purge_account(sm=db_session_factory, account_id=account.id, anthropic=client)
+    assert first.sessions.failed == 1
+    db_session.expire_all()
+    work = await db_session.get(PrivacySessionDelete, account.id)
+    assert work is not None and work.pending_session_ids[str(tenant.id)] == ["sesn_failed"]
+    fail = False
+    await sweep_privacy_session_deletes(client, db_session_factory)
+    db_session.expire_all()
+    assert await db_session.get(PrivacySessionDelete, account.id) is None
 
 
 async def test_purge_account_deletes_sessions_across_all_principal_tenants(

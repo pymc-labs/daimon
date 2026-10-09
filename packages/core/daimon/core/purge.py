@@ -118,6 +118,7 @@ from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import platform_names as platform_names_store
+from daimon.core.stores import privacy_session_deletes as privacy_deletes_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import security_audit as security_audit_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
@@ -487,13 +488,14 @@ async def purge_account(
     satisfied. Tenant-scoped tables (tenants, channel_config, tenant_config)
     are NOT touched.
 
-    When `anthropic` is provided, attempts upstream hard-deletion of all MA
-    sessions tagged for `account_id` AFTER the DB transaction commits (
-    DB purge is never rolled back by an upstream failure). Sessions are
-    enumerated per tenant, across EVERY tenant any linked principal belongs
-    to — `principal_links` permits an account to span tenants.
+    The local transaction retains the account and all principal tenant IDs in
+    a durable MA deletion work item. When `anthropic` is provided, attempts
+    upstream hard-deletion after commit; the scheduler retries unfinished work.
+    Sessions are enumerated across EVERY linked-principal tenant —
+    `principal_links` permits an account to span tenants.
     """
     async with sm() as session, session.begin():
+        await privacy_deletes_store.lock_account(session, account_id=account_id)
         await security_audit_store.erase_account_for_privacy(session, account_id=account_id)
         cli_list = await identity_store.list_cli_principals_for_account(
             session, account_id=account_id
@@ -504,6 +506,10 @@ async def purge_account(
         # Capture every distinct tenant before the session closes — each
         # tenant's agents must be enumerated for upstream session deletion.
         tenant_ids: set[uuid.UUID] = {principal.tenant_id for principal in (*cli_list, *pp_list)}
+        if tenant_ids:
+            await privacy_deletes_store.ensure_work(
+                session, account_id=account_id, tenant_ids=tenant_ids
+            )
 
         report = PurgeReport()
         github_account_link = await github_links_store.get_account_link(
@@ -592,31 +598,87 @@ async def purge_account(
     # completed, irreversible erasure as failed. Fold the failure into the
     # sessions report instead (upstream_error=True) and log for the operator;
     # a failure in one tenant does not skip the remaining tenants.
-    if anthropic is not None and tenant_ids:
-        deleted = 0
-        failed = 0
-        upstream_error = False
-        for tenant_id in sorted(tenant_ids):
-            try:
-                sub = await delete_sessions_for_account(
-                    anthropic, tenant_id=tenant_id, account_id=account_id
-                )
-            except APIError as err:
-                log.warning(
-                    "purge.upstream_sessions_failed",
-                    account_id=str(account_id),
-                    tenant_id=str(tenant_id),
-                    error=str(err),
-                )
-                upstream_error = True
-                continue
-            deleted += sub.deleted
-            failed += sub.failed
-        return AccountPurgeResult(
-            db=db_report,
-            sessions=SessionDeletionReport(
-                deleted=deleted, failed=failed, upstream_error=upstream_error
-            ),
-        )
+    if anthropic is not None:
+        sessions = await retry_account_session_delete(anthropic, sm, account_id=account_id)
+        return AccountPurgeResult(db=db_report, sessions=sessions)
 
     return AccountPurgeResult(db=db_report)
+
+
+async def retry_account_session_delete(
+    anthropic: AsyncAnthropic,
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    account_id: uuid.UUID,
+) -> SessionDeletionReport:
+    """Retry one durable work item; retain it until all tenant scans succeed."""
+    async with sm() as lock_session, lock_session.begin():
+        await privacy_deletes_store.lock_account(lock_session, account_id=account_id)
+        return await _retry_account_session_delete_locked(anthropic, sm, account_id=account_id)
+
+
+async def _retry_account_session_delete_locked(
+    anthropic: AsyncAnthropic,
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    account_id: uuid.UUID,
+) -> SessionDeletionReport:
+    async with sm() as session:
+        work = await privacy_deletes_store.get_work(session, account_id=account_id)
+    if work is None:
+        return SessionDeletionReport()
+
+    deleted = 0
+    failed = 0
+    upstream_error = False
+    for tenant_id in work.tenant_ids:
+
+        async def remember(session_ids: set[str], tenant_id: uuid.UUID = tenant_id) -> None:
+            async with sm() as session, session.begin():
+                await privacy_deletes_store.add_pending(
+                    session, account_id=account_id, tenant_id=tenant_id, session_ids=session_ids
+                )
+
+        async def forget(session_id: str, tenant_id: uuid.UUID = tenant_id) -> None:
+            async with sm() as session, session.begin():
+                await privacy_deletes_store.remove_pending(
+                    session, account_id=account_id, tenant_id=tenant_id, session_id=session_id
+                )
+
+        try:
+            sub = await delete_sessions_for_account(
+                anthropic,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                pending_session_ids=set(work.pending_session_ids.get(str(tenant_id), [])),
+                on_discovered=remember,
+                on_deleted=forget,
+            )
+        except APIError as err:
+            log.warning(
+                "purge.upstream_sessions_failed",
+                account_id=str(account_id),
+                tenant_id=str(tenant_id),
+                error=str(err),
+            )
+            upstream_error = True
+            continue
+        deleted += sub.deleted
+        failed += sub.failed
+
+    if not upstream_error and failed == 0:
+        async with sm() as session, session.begin():
+            current = await privacy_deletes_store.get_work(session, account_id=account_id)
+            if current is not None and not any(current.pending_session_ids.values()):
+                await privacy_deletes_store.finish_work(session, account_id=account_id)
+    return SessionDeletionReport(deleted=deleted, failed=failed, upstream_error=upstream_error)
+
+
+async def sweep_privacy_session_deletes(
+    anthropic: AsyncAnthropic, sm: async_sessionmaker[AsyncSession]
+) -> None:
+    """Retry queued account erasures on each scheduler tick."""
+    async with sm() as session:
+        work = await privacy_deletes_store.list_work(session)
+    for item in work:
+        await retry_account_session_delete(anthropic, sm, account_id=item.account_id)

@@ -32,6 +32,7 @@ from daimon.adapters.scheduler.main import (
     _refresh_github_app_sessions,  # pyright: ignore[reportPrivateUsage]  # MCP token renewal
     _run_loops,  # pyright: ignore[reportPrivateUsage]  # tick and usage-sweep loops
     _settle_promo_credit,  # pyright: ignore[reportPrivateUsage]  # test seam for the promo settlement wrapper
+    _sweep_privacy_deletes,  # pyright: ignore[reportPrivateUsage]  # privacy retry boundary
     _sweep_retired_turn_card_intents,  # pyright: ignore[reportPrivateUsage]  # test seam for the card-intent sweep wrapper
     _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
     _sweep_wizard_sessions,  # pyright: ignore[reportPrivateUsage]  # test seam for the wizard sweep wrapper
@@ -87,6 +88,18 @@ _TEST_BILLING = BillingConfig(
     success_url="http://test/success",
     cancel_url="http://test/cancel",
 )
+
+
+async def test_privacy_sweep_boundary_retries_after_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sweep = unittest.mock.AsyncMock(side_effect=[RuntimeError("temporary"), None])
+    monkeypatch.setattr("daimon.adapters.scheduler.main.sweep_privacy_session_deletes", sweep)
+    client = unittest.mock.Mock()
+    sm = unittest.mock.Mock()
+    await _sweep_privacy_deletes(client, sm)
+    await _sweep_privacy_deletes(client, sm)
+    assert sweep.await_count == 2
 
 
 async def test_app_vault_archive_retries_after_failure(

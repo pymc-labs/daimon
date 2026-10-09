@@ -45,6 +45,9 @@ approvals	Approvals	ApprovalsEarlyCard	clean	1034	-	retiring an unsent approval 
 approvals	Approvals	ApprovalsEarlyCardOld	violates:EventualCardTruth	1061	-	old refusal path leaves an unsent approved card after turn end
 approvals	Approvals	ApprovalsReplayQueued	violates:NoFalseNotAccepted	1566	-	pre-fix replay counts queued confirmations as taken; the next one-per-pause idle ends the turn as a re-ask
 # ---- scheduler ----
+privacy_delete	PrivacyDelete	PrivacyDeleteSafe	clean	35	-	durable local commit keeps upstream work across crashes and failures
+privacy_delete	PrivacyDelete	PrivacyDeleteUnsafe	violates:LocalDeletionTracked	2	-	old local commit loses the target immediately
+privacy_delete	PrivacyDelete	PrivacyDeleteProgress	clean	35	-	fair restarts and successful API calls eventually delete the session
 scheduler	RoutineScheduler	RoutineScheduler	clean	110	-	two schedulers, one lock: one dispatch per occurrence
 scheduler	RoutineScheduler	RoutineSchedulerProgress	clean	110	-	liveness under fairness: pending completes, first occurrence advances
 # ---- session preparation ----
