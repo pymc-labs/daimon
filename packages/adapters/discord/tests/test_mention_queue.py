@@ -841,6 +841,7 @@ async def test_queued_followup_drains_even_when_originating_turn_fails(
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
         unprompted: bool = False,
+        failure_surface: object = None,
     ) -> None:
         orchestrate_calls.append(content_override)
         if created_thread_ids is not None:

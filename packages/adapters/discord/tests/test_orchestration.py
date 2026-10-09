@@ -991,7 +991,7 @@ class TestNewThreadCreation:
         await bot.on_message(message)
 
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        assert "rid:" in replacement.edit.call_args.kwargs["content"]
+        assert "couldn't reach Claude" in replacement.edit.call_args.kwargs["content"]
         retire.assert_not_awaited()
 
 
