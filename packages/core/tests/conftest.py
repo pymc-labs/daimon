@@ -14,6 +14,9 @@ DB fixtures and MA fakes are provided by daimon.testing. Strategy (see
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
+import pytest
 from daimon.testing.db import (  # noqa: F401
     db_clean,
     db_engine,
@@ -22,3 +25,13 @@ from daimon.testing.db import (  # noqa: F401
     db_session,
     db_session_factory,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_card_edits() -> Iterator[None]:
+    """Card edits finish in the background; one test's stalled edit must not
+    hold the next test's edit to a card with the same id."""
+    from daimon.core.posted_controls.lifecycle import cancel_pending_card_edits
+
+    yield
+    cancel_pending_card_edits()

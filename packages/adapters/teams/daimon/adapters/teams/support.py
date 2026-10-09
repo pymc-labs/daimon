@@ -15,10 +15,9 @@ agent there (`answer_access`), as on Slack, decided when the form is shown and
 again on Send. If that channel has its own admins, the request goes to them in
 1:1 chats first, then to the tenant's admins (`daimon.core.support_routing`),
 each held to the tenant's DM policy and found on the channel's team roster.
-Otherwise, or when no chat landed, it goes to
-`DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`: a Teams channel (`19:…`) gets a post
-from this bot, any other id is a Discord channel posted to with the Discord
-bot token. A channel read only from inside is marked in the post, so whoever
+Otherwise, or when no chat landed, this bot posts it in
+`DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`, Teams' own channel, as Slack
+has its own. A channel read only from inside is marked in the post, so whoever
 picks it up answers there, and the form warns that the note leaves it.
 
 When it is, every answer also carries an Ask a human button (`card.ASK_HUMAN_DIALOG`),
@@ -130,7 +129,6 @@ log = structlog.get_logger(__name__)
 
 VERB = "support"
 NOTE_INPUT = "note"
-_DISCORD_API = "https://discord.com/api/v10"
 _DM_LINK = "(sent in the 1:1 chat)"
 _MAX_PENDING = 256  # forms whose "asked in" is remembered; older ones name the 1:1 chat
 MAX_NOTE_CHARS = 4000  # Discord's support modal cap.
@@ -147,28 +145,20 @@ SEALED_LINE = "_From a channel read only from inside: answer there, the conversa
 # (`daimon.core.support_escalation`), re-exported for this module's callers.
 
 
-def _teams_channel(channel_id: str) -> bool:
-    return channel_id.startswith("19:")
-
-
 def enabled(settings: Settings) -> bool:
-    """Whether escalation is on and its channel reachable from this process."""
-    channel, credits = settings.support.escalation_channel_id, settings.support.credits_per_user
-    if channel is None or credits <= 0:
-        return False
-    return _teams_channel(channel) or settings.discord is not None
+    """Whether escalation is on: a Teams channel to post in and credits to spend."""
+    support = settings.support
+    return bool(support.teams_escalation_channel_id) and support.credits_per_user > 0
 
 
 def routes_feedback(settings: Settings, tenant_id: uuid.UUID) -> bool:
     """Whether this tenant's submitted 👎 forms also go to the escalation channel.
 
-    Off unless the tenant turned it on and the channel is reachable from here,
-    as for `enabled`; credits play no part, since a form spends none.
+    Off unless the tenant turned it on and a Teams channel is set; credits play
+    no part, since a form spends none.
     """
-    channel = settings.support.escalation_channel_id
-    if channel is None or settings.support.routes_feedback(tenant_id) is not True:
-        return False
-    return _teams_channel(channel) or settings.discord is not None
+    support = settings.support
+    return bool(support.teams_escalation_channel_id) and support.routes_feedback(tenant_id)
 
 
 def _refusal(access: AnswerAccess) -> str:
@@ -528,31 +518,17 @@ class SupportCommand:
 async def post_to_support_channel(
     runtime: TeamsRuntime, direct: DirectChats | None, body: str
 ) -> bool:
-    """Post `body` to the escalation channel; False when it did not land.
+    """Post `body` to the Teams escalation channel; False when it did not land.
 
-    A Teams channel is asked `authorize(POST)` with no agent, on a policy read
+    The channel is asked `authorize(POST)` with no agent, on a policy read
     just before the send, as Slack does, so a channel protected meanwhile is
     refused. No lock is held across the send.
     """
-    settings = runtime.settings
-    channel = settings.support.escalation_channel_id
+    channel = runtime.settings.support.teams_escalation_channel_id
     try:
-        if channel is None or (_teams_channel(channel) and direct is None):
+        if not channel or direct is None or not await _may_post_to(runtime, channel):
             return False
-        if _teams_channel(channel) and direct is not None:
-            if not await _may_post_to(runtime, channel):
-                return False
-            await direct.post(channel, body)
-            return True
-        if settings.discord is None:
-            return False
-        token = settings.discord.bot_token.get_secret_value()
-        response = await runtime.http_client.post(
-            f"{_DISCORD_API}/channels/{channel}/messages",
-            headers={"Authorization": f"Bot {token}"},
-            json={"content": body[:2000], "allowed_mentions": {"parse": []}},
-        )
-        response.raise_for_status()
+        await direct.post(channel, body)
         return True
     except (SQLAlchemyError, *TEAMS_SEND_ERRORS) as exc:
         log.warning("support.channel_undeliverable", err_type=type(exc).__name__)

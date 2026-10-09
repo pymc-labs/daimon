@@ -106,7 +106,9 @@ async def _service(
         deployment_default=TURN_DEFAULT,
     )
     if support:
-        runtime.settings.support = SupportSettings(escalation_channel_id="19:ops@thread.tacv2")
+        runtime.settings.support = SupportSettings(
+            teams_escalation_channel_id="19:ops@thread.tacv2"
+        )
     session = ma_session(id=SESSION_ID, agent_id=AGENT_ID, environment_id=ENV_ID)
     create = patch("daimon.core.turn.prepare.create_session", return_value=session)
     with create if one_session else nullcontext():

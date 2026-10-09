@@ -96,6 +96,22 @@ class SessionPreparationFailed(DaimonError):
         self.preserved: bool = preserved
 
 
+class TurnNotStarted(DaimonError):
+    """A turn that never got a turn slot: Stop while it waited, the queue's max
+    wait, or a full queue (`daimon.core.turn.slots`). Raised for a continuation,
+    so its dispatcher never settles work that did not run as delivered: it is
+    offered again after a capacity miss and settled not delivered after Stop."""
+
+    def __init__(self, result: str) -> None:
+        super().__init__(f"turn not started: {result}")
+        self.result = result
+
+    @property
+    def capacity(self) -> bool:
+        """The queue was full or the wait ran out: worth offering again."""
+        return self.result in ("queue_full", "timed_out")
+
+
 class SessionBusyError(DaimonError):
     """A responder change reached a thread whose previous turn is still running.
 

@@ -278,21 +278,23 @@ class TestInflightCapRejection:
         async with db_session_factory() as session, session.begin():
             await set_turn_cap(session, tenant_id=result.tenant_id, cap=30)
         bot = make_bot(_make_runtime(db_session_factory, max_concurrent_turns_per_tenant=3))
-        bot._inflight[result.tenant_id] = 3  # pyright: ignore[reportPrivateUsage]
+        for _ in range(3):
+            bot.turn_queue.claim(result.tenant_id)
         bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue, reportMethodAssign]
 
         message = _make_channel_message(guild_id=int(guild_id))
         await bot.on_message(message)
 
         bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
-        assert bot._inflight[result.tenant_id] == 3  # pyright: ignore[reportPrivateUsage]
+        assert bot.turn_queue.in_flight(result.tenant_id) == 3
+        assert bot.turn_queue.depth() == 0, "the raised cap admits at once, no queueing"
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_on_message_rejects_over_cap_for_tenant(
+    async def test_on_message_refuses_when_the_tenant_queue_is_full(
         self,
         mock_resolve_config: AsyncMock,
         mock_create_session: AsyncMock,
@@ -302,10 +304,12 @@ class TestInflightCapRejection:
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        """4th turn for a saturated tenant rejected (SCALE-01).
+        """A turn for a saturated tenant whose queue is full is refused (SCALE-01).
 
-        Pre-seed inflight count at the cap; the next on_message call must send
-        the over-cap message and NOT start a turn.
+        Over the cap a turn queues; the plain refusal is only the last resort,
+        when the queue is full too. Pre-seed the slots at the cap with no
+        queue room; the next on_message must send the over-cap message and
+        NOT start a turn.
         """
         from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
@@ -323,8 +327,10 @@ class TestInflightCapRejection:
         runtime = _make_runtime(db_session_factory, max_concurrent_turns_per_tenant=cap)
         bot = make_bot(runtime)
 
-        # Saturate the tenant's in-flight slot.
-        bot._inflight[tenant_id] = cap  # pyright: ignore[reportPrivateUsage]
+        # Saturate the tenant's slots and leave no queue room.
+        bot.turn_queue.max_queued_per_tenant = 0
+        for _ in range(cap):
+            bot.turn_queue.claim(tenant_id)
 
         message = _make_channel_message(guild_id=int(guild_id))
 
@@ -395,8 +401,8 @@ class TestInflightDecrement:
 
         await bot.on_message(message)
 
-        # After the turn completes, tenant_id must be absent (or 0) from _inflight.
-        count_after = bot._inflight.get(tenant_id, 0)  # pyright: ignore[reportPrivateUsage]
+        # After the turn completes, the tenant holds no slot.
+        count_after = bot.turn_queue.in_flight(tenant_id)
         assert count_after == 0, (
             f"in-flight counter must be 0 after a successful turn; got {count_after}"
         )
@@ -451,7 +457,7 @@ class TestInflightDecrement:
 
         await bot.on_message(message)
 
-        count_after = bot._inflight.get(tenant_id, 0)  # pyright: ignore[reportPrivateUsage]
+        count_after = bot.turn_queue.in_flight(tenant_id)
         assert count_after == 0, (
             f"in-flight counter must be 0 after a failed turn; got {count_after}"
         )
@@ -509,8 +515,10 @@ class TestInflightIsolation:
         runtime = _make_runtime(db_session_factory, max_concurrent_turns_per_tenant=cap)
         bot = make_bot(runtime)
 
-        # Saturate only guild A.
-        bot._inflight[tenant_a] = cap  # pyright: ignore[reportPrivateUsage]
+        # Saturate only guild A, with no queue room.
+        bot.turn_queue.max_queued_per_tenant = 0
+        for _ in range(cap):
+            bot.turn_queue.claim(tenant_a)
 
         # Guild A message: must be rejected.
         message_a = _make_channel_message(guild_id=int(guild_a), channel_id=7010)

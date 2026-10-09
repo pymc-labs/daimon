@@ -83,6 +83,7 @@ from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import fit_notice, render_termination_notice
+from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
@@ -517,6 +518,18 @@ class SlackTurnLifecycle:
                 },
             ],
             "Stopped. Send a message to start again.",
+        )
+
+    async def end_unstarted(self, *, stopped: bool, text: str = QUEUE_TIMED_OUT_TEXT) -> None:
+        """End a card whose turn never started: Stop while it waited for a slot
+        (the stopped turn's words), or `text` (the ordinary error after the
+        queue's max wait, or a refusal)."""
+        if stopped:
+            await self._flush_cancelled()
+            return
+        self._terminal = True
+        await self._post_or_update(
+            [{"type": "section", "text": {"type": "mrkdwn", "text": text}}], text
         )
 
     async def _repair_terminal_flush(self, text: str) -> None:

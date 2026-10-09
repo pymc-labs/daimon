@@ -2294,6 +2294,17 @@ class PendingSkillAdd(Base):
     __table_args__ = (
         Index("pending_skill_adds_lookup_idx", "tenant_id", "account_id", "platform", "thread_id"),
         Index("pending_skill_adds_expiry_idx", "expires_at"),
+        # At most one open preview per person, thread and agent: a newer one replaces it.
+        Index(
+            "uq_pending_skill_adds_open",
+            "tenant_id",
+            "account_id",
+            "platform",
+            "thread_id",
+            "ma_agent_id",
+            unique=True,
+            postgresql_where=text("consumed_at IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

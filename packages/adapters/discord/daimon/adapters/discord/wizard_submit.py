@@ -37,9 +37,10 @@ Three things are load-bearing about `callback`'s shape:
 
 The two gates a wizard turn DOES share with the mention path: `bot.draining`
 (checked in `callback`, before the one-shot claim, so a refused submit leaves
-a form that is still tappable after the restart) and the per-tenant
-`_inflight` cap (claimed and released in `run_wizard_submit_turn`, because a
-wizard turn costs the same upstream capacity as a mention turn).
+a form that is still tappable after the restart) and the turn slots in
+`bot.turn_queue` (claimed, or queued for, and released in
+`run_wizard_submit_turn`, because a wizard turn costs the same upstream
+capacity as a mention turn).
 
 Accepted limitation, deliberately not addressed here: a submit-spawned turn
 does not participate in the mention path's per-thread `_processing`/`_pending`
@@ -102,12 +103,13 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.stores.wizard_session import try_claim_submit
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.ceiling import turn_deadline
-from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, wait_for_ticket
+from daimon.core.turn_queue import TurnTicket
 from daimon.core.wizard.answers import format_answer_block
 from daimon.core.wizard.apply import apply
 from daimon.core.wizard.render import to_screen
@@ -363,14 +365,14 @@ async def run_wizard_submit_turn_observed(
     fire-and-forget background task will otherwise report a failure to the
     user.
 
-    Claims a per-tenant in-flight slot the same way `on_message` does, and
-    releases it in the same `finally` that unbinds the log context: a wizard
-    turn costs the same upstream capacity as a mention turn, so it must count
-    against the same cap.
+    Claims a turn slot the same way `on_message` does (queueing over a cap),
+    and releases it in the same `finally` that unbinds the log context: a
+    wizard turn costs the same upstream capacity as a mention turn, so it must
+    count against the same caps.
     """
     rid = generate_request_id()
     structlog.contextvars.bind_contextvars(rid=rid)
-    inflight_claimed = False
+    ticket: TurnTicket | None = None
     # Nothing is posted -- not even an error -- until the channel is known to
     # be one the agent may post in.
     post_state = ProtectionState.UNKNOWN
@@ -414,13 +416,13 @@ async def run_wizard_submit_turn_observed(
             )
             return
 
-        # --- Per-tenant concurrency cap, claimed exactly as `on_message`
-        # claims it: read-check-increment with no await in between, and one
-        # matching release in this function's `finally`. The claim already
-        # committed, so an over-cap submit says the answers were recorded
-        # rather than pretending nothing happened. ---
-        count = bot._inflight.get(row.tenant_id, 0)  # pyright: ignore[reportPrivateUsage]  # the per-tenant cap bookkeeping DaimonBot owns; a wizard turn must count against the same cap the mention path claims
-        if not should_admit_turn(current_in_flight=count, cap=cap):
+        # --- Turn slot, claimed exactly as `on_message` claims it: admission
+        # with no await in between, and one matching release in this
+        # function's `finally`. Over a cap the turn queues and waits behind
+        # its card like a mention. Only a full queue refuses; the claim
+        # already committed, so that refusal says the answers were recorded. ---
+        ticket = bot.turn_queue.admit(row.tenant_id, cap=cap, channel_id=thread_id)
+        if ticket is None:
             record_refusal(
                 bot.runtime.sessionmaker,
                 tenant_id=row.tenant_id,
@@ -428,11 +430,11 @@ async def run_wizard_submit_turn_observed(
                 channel_id=parent_channel_id,
                 thread_id=thread_id,
             )
-            _log.info("wizard_submit.skipped.over_cap", tenant_id=str(row.tenant_id))
+            _log.info(
+                "wizard_submit.skipped.over_cap", tenant_id=str(row.tenant_id), reason="queue_full"
+            )
             await channel.send(_OVER_CAP)
             return
-        bot._inflight[row.tenant_id] = count + 1  # pyright: ignore[reportPrivateUsage]  # see the read above
-        inflight_claimed = True
 
         # --- Stage one: admission -- D-01 admit(). Same four branches
         # _orchestrate has, prefixed with a sentence saying the answers were
@@ -524,41 +526,8 @@ async def run_wizard_submit_turn_observed(
                 )
             return
 
-        # D-03 boundary, mirroring bot.py's mention path: the per-turn
-        # ceiling clock starts here, once admission has passed, and covers
-        # session bind (bind_session) plus the driver pump (run_prepared_turn)
-        # as ONE shared budget. This call site had NO timeout of any kind
-        # before this phase -- the old 45-minute wait_for lived only in
-        # bot.py's mention path, so a wizard-submit turn could hang forever.
-        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
-
         agent = admission.agent
-
         session_account_id = admission.account_id
-
-        # --- Stage two: bind_session -- D-01 bind_session(). Always reuses
-        # the thread's existing session: the form lives in the conversation
-        # the turn should continue, so the agent resumes with the history of
-        # having asked. ---
-        prepared = await bind_session(
-            bot.runtime.turn_deps,
-            admission,
-            tenant_id=row.tenant_id,
-            platform="discord",
-            external_user_id=str(interaction.user.id),
-            thread_id=thread_id,
-            session_account_id=session_account_id,
-            reuse_existing=True,
-            deadline=turn_deadline_at,
-        )
-
-        _log.info(
-            "wizard_submit.session_ready",
-            session_id=prepared.ma_session_id,
-            thread_id=thread_id,
-            reused=prepared.reused,
-        )
-
         user_message = format_answer_block(spec, state)
 
         # kwargs are forwarded verbatim to discord.py's overloaded send()/edit().
@@ -590,6 +559,9 @@ async def run_wizard_submit_turn_observed(
                 on_first_post=on_first_post,
             )
 
+        # The card and its durable intent go up before the turn waits for a
+        # slot, exactly as for a queued mention: the person sees "Working on
+        # it…" with Stop, and a restart while it waits retires the card.
         turn_card_intent, lifecycle = await post_initial_turn_card(
             bot.runtime.sessionmaker,
             tenant_id=row.tenant_id,
@@ -597,6 +569,73 @@ async def run_wizard_submit_turn_observed(
             make_lifecycle=_make_lifecycle,
         )
         bot._track_live_turn_card(turn_card_intent.id)  # pyright: ignore[reportPrivateUsage]
+
+        async def _end_card(text: str) -> None:
+            """Collapse the card of a turn that never ran, and retire its intent."""
+            if lifecycle.message_ref is not None:
+                await _edit_message(lifecycle.message_ref, content=text, embed=None, view=None)
+            else:
+                await channel.send(text)
+            await retire_terminal_turn_card(
+                bot.runtime.sessionmaker,
+                intent_id=turn_card_intent.id,
+                expected_message_id=lifecycle.card_message_id,
+                no_post_confirmed=not lifecycle.first_post_attempted,
+            )
+
+        # Over a cap the turn waits here, behind its card, before it binds a
+        # session: preparation never runs outside the caps.
+        slot = await wait_for_ticket(
+            ticket, cancel, sessionmaker=bot.runtime.sessionmaker, tenant_id=row.tenant_id
+        )
+        if slot != "started":
+            await _end_card(
+                {
+                    "cancelled": "Stopped.\nSend a message to start again.",
+                    "timed_out": QUEUE_TIMED_OUT_TEXT,
+                    "balance_depleted": admission_refusal_message(
+                        "balance_depleted", bot.runtime.settings
+                    ),
+                }.get(slot, QUEUE_TIMED_OUT_TEXT)
+            )
+            return
+
+        # D-03 boundary, mirroring bot.py's mention path: the per-turn
+        # ceiling clock starts here, once admission has passed and the turn
+        # holds its slot, and covers session bind (bind_session) plus the
+        # driver pump (run_prepared_turn) as ONE shared budget. This call
+        # site had NO timeout of any kind before this phase -- the old
+        # 45-minute wait_for lived only in bot.py's mention path, so a
+        # wizard-submit turn could hang forever.
+        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+
+        # --- Stage two: bind_session -- D-01 bind_session(). Always reuses
+        # the thread's existing session: the form lives in the conversation
+        # the turn should continue, so the agent resumes with the history of
+        # having asked. A bind failure ends the card before the error
+        # boundary below posts its notice. ---
+        try:
+            prepared = await bind_session(
+                bot.runtime.turn_deps,
+                admission,
+                tenant_id=row.tenant_id,
+                platform="discord",
+                external_user_id=str(interaction.user.id),
+                thread_id=thread_id,
+                session_account_id=session_account_id,
+                reuse_existing=True,
+                deadline=turn_deadline_at,
+            )
+        except Exception:
+            await _end_card(QUEUE_TIMED_OUT_TEXT)
+            raise
+
+        _log.info(
+            "wizard_submit.session_ready",
+            session_id=prepared.ma_session_id,
+            thread_id=thread_id,
+            reused=prepared.reused,
+        )
 
         # lifecycle_holder tracks whichever DiscordTurnLifecycle actually
         # completed the turn -- recovery_lifecycle rebuilds a fresh one
@@ -728,6 +767,6 @@ async def run_wizard_submit_turn_observed(
             interaction, tenant_id=row.tenant_id, rid=rid, exc=exc, post_state=post_state
         )
     finally:
-        if inflight_claimed:
-            bot._release_inflight(row.tenant_id)  # pyright: ignore[reportPrivateUsage]  # the matching release for the claim above
+        if ticket is not None:
+            ticket.release()
         structlog.contextvars.unbind_contextvars("rid")

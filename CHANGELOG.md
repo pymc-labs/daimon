@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hackathon staging layouts accept the existing QA admin bot and recognize Discord Administrator permissions, so private team roles can be provisioned without the roleless fallback.
 - The file-handling skill now tells agents to export only the current turn's finished deliverables, keeping working directories and already delivered files out of outputs to avoid duplicate attachments.
 - A copied agent keeps the skills its source added itself again. Copying (a channel's own agent made with `--copy-from`, or `fork_agent`) downloaded each skill with a header a workspace API key is refused for, so the copy silently left those skills off. The workspace recovery export downloads skills the same way and is fixed too.
+||||||| parent of fc92a34c1 (fix(core): count an approval as taken only when its tool result appears)
+- A turn with several approval cards no longer fails with "The agent stopped because it couldn't confirm your approval" when the stream reconnects while the answers are being applied. An approval card that takes longer than two seconds to update now still updates, instead of keeping its buttons.
 - A new agent's first Slack or Discord answer now shows its generated face. The first turn waits up to three seconds for the face to render instead of posting without a picture.
 - Discord agent posts and MCP tools now wait at most two seconds for a new channel webhook, then post through the bot with the agent name while creation continues in the background. Creation is deduplicated per channel, 429 retries respect a cooldown, and new channels create one webhook.
 - **The scheduler's usage sweep no longer re-replays every model call it has
@@ -34,7 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
-- Where approval cards are turned off, a person adds a skill from chat by replying `yes` to its preview. "Add this skill to our agent" previews it. Daimon reads the person's next message in that thread itself: a plain yes (or y, confirm, approve) approves the upload for that turn, and any other reply cancels it. The preview is valid for 15 minutes, for that person, thread, agent and content only, and is used once. A newer preview replaces an older one. Who may change the agent is unchanged. Discord turns pass the message; elsewhere the chat path stays preview-only.
+- Where approval cards are turned off, a person adds a skill from chat by replying `yes` to its preview. "Add this skill to our agent" previews it. Daimon reads the person's next message in that thread itself: a plain yes (or y, confirm, approve) approves the upload for that turn, and any other reply cancels it. The preview is valid for 15 minutes, for that person, thread, agent and content only, and is used once. A newer preview replaces an older one, even when two arrive at once: only one preview per person, thread and agent is ever open. Who may change the agent is unchanged. Discord turns pass the message; elsewhere the chat path stays preview-only.
+- Turns over the concurrency caps now wait instead of being refused. On Discord, Slack and Teams a mention over the per-workspace cap (or Discord's process-wide cap) shows the usual "Working on it…" card with Stop and starts when a slot frees, served round-robin across workspaces and in order within one. Stop cancels a waiting turn. A turn still waiting after five minutes ends with the usual error. The capacity notice now appears only when the queue itself is full (50 per workspace, 500 in total, per adapter process; `DAIMON_TURN_QUEUE__*`). Queue depth and wait times are in the `runtime.health` log.
 - MCP browser pages now share a responsive Daimon shell with Daimon's face in
   the page header, local Inter font, brand colours, and inline action icons.
   The picker uses separate desktop, tablet, and phone layouts. GitHub and Slack
@@ -255,6 +258,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Teams Ask a person posts to its own `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`, as Slack has its own. It no longer shares `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` with Discord, so one deployment can run Ask a human on both.
 - Tool approval cards on Discord, Slack and Teams now name the action and consequence, show plain labelled inputs in Details, and collapse after a decision. Each blocked call gets its own card and confirmation event.
 - If a turn stops after an approval click but before its confirmation is sent, the answered card now shows Stopped.
 
@@ -448,6 +452,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Teams Ask a person: a deployment that put a Teams channel (`19:…`) in `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` moves it to `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`; until then Teams offers no Ask a person, and Discord ignores the Teams id.
 - Building the image needs Docker 23 or later: the Dockerfile uses BuildKit instructions the legacy builder rejects.
 - Run migrations `0046_account_external` and `0047_turn_origin_external` before deploying. The new code leaves an empty member guest list out of the stored access policy, so older processes still read it; once one is listed, upgrade every process.
 - Isolated channels' agents no longer read other channels, nor sessions with no channel stamp: setups that relied on it stop working.
@@ -515,7 +520,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same rules as the chat tool and the setup panels: a built-in agent is
   refused, and a skill another agent also has is never given a new version.
 
-- **Ask a human on Slack.** Slack answers get an Ask a human button beside 👍/👎 when `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` is set. It opens a form and posts the note, the asker and a link to the answer (no answer text, link previews off) to that channel. It uses the same per-person, per-workspace allowance and messages as Discord and Teams, from the same ledger. Slack requests post only to the Slack channel, never to the Discord/Teams one; leaving the Slack one unset keeps the button hidden. `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that owns the channel when daimon is installed in several. Only people who may start a turn in that thread can ask, checked on click and again under the tenant's policy lock in the transaction that spends the credit, so a policy edit committed first refuses with nothing spent and a later one waits. The escalation channel's protection is checked from a fresh read right before the post. Asking twice on one answer records and posts once. Requests from a sealed channel warn that the note leaves it.
+- **Ask a human on Slack.** Slack answers get an Ask a human button beside 👍/👎 when `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` is set. It opens a form and posts the note, the asker and a link to the answer (no answer text, link previews off) to that channel. It uses the same per-person, per-workspace allowance and messages as Discord and Teams, from the same ledger. Slack requests post only to the Slack channel, never to Discord's or Teams' channel; leaving the Slack one unset keeps the button hidden. `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that owns the channel when daimon is installed in several. Only people who may start a turn in that thread can ask, checked on click and again under the tenant's policy lock in the transaction that spends the credit, so a policy edit committed first refuses with nothing spent and a later one waits. The escalation channel's protection is checked from a fresh read right before the post. Asking twice on one answer records and posts once. Requests from a sealed channel warn that the note leaves it.
 - **Scoped operator tokens for integrations.** `daimon mcp mint-operator-token`
   mints a token acting over `/mcp` for one server admin with only the scopes it
   names (`tenant:read`, `channels:write`, `promo:redeem`, deployment-wide

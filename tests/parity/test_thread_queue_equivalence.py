@@ -16,6 +16,7 @@ from daimon.adapters.teams import app as teams
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.errors import DaimonError
 from daimon.core.turn.thread_queue import ThreadQueue
+from daimon.core.turn_queue import TurnQueue
 
 TENANT = UUID(int=1)
 MODULES = {"discord": discord, "slack": slack, "teams": teams}
@@ -24,6 +25,8 @@ CLASSES = {"discord": discord.DaimonBot, "slack": slack.SlackApp, "teams": teams
 
 def base(platform):
     namespace = dict(vars(MODULES[platform]))
+    # The frozen base predates the turn queue and calls the old pure gate.
+    namespace["should_admit_turn"] = lambda *, current_in_flight, cap: current_in_flight < cap
     path = Path(__file__).with_name("thread_queue_base") / f"{platform}.txt"
     exec(compile(path.read_text(), str(path), "exec"), namespace)
     return namespace["Base"], namespace
@@ -32,6 +35,7 @@ def base(platform):
 class Replay:
     def __init__(self, platform, old, fault="ok", cap=3, draining=False):
         self.platform, self.fault, self.cap = platform, fault, cap
+        self.old = old
         self.effects, self.resumes, self.cleared = [], [], []
         self.rows = ["handoff"]
         cls, namespace = base(platform) if old else (CLASSES[platform], vars(MODULES[platform]))
@@ -41,6 +45,13 @@ class Replay:
             _pending={},
             _deferred_dispatch={},
             _inflight={},
+            turn_queue=TurnQueue(
+                platform=platform,
+                global_cap=None,
+                max_queued_per_tenant=50,
+                max_queued=500,
+                max_wait_s=300,
+            ),
             _last_message_at={},
             _recovery=None,
             _participation=None,
@@ -229,6 +240,20 @@ class Replay:
             return dataclasses.asdict(item)
         return item
 
+    def hold_slot(self):
+        """Another turn holds one of TENANT's slots: the base's counter, the queue's ticket."""
+        if self.old:
+            self.obj._inflight[TENANT] = 1
+        else:
+            self.obj.turn_queue.claim(TENANT)
+
+    def in_flight(self):
+        """Slots held per tenant, in the base's dict shape for either version."""
+        if self.old:
+            return self.obj._inflight
+        queue = self.obj.turn_queue
+        return {TENANT: queue.in_flight(TENANT)} if queue.in_flight(TENANT) else {}
+
     def result(self, error=None):
         # Client identity differs across the two executions; retain all other resume facts.
         resumes = [
@@ -247,7 +272,7 @@ class Replay:
                 for key, batch in self.obj._pending.items()
             },
             self.obj._deferred_dispatch,
-            self.obj._inflight,
+            self.in_flight(),
             self.rows,
             error,
         )
@@ -317,7 +342,7 @@ async def test_wake_caps_and_busy_before_cap_match_base(platform, capped, cap):
     results = []
     for old in (True, False):
         run = Replay(platform, old, cap=cap)
-        run.obj._inflight[TENANT] = 1
+        run.hold_slot()
         await run.external(capped=capped)
         run.obj._processing.add(run.key)
         await run.external(url="saved region", capped=False)

@@ -52,7 +52,7 @@ def _running(
 ) -> AbstractAsyncContextManager[TeamsHttpService]:
     runtime = build_teams_runtime(db_factory)
     runtime.settings.support = SupportSettings(
-        escalation_channel_id=OPS, feedback_to_support={TENANT: routed}
+        teams_escalation_channel_id=OPS, feedback_to_support={TENANT: routed}
     )
     return running_service(runtime, fake)
 

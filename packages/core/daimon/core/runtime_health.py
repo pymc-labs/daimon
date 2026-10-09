@@ -14,6 +14,7 @@ from typing import TypedDict, cast
 import httpx
 import structlog
 from daimon.core.session_preparation_gate import preparation_counts
+from daimon.core.turn_queue import take_queue_window
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.pool import QueuePool
 
@@ -175,6 +176,8 @@ async def log_health_once(
             "p95": _percentile(lag_samples_ms, 0.95),
         },
         turns_in_flight={"global": global_turns, "per_tenant_max": per_tenant_max},
+        # Depth now plus the waits of turns started this window (p50/p95/max).
+        turn_queue=take_queue_window(),
     )
     if process == "discord":
         fields["discord_ratelimits"] = take_discord_ratelimit_window()

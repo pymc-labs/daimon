@@ -84,9 +84,10 @@ class TerminationReason(StrEnum):
     ADMISSION_DENIED = "admission_denied"
     """Any other admission refusal (the invoker allowlist, a future gate)."""
     ADMISSION_CONCURRENCY_SHED = "admission_concurrency_shed"
-    """`daimon.core.turn.gating.should_admit_turn` refused: too many turns in
-    flight. It returns a bool rather than raising, so callers that shed a turn
-    set this member themselves; `termination_reason` never produces it."""
+    """Too many turns in flight: the turn queue was full, or a queued turn
+    waited past its max wait (`daimon.core.turn_queue`). Admission returns
+    rather than raising there, so callers set this member themselves;
+    `termination_reason` never produces it."""
     MISSING_CONFIG = "missing_config"
     RESOLVER_MISS = "resolver_miss"
     SESSION_PREPARATION_FAILED = "session_preparation_failed"

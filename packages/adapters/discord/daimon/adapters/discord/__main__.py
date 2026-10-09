@@ -58,7 +58,7 @@ async def main() -> None:
                 "discord",
                 cast(AsyncEngine, runtime.sessionmaker.kw["bind"]),
                 settings.observability.health_interval_s,
-                lambda: (bot._global_inflight, max(bot._inflight.values(), default=0)),  # pyright: ignore[reportPrivateUsage]
+                lambda: (bot.turn_queue.in_flight(), bot.turn_queue.in_flight_max()),
             ):
                 await bot.start(settings.discord.bot_token.get_secret_value())
         finally:

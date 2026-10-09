@@ -7,6 +7,20 @@ turn	TurnLifecycle	TurnLifecycle	violates:TerminalExclusive	39	-	adversarial ter
 turn	TurnLifecycle	TurnLifecycleReplay	clean	6926	-	stale replay with the merge fix: RenderAnchorBound holds
 turn	TurnLifecycle	TurnLifecycleBounded	clean	2646	-	adversarial conditions off: all safety invariants
 turn	TurnProgress	TurnProgress	clean	57	-	liveness: turn finalizes, periodic render resolves (weak fairness)
+# ---- turn slots and the queue at the concurrency cap ----
+turn_queue	TurnQueue	TurnQueueSafe	clean	560415	-	burst over the cap, round-robin, max wait, Stop, every end path, a follow-up, restart: all invariants
+turn_queue	TurnQueue	TurnQueueThreeTenants	clean	302963	-	round-robin over three tenants
+turn_queue	TurnQueue	TurnQueueFull	clean	416349	-	both queue bounds binding: all invariants
+turn_queue	TurnQueue	TurnQueueFullWitness	violates:NoRefusal	257	-	witness: the plain refusal is reachable from a full queue
+turn_queue	TurnQueue	TurnQueueProgress	clean	19795	-	liveness with the max wait off: queued turns resolve, cards settle, slots return (weak fairness)
+turn_queue	TurnQueue	FollowUpsReadmit	clean	3551	-	global cap 1, a two-follow-up thread: each follow-up re-enters admission; all invariants
+turn_queue	TurnQueue	LeakOnFailure	violates:SlotAccounting	13	-	unsafe: the failure end path forgets its slot
+turn_queue	TurnQueue	LeakStallsQueue	violates:QueuedResolves	823	-	unsafe: the leak without the max wait strands a queued turn
+turn_queue	TurnQueue	GlobalFifoStarves	violates:NoStarvation	127426	-	unsafe: one global FIFO lets a busy tenant overtake another
+turn_queue	TurnQueue	GrantThenPop	violates:NoDoubleStart	9486	-	unsafe: start then pop after an await runs a turn twice
+turn_queue	TurnQueue	DispatchGrantsLate	violates:NoLateStart	68	-	pre-review: dispatch starts a turn already past its max wait
+turn_queue	TurnQueue	FollowUpKeepsSlot	violates:NoStarvation	45	-	pre-review: a thread's follow-ups keep its slot and starve another tenant
+turn_queue	TurnQueue	FollowUpReusesTicket	violates:FollowUpWaitsItself	87	-	pre-review: a follow-up inherits a stopped turn's ticket and fails at once
 # ---- tool approval and Managed Agents pauses ----
 approvals	Approvals	ApprovalsSingle	clean	5489	-	three single cards: safety through duplicate pauses and queued echoes
 approvals	Approvals	ApprovalsBatched	clean	593	-	one card for three calls: same MA batch and safety invariants
@@ -20,6 +34,7 @@ approvals	Approvals	ApprovalsQuietBounded	clean	836	-	two extra idle cycles; ass
 approvals	Approvals	ApprovalsQuietLateBeyondBound	violates:ApprovedRunsInTurn	420	-	residual if MA takes a queued allow after the two-cycle bound
 approvals	Approvals	ApprovalsEarlyCard	clean	1034	-	retiring an unsent approval on refusal restores eventual card truth
 approvals	Approvals	ApprovalsEarlyCardOld	violates:EventualCardTruth	1061	-	old refusal path leaves an unsent approved card after turn end
+approvals	Approvals	ApprovalsReplayQueued	violates:NoFalseNotAccepted	1566	-	pre-fix replay counts queued confirmations as taken; the next one-per-pause idle ends the turn as a re-ask
 # ---- scheduler ----
 scheduler	RoutineScheduler	RoutineScheduler	clean	110	-	two schedulers, one lock: one dispatch per occurrence
 scheduler	RoutineScheduler	RoutineSchedulerProgress	clean	110	-	liveness under fairness: pending completes, first occurrence advances
