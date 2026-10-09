@@ -133,9 +133,9 @@ Channel skill tools: extra skills one channel's turns run with.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `add_channel_skill` | admin only, operator tokens with channels:write | Add a skill to whatever agent answers in one channel, there only. |
-| `list_channel_skills` | admin only, operator tokens with tenant:read | List the extra skills a channel's turns run with, on top of its agent's. |
-| `remove_channel_skill` | admin only, operator tokens with channels:write | Remove an extra skill from a channel, by id or name. |
+| `add_channel_skill` | admin only, channel admins too, operator tokens with channels:write | Add a skill to whatever agent answers in one channel, there only. |
+| `list_channel_skills` | admin only, channel admins too, operator tokens with tenant:read | List the extra skills a channel's turns run with, on top of its agent's. |
+| `remove_channel_skill` | admin only, channel admins too, operator tokens with channels:write | Remove an extra skill from a channel, by id or name. |
 
 ## `channels`
 

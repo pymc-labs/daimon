@@ -1,8 +1,9 @@
-"""Channel skill tools: extra skills one channel's turns run with. Admin-only.
+"""Channel skill tools: extra skills one channel's turns run with.
 
-`authorize` (SET_CHANNEL_SKILLS) allows a server admin and never a channel
-admin. Operator tokens read them with ``tenant:read`` and change them with
-``channels:write``. What a channel may add is `daimon.core.channel_skills`'s.
+`authorize` (SET_CHANNEL_SKILLS) allows a server admin, or an admin of that
+channel, to read and change them. Operator tokens read them with
+``tenant:read`` and change them with ``channels:write``. What a channel may
+add is `daimon.core.channel_skills`'s.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_target import resolve_channel
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
-    _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._rule_view import load_caller_view
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
@@ -32,9 +32,9 @@ from fastmcp.exceptions import ToolError
 
 _PLATFORMS = ("discord", "slack", "teams")
 _NEEDS_SKILLS_ADMIN = (
-    "Changing a channel's skills needs a workspace or server admin, and the caller is not "
-    "one; a channel's own admins can't change them either. Tell them who can, and give "
-    "them a sentence that admin can say. Do not retry."
+    "A channel's skills need a workspace or server admin, or an admin of that channel, and "
+    "the caller is neither. Tell them who can, and give them a sentence that admin can say. "
+    "Do not retry."
 )
 
 
@@ -90,6 +90,11 @@ async def _target(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> t
     return cast(str, auth.platform), target
 
 
+def _require_read(auth: AuthIdentity, channel_id: str) -> None:
+    if not may_set_channel_skills(mcp_subject(auth, is_admin=auth.is_admin), channel_id):
+        raise ToolError(_NEEDS_SKILLS_ADMIN)
+
+
 def _require_write(auth: AuthIdentity, channel_id: str) -> None:
     decision = may_set_channel_skills(mcp_subject(auth, is_admin=auth.is_admin), channel_id)
     if not decision:
@@ -100,8 +105,8 @@ def _require_write(auth: AuthIdentity, channel_id: str) -> None:
 
 async def _list(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> ChannelSkillsResult:
     require_scope(auth, "tenant:read")
-    _require_admin(auth)
     platform, target = await _target(runtime, auth, channel_id)
+    _require_read(auth, target)
     async with runtime.session_factory() as session:
         rows = await store.list_channel_skills(
             session, tenant_id=auth.tenant_id, platform=platform, channel_id=target
@@ -165,16 +170,21 @@ async def _remove(
 
 
 def register_channel_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin", *scope_tags("tenant:read")})
+    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("tenant:read")})
     async def list_channel_skills(ctx: Context, channel_id: str) -> ChannelSkillsResult:  # pyright: ignore[reportUnusedFunction]
-        """List the extra skills a channel's turns run with, on top of its agent's. Admin-only."""
+        """List the extra skills a channel's turns run with, on top of its agent's.
+
+        Requires Manage Server (admin) or being an admin of that channel.
+        """
         return await _list(runtime, await _auth(ctx), channel_id)
 
-    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
+    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
     async def add_channel_skill(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, channel_id: str, skill: str
     ) -> ChannelSkillsResult:
-        """Add a skill to whatever agent answers in one channel, there only. Admin-only.
+        """Add a skill to whatever agent answers in one channel, there only.
+
+        Requires Manage Server (admin) or being an admin of that channel.
 
         ``skill`` is a skill id, a workspace library skill's name, or
         ``agent/name`` for one uploaded to the agent that answers in this
@@ -184,11 +194,14 @@ def register_channel_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         return await _add(runtime, await _auth(ctx), channel_id, skill)
 
-    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
+    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
     async def remove_channel_skill(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, channel_id: str, skill: str
     ) -> ChannelSkillsResult:
-        """Remove an extra skill from a channel, by id or name. Admin-only."""
+        """Remove an extra skill from a channel, by id or name.
+
+        Requires Manage Server (admin) or being an admin of that channel.
+        """
         return await _remove(runtime, await _auth(ctx), channel_id, skill)
 
 
