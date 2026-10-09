@@ -268,3 +268,33 @@ async def test_the_retry_waits_until_ma_has_taken_the_interrupt() -> None:
     assert final.content == [TextBlock(kind="text", text="hello again")]
     sent = [batch[0]["type"] for _sid, batch in fa.beta.sessions.events.sent_events]
     assert sent == ["user.interrupt", "user.message"]
+
+
+async def test_an_idle_with_no_idle_history_is_not_settled() -> None:
+    """Review of #546: without an idle event there is no evidence MA took the
+    interrupt, so the recovery keeps waiting and sends nothing more."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [[]]
+    fa.beta.sessions.retrieve_statuses = ["idle"] * 1000
+    _refuse_messages(fa, times=1, interrupt_lag_s=3600)
+    fa.beta.sessions.events.replay_events.clear()
+    cancel = asyncio.Event()
+    asyncio.get_running_loop().call_later(1.2, cancel.set)
+
+    final = await asyncio.wait_for(
+        run_turn(
+            anthropic=cast(AsyncAnthropic, fa),
+            session_id="sess_1",
+            user_message="are you there?",
+            lifecycle=RecordingLifecycle(),
+            cancel=cancel,
+            render_interval_s=0.001,
+            now=_now,
+            billing=_EXEMPT,
+        ),
+        timeout=5,
+    )
+
+    sent = [batch[0]["type"] for _sid, batch in fa.beta.sessions.events.sent_events]
+    assert sent == ["user.interrupt"], "no retry without evidence MA took the interrupt"
+    assert final.error is not None and final.error.kind == "interrupted"

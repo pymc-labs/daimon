@@ -696,7 +696,7 @@ async def _interrupt_and_settle(
             session = await anthropic.beta.sessions.retrieve(session_id)
             if session.status == "terminated":
                 return False
-            if session.status == "idle" and not await _latest_idle_awaits_action(
+            if session.status == "idle" and await _latest_idle_is_settled(
                 anthropic, session_id=session_id
             ):
                 return True
@@ -730,13 +730,16 @@ async def _interrupt_and_settle(
     return "idle"
 
 
-async def _latest_idle_awaits_action(anthropic: AsyncAnthropic, *, session_id: str) -> bool:
-    """Whether the session's most recent idle is a `requires_action` pause."""
+async def _latest_idle_is_settled(anthropic: AsyncAnthropic, *, session_id: str) -> bool:
+    """Whether the session's most recent idle exists and is not a `requires_action` pause.
+
+    No idle in the history is no evidence MA took the interrupt, so it does not count.
+    """
     async for event in anthropic.beta.sessions.events.list(
         session_id=session_id, types=["session.status_idle"], order="desc", limit=1
     ):
         stop_reason = getattr(event, "stop_reason", None)
-        return getattr(stop_reason, "type", None) == "requires_action"
+        return getattr(stop_reason, "type", None) != "requires_action"
     return False
 
 

@@ -182,10 +182,12 @@ class FakeEventsResource:
         order: str = "asc",
         limit: int | None = None,
     ) -> _FakeEventList:
+        # `limit` is the SDK's page size; iterating the list walks every page.
+        del limit
         events = [e for e in self.replay_events if types is None or e.type in types]
         if order == "desc":
             events.reverse()
-        return _FakeEventList(events[:limit] if limit is not None else events)
+        return _FakeEventList(events)
 
     async def send(self, session_id: str, *, events: list[dict[str, Any]]) -> None:
         self.sent_events.append((session_id, list(events)))
