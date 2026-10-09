@@ -1,5 +1,27 @@
 # Billing and credits
 
+Neutral-backend usage revisions can be recorded through the host accounting
+outbox in the caller's database transaction. The first revision retains the
+`turn:{session}:{event}` debit key; later revisions use
+`adjust:{binding}:{observation}:{revision}` for the signed difference between
+rounded totals. A failed transaction rolls back the claim, usage projection and
+ledger write together, allowing pending revisions to be replayed after restart.
+Corrections retain the original observation's billing time and contribute to
+channel spend, including refunds. Historical turn credits keep their existing
+channel-spend treatment.
+
+Callers select one billing grain: model requests by default, or turn/session
+observations for a provider that reports those units. Incremental and cumulative
+observations both use their per-ID revision totals. An aggregate's explicit
+coverage must reference durable observations at the selected grain before it
+can be acknowledged without another debit; unresolved coverage or an uncovered
+mismatched grain fails before claiming the outbox row. Unknown token
+stages remain unknown there; known disjoint stages can be priced, and a legacy
+usage row is projected only once all four stages are known. Callers retain the
+same tenant, user, channel, rates, markup and billing grain across revisions.
+The established Anthropic live recorder continues to use its existing transaction
+and keys.
+
 One deployment runs on one Anthropic API key, and any number of Discord
 servers and Slack workspaces can install against it. The credit model is what
 makes that safe: every model call is priced in USD and debited from the

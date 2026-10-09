@@ -538,6 +538,27 @@ the M0 migration. Unknown token stages remain unpriced and cannot be written
 as measured billing rows. Higher observation revisions require the accounting
 outbox rather than a second turn debit.
 
+The host's `accounting_outbox.record_observation_usage` records and applies a
+revision within a caller-owned `AsyncSession` transaction;
+`apply_usage_outbox` also drains committed pending rows after restart. The bridge
+uses the Postgres StateStore's session-level claim function, serializes revisions
+by binding and observation, preserves historical `turn:` keys and uses signed
+`adjust:` entries for later revisions. The nullable legacy
+`observation_revision` column guards the latest projection without rewriting
+historical identities or timestamps. The caller selects `billing_grain`, defaulting
+to `model_request`; both increment and cumulative bases produce signed corrections.
+Explicit aggregate coverage must resolve to durable leaves at that grain in the
+same binding, tenant and session before acknowledgement without another charge.
+Uncovered mismatched grains and unresolved coverage fail before claiming, so a
+provider exposing turn observations needs an explicit `billing_grain="turn"`.
+
+C12 accepts an optional asynchronous `host_accounting_evidence()` hook on its
+transport. It verifies complete legacy-row snapshots, exact Decimal amounts for
+100→120→110 corrections, overlapping totals, and a failed transaction followed
+by restart. The hook supplies database facts rather than a verdict. Missing host
+evidence leaves C12 pending; the generic reference transport does not certify a
+host ledger. No provider request is made by the accounting bridge itself.
+
 ### Gemini inline reuse
 
 The Gemini driver is available only through explicit construction and the

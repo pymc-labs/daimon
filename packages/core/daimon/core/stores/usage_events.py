@@ -20,7 +20,8 @@ from daimon.core._models import UsageEvent
 from daimon.core.pricing import MODEL_PRICING, LegacyUsage, UsageTokens, cost_of, usage_tokens
 from daimon.core.stores.domain import UsageEventRow
 from mux.contracts.usage import UsageObservation
-from sqlalchemy import Select, delete, func, select
+from mux.errors import ScopeViolation
+from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -65,6 +66,103 @@ async def record(
     )
     await session.execute(stmt)
     await session.flush()
+
+
+async def project_revision(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform_user_id: str | None,
+    observation: UsageObservation,
+    initial: bool,
+    channel_id: str | None,
+) -> None:
+    """Project complete effective counts, preserving the original row identity.
+
+    Partial measurements live only in the neutral store: legacy integer columns
+    cannot represent unknown. An older pending row may still debit its delta,
+    but never rewinds the latest projected counts.
+    """
+    if observation.model is None:
+        raise ValueError("a billable usage observation requires a model")
+    model = observation.model.id
+    tokens = usage_tokens(observation)
+    where = (
+        UsageEvent.managed_session_id == observation.session.id,
+        UsageEvent.event_id == observation.id,
+    )
+
+    def check(existing: UsageEvent) -> None:
+        if (
+            existing.tenant_id != tenant_id
+            or existing.platform_user_id != platform_user_id
+            or existing.channel_id != channel_id
+            or existing.model != model
+        ):
+            raise ScopeViolation(observation.id, "usage row belongs to another billing context")
+        if (
+            initial
+            and (
+                existing.observation_revision is None
+                or existing.observation_revision <= observation.revision
+            )
+            and (
+                observation.revision != 1
+                or tokens is None
+                or (
+                    existing.input_tokens,
+                    existing.output_tokens,
+                    existing.cache_creation_input_tokens,
+                    existing.cache_read_input_tokens,
+                )
+                != (
+                    tokens.input_tokens,
+                    tokens.output_tokens,
+                    tokens.cache_creation_input_tokens,
+                    tokens.cache_read_input_tokens,
+                )
+            )
+        ):
+            raise ValueError("historical usage must be adopted from its unchanged first revision")
+
+    if tokens is None:
+        existing = await session.scalar(select(UsageEvent).where(*where).with_for_update())
+        if existing is not None:
+            check(existing)
+        return
+    values = dict(
+        input_tokens=tokens.input_tokens,
+        output_tokens=tokens.output_tokens,
+        cache_creation_input_tokens=tokens.cache_creation_input_tokens,
+        cache_read_input_tokens=tokens.cache_read_input_tokens,
+        observation_revision=observation.revision,
+    )
+    inserted = await session.scalar(
+        pg_insert(UsageEvent)
+        .values(
+            tenant_id=tenant_id,
+            platform_user_id=platform_user_id,
+            managed_session_id=observation.session.id,
+            model=model,
+            event_id=observation.id,
+            channel_id=channel_id,
+            **values,
+        )
+        .on_conflict_do_nothing(index_elements=["managed_session_id", "event_id"])
+        .returning(UsageEvent.id)
+    )
+    if inserted is not None:
+        return
+    # Read after the insert has waited for any concurrent legacy writer. Lock
+    # and validate before updating, including a historical baseline adoption.
+    existing = await session.scalar(select(UsageEvent).where(*where).with_for_update())
+    assert existing is not None
+    check(existing)
+    if (
+        existing.observation_revision is None
+        or existing.observation_revision < observation.revision
+    ):
+        await session.execute(update(UsageEvent).where(*where).values(**values))
 
 
 async def list_event_ids_for_session(

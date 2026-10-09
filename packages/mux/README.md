@@ -27,6 +27,11 @@ The full description is [docs/mux.md](../../docs/mux.md). Tests:
 
 Conformance adapters can declare individual fixtures PENDING with typed capability,
 live-key or dependency reasons. Declarations remain visible and never certify.
+The host can consume durable accounting outbox rows through its existing database
+transaction, applying usage revisions and signed ledger corrections together.
+The C12 conformance fixture requires a host accounting evidence hook with actual
+usage rows, Decimal ledger amounts, correction totals and rollback/restart facts;
+a transport without that hook remains pending for host billing certification.
 
 The Anthropic skills version extension also supports workspace-key downloads by
 native version ID, omitting the skills beta header on that request. The ordinary

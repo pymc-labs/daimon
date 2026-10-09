@@ -870,6 +870,7 @@ class UsageEvent(Base):
         Integer, nullable=False, server_default=text("0")
     )
     event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    observation_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Parent channel of the turn or tool call that spent it; NULL when unknown.
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
