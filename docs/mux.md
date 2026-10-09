@@ -605,23 +605,36 @@ The host accounting bridge must establish coverage before summing overlapping
 grains. Production metadata storage is still injected: its transaction mechanism
 must avoid retaining database connections during provider I/O.
 
-The explicit offline Gemini conformance adapter currently executes C03, C06,
-C07, C10, C13, C15 and C16 against the actual driver and injected test store. C13
+The explicit offline Gemini conformance adapter executes C03, C05, C06, C07,
+C10, C13, C15 and C16 against the actual driver and injected test store. C13
 proves that store's binding CAS, rather than production host registration.
-Six deferred provider scenarios declare typed PENDING reasons before fixture
-setup; five host-owned probes retain their existing pending results. The pinned
-C01–C18 matrix has seven PASS and eleven PENDING results, and cannot certify.
-Pending kinds distinguish missing adapter dependencies from unavailable
-capabilities. No real transport is
-discovered or invoked by registering this adapter. Broken-driver checks reject
-public raw handles, null usage incorrectly converted to zero, queued ambiguous
-sends, premature occupancy release, unconditional admission, supported migration,
-and ignored transport faults. C10's admission faults are a documented no-op:
-the real profile statically refuses the required memory store before any writes.
-C08 awaits the next-turn update port. The resource layer implements inline
-bundles; C11 awaits a conformance bridge for interaction-time deployment. The
-provider documents both capabilities. C04 awaits ambiguous accepted-POST reconciliation, rather than a
-host journal bridge. C05's durable saved-item/SSE-gap proof remains deferred.
+The pinned C01–C18 matrix has eight PASS and ten typed PENDING results, and
+cannot certify. Reasons distinguish unavailable capabilities from missing
+adapter or host dependencies. Registering the adapter discovers no real
+transport. C09's exact binary snapshot, pagination and interrupted-read tests
+do not prove its missing provider vault and session-deletion requirements.
+
+C05 scripts documented native saved steps and canonical GET revisions. Its
+saved-message identity expectation is `step:0`: the pinned SDK ModelOutputStep
+has no native ID. Other adapters retain the fixture default `item`. A streamed
+child-completion signal and EOF cannot release the root. Only the canonical
+root completion journals final content and one authoritative outcome. Native
+stream errors persist a deduplicated gap before delivery, exposed by journal
+reads and reconciliation after restart. Saved steps recover final content but
+cannot establish lossless replay of the interrupted SSE domain, so that gap
+remains explicitly unrecoverable. Preview content never enters saved history.
+
+Broken-driver checks reject missing projection gaps, wrong item expectations,
+public raw handles, unknown usage converted to zero, queued ambiguous sends,
+premature occupancy release, unconditional admission, supported migration and
+ignored transport faults. Cancellation fault revisions advance on a logical
+script clock rather than relying on wall-clock resolution. C10's admission
+faults are a documented no-op: the profile statically refuses the required
+memory store before any writes. C08 awaits the next-turn update port; C11
+awaits interaction-time inline skill deployment evidence. C04 lacks an
+ambiguous accepted-POST lookup. Host admission/batching, accounting recovery,
+backend selection, wake fencing and outcome persistence remain typed adapter
+dependencies until their genuine scenarios and hooks are connected.
 
 Gemini resource ports emulate a scoped skill catalogue and host artifact uploads.
 Skill bundles require a root `SKILL.md`, canonical relative paths and UTF-8

@@ -32,6 +32,8 @@ class FakeTransport:
         self.requests: list[Object] = []
         self.responses: list[Object | ProviderError] = []
         self.saved: dict[str, Object] = {}
+        self.reads: dict[str, list[Object | ProviderError]] = {}
+        self.read_requests: list[str] = []
         self.streams: dict[str, list[Object]] = {}
         self.cancelled: list[str] = []
         self.stream_closed = False
@@ -58,6 +60,13 @@ class FakeTransport:
         return deepcopy(response)
 
     async def get(self, interaction_id: str) -> Object:
+        self.read_requests.append(interaction_id)
+        queued = self.reads.get(interaction_id)
+        if queued:
+            response = queued.pop(0)
+            if isinstance(response, ProviderError):
+                raise response
+            self.saved[interaction_id] = deepcopy(response)
         if interaction_id not in self.saved:
             raise ProviderError("not_found", retryable=False)
         return deepcopy(self.saved[interaction_id])

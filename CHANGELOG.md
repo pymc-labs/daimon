@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Refresh the shared legacy/mux oracle for main's Discord agent-name fallback, preserving exact requests, accounting and continuation facts.
+- Persist Gemini stream gaps in history and reconciliation, prove C05 offline with documented saved-step identities, and retain ten typed provider/host dependencies.
+
 - Bound OpenAI session cleanup with idle polling and HTTP 409 recovery, preserving deletion keys, shared vaults and unknown-outcome failures.
 
 - Add an experimental neutral turn bridge behind `DAIMON_TURN__PATH=mux`; legacy remains the default, with unchanged input order, lifecycle effects and host accounting.
