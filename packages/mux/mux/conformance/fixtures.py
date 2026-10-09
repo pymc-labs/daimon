@@ -34,7 +34,7 @@ from mux.contracts.events import (
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import PageRequest
 from mux.contracts.ports import ManagedAgents, Steering
-from mux.contracts.resources import Artifact
+from mux.contracts.resources import Artifact, SkillUpload, SkillUploadFile
 
 Probe = Callable[[ManagedAgents, StateStore | None, ScriptedTransport], Awaitable[Result]]
 
@@ -399,21 +399,40 @@ async def c10(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
 
 async def c11(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
     s = await t.arrange("C11")
-    agent = await ma.agents.retrieve(s.scope, s.desired.agent)
-    require(
-        len(agent.spec.skills) == 1 and agent.spec.skills[0].digest == "sha256:fixture-bundle",
-        "C11: deployed agent must bind the pinned skill digest",
+    deployed = await ma.skills.create(
+        s.scope,
+        SkillUpload(
+            display_title="fixture",
+            files=(
+                SkillUploadFile(path="SKILL.md", content=b"fixture", media_type="text/markdown"),
+            ),
+        ),
+        key="skill-deploy",
     )
-    bundle = await ma.skills.retrieve(s.scope, agent.spec.skills[0])
+    pinned = deployed.latest_version
+    if pinned is None or pinned.version is None:
+        raise ConformanceFailure("C11: uploaded bundle must return a pinned skill version")
     require(
-        bundle.artifact is not None and any(f.path == "SKILL.md" for f in bundle.files),
-        "C11: pinned bundle must have a deployed artifact and SKILL.md",
+        pinned.id == deployed.id
+        and pinned.digest == f"sha256:{hashlib.sha256(b'fixture').hexdigest()}",
+        "C11: uploaded bundle must preserve the seeded content digest",
+    )
+    agent = await ma.agents.retrieve(s.scope, s.desired.agent)
+    skills = agent.spec.skills
+    require(
+        skills is not None and len(skills) == 1 and skills[0] == pinned,
+        "C11: deployed agent must bind the uploaded pinned skill version",
+    )
+    skill = await ma.skills.retrieve(s.scope, pinned.id)
+    require(
+        skill.id == pinned.id and skill.latest_version == pinned,
+        "C11: retrieved skill record must preserve the deployed pin",
     )
     if not (agent.spec.mcp_servers and s.desired.environment is not None):
         raise ConformanceFailure("C11: deployed MCP and environment bindings are required")
     environment = await ma.environments.retrieve(s.scope, s.desired.environment)
     require(
-        any(source.kind == "repository" for source in environment.spec.sources),
+        any(source.kind == "repository" for source in (environment.spec.sources or ())),
         "C11: required repository mount must be present",
     )
     journal = [e async for e in ma.events.stream(s.scope, s.session.ref)]

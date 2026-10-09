@@ -12,10 +12,13 @@ import pytest
 
 from mux.conformance.fixtures import FIXTURES
 from mux.conformance.reference import (
+    ReferenceAgents,
     ReferenceArtifacts,
     ReferenceDriver,
+    ReferenceEnvironments,
     ReferenceEvents,
     ReferenceSessions,
+    ReferenceSkills,
     Transport,
     create,
 )
@@ -25,7 +28,7 @@ from mux.contracts.ids import Page, PageRequest, ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.profile import Profile
 from mux.contracts.receipts import CancelReceipt, DeletionReceipt, StopObservation
-from mux.contracts.resources import Session
+from mux.contracts.resources import Agent, Environment, Session, Skill
 
 
 @pytest.mark.parametrize("fixture_id", FIXTURES)
@@ -321,3 +324,51 @@ def test_fixture_checks_cannot_reintroduce_optimized_away_assertions() -> None:
 
     tree = ast.parse(inspect.getsource(fixtures))
     assert not any(isinstance(node, ast.Assert) for node in ast.walk(tree))
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing_pin", "unbound_agent", "lost_record", "missing_repository"]
+)
+async def test_c11_rejects_resource_records_without_deployment_evidence(fault: str) -> None:
+    class BrokenSkills(ReferenceSkills):
+        reads = 0
+
+        async def retrieve(self, scope: Scope, skill_id: str) -> Skill:
+            skill = await super().retrieve(scope, skill_id)
+            self.reads += 1
+            if fault == "missing_pin" or (fault == "lost_record" and self.reads > 1):
+                return skill.model_copy(update={"latest_version": None})
+            return skill
+
+    class BrokenAgents(ReferenceAgents):
+        async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
+            agent = await super().retrieve(scope, ref)
+            if fault == "unbound_agent":
+                return agent.model_copy(
+                    update={"spec": agent.spec.model_copy(update={"skills": None})}
+                )
+            return agent
+
+    class BrokenEnvironments(ReferenceEnvironments):
+        async def retrieve(self, scope: Scope, ref: ResourceRef) -> Environment:
+            environment = await super().retrieve(scope, ref)
+            if fault == "missing_repository":
+                return environment.model_copy(
+                    update={"spec": environment.spec.model_copy(update={"sources": None})}
+                )
+            return environment
+
+    def broken() -> Adapter:
+        t = Transport()
+        driver = ReferenceDriver(t)
+        driver.skills = BrokenSkills(t)
+        driver.agents = BrokenAgents(t)
+        driver.environments = BrokenEnvironments(t)
+        return Adapter(cast(ManagedAgents, driver), None, t)
+
+    registry = Registry()
+    registry.register("broken-resource-reference", broken)
+    result = next(
+        r for r in await run(registry, "broken-resource-reference") if r.fixture_id == "C11"
+    )
+    assert result.status == "fail" and result.evidence[0].startswith("check failed: C11:")

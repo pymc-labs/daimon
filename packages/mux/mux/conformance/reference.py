@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import cast
 
 from mux.conformance.runner import Adapter, Scenario
@@ -54,8 +55,8 @@ from mux.contracts.resources import (
     ProviderBinding,
     Session,
     SessionSpec,
-    SkillBundle,
-    SkillFile,
+    Skill,
+    SkillUpload,
     UpdateOperation,
     UpdatePlan,
     WorkspaceSource,
@@ -343,9 +344,11 @@ class ReferenceEvents(UnsupportedPort):
             self.t.event(4, "session.turn_ended", {"root_turn_id": "root", "outcome": "completed"}),
         )
         start = int(page.cursor or 0)
-        end = start + page.limit
+        end = start + (page.limit if page.limit is not None else 100)
         return Page[Event](
-            data=saved[start:end], next_cursor=str(end) if end < len(saved) else None
+            data=saved[start:end],
+            has_more=end < len(saved),
+            next_cursor=str(end) if end < len(saved) else None,
         )
 
     async def cancel(
@@ -394,8 +397,10 @@ class ReferenceArtifacts(UnsupportedPort):
             for i in range(2)
         )
         start = int(page.cursor or 0)
-        end = start + page.limit
-        return Page[Artifact](data=artifacts[start:end], next_cursor=str(end) if end < 2 else None)
+        end = start + (page.limit if page.limit is not None else 100)
+        return Page[Artifact](
+            data=artifacts[start:end], has_more=end < 2, next_cursor=str(end) if end < 2 else None
+        )
 
     async def download(self, scope: Scope, ref: ResourceRef) -> AsyncIterator[bytes]:
         self.t.check(scope, ref)
@@ -414,10 +419,15 @@ class ReferenceAgents(UnsupportedPort):
         return Agent(
             ref=ref,
             revision=Revision(local=1),
+            created_at=NOW,
             spec=AgentSpec(
                 name="fixture",
                 model=ModelRef(provider="anthropic", id="fixture"),
-                skills=(SkillRef(id="skill", digest="sha256:fixture-bundle"),),
+                skills=(
+                    SkillRef(
+                        id="skill", version="v1", digest=f"sha256:{sha256(b'fixture').hexdigest()}"
+                    ),
+                ),
                 mcp_servers=(MCPConnection(name="fixture", url="https://fixture.invalid/mcp"),),
             ),
         )
@@ -432,6 +442,7 @@ class ReferenceEnvironments(UnsupportedPort):
         return Environment(
             ref=ref,
             revision=Revision(local=1),
+            created_at=NOW,
             spec=EnvironmentSpec(
                 name="fixture",
                 sources=(
@@ -449,11 +460,28 @@ class ReferenceSkills(UnsupportedPort):
     def __init__(self, t: Transport) -> None:
         self.t = t
 
-    async def retrieve(self, scope: Scope, ref: SkillRef) -> SkillBundle:
-        return SkillBundle(
-            name="fixture",
-            files=(SkillFile(path="SKILL.md", digest="sha256:file", size_bytes=7),),
-            artifact=self.t.ref.model_copy(update={"kind": "file", "id": "skill-archive"}),
+    async def create(self, scope: Scope, bundle: SkillUpload, *, key: str) -> Skill:
+        self.t.check(scope, self.t.ref)
+        if (
+            len(bundle.files) != 1
+            or bundle.files[0].path != "SKILL.md"
+            or bundle.files[0].content != b"fixture"
+        ):
+            raise UnsupportedCapability(("unseeded_skill_upload",), "test.reference")
+        self.t.mutations += 1
+        return await self.retrieve(scope, "skill")
+
+    async def retrieve(self, scope: Scope, skill_id: str) -> Skill:
+        self.t.check(scope, self.t.ref)
+        if skill_id != "skill":
+            raise UnsupportedCapability(("unseeded_skill",), "test.reference")
+        return Skill(
+            id=skill_id,
+            display_title="fixture",
+            latest_version=SkillRef(
+                id=skill_id, version="v1", digest=f"sha256:{sha256(b'fixture').hexdigest()}"
+            ),
+            created_at=NOW,
         )
 
 

@@ -29,6 +29,16 @@ bounded future deadlines. C08 deletes a required mount,
 fails its replacement, then supplies successful reconciliation. Fixture source
 contains the complete assertions and named faults.
 
+C11 submits `SKILL.md` with bytes `fixture` inline through `Skills.create`,
+then checks the returned full `Skill` record, explicit version, seeded content
+digest, deployed agent binding and `Skills.retrieve(scope, skill_id)` record.
+The adapter seeds a matching native skill record and agent binding; missing
+versions, bindings or records fail. This uses the core upload/record API,
+without inventing a downloadable bundle or archive field on `Skill`.
+MCP and repository bindings remain required, and an unavailable action must
+stay explicit. Optional collections set to `None` provide no binding evidence.
+Reference pagination honors omitted limits and the `has_more`/cursor contract.
+
 The reference driver is an in-memory, partial, test-only oracle for the runner.
 It is not a provider and its passes certify no backend. `IS_TEST_ORACLE = True`
 marks the reference module; register it with a name containing `reference`. Unexercised ports refuse
