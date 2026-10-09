@@ -259,11 +259,18 @@ async def test_routine_identity_resolves_the_agents_face_and_waits_for_it(
     assert call["tenant_id"] == row.tenant_id
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        anthropic.APIConnectionError(request=httpx.Request("GET", "https://api.test")),
+        RuntimeError("unexpected"),
+    ],
+)
 async def test_routine_identity_falls_back_to_plain_when_the_lookup_fails(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
     async def failing(*args: object, **kwargs: object) -> None:
-        raise anthropic.APIConnectionError(request=httpx.Request("GET", "https://api.test"))
+        raise error
 
     monkeypatch.setattr(routine_delivery_module, "find_agent_by_daimon_tag", failing)
     identity = await resolve_routine_identity(

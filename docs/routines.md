@@ -277,12 +277,13 @@ next to their wake poller (Teams for its one organisation). Each poll claims `pe
 
 The post reads `Routine result from <agent> (<cron>, <timezone>):` followed by
 the result. With agent identity on for the workspace, Slack and Discord post it
-as the agent, with its name and face, and the line drops the agent's name:
-`Routine result (<cron>, <timezone>):`. On Discord without a usable webhook the
-bot posts it with the agent's name label on top; on Slack without
-`chat:write.customize` it goes out as the app with the original line. The
-built-in agent and Teams keep the original line. The fallback direct message to
-the creator stays Daimon's own notice. An empty result is `skipped/no_result`.
+as the agent, with its name and face. Discord then drops the agent's name from
+the line, `Routine result (<cron>, <timezone>):`, because the webhook or, without
+one, the bot's subtext name label already carries it. Slack keeps the original
+line, since a workspace without `chat:write.customize` accepts the post but
+silently drops the agent's header. The built-in agent and Teams keep the
+original line. The fallback direct message to the creator stays Daimon's own
+notice. An empty result is `skipped/no_result`.
 
 The outbox is a small at-most-once queue on the routine row rather than a wake
 (`daimon.core.continuity.wakes`): a wake runs an agent turn in a thread,

@@ -213,15 +213,13 @@ def make_slack_routine_poster(
             else {"channel": target.channel_id}
         )
         try:
-            # Under the agent's own header the text drops "from <agent>"; if
-            # Slack posts it as the app instead, the plain text keeps the name.
+            # Slack drops `username` and `icon_url` without an error when the
+            # install lacks chat:write.customize, so the line keeps naming the
+            # agent here; only Discord, whose label always carries it, drops it.
             await post_as_agent(
                 client,
                 identity,
-                text=escape_mrkdwn_preserving_mentions(
-                    render_fallback_post(row, as_agent=not identity.builtin)
-                ),
-                plain_text=escape_mrkdwn_preserving_mentions(render_fallback_post(row)),
+                text=escape_mrkdwn_preserving_mentions(render_fallback_post(row)),
                 **place,
             )
         except SlackApiError as err:

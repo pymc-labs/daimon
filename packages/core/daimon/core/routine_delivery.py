@@ -33,8 +33,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
-import anthropic
 import structlog
+from anthropic import AsyncAnthropic
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import (
     AgentIdentity,
@@ -52,7 +52,6 @@ from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import claim_routine_deliveries, settle_routine_delivery
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -285,7 +284,7 @@ def render_fallback_post(row: RoutineRow, *, as_agent: bool = False) -> str:
 
 async def resolve_routine_identity(
     sessionmaker: async_sessionmaker[AsyncSession],
-    client: anthropic.AsyncAnthropic,
+    client: AsyncAnthropic,
     settings: Settings,
     *,
     row: RoutineRow,
@@ -296,8 +295,9 @@ async def resolve_routine_identity(
     """The identity a routine's result is posted under.
 
     The built-in agent, identity switched off, or a failed lookup all come back
-    built-in, so the post reads exactly as it did before agent identity. The
-    poller is off any interaction deadline, so a new agent's face is waited for.
+    built-in, so the post reads exactly as it did before agent identity. Any
+    error is caught here: a lookup that fails must not cost the result its post.
+    The poller is off any interaction deadline, so a new agent's face is waited for.
     """
     plain = AgentIdentity(name=row.agent_name, avatar_url=None, builtin=True)
     if not identity_enabled_for(settings, platform, workspace_id):
@@ -319,7 +319,7 @@ async def resolve_routine_identity(
                 background_sessionmaker=sessionmaker,
                 wait_for_face=True,
             )
-    except (anthropic.APIError, SQLAlchemyError) as exc:
+    except Exception as exc:  # identity is cosmetic: never lose the result over it
         log.warning(
             "routine.identity_lookup_failed",
             routine_id=str(row.id),

@@ -518,3 +518,25 @@ async def test_an_isolated_channels_routine_never_leaves_it(
 
     assert (outcome.status, outcome.note) == ("skipped", "destination_unavailable")
     assert dms.sent == [], "the result never goes by DM"
+
+
+async def test_a_bot_fallback_labels_the_result_with_the_subtext_name_line(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.adapters.discord import post_transport
+
+    row = await _routine(db_session)
+    channel = _text_channel(perms=SimpleNamespace(**vars(_perms()), manage_webhooks=False))
+    channel.id = 555
+    channel.guild.me = object()  # type: ignore[attr-defined]
+    identity = AgentIdentity(name="research", avatar_url=None, builtin=False)
+    post_transport._unavailable_until.pop(555, None)  # pyright: ignore[reportPrivateUsage]
+
+    outcome = await _poster(db_session_factory, channel, identity=identity)(row)
+
+    assert outcome.status == "delivered"
+    content = channel.send.await_args.kwargs["content"]
+    assert content == fallback_name_prefix(
+        "research", "Routine result (0 9 * * 1, UTC):\n\nAll green @everyone."
+    )
+    assert content.startswith("-# research\nRoutine result ("), "the label is #530's subtext line"

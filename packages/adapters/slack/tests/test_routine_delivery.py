@@ -21,14 +21,16 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
-async def _routine(db_session: AsyncSession, *, kind: str, destination_id: str) -> RoutineRow:
+async def _routine(
+    db_session: AsyncSession, *, kind: str, destination_id: str, agent_name: str = "daimon"
+) -> RoutineRow:
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_ROUTINES")
     row = await create_routine(
         db_session,
         tenant_id=tenant.id,
         created_by_user_id="U1",
         agent_id="ag",
-        agent_name="daimon",
+        agent_name=agent_name,
         cron_expr="0 9 * * 1",
         timezone_="UTC",
         trigger_message="go",
@@ -98,12 +100,12 @@ def _with_identity(monkeypatch: pytest.MonkeyPatch, identity: AgentIdentity) -> 
     monkeypatch.setattr(poster_mod, "resolve_routine_identity", resolve)
 
 
-async def test_with_identity_the_result_posts_as_the_agent_without_from_wording(
+async def test_with_identity_the_result_posts_as_the_agent_and_still_names_it(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    row = await _routine(db_session, kind="channel", destination_id="C1")
+    row = await _routine(db_session, kind="channel", destination_id="C1", agent_name="research")
     post, client = _poster(db_session_factory, monkeypatch)
     client.token = "xoxb-routine-identity"
     _with_identity(
@@ -114,7 +116,9 @@ async def test_with_identity_the_result_posts_as_the_agent_without_from_wording(
 
     kwargs = client.chat_postMessage.await_args.kwargs
     assert (kwargs["username"], kwargs["icon_url"]) == ("research", "https://app/a.png")
-    assert kwargs["text"].startswith("Routine result (0 9 * * 1, UTC):\n\nDone")
+    assert kwargs["text"].startswith("Routine result from research (0 9 * * 1, UTC):\n\nDone"), (
+        "Slack can drop the header silently, so the text keeps the agent's name"
+    )
     assert "<!channel>" not in kwargs["text"], "a routine never broadcasts"
 
 
@@ -126,7 +130,7 @@ async def test_without_customize_scope_the_plain_post_keeps_the_agents_name(
     from slack_sdk.errors import SlackApiError
     from slack_sdk.web.async_slack_response import AsyncSlackResponse
 
-    row = await _routine(db_session, kind="channel", destination_id="C1")
+    row = await _routine(db_session, kind="channel", destination_id="C1", agent_name="research")
     post, client = _poster(db_session_factory, monkeypatch)
     client.token = "xoxb-routine-no-customize"
     response = MagicMock(spec=AsyncSlackResponse)
@@ -138,7 +142,7 @@ async def test_without_customize_scope_the_plain_post_keeps_the_agents_name(
 
     retry = client.chat_postMessage.await_args_list[-1].kwargs
     assert "username" not in retry
-    assert retry["text"].startswith("Routine result from daimon (0 9 * * 1, UTC):")
+    assert retry["text"].startswith("Routine result from research (0 9 * * 1, UTC):")
 
 
 async def test_the_built_in_agent_keeps_todays_text(

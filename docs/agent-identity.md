@@ -132,9 +132,10 @@ default) posts with no override, so it keeps the app's own name and icon.
 
 A routine result the agent did not post itself goes out under the agent's
 identity on Slack (`post_as_agent`) and Discord (`DiscordPostTransport`, with
-the fallback name label), without "from <agent>" in its first line. The
-answer to a submitted Discord form runs through the same transport as a
-mention turn.
+the fallback name label). Discord drops "from <agent>" from its first line;
+Slack keeps it, because Slack drops the header silently without
+`chat:write.customize`. The answer to a submitted Discord form runs through the
+same transport as a mention turn.
 
 ### Teams
 

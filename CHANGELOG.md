@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - When Daimon can't post as the agent on Discord, the agent's name now sits above the answer as a small subtext line instead of a bold header. Admins whose server hasn't given Daimon Manage Webhooks see a one-line note with a re-authorize link in `/agent-setup`. After a webhook permission error, Daimon retries agent names after 60 seconds instead of 10 minutes, and right away when the bot is granted Manage Webhooks.
 - Discord and Slack Connect GitHub buttons now show a link emoji.
 - GitHub connection links now appear in a branded card with the agent's face and readable name when agent identity is enabled. Generated names are shown as "this agent". The compact card is the default; a richer card is available with a one-line switch.
-- With agent identity on, a routine result that Daimon posts for an agent on Slack or Discord now shows the agent's name and face and reads `Routine result (0 17 * * 5, Europe/London):` instead of naming the agent in the text. The answer to a submitted Discord form also posts as the agent, like a mention reply.
+- With agent identity on, a routine result that Daimon posts for an agent on Slack or Discord now shows the agent's name and face. On Discord it reads `Routine result (0 17 * * 5, Europe/London):` instead of naming the agent in the text; Slack keeps the agent's name in the text. The answer to a submitted Discord form also posts as the agent, like a mention reply.
 
 ### Fixed
 

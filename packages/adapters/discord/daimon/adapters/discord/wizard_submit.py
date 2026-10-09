@@ -92,7 +92,12 @@ from daimon.adapters.discord.wizard import (
     _reply_or_followup,  # pyright: ignore[reportPrivateUsage]  # shared is_done()-gated reply helper the sibling dispatch classes use -- reused verbatim
 )
 from daimon.adapters.discord.wizard_render import build_wizard_view
-from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
+from daimon.core.agent_identity import (
+    AgentIdentity,
+    identity_enabled_for,
+    is_builtin_agent,
+    resolve_agent_identity,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.domain import Role, WizardSessionRow
@@ -543,7 +548,11 @@ async def run_wizard_submit_turn_observed(
                     identity_session,
                     tenant_id=row.tenant_id,
                     agent_name=agent.name,
-                    is_builtin=agent.name.casefold() == "daimon",
+                    is_builtin=is_builtin_agent(
+                        name=agent.name,
+                        metadata=agent.metadata,
+                        default_agent_name=bot.runtime.deployment_default.agent_name,
+                    ),
                     public_base_url=bot.runtime.settings.mcp.app_root_url,
                     enabled=identity_enabled,
                     background_sessionmaker=bot.runtime.sessionmaker,
@@ -565,8 +574,13 @@ async def run_wizard_submit_turn_observed(
         async def _send_embed(**kwargs: Any) -> discord.Message:  # noqa: ANN401
             return await transport.send(**kwargs)
 
-        async def _edit_message(msg: discord.Message, **kwargs: Any) -> None:  # noqa: ANN401
-            await transport.edit(msg, **kwargs)
+        async def _edit_message(
+            msg: discord.Message,
+            **kwargs: Any,  # noqa: ANN401
+        ) -> discord.Message | None:
+            # The transport can post a replacement; the lifecycle keeps whichever
+            # message it returns, as the mention path does.
+            return await transport.edit(msg, **kwargs)
 
         async def _delete_message(msg: discord.Message) -> None:
             await transport.delete(msg)
