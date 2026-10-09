@@ -211,9 +211,6 @@ _DRAIN_GRACE_S: float = 60.0
 # attaching skills the sweep had never created.
 _SWEEP_CONCURRENCY = 2
 _TURN_CARD_RECOVERY_CONCURRENCY = 4
-# Turn starts kept for the output sweep's cutoff. A sweep reads its session's
-# entry within seconds of the turn ending, so only recent sessions matter.
-_TURN_STARTS_KEPT = 4096
 
 
 THREAD_OPENING_REACTION = "⌛"
@@ -563,9 +560,6 @@ class DaimonBot(commands.Bot):
         # Track spawned background tasks so they aren't GC'd; discard on done.
         self._bg_tasks: set[asyncio.Task[None]] = set()
         self._output_sweeps: dict[str, asyncio.Task[None]] = {}
-        # When the latest turn on each MA session started: a detached output
-        # sweep reads it so it never takes a file the next turn wrote.
-        self._turn_starts: dict[str, datetime] = {}
         self._delivery_notice_thread_ids: set[int] = set()
         # Drain flag — set by _drain_and_close on SIGTERM/SIGINT.
         # While True, on_message rejects new mentions; existing turns finish.
@@ -607,14 +601,6 @@ class DaimonBot(commands.Bot):
         self._live_turn_card_intent_ids.add(intent_id)
         task.add_done_callback(lambda _done: self._live_turn_card_intent_ids.discard(intent_id))
 
-    def _note_turn_start(self, session_id: str) -> None:
-        """Record that a turn is starting on this MA session, for the output sweep's cutoff."""
-        self._turn_starts.pop(session_id, None)
-        self._turn_starts[session_id] = datetime.now(UTC)
-        while len(self._turn_starts) > _TURN_STARTS_KEPT:
-            # Oldest first: a session idle this long has no sweep left to bound.
-            del self._turn_starts[next(iter(self._turn_starts))]
-
     def _forget_output_sweep(self, session_id: str, task: asyncio.Task[None]) -> None:
         if self._output_sweeps.get(session_id) is task:
             del self._output_sweeps[session_id]
@@ -640,7 +626,6 @@ class DaimonBot(commands.Bot):
                 notice_thread_ids=self._delivery_notice_thread_ids,
                 turn_window=lifecycle.turn_window if lifecycle is not None else None,
                 answer=lifecycle.answer_message if lifecycle is not None else None,
-                next_turn_start=lambda: self._turn_starts.get(session_id),
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
             log.warning(
@@ -715,7 +700,14 @@ class DaimonBot(commands.Bot):
         tenant_id: uuid.UUID,
         lifecycle: DiscordTurnLifecycle | None = None,
     ) -> None:
-        """Sweep the session's files onto the turn's answer, detached from the turn."""
+        """Sweep the session's files onto the turn's answer, detached from the turn.
+
+        The sweep takes whatever the session's listing holds once it settles.
+        Accepted trade-off: a file the next turn writes while this sweep is
+        still settling can land on this turn's answer. It is still delivered
+        once and never stranded, which a per-turn cutoff could not promise.
+        Sweeps stay serialized per session.
+        """
         if not any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
             return
         session_id = outcome.ma_session_id
@@ -2740,7 +2732,6 @@ class DaimonBot(commands.Bot):
                 role=role,
                 is_setup=admission.config.thread_binding_kind == "setup",
             ) as origin:
-                self._note_turn_start(prepared.ma_session_id)
                 outcome = await run_prepared_turn(
                     self.runtime.turn_deps,
                     prepared,
@@ -3664,7 +3655,6 @@ class DaimonBot(commands.Bot):
                 is_setup=admission.config.thread_binding_kind == "setup",
                 message_text=message.content,
             ) as origin:
-                self._note_turn_start(prepared.ma_session_id)
                 outcome = await run_prepared_turn(
                     self.runtime.turn_deps,
                     prepared,

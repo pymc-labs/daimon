@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
 
 import anthropic
 import structlog
@@ -169,7 +168,6 @@ async def sweep_session_outputs(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     max_bytes: int = MAX_BYTES_PER_FILE,
     exclude_filename_prefixes: tuple[str, ...] = (HANDOFF_FILENAME_PREFIX,),
-    created_before: Callable[[], datetime | None] | None = None,
 ) -> int:
     """Deliver the session's output files via ``post``; return how many posted.
 
@@ -184,13 +182,6 @@ async def sweep_session_outputs(
     :mod:`daimon.core.workspace_transfer`, not to the user. The listing is
     basename-only (capability matrix P4.a), so a name prefix is the whole
     available key.
-
-    ``created_before`` limits the sweep to one turn's files. The listing is
-    session-wide and the next turn may already be writing while this sweep
-    settles, so an entry created at or after the moment it returns is left
-    listed, untouched, for the next turn's sweep. It is read per entry, after
-    the listing settled, so a turn that started meanwhile still bounds it;
-    None means no bound.
     """
     settled = await _poll_until_settled(anthropic_client, session_id=session_id, sleep=sleep)
 
@@ -200,17 +191,6 @@ async def sweep_session_outputs(
             # Left listed on purpose: the owner of this file deletes it.
             _log.info(
                 "output_delivery.skipped_excluded",
-                session_id=session_id,
-                file_id=meta.id,
-                filename=meta.filename,
-            )
-            continue
-
-        cutoff = created_before() if created_before is not None else None
-        if cutoff is not None and meta.created_at >= cutoff:
-            # Left listed on purpose: a later turn wrote it, and its sweep delivers it.
-            _log.info(
-                "output_delivery.left_for_next_turn",
                 session_id=session_id,
                 file_id=meta.id,
                 filename=meta.filename,

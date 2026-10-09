@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
@@ -19,7 +18,6 @@ from anthropic.types.beta import FileMetadata
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.output_delivery import (
     MAX_ATTACHMENTS_PER_MESSAGE,
-    TURN_END_GRACE,
     AnswerMessage,
     deliver_session_outputs,
 )
@@ -365,9 +363,15 @@ def _client_with_files(
     return build_fake_anthropic(router.dispatch), deleted
 
 
-def _attachment(filename: str) -> MagicMock:
+_attachment_ids = iter(range(5000, 10**6))
+
+
+def _attachment(filename: str, content: bytes = b"") -> MagicMock:
     attachment = MagicMock(spec=discord.Attachment)
+    attachment.id = next(_attachment_ids)
     attachment.filename = filename
+    attachment.size = len(content)
+    attachment.read = AsyncMock(return_value=content)
     return attachment
 
 
@@ -538,36 +542,6 @@ async def test_files_past_the_ten_attachment_limit_post_on_their_own() -> None:
     assert sorted(deleted) == ["file_a", "file_b"]
 
 
-async def test_a_file_listed_after_the_turn_ended_is_left_for_the_next_sweep() -> None:
-    later = NOW + timedelta(minutes=5)
-    client, deleted = _client_with_files(
-        ("file_mine", "brief.pdf", b"pdf-a", NOW),
-        ("file_next", "next_turn.pdf", b"pdf-b", later),
-    )
-    thread = _answer_thread(_answer_message([]))
-    answer, calls = _recording_edit(deleted)
-
-    await deliver_session_outputs(
-        client,
-        thread,
-        session_id="sesn_1",
-        may_post=_allowed,
-        notice_thread_ids=set(),
-        turn_window=_window_after(NOW),
-        answer=answer,
-        sleep=_no_sleep,
-    )
-
-    names = [
-        getattr(a, "filename", None)
-        for _m, kwargs in calls
-        for a in cast(list[object], kwargs["attachments"])
-    ]
-    assert names == ["brief.pdf"], "the next turn's file is not this answer's"
-    thread.send.assert_not_awaited()
-    assert deleted == ["file_mine"], "the next turn's file stays listed for its own sweep"
-
-
 async def test_a_file_the_agent_already_sent_is_not_added_to_the_answer() -> None:
     client, deleted = _client_with_files(("file_chart", "chart.pdf", b"png-bytes", NOW))
     thread = _answer_thread(_answer_message([]))
@@ -621,44 +595,24 @@ async def test_an_answer_that_cannot_be_fetched_falls_back_to_a_post() -> None:
     assert deleted == ["file_a"]
 
 
-async def test_a_file_indexed_seconds_after_the_turn_ended_is_still_attached() -> None:
-    """created_at is the index time, about 5 s after the write, so a file written
-    in the turn's last seconds is stamped after it ended and must still go out."""
-    turn_end = NOW
-    client, deleted = _client_with_files(
-        ("file_last", "brief.pdf", b"pdf-a", turn_end + timedelta(seconds=5)),
-        ("file_next", "next_turn.pdf", b"pdf-b", turn_end + TURN_END_GRACE),
-    )
-    thread = _answer_thread(_answer_message([]))
-    answer, calls = _recording_edit(deleted)
-
-    await deliver_session_outputs(
-        client,
-        thread,
-        session_id="sesn_1",
-        may_post=_allowed,
-        notice_thread_ids=set(),
-        turn_window=(777, discord.utils.time_snowflake(turn_end, high=True)),
-        answer=answer,
-        sleep=_no_sleep,
-    )
-
-    names = [
-        getattr(a, "filename", None)
-        for _m, kwargs in calls
-        for a in cast(list[object], kwargs["attachments"])
-    ]
-    assert names == ["brief.pdf"], "a file indexed inside the grace is this turn's"
-    assert deleted == ["file_last"], "one indexed past the grace waits for the next sweep"
-
-
 class _ServerAnswer:
-    """Discord's copy of the answer: an edit applies here even when its response fails."""
+    """Discord's copy of the answer: an edit applies here even when its response fails.
 
-    def __init__(self, fail_after_apply: list[BaseException], *, apply: bool = True) -> None:
+    ``meanwhile`` is another writer's attachment that lands on the answer while
+    the edit is in flight.
+    """
+
+    def __init__(
+        self,
+        fail_after_apply: list[BaseException],
+        *,
+        apply: bool = True,
+        meanwhile: MagicMock | None = None,
+    ) -> None:
         self.attachments: list[object] = []
         self._fail = fail_after_apply
         self._apply = apply
+        self._meanwhile = meanwhile
         self.edits = 0
 
     def message(self) -> MagicMock:
@@ -675,12 +629,13 @@ class _ServerAnswer:
             new: list[object] = []
             for item in cast(list[object], kwargs["attachments"]):
                 if isinstance(item, discord.File):
-                    attachment = _attachment(item.filename)
-                    attachment.size = len(item.fp.read())
-                    new.append(attachment)
+                    new.append(_attachment(item.filename, item.fp.read()))
                 else:
                     new.append(item)
             self.attachments = new
+        if self._meanwhile is not None:
+            self.attachments.append(self._meanwhile)
+            self._meanwhile = None
         if self._fail:
             raise self._fail.pop(0)
         return cast(discord.Message, self.message())
@@ -690,16 +645,26 @@ def _server_error(status: int) -> discord.HTTPException:
     return discord.DiscordServerError(MagicMock(status=status, reason="Gateway Timeout"), "")
 
 
-@pytest.mark.parametrize(
+def _forbidden() -> discord.HTTPException:
+    # What surfaces when discord.py retried a 504 itself and the retry got a 403.
+    return discord.Forbidden(MagicMock(status=403, reason="Forbidden"), "Missing Access")
+
+
+_UNCERTAIN = pytest.mark.parametrize(
     "failure",
-    [TimeoutError(), _server_error(504)],
-    ids=["timeout", "504"],
+    [TimeoutError(), _server_error(504), _forbidden()],
+    ids=["timeout", "504", "504-retried-then-403"],
 )
+
+
+@_UNCERTAIN
 async def test_an_edit_that_applied_before_failing_counts_and_keeps_the_file(
     failure: BaseException,
 ) -> None:
     """The response failed but Discord applied the edit: no second copy, and the
-    next edit starts from the answer as it now stands, so the file stays on it."""
+    next edit starts from the answer as it now stands, so the file stays on it.
+    A final 4xx proves nothing: discord.py retries a 5xx itself, so [504, 403]
+    surfaces as a 403 after the first attempt already applied."""
     client, deleted = _client_with_files(
         ("file_a", "a.pdf", b"pdf-a", NOW), ("file_b", "b.pdf", b"pdf-bb", NOW)
     )
@@ -726,11 +691,7 @@ async def test_an_edit_that_applied_before_failing_counts_and_keeps_the_file(
     assert sorted(deleted) == ["file_a", "file_b"]
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [TimeoutError(), _server_error(504)],
-    ids=["timeout", "504"],
-)
+@_UNCERTAIN
 async def test_an_edit_that_never_applied_falls_back_to_one_post(failure: BaseException) -> None:
     client, deleted = _client_with_files(("file_a", "a.pdf", b"pdf-a", NOW))
     server = _ServerAnswer([failure], apply=False)
@@ -754,21 +715,21 @@ async def test_an_edit_that_never_applied_falls_back_to_one_post(failure: BaseEx
     assert deleted == ["file_a"]
 
 
-async def test_a_file_indexed_after_the_next_turn_started_waits_for_that_turn() -> None:
-    """The grace ends early once the next turn on the session has started: a file
-    indexed after that may be the next turn's, so its sweep delivers it."""
-    turn_end = NOW
-    client, deleted = _client_with_files(
-        ("file_mine", "brief.pdf", b"pdf-a", turn_end + timedelta(seconds=1)),
-        ("file_next", "next_turn.pdf", b"pdf-b", turn_end + timedelta(seconds=7)),
-    )
-    thread = _answer_thread(_answer_message([]))
-    answer, calls = _recording_edit(deleted)
-    next_start: list[datetime] = []
+async def test_a_same_named_file_with_other_bytes_on_the_answer_does_not_count() -> None:
+    """Another writer adds an attachment with the same name and size while the
+    edit fails unapplied: only the file's exact bytes confirm delivery, so it is
+    posted, and its listing entry goes only after that post."""
+    client, deleted = _client_with_files(("file_a", "a.pdf", b"pdf-a", NOW))
+    impostor = _attachment("a.pdf", b"pdf-z")
+    server = _ServerAnswer([TimeoutError()], apply=False, meanwhile=impostor)
+    thread = _answer_thread(server.message())
+    thread.fetch_message = AsyncMock(side_effect=server.fetch)
+    deleted_at_post: list[list[str]] = []
 
-    async def settle(delay: float) -> None:
-        # The next turn starts while this sweep is still settling.
-        next_start[:] = [turn_end + timedelta(seconds=2)]
+    async def send(**kwargs: object) -> None:
+        deleted_at_post.append(list(deleted))
+
+    thread.send = AsyncMock(side_effect=send)
 
     await deliver_session_outputs(
         client,
@@ -776,37 +737,13 @@ async def test_a_file_indexed_after_the_next_turn_started_waits_for_that_turn() 
         session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
-        turn_window=(777, discord.utils.time_snowflake(turn_end, high=True)),
-        answer=answer,
-        next_turn_start=lambda: next_start[0] if next_start else None,
-        sleep=settle,
+        turn_window=_WINDOW,
+        answer=AnswerMessage(message_id=_ANSWER_ID, edit=server.edit),
+        sleep=_no_sleep,
     )
 
-    names = [
-        getattr(a, "filename", None)
-        for _m, kwargs in calls
-        for a in cast(list[object], kwargs["attachments"])
-    ]
-    assert names == ["brief.pdf"]
-    assert deleted == ["file_mine"], "the file indexed after the next turn started stays listed"
-
-
-async def test_the_sweep_reads_the_next_turns_start_when_it_runs() -> None:
-    runtime = MagicMock()
-    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
-    thread = _thread()
-    captured: dict[str, object] = {}
-
-    async def sweep(*args: object, **kwargs: object) -> None:
-        captured.update(kwargs)
-
-    with patch("daimon.adapters.discord.bot.deliver_session_outputs", side_effect=sweep):
-        await bot._sweep_session_outputs(None, thread, uuid.uuid4(), "sesn_1")  # pyright: ignore[reportPrivateUsage]
-
-    read_start = cast(Callable[[], datetime | None], captured["next_turn_start"])
-    assert read_start() is None
-    bot._note_turn_start("sesn_1")  # pyright: ignore[reportPrivateUsage]
-    started = read_start()
-    assert started is not None, "a turn that starts after scheduling still bounds the sweep"
-    bot._note_turn_start("sesn_2")  # pyright: ignore[reportPrivateUsage]
-    assert read_start() == started, "another session's turn does not"
+    impostor.read.assert_awaited()
+    thread.send.assert_awaited_once()
+    assert thread.send.await_args.kwargs["file"].filename == "a.pdf"
+    assert deleted_at_post == [[]], "the listing entry outlives the fallback post"
+    assert deleted == ["file_a"]

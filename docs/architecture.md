@@ -853,21 +853,21 @@ turn's answer: the message carrying the summary line and the 👍 👎 🙋 emoj
 (the last chunk of a long answer, or the "Done." card of a tool-only turn).
 It edits that message once per file through the turn's post transport,
 passing the attachments already on it back, and never reposts the answer when
-a webhook message cannot be edited. An edit that times out or gets a 5xx may
-still have been applied, so the sweep reads the answer back: a file already on
-it counts as delivered, and the next edit starts from what is there. A file the answer cannot take (Discord's
+a webhook message cannot be edited. Any edit error that reached Discord (a
+timeout, a 5xx, or a 4xx after discord.py's own retry of a 5xx) may follow an
+applied edit, so the sweep reads the answer back: the file counts as delivered
+only if a new attachment holds its exact bytes, and the next edit starts from
+what is there. A file the answer cannot take (Discord's
 10-attachment limit, or a failed edit) is posted on its own below it, and a
 turn that ended without an answer (stopped or failed) gets its files as
 separate posts. Discord uses the guild's upload limit, skips oversize files
 with an in-thread notice, and checks the channel's writers before posting. A
 file Daimon already attached in the thread after the turn's card (the agent
 sent it itself), with the same name and bytes, is cleared from the listing
-without a second copy. The session listing is shared by every turn, so the
-Discord sweep takes only files listed within 10 seconds of its turn's end, or
-before the next turn on the session started if that is sooner, and leaves later
-ones for the next turn's sweep. A listing entry is stamped when it is indexed,
-about 5 seconds after the write, so a file written just before the turn ended
-is still this turn's. A long answer carries the summary on its
+without a second copy. The session listing is shared by every turn and the
+sweep takes whatever it holds once it settles, so a file the next turn writes
+while this turn's sweep is still settling can land on this turn's answer; it
+is still delivered once. A long answer carries the summary on its
 last chunk on both platforms.
 
 Reconnection is two loops for two failure modes. The outer loop handles
