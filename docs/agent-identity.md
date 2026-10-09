@@ -128,6 +128,15 @@ default) posts with no override, so it keeps the app's own name and icon.
   one channel webhook carries concurrent turns and MCP posts, so staging
   checks two concurrent turns in one channel.
 
+### Routine results and form answers
+
+A routine result the agent did not post itself goes out under the agent's
+identity on Slack (`post_as_agent`) and Discord (`DiscordPostTransport`, with
+the fallback name label). Discord drops "from <agent>" from its first line;
+Slack keeps it, because Slack drops the header silently without
+`chat:write.customize`. The answer to a submitted Discord form runs through the
+same transport as a mention turn.
+
 ### Teams
 
 Bold name prefix on the first chunk when the agent is not the built-in one.

@@ -92,7 +92,7 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
-from daimon.core.routine_delivery import run_delivery_poller
+from daimon.core.routine_delivery import resolve_routine_identity, run_delivery_poller
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.github_access_requests import AccessRequest
@@ -754,6 +754,16 @@ class DaimonBot(commands.Bot):
                         open_dm=self.open_member_dm,
                         dm_policy=lambda row: self.runtime.settings.direct_message_policies.get(
                             row.tenant_id, DirectMessagePolicy()
+                        ),
+                        client=self,
+                        resolve_identity=lambda row, guild_id: resolve_routine_identity(
+                            self.runtime.sessionmaker,
+                            self.runtime.anthropic,
+                            self.runtime.settings,
+                            row=row,
+                            platform="discord",
+                            workspace_id=guild_id,
+                            default_agent_name=self.runtime.deployment_default.agent_name,
                         ),
                     ),
                     should_stop=lambda: self.draining or self.is_closed(),
