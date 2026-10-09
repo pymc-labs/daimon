@@ -53,11 +53,13 @@ def _refs(*names: str) -> tuple[ExtensionRef, ...]:
 
 
 ANTHROPIC_EXTENSIONS = _refs(
+    "anthropic.agent_tools",
     "anthropic.memory_stores",
     "anthropic.vaults",
     "anthropic.session_resources",
     "anthropic.skills_versions",
     "anthropic.multiagent",
     "anthropic.environments_fork",
+    "anthropic.platform_export",
 )
 OPENAI_EXTENSIONS = _refs("openai.vaults", "openai.steer")

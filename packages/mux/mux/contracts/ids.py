@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, model_validator
 
 from mux.contracts._base import Contract, FrozenMap
 
@@ -65,14 +65,31 @@ class Revision(Contract):
 
 
 class PageRequest(Contract):
+    """What page to fetch. `None` sends nothing, so the provider's default applies."""
+
     cursor: str | None = None
-    limit: int = Field(default=100, ge=1, le=1000)
-    order: Literal["asc", "desc"] = "asc"
+    limit: int | None = Field(default=None, ge=1, le=1000)
+    order: Literal["asc", "desc"] | None = None
 
 
 class Page[T](Contract):
+    """One page.
+
+    `has_more` is the provider's own end-of-list signal and `next_cursor` is
+    None exactly when it is false. A last page can be full: a caller that
+    guards against truncation compares `len(data)` with the limit it asked
+    for and `has_more`, and needs no extra request to do it.
+    """
+
     data: tuple[T, ...]
+    has_more: bool = False
     next_cursor: str | None = None
+
+    @model_validator(mode="after")
+    def _cursor_matches(self) -> Page[T]:
+        if self.has_more != (self.next_cursor is not None):
+            raise ValueError("next_cursor is set exactly when has_more is true")
+        return self
 
 
 class ModelRef(Contract):
@@ -82,7 +99,15 @@ class ModelRef(Contract):
 
 
 class SkillRef(Contract):
-    """One immutable skill version. A digest, never "latest"."""
+    """A skill, and which version of it.
+
+    `version` pins one version; `None` lets the provider resolve its latest,
+    which is how many existing agent configurations reference a skill.
+    `source` is the provider's own catalogue name (Anthropic: `anthropic` or
+    `custom`). `digest` is the content digest when the library knows it.
+    """
 
     id: str
-    digest: str
+    version: str | None = None
+    source: str | None = None
+    digest: str | None = None

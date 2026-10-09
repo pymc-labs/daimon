@@ -11,9 +11,11 @@ port from the bottom of this module. There is no raw client attribute.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import datetime
 from typing import Protocol
+
+from pydantic import JsonValue
 
 from mux.contracts.actions import InputEvent, UserMessage
 from mux.contracts.admission import Admission
@@ -55,6 +57,7 @@ from mux.contracts.resources import (
     EnvironmentSpec,
     ExportRequirements,
     Memory,
+    MemoryStore,
     ModelAdmission,
     ModelInfo,
     ProjectionSnapshot,
@@ -63,7 +66,9 @@ from mux.contracts.resources import (
     SessionExport,
     SessionFilter,
     SessionSpec,
-    SkillBundle,
+    Skill,
+    SkillUpload,
+    SkillVersion,
     UpdatePlan,
     Vault,
 )
@@ -191,9 +196,14 @@ class Artifacts(Protocol):
 
 
 class Skills(Protocol):
-    async def publish(self, scope: Scope, bundle: SkillBundle, *, key: str) -> SkillRef: ...
-    async def retrieve(self, scope: Scope, ref: SkillRef) -> SkillBundle: ...
-    async def list(self, scope: Scope, *, page: PageRequest) -> Page[SkillRef]: ...
+    """Skills. A bundle travels inline with `create` or `publish_version`, in one request."""
+
+    async def create(self, scope: Scope, bundle: SkillUpload, *, key: str) -> Skill: ...
+    async def publish_version(
+        self, scope: Scope, skill_id: str, bundle: SkillUpload, *, key: str
+    ) -> SkillVersion: ...
+    async def retrieve(self, scope: Scope, skill_id: str) -> Skill: ...
+    async def list(self, scope: Scope, *, page: PageRequest) -> Page[Skill]: ...
     async def delete(self, scope: Scope, skill_id: str, *, key: str) -> DeletionReceipt: ...
 
 
@@ -310,6 +320,8 @@ class Vaults(Protocol):
 class MemoryStores(Protocol):
     """`anthropic.memory_stores`: shared native memory."""
 
+    async def list(self, scope: Scope, *, page: PageRequest) -> Page[MemoryStore]: ...
+    async def retrieve(self, scope: Scope, store: ResourceRef) -> MemoryStore: ...
     async def create(
         self, scope: Scope, name: str, description: str, *, key: str
     ) -> ResourceRef: ...
@@ -336,7 +348,8 @@ class SkillVersions(Protocol):
 
     async def versions(
         self, scope: Scope, skill_id: str, *, page: PageRequest
-    ) -> Page[SkillRef]: ...
+    ) -> Page[SkillVersion]: ...
+    def download(self, scope: Scope, ref: SkillRef) -> AsyncIterator[bytes]: ...
     async def delete_version(self, scope: Scope, ref: SkillRef, *, key: str) -> DeletionReceipt: ...
 
 
@@ -355,3 +368,15 @@ class EnvironmentsFork(Protocol):
     async def fork(
         self, scope: Scope, source: ResourceRef, config: ExtensionConfig, *, key: str
     ) -> Environment: ...
+
+
+class PlatformExport(Protocol):
+    """`anthropic.platform_export`: an operator dump of native state.
+
+    Returns the provider's own JSON, by design: the feature is exporting
+    native state. It still runs under a scope; no client is exposed.
+    """
+
+    async def export(
+        self, scope: Scope, *, resource_kinds: frozenset[str]
+    ) -> Mapping[str, JsonValue]: ...
