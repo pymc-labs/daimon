@@ -119,7 +119,7 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_recovery_failure,
 )
 from daimon.core.stores.turn_origins import get_active_origin, thread_archive_requested
-from daimon.core.thread_naming import strip_mentions
+from daimon.core.thread_naming import naming_text, strip_mentions
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.bookkeeping import recover_orphan_marker
@@ -3063,7 +3063,9 @@ class DaimonBot(commands.Bot):
                 # Name before creation to avoid a Discord rename system message.
                 thread_name = f"Chat with {agent.name}"
                 naming = self.runtime.settings.thread_naming
-                opening_text = strip_mentions(message.content)
+                opening_text = naming_text(
+                    strip_mentions(message.content), [a.filename for a in message.attachments]
+                )
                 try:
                     if naming.enabled and opening_text:
                         async with contextlib.AsyncExitStack() as typing:
