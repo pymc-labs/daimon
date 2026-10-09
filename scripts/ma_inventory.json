@@ -1,5 +1,5 @@
 {
-  "files_scanned": 1961,
+  "files_scanned": 1970,
   "parse_errors": [],
   "calls": [
     {
@@ -497,23 +497,8 @@
     },
     {
       "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/_session_gate.py",
-      "line": 118,
-      "end": 118,
-      "scope": "_recorded_as_gated",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "runtime.client.beta.agents.retrieve(ma_agent_id)",
-      "request_keys": [],
-      "response_access": [
-        "agent.id",
-        "agent.mcp_servers",
-        "agent.tools"
-      ]
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/_session_gate.py",
-      "line": 70,
-      "end": 70,
+      "line": 72,
+      "end": 72,
       "scope": "session_card_gap",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -658,94 +643,6 @@
       "response_access": []
     },
     {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/agent_removal.py",
-      "line": 150,
-      "end": 155,
-      "scope": "_apply",
-      "category": "production",
-      "resource": "agents.update",
-      "call": "runtime.client.beta.agents.update(fresh.id, version=fresh.version, mcp_servers=new_mcp_servers, tools=new_tools)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/agent_removal.py",
-      "line": 228,
-      "end": 230,
-      "scope": "_apply",
-      "category": "production",
-      "resource": "agents.update",
-      "call": "runtime.client.beta.agents.update(fresh.id, version=fresh.version, skills=new_skills)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/agents.py",
-      "line": 493,
-      "end": 493,
-      "scope": "_create_agent_impl",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "runtime.client.beta.agents.retrieve(outcome.anthropic_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/agents.py",
-      "line": 933,
-      "end": 933,
-      "scope": "_archive_agent_impl",
-      "category": "production",
-      "resource": "agents.archive",
-      "call": "runtime.client.beta.agents.archive(agent.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/agents.py",
-      "line": 728,
-      "end": 728,
-      "scope": "_apply",
-      "category": "production",
-      "resource": "agents.update",
-      "call": "runtime.client.beta.agents.update(fresh.id, version=fresh.version, **patch)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/environments.py",
-      "line": 127,
-      "end": 127,
-      "scope": "_create_environment_impl",
-      "category": "production",
-      "resource": "environments.create",
-      "call": "runtime.client.beta.environments.create(**payload)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/environments.py",
-      "line": 176,
-      "end": 176,
-      "scope": "_update_environment_impl",
-      "category": "production",
-      "resource": "environments.update",
-      "call": "runtime.client.beta.environments.update(env.id, **patch)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/environments.py",
-      "line": 220,
-      "end": 220,
-      "scope": "_archive_environment_impl",
-      "category": "production",
-      "resource": "environments.archive",
-      "call": "runtime.client.beta.environments.archive(env.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
       "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/hub.py",
       "line": 258,
       "end": 258,
@@ -875,23 +772,12 @@
     },
     {
       "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/skills.py",
-      "line": 467,
-      "end": 467,
+      "line": 478,
+      "end": 478,
       "scope": "_get_impl",
       "category": "production",
       "resource": "skills.versions.list",
       "call": "runtime.client.beta.skills.versions.list(skill.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/skills.py",
-      "line": 308,
-      "end": 310,
-      "scope": "_apply",
-      "category": "production",
-      "resource": "agents.update",
-      "call": "runtime.client.beta.agents.update(fresh.id, version=fresh.version, skills=merged)",
       "request_keys": [],
       "response_access": []
     },
@@ -921,6 +807,71 @@
       "response_access": [
         "c.model_dump"
       ]
+    },
+    {
+      "file": "packages/adapters/mcp/tests/tools/test_mux_resource_parity.py",
+      "line": 87,
+      "end": 87,
+      "scope": "test_skill_attach_callsite_preserves_version_retry",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "old.beta.agents.retrieve('agent1')",
+      "request_keys": [],
+      "response_access": [
+        "fresh.version"
+      ]
+    },
+    {
+      "file": "packages/adapters/mcp/tests/tools/test_mux_resource_parity.py",
+      "line": 138,
+      "end": 138,
+      "scope": "test_create_environment_callsite_preserves_omitted_and_empty_description",
+      "category": "test",
+      "resource": "environments.create",
+      "call": "old.beta.environments.create(**payload)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/mcp/tests/tools/test_mux_resource_parity.py",
+      "line": 89,
+      "end": 96,
+      "scope": "test_skill_attach_callsite_preserves_version_retry",
+      "category": "test",
+      "resource": "agents.update",
+      "call": "old.beta.agents.update('agent1', version=fresh.version, skills=[{'type': 'custom', 'skill_id': 'added'}, {'type': 'anthropic', 'skill_id': 'xlsx'}])",
+      "request_keys": [
+        "skill_id",
+        "type"
+      ],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/mcp/tests/tools/test_mux_resource_parity.py",
+      "line": 100,
+      "end": 100,
+      "scope": "test_skill_attach_callsite_preserves_version_retry",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "old.beta.agents.retrieve('agent1')",
+      "request_keys": [],
+      "response_access": [
+        "fresh.version"
+      ]
+    },
+    {
+      "file": "packages/adapters/mcp/tests/tools/test_mux_resource_parity.py",
+      "line": 101,
+      "end": 109,
+      "scope": "test_skill_attach_callsite_preserves_version_retry",
+      "category": "test",
+      "resource": "agents.update",
+      "call": "old.beta.agents.update('agent1', version=fresh.version, skills=[{'type': 'custom', 'skill_id': 'added'}, {'type': 'anthropic', 'skill_id': 'xlsx'}, {'type': 'custom', 'skill_id': 'concurrent'}])",
+      "request_keys": [
+        "skill_id",
+        "type"
+      ],
+      "response_access": []
     },
     {
       "file": "packages/adapters/scheduler/daimon/adapters/scheduler/main.py",
@@ -5924,6 +5875,52 @@
       "response_access": []
     },
     {
+      "file": "packages/mux/mux/drivers/anthropic/turn.py",
+      "line": 138,
+      "end": 140,
+      "scope": "open_stream",
+      "category": "production",
+      "resource": "sessions.events.stream",
+      "call": "self._client.beta.sessions.events.stream(session.id, event_deltas=['agent.message'] if previews else omit)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/turn.py",
+      "line": 164,
+      "end": 169,
+      "scope": "list",
+      "category": "production",
+      "resource": "sessions.events.list",
+      "call": "self._client.beta.sessions.events.list(session.id, page=page.cursor if page.cursor is not None else omit, limit=page.limit if page.limit is not None else omit, order=page.order if page.order is not None else omit)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/turn.py",
+      "line": 114,
+      "end": 114,
+      "scope": "send",
+      "category": "production",
+      "resource": "sessions.events.send",
+      "call": "self._client.beta.sessions.events.send(session.id, events=inputs)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/turn.py",
+      "line": 201,
+      "end": 203,
+      "scope": "cancel",
+      "category": "production",
+      "resource": "sessions.events.send",
+      "call": "self._client.beta.sessions.events.send(session.id, events=[{'type': 'user.interrupt'}])",
+      "request_keys": [
+        "type"
+      ],
+      "response_access": []
+    },
+    {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
       "line": 101,
       "end": 101,
@@ -10091,6 +10088,15 @@
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/mcp/tests/tools/test_mux_resource_parity.py",
+      "line": 8,
+      "module": "anthropic",
+      "names": [
+        "ConflictError"
       ],
       "category": "test"
     },
@@ -15295,6 +15301,15 @@
       "category": "production"
     },
     {
+      "file": "packages/mux/mux/drivers/anthropic/actions.py",
+      "line": 6,
+      "module": "anthropic.types.beta.sessions.beta_managed_agents_event_params",
+      "names": [
+        "BetaManagedAgentsEventParams"
+      ],
+      "category": "production"
+    },
+    {
       "file": "packages/mux/mux/drivers/anthropic/resources/_errors.py",
       "line": 6,
       "module": "anthropic",
@@ -15471,6 +15486,28 @@
       "category": "production"
     },
     {
+      "file": "packages/mux/mux/drivers/anthropic/turn.py",
+      "line": 9,
+      "module": "anthropic",
+      "names": [
+        "APIConnectionError",
+        "APITimeoutError",
+        "AsyncAnthropic",
+        "AsyncStream",
+        "omit"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/turn.py",
+      "line": 10,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsStreamSessionEvents"
+      ],
+      "category": "production"
+    },
+    {
       "file": "packages/mux/tests/drivers/anthropic/test_authorization.py",
       "line": 5,
       "module": "anthropic",
@@ -15505,6 +15542,26 @@
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/mux/tests/drivers/anthropic/test_turn.py",
+      "line": 11,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/mux/tests/drivers/anthropic/test_turn.py",
+      "line": 12,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsAgentMCPToolResultEvent",
+        "BetaManagedAgentsAgentToolResultEvent",
+        "BetaManagedAgentsUserCustomToolResultEvent"
       ],
       "category": "test"
     },

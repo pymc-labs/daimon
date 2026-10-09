@@ -379,3 +379,17 @@ receive explicit tenant scopes, including each legacy skill's backfill tenant.
 Request order, version checks, multipart filenames and bytes, output and SDK
 exception types are retained. The CLI's temporary `mux_compat` module decodes
 native records at the adapter edge without issuing SDK calls.
+### MCP resource consumers
+
+MCP agent create-result reads, updates, archives, skill attachment/removal and
+environment writes consume neutral resource ports through the temporary host
+SDK codecs. Callers pass the authenticated tenant and account scope, including
+version retries and skill deletion. Tool schemas, confirmation text and
+conflict retry boundaries remain the same.
+
+Session lifecycle, session events, hosted artifacts/bundles and vault callers
+retain their current SDK path until the lifecycle, events and remaining resource
+ports land. The existing agent_chat turn calls wait for the turn lane.
+
+The MCP version-count read also retains its SDK walk while the resource decoder
+requires fields that the existing SDK counting caller does not consume.
