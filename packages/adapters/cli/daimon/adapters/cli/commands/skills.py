@@ -38,6 +38,8 @@ from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.errors import StoreError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma import delete_skill_and_versions
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import list_skill_versions
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.skill_sync import PATMissingError, SyncReport, sync_agent_skills
 from daimon.core.skills.add import (
@@ -380,7 +382,9 @@ async def get_skill(
     if skill is None:
         raise StoreError(f"no skill named {name!r} in your account.")
     version_count = 0
-    async for _ in rt.anthropic.beta.skills.versions.list(skill.id):
+    async for _ in list_skill_versions(
+        rt.anthropic, skill.id, scope=resource_scope(tenant_id=str(tenant_id))
+    ):
         version_count += 1
     cols = ("display_title", "id", "source", "created_at")
     emit_rows(console, [skill], columns=cols, as_json=as_json)
@@ -431,7 +435,9 @@ async def delete_skill(
     skill = await find_skill_by_display_title(rt.anthropic, canonical, on_truncation="degrade")
     if skill is None:
         raise StoreError(f"no skill named {name!r} in your account.")
-    await delete_skill_and_versions(rt.anthropic, skill.id)
+    await delete_skill_and_versions(
+        rt.anthropic, skill.id, scope=resource_scope(tenant_id=str(tenant_id))
+    )
     console.print(f"[green]✓ deleted skill {name!r}[/green]")
 
 
