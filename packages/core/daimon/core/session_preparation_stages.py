@@ -35,6 +35,7 @@ from daimon.core.config import GithubAppSettings
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.github_app_session import effective_repo_urls
 from daimon.core.session_fence_retry import try_fence
+from daimon.core.session_ports_compat import retrieve_session_record, session_scope
 from daimon.core.session_snapshot import (
     SessionSnapshot,
     desired_snapshot,
@@ -222,7 +223,15 @@ async def recorded_snapshot(
 
     if observed is None:
         try:
-            observed = await anthropic.beta.sessions.retrieve(existing.ma_session_id)
+            observed = await retrieve_session_record(
+                anthropic,
+                existing.ma_session_id,
+                scope=session_scope(
+                    tenant_id=existing.tenant_id,
+                    account_id=existing.account_id,
+                    call_site="session_preparation_stages:recorded_snapshot",
+                ),
+            )
         except APIStatusError as error:
             if error.status_code == 404:
                 return None

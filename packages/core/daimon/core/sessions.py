@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, cast
 import anthropic as anthropic_pkg
 import httpx
 import structlog
-from anthropic import AsyncAnthropic, omit
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
@@ -69,6 +69,11 @@ from daimon.core.mcp_vault import (
 )
 from daimon.core.memory_resource import ensure_memory_store_and_mount
 from daimon.core.repo_resource import build_repo_resource
+from daimon.core.session_ports_compat import (
+    archive_session_record,
+    create_session_record,
+    session_scope,
+)
 from daimon.core.session_seal import origin_stamp
 from daimon.core.session_snapshot import (
     session_mcp_servers,
@@ -604,18 +609,22 @@ async def create_session(
             if before_create is not None:
                 # The caller's last access decision, after every await above.
                 await before_create()
-            created = await anthropic.beta.sessions.create(
+            created = await create_session_record(
+                anthropic,
+                scope=session_scope(
+                    tenant_id=tenant_id, account_id=account_id, call_site="sessions:create_session"
+                ),
                 agent=agent_argument,
                 environment_id=environment.id,
-                metadata=metadata if metadata else omit,
+                metadata=metadata if metadata else None,
                 vault_ids=(
                     [caller_vault_id, vault_id]
                     if caller_vault_id is not None and vault_id is not None
                     else [vault_id]
                     if vault_id is not None
-                    else omit
+                    else None
                 ),
-                resources=resources if resources else omit,
+                resources=resources if resources else None,
             )
             if app_access is not None:
                 assert (
@@ -659,7 +668,15 @@ async def create_session(
             return created
         except BaseException:
             if created is not None and app_mode:
-                await anthropic.beta.sessions.archive(created.id)
+                await archive_session_record(
+                    anthropic,
+                    created.id,
+                    scope=session_scope(
+                        tenant_id=tenant_id,
+                        account_id=account_id,
+                        call_site="sessions:create_session",
+                    ),
+                )
             if app_access is not None:
                 assert session_factory is not None
                 async with httpx.AsyncClient() as app_client:
@@ -723,9 +740,13 @@ async def create_isolated_session(
             origin_stamp(channel_id=origin_channel_id, thread_id=None, seal=origin_seal_ids)
         )
 
-    return await anthropic.beta.sessions.create(
+    return await create_session_record(
+        anthropic,
+        scope=session_scope(
+            tenant_id=tenant_id, account_id=account_id, call_site="sessions:create_isolated_session"
+        ),
         agent=agent.id,
         environment_id=environment.id,
-        metadata=metadata if metadata else omit,
+        metadata=metadata if metadata else None,
         resources=resources,
     )

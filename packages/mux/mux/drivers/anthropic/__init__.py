@@ -35,6 +35,7 @@ from mux.drivers.anthropic.resources.sessions_admin import (
 from mux.drivers.anthropic.resources.skills import AnthropicSkills, AnthropicSkillVersions
 from mux.drivers.anthropic.resources.vaults import AnthropicVaults, Vaults
 from mux.drivers.anthropic.resources.walk import AnthropicResourceWalk, ResourceWalk
+from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
 from mux.drivers.anthropic.turn import AnthropicEvents
 from mux.errors import ExtensionVersionError, UnsupportedCapability
 from mux.profiles.anthropic import MANAGED_AGENTS
@@ -82,6 +83,13 @@ class AnthropicManagedAgents:
         native_vaults = AnthropicVaults(client, self.account_scope_id, secrets, authorization)
         self.session_admin = AnthropicSessionAdmin(
             client, self.account_scope_id, secrets, authorization
+        )
+        self._sessions = sessions or AnthropicSessions(
+            client,
+            self.account_scope_id,
+            authorization,
+            archive=self.session_admin,
+            secrets=secrets,
         )
         native_export = AnthropicPlatformExport(client)
         self._extensions: dict[tuple[type[object], str, int], object] = {

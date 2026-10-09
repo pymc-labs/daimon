@@ -190,6 +190,7 @@ class SessionSpec(Contract):
     metadata: FrozenMap[str, str] = Field(default_factory=dict[str, str])
     resources: tuple[ResourceBinding, ...] = ()
     state_mode: Literal["continue", "fresh"] = "continue"
+    extensions: FrozenMap[str, ExtensionConfig] = Field(default_factory=dict[str, ExtensionConfig])
 
 
 class Continuity(Contract):
@@ -233,6 +234,8 @@ class Session(Contract):
     state: Literal["provisioning", "idle", "running", "requires_action", "terminated"]
     active_root_turn: str | None = None
     required_actions: tuple[RequiredAction, ...] = ()
+    native: JsonValue | None = None
+    """Opaque provider snapshot, filled by the driver for the M0 host codec."""
 
 
 class SessionFilter(Contract):
