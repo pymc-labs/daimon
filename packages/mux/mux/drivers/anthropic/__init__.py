@@ -130,6 +130,9 @@ class AnthropicManagedAgents:
                 "anthropic.model_config",
                 "anthropic.environment_config",
                 "anthropic.agent_create_nulls",
+                "anthropic.session_create",
+                "anthropic.session_resource_create",
+                "anthropic.session_update",
             )
         )
         extra = tuple(

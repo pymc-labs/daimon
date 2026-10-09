@@ -454,3 +454,8 @@ closed `anthropic.environment_config@1` `create_nulls` field. Its only accepted
 field name is `description`; the marker is removed before the SDK request.
 Neutral description omission remains unchanged, including when configuration
 is absent or explicitly null.
+
+The factory advertises the session lane's closed configuration namespaces
+`anthropic.session_create@1`, `anthropic.session_resource_create@1` and
+`anthropic.session_update@1` for admission. The session lifecycle driver owns
+their payload validation and execution.
