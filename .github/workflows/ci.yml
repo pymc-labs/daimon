@@ -60,6 +60,14 @@ jobs:
       - name: mcp tool catalogue check
         run: uv run python scripts/generate_mcp_tool_catalogue.py --check
 
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/daimon-web
+          key: tailwindcss-v4.3.3-linux-x64-dc61b3ac6b8c9ca8
+
+      - name: web CSS check
+        run: uv run python scripts/generate_web_css.py --check
+
   pytest-core:
     runs-on: ubuntu-latest
     timeout-minutes: 15

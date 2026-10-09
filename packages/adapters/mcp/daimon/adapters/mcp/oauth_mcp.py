@@ -21,7 +21,6 @@ import anthropic
 import httpx
 import structlog
 from cryptography.fernet import MultiFernet
-from daimon.adapters.mcp.oauth_slack import _page  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.discord._credential_button import (
     edit_card_state as edit_discord_card_state,
@@ -30,6 +29,8 @@ from daimon.adapters.mcp.tools.slack._credential_button import (
     edit_card_state_for_tenant as edit_slack_card_state,
 )
 from daimon.adapters.mcp.tools.teams._send import edit_teams_card_state
+from daimon.adapters.mcp.web_icons import icon, platform_mark
+from daimon.adapters.mcp.web_shell import render_page
 from daimon.core.agent_pins import request_pin_refusal
 from daimon.core.authz import (
     Action,
@@ -112,20 +113,36 @@ _ERROR_COPY: dict[_ErrorKind, tuple[str, str, int]] = {
 def _error_page(kind: _ErrorKind) -> HTMLResponse:
     headline, body_text, status = _ERROR_COPY[kind]
     body = (
+        f'<div class="gh-status-icon">{icon("triangle-alert")}</div>'
         f"<h1>{html.escape(headline, quote=False)}</h1><p>{html.escape(body_text, quote=False)}</p>"
     )
-    return _page(
-        title="daimon — connection", state_bar=" status-bar--rose", body_html=body, status=status
+    return render_page(
+        title=headline, context="Connection", error=True, body_html=body, status=status
     )
 
 
-def _success_page(*, server_name: str, agent_name: str) -> HTMLResponse:
+def _success_page(
+    *, server_name: str, agent_name: str, platform: str | None = None
+) -> HTMLResponse:
+    destinations = {
+        "discord": ("Discord", "https://discord.com/app"),
+        "slack": ("Slack", "https://app.slack.com/client/"),
+        "teams": ("Teams", "https://teams.microsoft.com/"),
+    }
+    destination = destinations.get(platform or "")
+    back = (
+        '<div class="gh-actions"><a class="gh-primary" '
+        f'href="{destination[1]}">{platform_mark(platform)}Back to {destination[0]}</a></div>'
+        if destination
+        else "<p>Return to chat.</p>"
+    )
     body = (
+        f'<div class="gh-status-icon">{icon("circle-check")}</div>'
         f"<h1>Connected {html.escape(server_name, quote=False)}</h1>"
         f"<p>{html.escape(agent_name, quote=False)} can use your connection from your next "
-        "message. You can close this tab and go back to the conversation.</p>"
+        f"message.</p>{back}"
     )
-    return _page(title="daimon — connected", state_bar="", body_html=body)
+    return render_page(title=f"Connected {server_name}", context="Connection", body_html=body)
 
 
 def build_oauth_mcp_routes(
@@ -249,7 +266,11 @@ def build_oauth_mcp_routes(
         if request_row is not None:
             await _settle(request_row, outcome="applied", state="applied")
         agent_name = request_row.target_name if request_row is not None else None
-        return _success_page(server_name=flow.server_name, agent_name=agent_name or "The agent")
+        return _success_page(
+            server_name=flow.server_name,
+            agent_name=agent_name or "The agent",
+            platform=request_row.platform if request_row is not None else None,
+        )
 
     async def _pinned_refusal(
         flow: McpOAuthFlowRow, request_row: CredentialRequestRow | None

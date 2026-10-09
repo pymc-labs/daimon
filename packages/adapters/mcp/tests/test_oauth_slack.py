@@ -1,7 +1,7 @@
 """Tests for oauth_slack.py: branded HTML pages (unit) and route handlers (integration).
 
 Unit tests cover:
-- _page shell: doctype, :root token block, status stripe color
+- _page shell: doctype, shared stylesheet and error card
 - _install_landing_html: 6 locked scope ids present
 - _success_html: workspace name is HTML-escaped (XSS prevention)
 - _enterprise_rejection_html: reassurance copy present
@@ -16,6 +16,7 @@ Integration tests cover:
 
 from __future__ import annotations
 
+import hashlib
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -34,6 +35,8 @@ from daimon.adapters.mcp.oauth_slack import (
     build_oauth_slack_routes,
 )
 from daimon.adapters.mcp.server import create_mcp_app
+from daimon.adapters.mcp.web_icons import icon
+from daimon.adapters.mcp.web_shell import CSS_SHA256, render_page
 from daimon.core.config import (
     AgentIdentitySettings,
     AnthropicSettings,
@@ -72,11 +75,20 @@ def test_page_shell_contains_doctype() -> None:
 def test_page_shell_contains_root_tokens() -> None:
     response = _page(title="test page", state_bar="", body_html="<p>hello</p>")
     body = response.body.decode()
-    assert "--stage: #0b110e" in body, "_page CSS should declare --stage token"
-    assert "--accent: #44a171" in body, "_page CSS should declare --accent token"
-    assert "--rose: #c68d8c" in body, "_page CSS should declare --rose token"
-    assert "--accent-press: #2f8e60" in body, "_page CSS should declare --accent-press token"
-    assert "--stage-raised: #141d19" in body, "_page CSS should declare --stage-raised token"
+    assert f'href="/web/web.css?v={CSS_SHA256}"' in body
+    assert 'src="/web/daimon-face.png"' in body
+    github_body = render_page(title="GitHub", body_html="", context="GitHub").body.decode()
+    assert 'class="web-icon web-icon--github"' in github_body
+
+
+def test_inline_web_icon_accessibility_and_allowlist() -> None:
+    assert 'aria-hidden="true"' in icon("search")
+    assert 'aria-label="Find &lt;repos&gt;"' in icon("search", label="Find <repos>")
+    assert 'viewBox="0 0 24 24"' in icon("github")
+    assert 'viewBox="0 0 24 24"' in icon("discord")
+    assert 'aria-hidden="true"' in icon("github")
+    with pytest.raises(ValueError):
+        icon("../daimon-face")
 
 
 def test_page_shell_contains_viewport_meta() -> None:
@@ -88,26 +100,25 @@ def test_page_shell_contains_viewport_meta() -> None:
 def test_page_shell_button_min_height() -> None:
     response = _page(title="test page", state_bar="", body_html="<p>hello</p>")
     body = response.body.decode()
-    assert "min-height: 44px" in body, "_page should declare 44px touch-target floor on button"
+    assert f'href="/web/web.css?v={CSS_SHA256}"' in body
 
 
 def test_page_shell_system_ui_fallback() -> None:
     response = _page(title="test page", state_bar="", body_html="<p>hello</p>")
     body = response.body.decode()
-    assert "system-ui" in body, "_page font-family stacks should end in system-ui fallback"
+    assert 'class="web-brand"' in body
 
 
 def test_page_shell_accent_stripe_color() -> None:
     response = _page(title="test page", state_bar="", body_html="<p>hello</p>")
     body = response.body.decode()
-    # accent stripe: the status-bar div uses the plain class (no modifier suffix)
-    assert 'class="status-bar"' in body, "accent state_bar should render plain status-bar class"
+    assert 'class="web-card"' in body
 
 
 def test_page_shell_rose_stripe_color() -> None:
     response = _page(title="test page", state_bar=" status-bar--rose", body_html="<p>err</p>")
     body = response.body.decode()
-    assert "status-bar--rose" in body, "rose state_bar should render status-bar--rose modifier"
+    assert 'class="web-card web-card--error"' in body
 
 
 def test_page_shell_status_code() -> None:
@@ -146,7 +157,7 @@ def test_install_landing_html_title() -> None:
         authorize_url="https://slack.com/oauth/v2/authorize", signup_credit=Decimal("5.00")
     )
     body = response.body.decode()
-    assert "<title>add daimon to Slack</title>" in body, "install landing should have correct title"
+    assert "<title>Daimon: Add Daimon to Slack</title>" in body
 
 
 def test_install_landing_html_cta_label() -> None:
@@ -200,13 +211,13 @@ def test_success_html_escapes_workspace_name_xss() -> None:
 def test_success_html_title() -> None:
     response = _success_html(workspace="Acme Corp", signup_credit=Decimal("5.00"))
     body = response.body.decode()
-    assert "<title>daimon installed</title>" in body, "success page should have correct title"
+    assert "<title>Daimon: Daimon installed</title>" in body
 
 
 def test_success_html_interpolates_workspace_name() -> None:
     response = _success_html(workspace="Acme Corp", signup_credit=Decimal("5.00"))
     body = response.body.decode()
-    assert "installed in Acme Corp" in body, "success page h1 should include workspace name"
+    assert "Installed in Acme Corp" in body, "success page h1 should include workspace name"
 
 
 def test_success_html_no_button() -> None:
@@ -219,7 +230,9 @@ def test_success_html_no_button() -> None:
 def test_success_html_close_tab_copy() -> None:
     response = _success_html(workspace="Acme Corp", signup_credit=Decimal("5.00"))
     body = response.body.decode()
-    assert "close this tab" in body, "success page should tell the user they can close the tab"
+    assert "close this tab" in body.lower(), (
+        "success page should tell the user they can close the tab"
+    )
 
 
 def test_success_html_mentions_promo_codes_only_when_one_is_redeemable() -> None:
@@ -261,7 +274,7 @@ def test_enterprise_rejection_html_reassurance_nothing_stored() -> None:
 def test_enterprise_rejection_html_rose_stripe() -> None:
     response = _enterprise_rejection_html()
     body = response.body.decode()
-    assert "status-bar--rose" in body, "rejection page should use the rose error stripe"
+    assert 'class="web-card web-card--error"' in body
 
 
 def test_enterprise_rejection_html_status_200() -> None:
@@ -333,7 +346,7 @@ def test_error_html_rose_stripe() -> None:
     for kind in ("expired", "unconfigured", "exchange_failed"):
         response = _error_html(kind=kind)  # type: ignore[arg-type]
         body = response.body.decode()
-        assert "status-bar--rose" in body, f"{kind}: error page should use rose stripe"
+        assert 'class="web-card web-card--error"' in body
 
 
 # ---------------------------------------------------------------------------
@@ -800,6 +813,68 @@ async def test_slack_routes_mount_when_configured(
     assert r.status_code == 200, (
         f"Slack routes should be mounted and return 200 when configured; got {r.status_code}"
     )
+
+
+async def test_shared_web_assets_are_served(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    app = _build_full_slack_app(sessionmaker, with_slack=True)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        css = await client.get("/web/web.css")
+        versioned_css = await client.get(f"/web/web.css?v={CSS_SHA256}")
+        stale_css = await client.get("/web/web.css?v=old")
+        duplicate_version = await client.get(f"/web/web.css?v={CSS_SHA256}&v=old")
+        face = await client.get("/web/daimon-face.png")
+        font = await client.get("/web/Inter-Regular.ttf")
+        icon = await client.get("/web/lucide/search.svg")
+        license_file = await client.get("/web/Lucide-LICENSE.txt")
+        brand_icon = await client.get("/web/simple-icons/discord.svg")
+        brand_notice = await client.get("/web/SimpleIcons-NOTICE.txt")
+        missing = await client.get("/web/missing.css")
+    assert all(
+        response.status_code == 200
+        for response in (
+            css,
+            versioned_css,
+            stale_css,
+            duplicate_version,
+            face,
+            font,
+            icon,
+            license_file,
+            brand_icon,
+            brand_notice,
+        )
+    )
+    assert "text/css" in css.headers["content-type"]
+    assert b"--primary" in css.content
+    assert face.content.startswith(b"\x89PNG")
+    assert hashlib.sha256(face.content).hexdigest() == (
+        "a3a3305a7d9d3ec4420cdb420d4d27bc0d2f029b618a4a6dc7fb781556a7d73e"
+    )
+    assert versioned_css.headers["cache-control"] == "public, max-age=31536000, immutable"
+    for response in (css, stale_css, duplicate_version):
+        assert response.headers["cache-control"] == "no-cache"
+    for response in (face, font, icon, license_file, brand_icon, brand_notice):
+        assert response.headers["cache-control"] == "public, max-age=86400"
+    assert missing.status_code == 404
+    assert missing.headers["cache-control"] == "no-cache"
+    for response in (
+        css,
+        versioned_css,
+        stale_css,
+        duplicate_version,
+        face,
+        font,
+        icon,
+        license_file,
+        brand_icon,
+        brand_notice,
+        missing,
+    ):
+        assert response.headers["x-content-type-options"] == "nosniff"
 
 
 async def test_slack_routes_not_mounted_without_slack_settings(

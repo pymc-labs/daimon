@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
+- MCP browser pages now share a responsive Daimon shell with Daimon's face in
+  the page header, local Inter font, brand colours, and inline action icons.
+  The picker uses separate desktop, tablet, and phone layouts. GitHub and Slack
+  page copy has been rewritten. The GitHub picker shows access
+  before the repo list on narrow screens, keeps selections across search, and
+  locks controls during Connect. Billing, Slack installation, personal GitHub
+  linking, and MCP connection pages use the same shell. Tailwind CSS is
+  generated from the server templates with a pinned standalone CLI and checked
+  in CI.
 - Agent identity can be disabled for selected Discord guilds or Slack workspaces
   while remaining enabled elsewhere in the deployment.
 - Discord and Slack GitHub setup panels now manage connected repos, agent grants,
