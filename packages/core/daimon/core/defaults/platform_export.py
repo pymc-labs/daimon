@@ -16,9 +16,8 @@ from pathlib import Path
 
 from anthropic import AsyncAnthropic
 from daimon.core.errors import SkillsListTruncatedError
-from daimon.core.mux_backend import managed_agents, resource_scope
+from daimon.core.mux_backend import managed_agents, platform_scope
 from daimon.core.mux_compat import legacy_call, legacy_iter
-from mux.contracts.ids import PageRequest
 from mux.drivers.anthropic.resources.platform_export import PlatformExport
 from pydantic import JsonValue
 
@@ -32,7 +31,7 @@ async def export_platform(client: AsyncAnthropic, destination: Path) -> None:
     """
     backend = managed_agents(client)
     native = backend.extension(PlatformExport, namespace="anthropic.platform_export", version=1)
-    scope = resource_scope(authorization_id="platform-export")
+    scope = platform_scope("defaults.platform_export", authorization_id="platform-export")
     checksums: dict[str, str] = {}
     fd, temporary = tempfile.mkstemp(prefix=".platform-export-", dir=destination.parent)
     os.close(fd)
@@ -54,11 +53,7 @@ async def export_platform(client: AsyncAnthropic, destination: Path) -> None:
                 full_env = await legacy_call(native.environment(scope, str(environment["id"])))
                 write_json(f"environments/{len(checksums)}.json", full_env)
             skills: list[dict[str, JsonValue]] = []
-            cursor: str | None = None
-            while True:
-                page = await legacy_call(
-                    native.skills_page(scope, page=PageRequest(cursor=cursor, limit=1000))
-                )
+            async for page in legacy_iter(native.skill_pages(scope, limit=1000)):
                 skills.extend(page.data)
                 if len(page.data) >= 1000 and not page.has_more:
                     raise SkillsListTruncatedError(
@@ -66,9 +61,6 @@ async def export_platform(client: AsyncAnthropic, destination: Path) -> None:
                         "the org skill view may be truncated; "
                         "create/delete decisions on this view are unsafe"
                     )
-                if page.next_cursor is None:
-                    break
-                cursor = page.next_cursor
             for skill in skills:
                 if skill["source"] != "custom":
                     continue

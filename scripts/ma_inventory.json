@@ -1,5 +1,5 @@
 {
-  "files_scanned": 1923,
+  "files_scanned": 1926,
   "parse_errors": [],
   "calls": [
     {
@@ -1766,8 +1766,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 339,
-      "end": 339,
+      "line": 350,
+      "end": 350,
       "scope": "find_workspace_disposable_sentinel",
       "category": "production",
       "resource": "agents.list",
@@ -1780,8 +1780,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 393,
-      "end": 393,
+      "line": 404,
+      "end": 404,
       "scope": "delete_entire_workspace_for_testing",
       "category": "production",
       "resource": "environments.list",
@@ -1793,8 +1793,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 409,
-      "end": 409,
+      "line": 420,
+      "end": 420,
       "scope": "delete_entire_workspace_for_testing",
       "category": "production",
       "resource": "agents.list",
@@ -1806,8 +1806,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 94,
-      "end": 94,
+      "line": 95,
+      "end": 95,
       "scope": "_walk",
       "category": "production",
       "resource": "sessions.events.list",
@@ -1817,8 +1817,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 162,
-      "end": 165,
+      "line": 163,
+      "end": 166,
       "scope": "send_interrupt_and_wait",
       "category": "production",
       "resource": "sessions.events.send",
@@ -1830,8 +1830,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 448,
-      "end": 448,
+      "line": 459,
+      "end": 459,
       "scope": "delete_sessions_for_account",
       "category": "production",
       "resource": "sessions.list",
@@ -1845,8 +1845,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 168,
-      "end": 168,
+      "line": 169,
+      "end": 169,
       "scope": "_wait_for_terminal_idle",
       "category": "production",
       "resource": "sessions.events.stream",
@@ -1856,8 +1856,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 235,
-      "end": 238,
+      "line": 236,
+      "end": 239,
       "scope": "interrupt_orphaned_session",
       "category": "production",
       "resource": "sessions.events.send",
@@ -1869,8 +1869,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 395,
-      "end": 395,
+      "line": 406,
+      "end": 406,
       "scope": "delete_entire_workspace_for_testing",
       "category": "production",
       "resource": "environments.delete",
@@ -1880,8 +1880,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 413,
-      "end": 413,
+      "line": 424,
+      "end": 424,
       "scope": "delete_entire_workspace_for_testing",
       "category": "production",
       "resource": "agents.archive",
@@ -1891,8 +1891,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 456,
-      "end": 456,
+      "line": 467,
+      "end": 467,
       "scope": "delete_sessions_for_account",
       "category": "production",
       "resource": "sessions.delete",
@@ -1902,8 +1902,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 399,
-      "end": 399,
+      "line": 410,
+      "end": 410,
       "scope": "delete_entire_workspace_for_testing",
       "category": "production",
       "resource": "environments.archive",
@@ -5409,8 +5409,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 163,
-      "end": 163,
+      "line": 172,
+      "end": 172,
       "scope": "test_agent_create_has_no_extra_or_missing_fields",
       "category": "test",
       "resource": "agents.create",
@@ -5422,8 +5422,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 206,
-      "end": 206,
+      "line": 215,
+      "end": 215,
       "scope": "test_environment_create_preserves_configuration",
       "category": "test",
       "resource": "environments.create",
@@ -5435,8 +5435,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 229,
-      "end": 229,
+      "line": 240,
+      "end": 240,
       "scope": "test_agent_update_keeps_version_and_null_clear_semantics",
       "category": "test",
       "resource": "agents.update",
@@ -5446,8 +5446,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 405,
-      "end": 405,
+      "line": 438,
+      "end": 438,
       "scope": "test_skills_listing_keeps_pagination_and_truncation_signal",
       "category": "test",
       "resource": "skills.list",
@@ -5459,8 +5459,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 242,
-      "end": 242,
+      "line": 259,
+      "end": 259,
       "scope": "test_remaining_defaults_requests_match",
       "category": "test",
       "resource": "agents.retrieve",
@@ -5470,8 +5470,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 355,
-      "end": 358,
+      "line": 374,
+      "end": 377,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.create",
@@ -5483,8 +5483,21 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 104,
-      "end": 104,
+      "line": 521,
+      "end": 521,
+      "scope": "test_skill_walks_keep_sdk_terminal_page_stop_rule",
+      "category": "test",
+      "resource": "skills.list",
+      "call": "before.beta.skills.list(limit=1000)",
+      "request_keys": [],
+      "response_access": [
+        "initial.iter_pages"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_mux_resources_parity.py",
+      "line": 105,
+      "end": 105,
       "scope": "test_full_list_walk_makes_identical_requests",
       "category": "test",
       "resource": "agents.list",
@@ -5496,8 +5509,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 113,
-      "end": 113,
+      "line": 118,
+      "end": 118,
       "scope": "test_full_list_walk_makes_identical_requests",
       "category": "test",
       "resource": "environments.list",
@@ -5509,8 +5522,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 245,
-      "end": 245,
+      "line": 262,
+      "end": 262,
       "scope": "test_remaining_defaults_requests_match",
       "category": "test",
       "resource": "agents.archive",
@@ -5520,8 +5533,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 362,
-      "end": 364,
+      "line": 386,
+      "end": 388,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.create",
@@ -5533,8 +5546,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 427,
-      "end": 427,
+      "line": 462,
+      "end": 462,
       "scope": "test_missing_page_data_keeps_sdks_empty_iterator_behavior",
       "category": "test",
       "resource": "agents.list",
@@ -5544,8 +5557,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 430,
-      "end": 430,
+      "line": 470,
+      "end": 470,
       "scope": "test_missing_page_data_keeps_sdks_empty_iterator_behavior",
       "category": "test",
       "resource": "environments.list",
@@ -5555,8 +5568,21 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 248,
-      "end": 248,
+      "line": 514,
+      "end": 514,
+      "scope": "test_skill_walks_keep_sdk_terminal_page_stop_rule",
+      "category": "test",
+      "resource": "skills.versions.list",
+      "call": "before.beta.skills.versions.list('skill1', limit=100)",
+      "request_keys": [],
+      "response_access": [
+        "v.model_dump"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_mux_resources_parity.py",
+      "line": 265,
+      "end": 265,
       "scope": "test_remaining_defaults_requests_match",
       "category": "test",
       "resource": "environments.archive",
@@ -5566,8 +5592,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 256,
-      "end": 256,
+      "line": 273,
+      "end": 273,
       "scope": "test_remaining_defaults_requests_match",
       "category": "test",
       "resource": "environments.update",
@@ -5577,8 +5603,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 368,
-      "end": 368,
+      "line": 394,
+      "end": 394,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.download",
@@ -5591,8 +5617,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 385,
-      "end": 385,
+      "line": 418,
+      "end": 418,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.list",
@@ -5604,8 +5630,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 391,
-      "end": 391,
+      "line": 424,
+      "end": 424,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.delete",
@@ -5615,8 +5641,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 377,
-      "end": 377,
+      "line": 408,
+      "end": 408,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.list",
@@ -5628,8 +5654,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 387,
-      "end": 387,
+      "line": 420,
+      "end": 420,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.delete",
@@ -5889,8 +5915,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 239,
-      "end": 239,
+      "line": 255,
+      "end": 255,
       "scope": "walk",
       "category": "production",
       "resource": "agents.list",
@@ -5900,8 +5926,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 174,
-      "end": 174,
+      "line": 180,
+      "end": 180,
       "scope": "create",
       "category": "production",
       "resource": "agents.create",
@@ -5911,8 +5937,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 194,
-      "end": 194,
+      "line": 188,
+      "end": 188,
+      "scope": "retrieve",
+      "category": "production",
+      "resource": "agents.retrieve",
+      "call": "self._client.beta.agents.retrieve(ref.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
+      "line": 203,
+      "end": 203,
       "scope": "list",
       "category": "production",
       "resource": "agents.list",
@@ -5922,8 +5959,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 212,
-      "end": 212,
+      "line": 224,
+      "end": 224,
       "scope": "update",
       "category": "production",
       "resource": "agents.update",
@@ -5933,8 +5970,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 218,
-      "end": 218,
+      "line": 232,
+      "end": 232,
       "scope": "archive",
       "category": "production",
       "resource": "agents.archive",
@@ -5943,20 +5980,9 @@
       "response_access": []
     },
     {
-      "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 181,
-      "end": 181,
-      "scope": "retrieve",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "self._client.beta.agents.retrieve(ref.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 181,
-      "end": 181,
+      "line": 202,
+      "end": 202,
       "scope": "walk",
       "category": "production",
       "resource": "environments.list",
@@ -5966,8 +5992,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 103,
-      "end": 105,
+      "line": 115,
+      "end": 117,
       "scope": "create",
       "category": "production",
       "resource": "environments.create",
@@ -5977,8 +6003,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 127,
-      "end": 127,
+      "line": 125,
+      "end": 125,
+      "scope": "retrieve",
+      "category": "production",
+      "resource": "environments.retrieve",
+      "call": "self._client.beta.environments.retrieve(ref.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
+      "line": 141,
+      "end": 141,
       "scope": "list",
       "category": "production",
       "resource": "environments.list",
@@ -5988,8 +6025,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 150,
-      "end": 152,
+      "line": 167,
+      "end": 169,
       "scope": "update",
       "category": "production",
       "resource": "environments.update",
@@ -5999,8 +6036,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 158,
-      "end": 158,
+      "line": 177,
+      "end": 177,
       "scope": "archive",
       "category": "production",
       "resource": "environments.archive",
@@ -6010,8 +6047,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 175,
-      "end": 175,
+      "line": 195,
+      "end": 195,
       "scope": "delete",
       "category": "production",
       "resource": "environments.delete",
@@ -6020,20 +6057,9 @@
       "response_access": []
     },
     {
-      "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 112,
-      "end": 112,
-      "scope": "retrieve",
-      "category": "production",
-      "resource": "environments.retrieve",
-      "call": "self._client.beta.environments.retrieve(ref.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 50,
-      "end": 50,
+      "line": 53,
+      "end": 53,
       "scope": "agents",
       "category": "production",
       "resource": "agents.list",
@@ -6043,8 +6069,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 60,
-      "end": 60,
+      "line": 63,
+      "end": 63,
       "scope": "environments",
       "category": "production",
       "resource": "environments.list",
@@ -6054,8 +6080,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 93,
-      "end": 93,
+      "line": 111,
+      "end": 111,
       "scope": "skill_versions",
       "category": "production",
       "resource": "skills.versions.list",
@@ -6065,8 +6091,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 108,
-      "end": 108,
+      "line": 126,
+      "end": 126,
       "scope": "memory_stores",
       "category": "production",
       "resource": "memory_stores.list",
@@ -6076,8 +6102,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 114,
-      "end": 114,
+      "line": 132,
+      "end": 132,
       "scope": "memories",
       "category": "production",
       "resource": "memory_stores.memories.list",
@@ -6087,8 +6113,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 55,
-      "end": 55,
+      "line": 58,
+      "end": 58,
       "scope": "agent",
       "category": "production",
       "resource": "agents.retrieve",
@@ -6098,8 +6124,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 65,
-      "end": 65,
+      "line": 68,
+      "end": 68,
       "scope": "environment",
       "category": "production",
       "resource": "environments.retrieve",
@@ -6109,8 +6135,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 79,
-      "end": 79,
+      "line": 82,
+      "end": 82,
       "scope": "skills_page",
       "category": "production",
       "resource": "skills.list",
@@ -6120,8 +6146,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 99,
-      "end": 99,
+      "line": 96,
+      "end": 96,
+      "scope": "skill_pages",
+      "category": "production",
+      "resource": "skills.list",
+      "call": "self._client.beta.skills.list(limit=limit)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
+      "line": 117,
+      "end": 117,
       "scope": "download_skill_version",
       "category": "production",
       "resource": "skills.versions.download",
@@ -6131,8 +6168,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 121,
-      "end": 123,
+      "line": 139,
+      "end": 141,
       "scope": "memory",
       "category": "production",
       "resource": "memory_stores.memories.retrieve",
@@ -6142,8 +6179,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/skills.py",
-      "line": 65,
-      "end": 67,
+      "line": 174,
+      "end": 174,
+      "scope": "walk",
+      "category": "production",
+      "resource": "skills.versions.list",
+      "call": "self._client.beta.skills.versions.list(skill_id, **kwargs)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/skills.py",
+      "line": 70,
+      "end": 72,
       "scope": "create",
       "category": "production",
       "resource": "skills.create",
@@ -6155,8 +6203,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/skills.py",
-      "line": 75,
-      "end": 75,
+      "line": 81,
+      "end": 81,
       "scope": "publish_version",
       "category": "production",
       "resource": "skills.versions.create",
@@ -6166,8 +6214,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/skills.py",
-      "line": 90,
-      "end": 90,
+      "line": 98,
+      "end": 98,
       "scope": "list",
       "category": "production",
       "resource": "skills.list",
@@ -6177,8 +6225,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/skills.py",
-      "line": 98,
-      "end": 98,
+      "line": 107,
+      "end": 107,
       "scope": "delete",
       "category": "production",
       "resource": "skills.delete",
@@ -6188,8 +6236,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/skills.py",
-      "line": 117,
-      "end": 117,
+      "line": 113,
+      "end": 113,
+      "scope": "pages",
+      "category": "production",
+      "resource": "skills.list",
+      "call": "self._client.beta.skills.list(limit=limit)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/skills.py",
+      "line": 141,
+      "end": 141,
       "scope": "versions",
       "category": "production",
       "resource": "skills.versions.list",
@@ -6199,8 +6258,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/skills.py",
-      "line": 129,
-      "end": 129,
+      "line": 154,
+      "end": 154,
       "scope": "download",
       "category": "production",
       "resource": "skills.versions.download",
@@ -6210,8 +6269,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/skills.py",
-      "line": 139,
-      "end": 139,
+      "line": 165,
+      "end": 165,
       "scope": "delete_version",
       "category": "production",
       "resource": "skills.versions.delete",
@@ -6221,8 +6280,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/skills.py",
-      "line": 80,
-      "end": 80,
+      "line": 87,
+      "end": 87,
       "scope": "retrieve",
       "category": "production",
       "resource": "skills.retrieve",
@@ -6232,8 +6291,8 @@
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
-      "line": 106,
-      "end": 106,
+      "line": 101,
+      "end": 101,
       "scope": "test_single_export_request_matches",
       "category": "test",
       "resource": "agents.retrieve('s')).model_dump",
@@ -6243,8 +6302,8 @@
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
-      "line": 109,
-      "end": 109,
+      "line": 104,
+      "end": 104,
       "scope": "test_single_export_request_matches",
       "category": "test",
       "resource": "environments.retrieve('s')).model_dump",
@@ -6254,8 +6313,8 @@
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
-      "line": 177,
-      "end": 177,
+      "line": 172,
+      "end": 172,
       "scope": "test_skill_summary_pages_preserve_missing_fields_and_limit",
       "category": "test",
       "resource": "skills.list",
@@ -6265,8 +6324,8 @@
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
-      "line": 80,
-      "end": 80,
+      "line": 75,
+      "end": 75,
       "scope": "test_paginated_export_requests_and_native_json_match",
       "category": "test",
       "resource": "agents.list",
@@ -6276,8 +6335,8 @@
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
-      "line": 112,
-      "end": 116,
+      "line": 107,
+      "end": 111,
       "scope": "test_single_export_request_matches",
       "category": "test",
       "resource": "memory_stores.memories.retrieve('m', memory_store_id='s', view='full')).model_dump",
@@ -6287,8 +6346,8 @@
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
-      "line": 83,
-      "end": 83,
+      "line": 78,
+      "end": 78,
       "scope": "test_paginated_export_requests_and_native_json_match",
       "category": "test",
       "resource": "environments.list",
@@ -6298,8 +6357,8 @@
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
-      "line": 106,
-      "end": 106,
+      "line": 101,
+      "end": 101,
       "scope": "test_single_export_request_matches",
       "category": "test",
       "resource": "agents.retrieve",
@@ -6309,8 +6368,8 @@
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
-      "line": 119,
-      "end": 119,
+      "line": 114,
+      "end": 114,
       "scope": "test_single_export_request_matches",
       "category": "test",
       "resource": "skills.versions.download",
@@ -6323,8 +6382,8 @@
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
-      "line": 86,
-      "end": 86,
+      "line": 81,
+      "end": 81,
       "scope": "test_paginated_export_requests_and_native_json_match",
       "category": "test",
       "resource": "skills.versions.list",
@@ -6334,8 +6393,8 @@
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
-      "line": 109,
-      "end": 109,
+      "line": 104,
+      "end": 104,
       "scope": "test_single_export_request_matches",
       "category": "test",
       "resource": "environments.retrieve",
@@ -6345,8 +6404,8 @@
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
-      "line": 89,
-      "end": 89,
+      "line": 84,
+      "end": 84,
       "scope": "test_paginated_export_requests_and_native_json_match",
       "category": "test",
       "resource": "memory_stores.list",
@@ -6356,8 +6415,8 @@
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
-      "line": 92,
-      "end": 92,
+      "line": 87,
+      "end": 87,
       "scope": "test_paginated_export_requests_and_native_json_match",
       "category": "test",
       "resource": "memory_stores.memories.list",
@@ -6367,8 +6426,8 @@
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_platform_export.py",
-      "line": 113,
-      "end": 115,
+      "line": 108,
+      "end": 110,
       "scope": "test_single_export_request_matches",
       "category": "test",
       "resource": "memory_stores.memories.retrieve",
@@ -14241,7 +14300,7 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 342,
+      "line": 361,
       "module": "anthropic",
       "names": [
         "APIStatusError"
@@ -15547,7 +15606,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 192,
+      "line": 201,
       "module": "anthropic.types.beta.agent_list_params",
       "names": [
         "AgentListParams"
@@ -15610,7 +15669,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 70,
+      "line": 73,
       "module": "anthropic.types.beta.skill_list_params",
       "names": [
         "SkillListParams"
@@ -15667,12 +15726,21 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/skills.py",
-      "line": 62,
+      "line": 67,
       "module": "anthropic.types.beta.skill_create_params",
       "names": [
         "SkillCreateParams"
       ],
       "category": "production"
+    },
+    {
+      "file": "packages/mux/tests/drivers/anthropic/test_authorization.py",
+      "line": 5,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
     },
     {
       "file": "packages/mux/tests/drivers/anthropic/test_errors.py",

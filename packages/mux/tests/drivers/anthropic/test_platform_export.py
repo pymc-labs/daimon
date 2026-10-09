@@ -11,12 +11,7 @@ from mux.contracts.ids import Scope
 from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport
 from mux.errors import ProviderError
 
-SCOPE = Scope(
-    tenant_id="platform",
-    account_id="operator",
-    principal_id="operator",
-    authorization_id="platform-export",
-)
+SCOPE = Scope.platform(reason="test export", authorization_id="platform-export")
 
 
 def client_and_requests():
@@ -189,3 +184,21 @@ async def test_skill_summary_pages_preserve_missing_fields_and_limit():
     assert new.requests == old.requests
     old.assert_consumed()
     new.assert_consumed()
+
+
+async def test_export_rejects_matching_authorization_name_without_platform_capability():
+    from mux.errors import ScopeViolation
+
+    client, requests = client_and_requests()
+    async with client:
+        with pytest.raises(ScopeViolation):
+            await AnthropicPlatformExport(client).agent(
+                Scope(
+                    tenant_id="tenant",
+                    account_id="account",
+                    principal_id="host",
+                    authorization_id="platform-export",
+                ),
+                "s",
+            )
+    assert requests == []

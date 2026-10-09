@@ -17,6 +17,7 @@ from daimon.core.defaults.metadata import (
     compute_spec_fingerprint,
 )
 from daimon.core.defaults.report import Action, ResourceOutcome
+from daimon.core.mux_backend import platform_scope
 from daimon.core.mux_compat import archive_environment, create_environment, update_environment
 from daimon.core.specs import EnvironmentSpec
 
@@ -42,7 +43,9 @@ async def reconcile_environment(
                 canonical_id=ma_match.id if ma_match else None,
                 duplicate_id=dup.id,
             )
-            await archive_environment(client, dup.id)
+            await archive_environment(
+                client, dup.id, scope=platform_scope("defaults.reconcile_environments")
+            )
     spec_dump = spec.model_dump(exclude_none=True, mode="json")
     spec_hash = compute_spec_fingerprint({"spec": spec_dump})
     metadata = build_metadata(
@@ -64,6 +67,7 @@ async def reconcile_environment(
             client,
             ma_match.id,
             {**spec.model_dump(exclude_none=True, exclude={"name"}), "metadata": metadata},
+            scope=platform_scope("defaults.reconcile_environments"),
         )
         return ResourceOutcome(
             kind="environment", name=spec.name, action=Action.UPDATED, anthropic_id=updated.id
@@ -72,7 +76,9 @@ async def reconcile_environment(
     if dry_run:
         return ResourceOutcome(kind="environment", name=spec.name, action=Action.CREATED)
     created = await create_environment(
-        client, {**spec.model_dump(exclude_none=True), "metadata": metadata}
+        client,
+        {**spec.model_dump(exclude_none=True), "metadata": metadata},
+        scope=platform_scope("defaults.reconcile_environments"),
     )
     return ResourceOutcome(
         kind="environment", name=spec.name, action=Action.CREATED, anthropic_id=created.id

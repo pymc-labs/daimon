@@ -33,6 +33,7 @@ from daimon.core.defaults.spec_merge import (
     merge_tools_with_ma,
 )
 from daimon.core.ma import update_agent_with_version_retry
+from daimon.core.mux_backend import platform_scope
 from daimon.core.mux_compat import archive_agent, create_agent, update_agent
 from daimon.core.specs import AgentSpec, dump_agent_spec
 
@@ -127,7 +128,7 @@ async def reconcile_agent(
                 canonical_id=ma_match.id if ma_match else None,
                 duplicate_id=dup.id,
             )
-            await archive_agent(client, dup.id)
+            await archive_agent(client, dup.id, scope=platform_scope("defaults.reconcile_agents"))
     spec_dump = dump_agent_spec(spec, mode="json")
     spec_hash = compute_spec_fingerprint(
         {
@@ -198,9 +199,12 @@ async def reconcile_agent(
                     "skills": merged_skills,
                     "metadata": metadata,
                 },
+                scope=platform_scope("defaults.reconcile_agents"),
             )
 
-        updated = await update_agent_with_version_retry(client, ma_match.id, _apply)
+        updated = await update_agent_with_version_retry(
+            client, ma_match.id, _apply, scope=platform_scope("defaults.reconcile_agents")
+        )
         return ResourceOutcome(
             kind="agent", name=spec.name, action=Action.UPDATED, anthropic_id=updated.id
         )
@@ -208,7 +212,9 @@ async def reconcile_agent(
     if dry_run:
         return ResourceOutcome(kind="agent", name=spec.name, action=Action.CREATED)
     created = await create_agent(
-        client, {**dump_agent_spec(spec), "skills": resolved_skills, "metadata": metadata}
+        client,
+        {**dump_agent_spec(spec), "skills": resolved_skills, "metadata": metadata},
+        scope=platform_scope("defaults.reconcile_agents"),
     )
     return ResourceOutcome(
         kind="agent", name=spec.name, action=Action.CREATED, anthropic_id=created.id

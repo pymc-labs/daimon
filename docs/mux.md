@@ -300,3 +300,23 @@ M0 resource drivers accept operation keys and issue the existing requests
 without a driver cache or deduplication layer. Durable operation handling is
 owned by the host StateStore integration; resource drivers do not add provider
 headers or retry policy for it.
+
+
+Resource authorization is host supplied. `ResourceAuthorization` binds the
+backend to one immutable `Scope` and the native IDs the host already authorized.
+Tenant calls reject another tenant/account or unstamped references before I/O;
+returned agent/environment references carry their minting scope. Native
+`daimon_tenant` tags are checked after the existing request, and tenant lists
+exclude foreign tagged records without additional requests. All current defaults
+list callers use an explicit workspace scope, so their returned lists are unchanged.
+
+Workspace defaults reconcile, sweep, preflight, indexing and recovery export use
+`Scope.platform(reason=...)` explicitly. Export additionally requires its existing
+operator authorization name. The two shared `ma.py` resource helpers accept a
+scope; unmigrated callers retain their current host authorization through the
+separate, temporary `Scope.legacy_host_authorized(call_site=...)` capability.
+Those callers are enumerated in sprint FOLLOWUPS.md for their owning lanes.
+
+Skill collection and version walks use the SDK paginator inside the driver,
+including its stop behavior for empty data and empty-string cursors. They preserve
+page truncation detection and version deletion during iteration.

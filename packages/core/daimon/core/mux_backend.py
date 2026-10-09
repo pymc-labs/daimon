@@ -7,28 +7,47 @@ Adapters retain ownership of client configuration and lifetime.
 from anthropic import AsyncAnthropic
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
+from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 
 
-def managed_agents(client: AsyncAnthropic) -> AnthropicManagedAgents:
-    return AnthropicManagedAgents(client)
+def managed_agents(
+    client: AsyncAnthropic,
+    *,
+    scope: Scope | None = None,
+    resources: frozenset[tuple[str, str]] = frozenset(),
+) -> AnthropicManagedAgents:
+    return AnthropicManagedAgents(
+        client, authorization=ResourceAuthorization(scope, resources) if scope is not None else None
+    )
 
 
-def resource_ref(backend: AnthropicManagedAgents, kind: str, native_id: str) -> ResourceRef:
+def resource_ref(
+    backend: AnthropicManagedAgents, kind: str, native_id: str, *, scope: Scope
+) -> ResourceRef:
     return ResourceRef(
-        id=native_id, kind=kind, provider="anthropic", account_scope_id=backend.account_scope_id
+        id=native_id,
+        kind=kind,
+        provider="anthropic",
+        account_scope_id=backend.account_scope_id,
+        tenant_id=scope.tenant_id,
+        account_id=scope.account_id,
     )
 
 
 def resource_scope(
     *,
-    tenant_id: str = "platform",
+    tenant_id: str,
     account_id: str = "service",
-    authorization_id: str = "legacy-resource",
+    authorization_id: str = "host-resource",
 ) -> Scope:
-    """Host-internal operations retain their existing authorization boundaries."""
+    """Build a tenant scope from the host's existing authorization decision."""
     return Scope(
         tenant_id=tenant_id,
         account_id=account_id,
         principal_id="daimon",
         authorization_id=authorization_id,
     )
+
+
+def platform_scope(reason: str, *, authorization_id: str = "platform-resource") -> Scope:
+    return Scope.platform(reason=reason, authorization_id=authorization_id)

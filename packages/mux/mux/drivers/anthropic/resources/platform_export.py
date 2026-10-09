@@ -22,6 +22,9 @@ class PlatformExport(CorePlatformExport, Protocol):
     async def skills_page(
         self, scope: Scope, *, page: PageRequest
     ) -> Page[dict[str, JsonValue]]: ...
+    def skill_pages(
+        self, scope: Scope, *, limit: int
+    ) -> AsyncIterator[Page[dict[str, JsonValue]]]: ...
     def skill_versions(
         self, scope: Scope, skill_id: str
     ) -> AsyncIterator[dict[str, JsonValue]]: ...
@@ -42,7 +45,7 @@ class AnthropicPlatformExport:
         self._client = client
 
     def _authorize(self, scope: Scope) -> None:
-        if scope.authorization_id != "platform-export":
+        if not scope.is_platform or scope.authorization_id != "platform-export":
             raise ScopeViolation("platform", "native export requires host operator authorization")
 
     async def agents(self, scope: Scope) -> AsyncIterator[dict[str, JsonValue]]:
@@ -82,9 +85,24 @@ class AnthropicPlatformExport:
                 cast(dict[str, JsonValue], item.model_dump(mode="json"))
                 for item in (result.data or ())
             ),
-            next_cursor=result.next_page,
+            next_cursor=result.next_page or None,
             has_more=bool(result.next_page),
         )
+
+    async def skill_pages(
+        self, scope: Scope, *, limit: int
+    ) -> AsyncIterator[Page[dict[str, JsonValue]]]:
+        self._authorize(scope)
+        page = await provider_call(self._client.beta.skills.list(limit=limit))
+        async for current in provider_iter(page.iter_pages()):
+            yield Page(
+                data=tuple(
+                    cast(dict[str, JsonValue], item.model_dump(mode="json"))
+                    for item in (current.data or ())
+                ),
+                next_cursor=current.next_page or None,
+                has_more=bool(current.next_page),
+            )
 
     async def skill_versions(
         self, scope: Scope, skill_id: str

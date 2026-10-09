@@ -39,6 +39,7 @@ from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_dis
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import DefaultsError
 from daimon.core.ma import delete_skill_and_versions
+from daimon.core.mux_backend import platform_scope
 from daimon.core.mux_compat import create_skill, publish_skill_version
 from daimon.core.skill_zip import build_skill_zip
 from daimon.core.stores.seeded_skills import load_seeded_skill, record_seeded_skill
@@ -88,7 +89,9 @@ async def reconcile_skill(
                 canonical_id=ma_match.id if ma_match else None,
                 duplicate_id=dup.id,
             )
-            await delete_skill_and_versions(client, dup.id)
+            await delete_skill_and_versions(
+                client, dup.id, scope=platform_scope("defaults.reconcile_skills")
+            )
 
     pkg = build_skill_zip(skill_dir)
     try:
@@ -125,7 +128,12 @@ async def reconcile_skill(
                 had_fingerprint=recorded is not None,
             )
             with pkg.path.open("rb") as fh:
-                await publish_skill_version(client, ma_match.id, data=fh.read())
+                await publish_skill_version(
+                    client,
+                    ma_match.id,
+                    data=fh.read(),
+                    scope=platform_scope("defaults.reconcile_skills"),
+                )
             if db_session is None:
                 async with session_factory() as seed_session:
                     await record_seeded_skill(
@@ -152,7 +160,12 @@ async def reconcile_skill(
         if dry_run:
             return ResourceOutcome(kind="skill", name=spec.name, action=Action.CREATED)
         with pkg.path.open("rb") as fh:
-            created = await create_skill(client, display_title=display_title, data=fh.read())
+            created = await create_skill(
+                client,
+                display_title=display_title,
+                data=fh.read(),
+                scope=platform_scope("defaults.reconcile_skills"),
+            )
         if db_session is None:
             async with session_factory() as seed_session:
                 await record_seeded_skill(

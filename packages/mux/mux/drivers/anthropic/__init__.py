@@ -11,6 +11,7 @@ from mux.contracts.extensions import ExtensionRef
 from mux.contracts.ports import Artifacts, Events, Models, Sessions, Skills, SkillVersions, Usage
 from mux.contracts.ports import PlatformExport as CorePlatformExport
 from mux.contracts.profile import Profile
+from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources.agents import AnthropicAgents
 from mux.drivers.anthropic.resources.environments import AnthropicEnvironments
 from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport, PlatformExport
@@ -38,6 +39,7 @@ class AnthropicManagedAgents:
         client: AsyncAnthropic,
         *,
         account_scope_id: str | None = None,
+        authorization: ResourceAuthorization | None = None,
         sessions: Sessions | None = None,
         events: Events | None = None,
         artifacts: Artifacts | None = None,
@@ -46,22 +48,24 @@ class AnthropicManagedAgents:
         usage: Usage | None = None,
     ) -> None:
         self.account_scope_id = account_scope_id or str(uuid4())
-        self.agents = AnthropicAgents(client, self.account_scope_id)
-        self.environments = AnthropicEnvironments(client, self.account_scope_id)
+        self.agents = AnthropicAgents(client, self.account_scope_id, authorization)
+        self.environments = AnthropicEnvironments(client, self.account_scope_id, authorization)
         self._sessions = sessions
         self._events = events
         self._artifacts = artifacts
-        self._skills = skills or AnthropicSkills(client)
+        native_skills = AnthropicSkills(client, authorization)
+        native_versions = AnthropicSkillVersions(client, authorization)
+        self._skills = skills or native_skills
         self._models = models
         self._usage = usage
         native_export = AnthropicPlatformExport(client)
         self._extensions: dict[tuple[type[object], str, int], object] = {
             (ResourceWalk, "anthropic.resource_walk", 1): AnthropicResourceWalk(
-                self.agents, self.environments
+                self.agents, self.environments, native_skills, native_versions
             ),
             (PlatformExport, "anthropic.platform_export", 1): native_export,
             (CorePlatformExport, "anthropic.platform_export", 1): native_export,
-            (SkillVersions, "anthropic.skills_versions", 1): AnthropicSkillVersions(client),
+            (SkillVersions, "anthropic.skills_versions", 1): native_versions,
         }
 
     @property

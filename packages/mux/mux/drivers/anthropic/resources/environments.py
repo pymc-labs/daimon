@@ -20,8 +20,14 @@ from mux.contracts.resources import (
     EnvironmentPatch,
     EnvironmentSpec,
 )
+from mux.drivers.anthropic.resources._authorization import (
+    ResourceAuthorization,
+    authorize,
+    check_record,
+    check_ref,
+    visible,
+)
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
-from mux.drivers.anthropic.resources.agents import check_ref
 from mux.drivers.anthropic.schemas import EnvironmentConfig
 from mux.errors import UnsupportedCapability
 
@@ -58,7 +64,7 @@ def environment_payload(spec: EnvironmentSpec | EnvironmentPatch) -> dict[str, o
     return result
 
 
-def environment_record(item: BetaEnvironment, account_scope_id: str) -> Environment:
+def environment_record(item: BetaEnvironment, account_scope_id: str, scope: Scope) -> Environment:
     return Environment.model_validate(
         {
             "ref": {
@@ -66,6 +72,8 @@ def environment_record(item: BetaEnvironment, account_scope_id: str) -> Environm
                 "kind": "environment",
                 "provider": "anthropic",
                 "account_scope_id": account_scope_id,
+                "tenant_id": scope.tenant_id,
+                "account_id": scope.account_id,
             },
             "revision": {"local": 0},
             "native": item.model_dump(mode="json", exclude_unset=True),
@@ -94,28 +102,34 @@ class AnthropicEnvironments:
         self,
         client: AsyncAnthropic,
         account_scope_id: str,
+        authorization: ResourceAuthorization | None = None,
     ) -> None:
         self._client = client
         self._account_scope_id = account_scope_id
+        self._authorization = authorization
 
     async def create(self, scope: Scope, spec: EnvironmentSpec, *, key: str) -> Environment:
+        authorize(self._authorization, scope, "environment")
+        check_record(scope, "new-environment", spec.metadata)
         item = await provider_call(
             self._client.beta.environments.create(
                 **cast(EnvironmentCreateParams, environment_payload(spec))
             )
         )
-        return environment_record(item, self._account_scope_id)
+        check_record(scope, item.id, item.metadata)
+        return environment_record(item, self._account_scope_id, scope)
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Environment:
-        check_ref(ref, self._account_scope_id, "environment")
-        return environment_record(
-            await provider_call(self._client.beta.environments.retrieve(ref.id)),
-            self._account_scope_id,
-        )
+        authorize(self._authorization, scope, "environment", ref.id)
+        check_ref(scope, ref, self._account_scope_id, "environment")
+        item = await provider_call(self._client.beta.environments.retrieve(ref.id))
+        check_record(scope, item.id, item.metadata)
+        return environment_record(item, self._account_scope_id, scope)
 
     async def list(
         self, scope: Scope, *, filters: EnvironmentFilter, page: PageRequest
     ) -> Page[Environment]:
+        authorize(self._authorization, scope, "environment")
         kwargs: dict[str, object] = {"include_archived": filters.include_archived}
         if page.cursor is not None:
             kwargs["page"] = page.cursor
@@ -128,9 +142,10 @@ class AnthropicEnvironments:
         )
         return Page(
             data=tuple(
-                environment_record(item, self._account_scope_id)
+                environment_record(item, self._account_scope_id, scope)
                 for item in (result.data or ())
-                if filters.name is None or item.name == filters.name
+                if visible(scope, item.metadata)
+                and (filters.name is None or item.name == filters.name)
             ),
             next_cursor=result.next_page,
             has_more=bool(result.next_page),
@@ -145,16 +160,20 @@ class AnthropicEnvironments:
         expected: Revision,
         key: str,
     ) -> Environment:
-        check_ref(ref, self._account_scope_id, "environment")
+        authorize(self._authorization, scope, "environment", ref.id)
+        check_ref(scope, ref, self._account_scope_id, "environment")
+        check_record(scope, ref.id, patch.metadata)
         item = await provider_call(
             self._client.beta.environments.update(
                 ref.id, **cast(EnvironmentUpdateParams, environment_payload(patch))
             )
         )
-        return environment_record(item, self._account_scope_id)
+        check_record(scope, item.id, item.metadata)
+        return environment_record(item, self._account_scope_id, scope)
 
     async def archive(self, scope: Scope, ref: ResourceRef, *, key: str) -> Operation:
-        check_ref(ref, self._account_scope_id, "environment")
+        authorize(self._authorization, scope, "environment", ref.id)
+        check_ref(scope, ref, self._account_scope_id, "environment")
         await provider_call(self._client.beta.environments.archive(ref.id))
         now = datetime.now(UTC)
         digest = hashlib.sha256(
@@ -171,14 +190,18 @@ class AnthropicEnvironments:
         )
 
     async def delete(self, scope: Scope, ref: ResourceRef, *, key: str) -> DeletionReceipt:
-        check_ref(ref, self._account_scope_id, "environment")
+        authorize(self._authorization, scope, "environment", ref.id)
+        check_ref(scope, ref, self._account_scope_id, "environment")
         await provider_call(self._client.beta.environments.delete(ref.id))
         return DeletionReceipt(operation_id=key, deleted=(ref,))
 
     async def walk(self, scope: Scope, *, filters: EnvironmentFilter) -> AsyncIterator[Environment]:
         """Preserve the SDK's full async iterator for legacy host walks."""
+        authorize(self._authorization, scope, "environment")
         async for item in provider_iter(
             self._client.beta.environments.list(include_archived=filters.include_archived)
         ):
-            if filters.name is None or item.name == filters.name:
-                yield environment_record(item, self._account_scope_id)
+            if visible(scope, item.metadata) and (
+                filters.name is None or item.name == filters.name
+            ):
+                yield environment_record(item, self._account_scope_id, scope)

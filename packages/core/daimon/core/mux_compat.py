@@ -18,8 +18,8 @@ from anthropic.types.beta import (
     SkillListResponse,
 )
 from anthropic.types.beta.skills import VersionCreateResponse, VersionListResponse
-from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
-from mux.contracts.ids import PageRequest, Revision, SkillRef
+from daimon.core.mux_backend import managed_agents, resource_ref
+from mux.contracts.ids import Revision, Scope, SkillRef
 from mux.contracts.ports import SkillVersions
 from mux.contracts.resources import (
     Agent,
@@ -195,58 +195,61 @@ def sdk_environment(record: Environment) -> BetaEnvironment:
 
 
 async def list_agents(
-    client: AsyncAnthropic, *, include_archived: bool = False
+    client: AsyncAnthropic, *, include_archived: bool = False, scope: Scope
 ) -> AsyncIterator[BetaManagedAgentsAgent]:
-    backend = managed_agents(client)
+    backend = managed_agents(client, scope=scope)
     port = backend.extension(ResourceWalk, namespace="anthropic.resource_walk", version=1)
     async for record in legacy_iter(
-        port.agents(resource_scope(), filters=AgentFilter(include_archived=include_archived))
+        port.agents(scope, filters=AgentFilter(include_archived=include_archived))
     ):
         yield sdk_agent(record)
 
 
 async def list_environments(
-    client: AsyncAnthropic, *, include_archived: bool = False
+    client: AsyncAnthropic, *, include_archived: bool = False, scope: Scope
 ) -> AsyncIterator[BetaEnvironment]:
-    backend = managed_agents(client)
+    backend = managed_agents(client, scope=scope)
     port = backend.extension(ResourceWalk, namespace="anthropic.resource_walk", version=1)
     async for record in legacy_iter(
-        port.environments(
-            resource_scope(), filters=EnvironmentFilter(include_archived=include_archived)
-        )
+        port.environments(scope, filters=EnvironmentFilter(include_archived=include_archived))
     ):
         yield sdk_environment(record)
 
 
-async def retrieve_agent(client: AsyncAnthropic, agent_id: str) -> BetaManagedAgentsAgent:
-    backend = managed_agents(client)
+async def retrieve_agent(
+    client: AsyncAnthropic, agent_id: str, *, scope: Scope
+) -> BetaManagedAgentsAgent:
+    backend = managed_agents(client, scope=scope, resources=frozenset({("agent", agent_id)}))
     return sdk_agent(
         await legacy_call(
-            backend.agents.retrieve(resource_scope(), resource_ref(backend, "agent", agent_id))
+            backend.agents.retrieve(scope, resource_ref(backend, "agent", agent_id, scope=scope))
         )
     )
 
 
 async def create_agent(
-    client: AsyncAnthropic, payload: Mapping[str, object]
+    client: AsyncAnthropic, payload: Mapping[str, object], *, scope: Scope
 ) -> BetaManagedAgentsAgent:
-    backend = managed_agents(client)
+    backend = managed_agents(client, scope=scope)
     return sdk_agent(
-        await legacy_call(
-            backend.agents.create(resource_scope(), agent_spec(payload), key=str(uuid4()))
-        )
+        await legacy_call(backend.agents.create(scope, agent_spec(payload), key=str(uuid4())))
     )
 
 
 async def update_agent(
-    client: AsyncAnthropic, agent_id: str, *, version: int, payload: Mapping[str, object]
+    client: AsyncAnthropic,
+    agent_id: str,
+    *,
+    version: int,
+    payload: Mapping[str, object],
+    scope: Scope,
 ) -> BetaManagedAgentsAgent:
-    backend = managed_agents(client)
+    backend = managed_agents(client, scope=scope, resources=frozenset({("agent", agent_id)}))
     return sdk_agent(
         await legacy_call(
             backend.agents.update(
-                resource_scope(),
-                resource_ref(backend, "agent", agent_id),
+                scope,
+                resource_ref(backend, "agent", agent_id, scope=scope),
                 agent_patch(payload),
                 expected=Revision(local=version, native=str(version)),
                 key=str(uuid4()),
@@ -255,46 +258,50 @@ async def update_agent(
     )
 
 
-async def archive_agent(client: AsyncAnthropic, agent_id: str) -> None:
-    backend = managed_agents(client)
+async def archive_agent(client: AsyncAnthropic, agent_id: str, *, scope: Scope) -> None:
+    backend = managed_agents(client, scope=scope, resources=frozenset({("agent", agent_id)}))
     await legacy_call(
         backend.agents.archive(
-            resource_scope(), resource_ref(backend, "agent", agent_id), key=str(uuid4())
+            scope, resource_ref(backend, "agent", agent_id, scope=scope), key=str(uuid4())
         )
     )
 
 
-async def archive_environment(client: AsyncAnthropic, environment_id: str) -> None:
-    backend = managed_agents(client)
+async def archive_environment(client: AsyncAnthropic, environment_id: str, *, scope: Scope) -> None:
+    backend = managed_agents(
+        client, scope=scope, resources=frozenset({("environment", environment_id)})
+    )
     await legacy_call(
         backend.environments.archive(
-            resource_scope(), resource_ref(backend, "environment", environment_id), key=str(uuid4())
+            scope,
+            resource_ref(backend, "environment", environment_id, scope=scope),
+            key=str(uuid4()),
         )
     )
 
 
 async def create_environment(
-    client: AsyncAnthropic, payload: Mapping[str, object]
+    client: AsyncAnthropic, payload: Mapping[str, object], *, scope: Scope
 ) -> BetaEnvironment:
-    backend = managed_agents(client)
+    backend = managed_agents(client, scope=scope)
     return sdk_environment(
         await legacy_call(
-            backend.environments.create(
-                resource_scope(), environment_spec(payload), key=str(uuid4())
-            )
+            backend.environments.create(scope, environment_spec(payload), key=str(uuid4()))
         )
     )
 
 
 async def update_environment(
-    client: AsyncAnthropic, environment_id: str, payload: Mapping[str, object]
+    client: AsyncAnthropic, environment_id: str, payload: Mapping[str, object], *, scope: Scope
 ) -> BetaEnvironment:
-    backend = managed_agents(client)
+    backend = managed_agents(
+        client, scope=scope, resources=frozenset({("environment", environment_id)})
+    )
     return sdk_environment(
         await legacy_call(
             backend.environments.update(
-                resource_scope(),
-                resource_ref(backend, "environment", environment_id),
+                scope,
+                resource_ref(backend, "environment", environment_id, scope=scope),
                 environment_patch(payload),
                 expected=Revision(local=0),
                 key=str(uuid4()),
@@ -337,22 +344,15 @@ def sdk_skill_version(record: SkillVersion) -> VersionListResponse:
 
 
 async def collect_skills(
-    client: AsyncAnthropic, *, limit: int
+    client: AsyncAnthropic, *, limit: int, scope: Scope
 ) -> tuple[list[SkillListResponse], bool]:
-    backend = managed_agents(client)
-    scope = resource_scope()
-    cursor: str | None = None
+    backend = managed_agents(client, scope=scope)
+    port = backend.extension(ResourceWalk, namespace="anthropic.resource_walk", version=1)
     rows: list[SkillListResponse] = []
     truncated = False
-    while True:
-        page = await legacy_call(
-            backend.skills.list(scope, page=PageRequest(cursor=cursor, limit=limit))
-        )
+    async for page in legacy_iter(port.skill_pages(scope, limit=limit)):
         rows.extend(sdk_skill(record) for record in page.data)
         truncated = truncated or (len(page.data) >= limit and not page.has_more)
-        if page.next_cursor is None:
-            break
-        cursor = page.next_cursor
     return rows, truncated
 
 
@@ -363,11 +363,12 @@ async def create_skill(
     data: bytes,
     filename: str = "SKILL.zip",
     media_type: str = "application/zip",
+    scope: Scope,
 ) -> SkillCreateResponse:
-    backend = managed_agents(client)
+    backend = managed_agents(client, scope=scope)
     record = await legacy_call(
         backend.skills.create(
-            resource_scope(),
+            scope,
             SkillUpload(
                 display_title=display_title,
                 files=(SkillUploadFile(path=filename, content=data, media_type=media_type),),
@@ -387,11 +388,12 @@ async def publish_skill_version(
     data: bytes,
     filename: str = "SKILL.zip",
     media_type: str = "application/zip",
+    scope: Scope,
 ) -> VersionCreateResponse:
-    backend = managed_agents(client)
+    backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
     record = await legacy_call(
         backend.skills.publish_version(
-            resource_scope(),
+            scope,
             skill_id,
             SkillUpload(
                 files=(SkillUploadFile(path=filename, content=data, media_type=media_type),)
@@ -405,50 +407,43 @@ async def publish_skill_version(
 
 
 async def list_skill_versions(
-    client: AsyncAnthropic, skill_id: str, *, limit: int | None = None
+    client: AsyncAnthropic, skill_id: str, *, limit: int | None = None, scope: Scope
 ) -> AsyncIterator[VersionListResponse]:
-    backend = managed_agents(client)
-    port = backend.extension(SkillVersions, namespace="anthropic.skills_versions", version=1)
-    scope = resource_scope()
-    cursor: str | None = None
-    while True:
-        page = await legacy_call(
-            port.versions(scope, skill_id, page=PageRequest(cursor=cursor, limit=limit))
-        )
-        for record in page.data:
-            yield sdk_skill_version(record)
-        if page.next_cursor is None:
-            break
-        cursor = page.next_cursor
+    backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
+    port = backend.extension(ResourceWalk, namespace="anthropic.resource_walk", version=1)
+    async for record in legacy_iter(port.skill_versions(scope, skill_id, limit=limit)):
+        yield sdk_skill_version(record)
 
 
-async def download_skill_version(client: AsyncAnthropic, skill_id: str, version: str) -> bytes:
-    backend = managed_agents(client)
+async def download_skill_version(
+    client: AsyncAnthropic, skill_id: str, version: str, *, scope: Scope
+) -> bytes:
+    backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
     port = backend.extension(SkillVersions, namespace="anthropic.skills_versions", version=1)
     return b"".join(
         [
             chunk
             async for chunk in legacy_iter(
-                port.download(
-                    resource_scope(), SkillRef(id=skill_id, source="custom", version=version)
-                )
+                port.download(scope, SkillRef(id=skill_id, source="custom", version=version))
             )
         ]
     )
 
 
-async def delete_skill_version(client: AsyncAnthropic, skill_id: str, version: str) -> None:
-    backend = managed_agents(client)
+async def delete_skill_version(
+    client: AsyncAnthropic, skill_id: str, version: str, *, scope: Scope
+) -> None:
+    backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
     port = backend.extension(SkillVersions, namespace="anthropic.skills_versions", version=1)
     await legacy_call(
         port.delete_version(
-            resource_scope(),
+            scope,
             SkillRef(id=skill_id, source="custom", version=version),
             key=str(uuid4()),
         )
     )
 
 
-async def delete_skill(client: AsyncAnthropic, skill_id: str) -> None:
-    backend = managed_agents(client)
-    await legacy_call(backend.skills.delete(resource_scope(), skill_id, key=str(uuid4())))
+async def delete_skill(client: AsyncAnthropic, skill_id: str, *, scope: Scope) -> None:
+    backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
+    await legacy_call(backend.skills.delete(scope, skill_id, key=str(uuid4())))

@@ -67,4 +67,6 @@ async def test_agent_hard_delete_never_substitutes_archive():
             id="resource", kind="agent", provider="anthropic", account_scope_id="workspace"
         )
         with pytest.raises(UnsupportedCapability):
-            await backend.agents.delete(SCOPE, ref, key="delete")
+            await backend.agents.delete(
+                Scope.platform(reason="test hard delete"), ref, key="delete"
+            )

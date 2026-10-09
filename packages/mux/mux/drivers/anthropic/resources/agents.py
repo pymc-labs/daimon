@@ -16,16 +16,16 @@ from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.receipts import DeletionReceipt, Operation
 from mux.contracts.resources import Agent, AgentFilter, AgentPatch, AgentSpec
+from mux.drivers.anthropic.resources._authorization import (
+    ResourceAuthorization,
+    authorize,
+    check_record,
+    check_ref,
+    visible,
+)
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.schemas import AgentModelConfig, agent_tools, multiagent
 from mux.errors import ScopeViolation, UnsupportedCapability
-
-
-def check_ref(ref: ResourceRef, account_scope_id: str, kind: str) -> None:
-    if ref.provider != "anthropic" or ref.account_scope_id != account_scope_id or ref.kind != kind:
-        raise ScopeViolation(
-            ref.id, "reference does not belong to this provider workspace and kind"
-        )
 
 
 def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
@@ -109,7 +109,7 @@ def tool_payload(tool: object) -> dict[str, object]:
     return {"type": "agent_toolset_20260401", "configs": [{"name": tool.name}]}
 
 
-def agent_record(item: BetaManagedAgentsAgent, account_scope_id: str) -> Agent:
+def agent_record(item: BetaManagedAgentsAgent, account_scope_id: str, scope: Scope) -> Agent:
     extensions: dict[str, ExtensionConfig] = {
         "anthropic.agent_tools": ExtensionConfig(
             namespace="anthropic.agent_tools",
@@ -137,6 +137,8 @@ def agent_record(item: BetaManagedAgentsAgent, account_scope_id: str) -> Agent:
                 "kind": "agent",
                 "provider": "anthropic",
                 "account_scope_id": account_scope_id,
+                "tenant_id": scope.tenant_id,
+                "account_id": scope.account_id,
             },
             "revision": {"local": item.version, "native": str(item.version)},
             "native": item.model_dump(mode="json", exclude_unset=True),
@@ -165,23 +167,30 @@ class AnthropicAgents:
         self,
         client: AsyncAnthropic,
         account_scope_id: str,
+        authorization: ResourceAuthorization | None = None,
     ) -> None:
         self._client = client
         self._account_scope_id = account_scope_id
+        self._authorization = authorization
 
     async def create(self, scope: Scope, spec: AgentSpec, *, key: str) -> Agent:
+        authorize(self._authorization, scope, "agent")
+        check_record(scope, "new-agent", spec.metadata)
         item = await provider_call(
             self._client.beta.agents.create(**cast(AgentCreateParams, agent_payload(spec)))
         )
-        return agent_record(item, self._account_scope_id)
+        check_record(scope, item.id, item.metadata)
+        return agent_record(item, self._account_scope_id, scope)
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
-        check_ref(ref, self._account_scope_id, "agent")
-        return agent_record(
-            await provider_call(self._client.beta.agents.retrieve(ref.id)), self._account_scope_id
-        )
+        authorize(self._authorization, scope, "agent", ref.id)
+        check_ref(scope, ref, self._account_scope_id, "agent")
+        item = await provider_call(self._client.beta.agents.retrieve(ref.id))
+        check_record(scope, item.id, item.metadata)
+        return agent_record(item, self._account_scope_id, scope)
 
     async def list(self, scope: Scope, *, filters: AgentFilter, page: PageRequest) -> Page[Agent]:
+        authorize(self._authorization, scope, "agent")
         kwargs: dict[str, object] = {"include_archived": filters.include_archived}
         if page.cursor is not None:
             kwargs["page"] = page.cursor
@@ -194,9 +203,10 @@ class AnthropicAgents:
         result = await provider_call(self._client.beta.agents.list(**cast(AgentListParams, kwargs)))
         return Page(
             data=tuple(
-                agent_record(item, self._account_scope_id)
+                agent_record(item, self._account_scope_id, scope)
                 for item in (result.data or ())
-                if filters.name is None or item.name == filters.name
+                if visible(scope, item.metadata)
+                and (filters.name is None or item.name == filters.name)
             ),
             next_cursor=result.next_page,
             has_more=bool(result.next_page),
@@ -205,16 +215,20 @@ class AnthropicAgents:
     async def update(
         self, scope: Scope, ref: ResourceRef, patch: AgentPatch, *, expected: Revision, key: str
     ) -> Agent:
-        check_ref(ref, self._account_scope_id, "agent")
+        authorize(self._authorization, scope, "agent", ref.id)
+        check_ref(scope, ref, self._account_scope_id, "agent")
+        check_record(scope, ref.id, patch.metadata)
         kwargs = agent_payload(patch)
         kwargs["version"] = int(expected.native) if expected.native is not None else expected.local
         item = await provider_call(
             self._client.beta.agents.update(ref.id, **cast(AgentUpdateParams, kwargs))
         )
-        return agent_record(item, self._account_scope_id)
+        check_record(scope, item.id, item.metadata)
+        return agent_record(item, self._account_scope_id, scope)
 
     async def archive(self, scope: Scope, ref: ResourceRef, *, key: str) -> Operation:
-        check_ref(ref, self._account_scope_id, "agent")
+        authorize(self._authorization, scope, "agent", ref.id)
+        check_ref(scope, ref, self._account_scope_id, "agent")
         await provider_call(self._client.beta.agents.archive(ref.id))
         now = datetime.now(UTC)
         return Operation(
@@ -230,13 +244,17 @@ class AnthropicAgents:
         )
 
     async def delete(self, scope: Scope, ref: ResourceRef, *, key: str) -> DeletionReceipt:
-        check_ref(ref, self._account_scope_id, "agent")
+        authorize(self._authorization, scope, "agent", ref.id)
+        check_ref(scope, ref, self._account_scope_id, "agent")
         raise UnsupportedCapability(("agent_hard_delete",), "anthropic.managed_agents")
 
     async def walk(self, scope: Scope, *, filters: AgentFilter) -> AsyncIterator[Agent]:
         """Preserve the SDK's full async iterator for legacy host walks."""
+        authorize(self._authorization, scope, "agent")
         async for item in provider_iter(
             self._client.beta.agents.list(include_archived=filters.include_archived)
         ):
-            if filters.name is None or item.name == filters.name:
-                yield agent_record(item, self._account_scope_id)
+            if visible(scope, item.metadata) and (
+                filters.name is None or item.name == filters.name
+            ):
+                yield agent_record(item, self._account_scope_id, scope)

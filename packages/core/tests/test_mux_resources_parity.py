@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+from daimon.core.mux_backend import platform_scope
 from daimon.core.mux_compat import (
     archive_agent,
     archive_environment,
@@ -105,7 +106,11 @@ async def test_full_list_walk_makes_identical_requests(resource, include_archive
             ]
             actual = [
                 a.model_dump(mode="json")
-                async for a in list_agents(after, include_archived=include_archived)
+                async for a in list_agents(
+                    after,
+                    include_archived=include_archived,
+                    scope=platform_scope("test request fidelity"),
+                )
             ]
         else:
             expected = [
@@ -114,7 +119,11 @@ async def test_full_list_walk_makes_identical_requests(resource, include_archive
             ]
             actual = [
                 e.model_dump(mode="json")
-                async for e in list_environments(after, include_archived=include_archived)
+                async for e in list_environments(
+                    after,
+                    include_archived=include_archived,
+                    scope=platform_scope("test request fidelity"),
+                )
             ]
     assert_transport_equal(old, new)
     assert len(new.requests) == 2
@@ -161,7 +170,7 @@ async def test_agent_create_has_no_extra_or_missing_fields(payload):
     new = ResourceTransport()
     async with fake_client(old) as before, fake_client(new) as after:
         expected = await before.beta.agents.create(**payload)
-        actual = await create_agent(after, payload)
+        actual = await create_agent(after, payload, scope=platform_scope("test request fidelity"))
     assert_transport_equal(old, new)
     assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
 
@@ -204,7 +213,9 @@ async def test_environment_create_preserves_configuration(payload):
     new = ResourceTransport()
     async with fake_client(old) as before, fake_client(new) as after:
         expected = await before.beta.environments.create(**payload)
-        actual = await create_environment(after, payload)
+        actual = await create_environment(
+            after, payload, scope=platform_scope("test request fidelity")
+        )
     assert_transport_equal(old, new)
     assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
 
@@ -227,7 +238,13 @@ async def test_agent_update_keeps_version_and_null_clear_semantics(payload):
     new = ResourceTransport()
     async with fake_client(old) as before, fake_client(new) as after:
         await before.beta.agents.update("agent1", version=2, **payload)
-        await update_agent(after, "agent1", version=2, payload=payload)
+        await update_agent(
+            after,
+            "agent1",
+            version=2,
+            payload=payload,
+            scope=platform_scope("test request fidelity"),
+        )
     assert_transport_equal(old, new)
 
 
@@ -240,13 +257,13 @@ async def test_remaining_defaults_requests_match(resource):
     async with fake_client(old) as before, fake_client(new) as after:
         if resource == "retrieve_agent":
             await before.beta.agents.retrieve("agent1")
-            await retrieve_agent(after, "agent1")
+            await retrieve_agent(after, "agent1", scope=platform_scope("test request fidelity"))
         elif resource == "archive_agent":
             await before.beta.agents.archive("agent1")
-            await archive_agent(after, "agent1")
+            await archive_agent(after, "agent1", scope=platform_scope("test request fidelity"))
         elif resource == "archive_environment":
             await before.beta.environments.archive("env1")
-            await archive_environment(after, "env1")
+            await archive_environment(after, "env1", scope=platform_scope("test request fidelity"))
         else:
             payload = {
                 "description": "changed",
@@ -254,7 +271,9 @@ async def test_remaining_defaults_requests_match(resource):
                 "config": {"type": "cloud", "packages": {"pip": []}},
             }
             await before.beta.environments.update("env1", **payload)
-            await update_environment(after, "env1", payload)
+            await update_environment(
+                after, "env1", payload, scope=platform_scope("test request fidelity")
+            )
     assert_transport_equal(old, new)
 
 
@@ -356,13 +375,20 @@ async def test_skill_multipart_version_walk_and_cleanup_match(operation):
                 display_title="example",
                 files=[("SKILL.zip", io.BytesIO(b"ZIP"), "application/zip")],
             )
-            actual = await create_skill(after, display_title="example", data=b"ZIP")
+            actual = await create_skill(
+                after,
+                display_title="example",
+                data=b"ZIP",
+                scope=platform_scope("test request fidelity"),
+            )
             assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
         elif operation == "publish":
             expected = await before.beta.skills.versions.create(
                 "skill1", files=[("SKILL.zip", io.BytesIO(b"ZIP"), "application/zip")]
             )
-            actual = await publish_skill_version(after, "skill1", data=b"ZIP")
+            actual = await publish_skill_version(
+                after, "skill1", data=b"ZIP", scope=platform_scope("test request fidelity")
+            )
             assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
         elif operation == "download":
             response = await before.beta.skills.versions.download("v1", skill_id="skill1")
@@ -370,7 +396,12 @@ async def test_skill_multipart_version_walk_and_cleanup_match(operation):
                 expected = await response.read()
             finally:
                 await response.close()
-            assert await download_skill_version(after, "skill1", "v1") == expected
+            assert (
+                await download_skill_version(
+                    after, "skill1", "v1", scope=platform_scope("test request fidelity")
+                )
+                == expected
+            )
         elif operation == "versions":
             expected = [
                 v.model_dump(mode="json")
@@ -378,7 +409,9 @@ async def test_skill_multipart_version_walk_and_cleanup_match(operation):
             ]
             actual = [
                 v.model_dump(mode="json")
-                async for v in list_skill_versions(after, "skill1", limit=100)
+                async for v in list_skill_versions(
+                    after, "skill1", limit=100, scope=platform_scope("test request fidelity")
+                )
             ]
             assert actual == expected
         else:
@@ -406,7 +439,9 @@ async def test_skills_listing_keeps_pagination_and_truncation_signal(terminal_fu
         async for current in page.iter_pages():
             expected.extend(s.model_dump(mode="json") for s in current.data)
             truncated |= len(current.data) >= 1000 and not current.next_page
-        rows, actual_truncated = await collect_skills(after, limit=1000)
+        rows, actual_truncated = await collect_skills(
+            after, limit=1000, scope=platform_scope("test request fidelity")
+        )
     assert [s.model_dump(mode="json") for s in rows] == expected
     assert actual_truncated == truncated
     assert_transport_equal(old, new)
@@ -425,11 +460,76 @@ async def test_missing_page_data_keeps_sdks_empty_iterator_behavior(resource, pa
     async with old.client() as before, new.client() as after:
         if resource == "agent":
             expected = [row async for row in before.beta.agents.list(include_archived=False)]
-            actual = [row async for row in list_agents(after, include_archived=False)]
+            actual = [
+                row
+                async for row in list_agents(
+                    after, include_archived=False, scope=platform_scope("test request fidelity")
+                )
+            ]
         else:
             expected = [row async for row in before.beta.environments.list(include_archived=False)]
-            actual = [row async for row in list_environments(after, include_archived=False)]
+            actual = [
+                row
+                async for row in list_environments(
+                    after, include_archived=False, scope=platform_scope("test request fidelity")
+                )
+            ]
     assert actual == expected == []
     assert new.requests == old.requests
     old.assert_consumed()
     new.assert_consumed()
+
+
+@pytest.mark.parametrize("path", ["skills", "versions", "export"])
+@pytest.mark.parametrize("stop_case", ["empty_with_cursor", "empty_cursor"])
+async def test_skill_walks_keep_sdk_terminal_page_stop_rule(path, stop_case):
+    from daimon.core.mux_compat import collect_skills, list_skill_versions
+    from mux.contracts.ids import Scope
+    from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport
+
+    old, new = SkillTransport(), SkillTransport()
+    scope = Scope.platform(reason="test paginator stop", authorization_id="platform-export")
+
+    def terminal(transport):
+        def respond(request):
+            reply = transport(request)
+            payload = json.loads(reply.content)
+            payload["next_page"] = "cursor" if stop_case == "empty_with_cursor" else ""
+            if stop_case == "empty_with_cursor":
+                payload["data"] = []
+            return httpx.Response(200, json=payload)
+
+        return respond
+
+    def client(transport):
+        router = MARouter()
+        router.add("GET", r"/v1/.*", lambda request, _match: terminal(transport)(request))
+        transport.scripted = ScriptedTransport(router=router)
+        return transport.scripted.client()
+
+    async with client(old) as before, client(new) as after:
+        if path == "versions":
+            expected = [
+                v.model_dump(mode="json")
+                async for v in before.beta.skills.versions.list("skill1", limit=100)
+            ]
+            actual = [
+                v.model_dump(mode="json")
+                async for v in list_skill_versions(after, "skill1", limit=100, scope=scope)
+            ]
+        else:
+            initial = await before.beta.skills.list(limit=1000)
+            expected = []
+            async for page in initial.iter_pages():
+                expected.extend(v.model_dump(mode="json") for v in page.data)
+            if path == "skills":
+                rows, truncated = await collect_skills(after, limit=1000, scope=scope)
+                actual = [v.model_dump(mode="json") for v in rows]
+                assert not truncated
+            else:
+                actual = []
+                async for page in AnthropicPlatformExport(after).skill_pages(scope, limit=1000):
+                    actual.extend(page.data)
+    assert actual == expected
+    assert_transport_equal(old, new)
+    assert len(new.requests) == 1
