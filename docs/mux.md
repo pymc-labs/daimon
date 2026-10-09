@@ -307,14 +307,16 @@ backend to one immutable `Scope` and the native IDs the host already authorized.
 Tenant calls reject another tenant/account or unstamped references before I/O;
 returned agent/environment references carry their minting scope. Native
 `daimon_tenant` tags are checked after the existing request, and tenant lists
-exclude foreign tagged records without additional requests. Tenant-parameterised agent reconciliation and agent/environment indexing use
-the tenant scope already established by their caller. Their existing metadata
-predicates retain the same results.
+exclude foreign tagged records without additional requests. Agent, environment
+and skill reconciliation, tenant indexing and all three tenant sweeps use the
+tenant scope already established by their caller. Existing metadata and skill
+title predicates retain the same results.
 
-Workspace environment/skill defaults reconcile, multi-tenant indexing, skill
-inventory, sweep, preflight and recovery export use `Scope.platform(reason=...)`
-explicitly. Export additionally requires its existing
-operator authorization name. The two shared `ma.py` resource helpers accept a
+Only multi-tenant agent listing, workspace skill collection, organization-wide
+referenced-skill inventory, operator recovery export and the untagged model
+acceptance probe use `Scope.platform(reason=...)`. These are six production
+call sites; the probe creates and archives its workspace test agent. Export
+additionally requires its existing operator authorization name. The two shared `ma.py` resource helpers accept a
 scope; unmigrated callers retain their current host authorization through the
 separate, temporary `Scope.legacy_host_authorized(call_site=...)` capability.
 Those callers are enumerated in sprint FOLLOWUPS.md for their owning lanes.

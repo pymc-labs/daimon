@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Limit tenant skill list results to authorized custom skills and shared provider catalog skills without changing provider pagination.
 
-- Authorize neutral resource calls with tenant/account ownership and explicit workspace scopes; use tenant scopes for tenant agent reconciliation and indexing, and retain native skills paginator stop behavior.
+- Authorize neutral resource calls with tenant/account ownership and explicit workspace scopes; use tenant scopes for agent/environment/skill reconciliation, tenant indexing and sweeps, and retain native skills paginator stop behavior.
 
 ### Fixed
 
