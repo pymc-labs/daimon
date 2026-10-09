@@ -43,6 +43,8 @@ from daimon.core.github_app_auth import build_app_jwt, get_installation_id_for_r
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import InstallationLookup, resolve_skill_sync_token
 from daimon.core.ma import delete_skill_and_versions, update_agent_with_version_retry
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import update_agent
 from daimon.core.skills.fetch import GitHubFetchError
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.stores.agent_repo_binding import get_bindings_for_repo
@@ -305,12 +307,21 @@ async def _attach_synced_skills(
         )
         if collision is not None:
             raise ToolError(f"Cannot attach: {collision}")
-        return await runtime.client.beta.agents.update(
-            fresh.id, version=fresh.version, skills=merged
+        return await update_agent(
+            runtime.client,
+            fresh.id,
+            version=fresh.version,
+            payload={"skills": merged},
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
         )
 
     try:
-        await update_agent_with_version_retry(runtime.client, agent.id, _apply)
+        await update_agent_with_version_retry(
+            runtime.client,
+            agent.id,
+            _apply,
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        )
     except (ToolError, DaimonError, anthropic.APIStatusError) as exc:
         return f"Uploaded to the registry, but attaching to '{agent_name}' failed: {exc}"
     return f"Attached to '{agent_name}'."
@@ -493,7 +504,11 @@ async def _delete_impl(
     skill = await find_skill_by_display_title(runtime.client, canonical, on_truncation="degrade")
     if skill is None or await _hidden(runtime, auth, skill):
         raise ToolError(f"skill '{name}' not found in this server's skills")
-    await delete_skill_and_versions(runtime.client, skill.id)
+    await delete_skill_and_versions(
+        runtime.client,
+        skill.id,
+        scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+    )
 
 
 def register_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
