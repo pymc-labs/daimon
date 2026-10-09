@@ -591,3 +591,7 @@ responses. Grant edits that can rotate tokens in place keep that path.
 Adapters can declare individual fixtures PENDING with a typed capability,
 live-key or dependency reason. The declaration remains visible and blocks
 certification; undeclared capability errors still fail their probes.
+The native `anthropic.session_walk@1` extension exposes `SessionWalk.walk(scope)`
+as an async iterator of neutral sessions with opaque native snapshots. It sends
+no list filters and follows the SDK paginator exactly. Workspace-wide billing
+sweeps pass a justified platform scope; tenant walks retain grants and tag checks.

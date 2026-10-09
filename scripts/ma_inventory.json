@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2027,
+  "files_scanned": 2029,
   "parse_errors": [],
   "calls": [
     {
@@ -6003,8 +6003,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 351,
-      "end": 351,
+      "line": 370,
+      "end": 370,
+      "scope": "walk",
+      "category": "production",
+      "resource": "sessions.list",
+      "call": "self._client.beta.sessions.list()",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
+      "line": 355,
+      "end": 355,
       "scope": "list",
       "category": "production",
       "resource": "sessions.list",
@@ -6014,8 +6025,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 316,
-      "end": 316,
+      "line": 320,
+      "end": 320,
       "scope": "send",
       "category": "production",
       "resource": "sessions.create",
@@ -6025,8 +6036,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 323,
-      "end": 323,
+      "line": 327,
+      "end": 327,
       "scope": "create",
       "category": "production",
       "resource": "sessions.create",
@@ -6036,8 +6047,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 330,
-      "end": 330,
+      "line": 334,
+      "end": 334,
       "scope": "retrieve",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -6248,6 +6259,20 @@
       "request_keys": [],
       "response_access": [
         "first.iter_pages"
+      ]
+    },
+    {
+      "file": "packages/mux/tests/test_anthropic_session_walk.py",
+      "line": 64,
+      "end": 64,
+      "scope": "test_walk_matches_sdk_requests_and_terminal_rules",
+      "category": "test",
+      "resource": "sessions.list",
+      "call": "legacy.beta.sessions.list()",
+      "request_keys": [],
+      "response_access": [
+        "item.model_dump",
+        "item.native"
       ]
     },
     {
@@ -16148,6 +16173,15 @@
         "BetaManagedAgentsAgentMCPToolResultEvent",
         "BetaManagedAgentsAgentToolResultEvent",
         "BetaManagedAgentsUserCustomToolResultEvent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/mux/tests/test_anthropic_session_walk.py",
+      "line": 5,
+      "module": "anthropic",
+      "names": [
+        "NotFoundError"
       ],
       "category": "test"
     },

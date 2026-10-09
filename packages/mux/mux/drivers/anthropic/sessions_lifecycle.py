@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Annotated, Literal, Protocol, cast
 
 from anthropic import AsyncAnthropic
@@ -34,7 +34,7 @@ from mux.drivers.anthropic.resources._authorization import (
     visible,
     visible_grant,
 )
-from mux.drivers.anthropic.resources._errors import provider_call
+from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.schemas import AgentTool, NativeConfig
 from mux.errors import MigrationUnsupported, ScopeViolation, UnsupportedCapability
 
@@ -150,6 +150,10 @@ class SessionCreateRequest(NativeConfig):
 
 class SessionArchive(Protocol):
     async def archive(self, scope: Scope, session: ResourceRef, *, key: str) -> Operation: ...
+
+
+class SessionWalk(Protocol):
+    def walk(self, scope: Scope) -> AsyncIterator[Session]: ...
 
 
 def _config[T: NativeConfig](extension: ExtensionConfig, namespace: str, model: type[T]) -> T:
@@ -359,6 +363,15 @@ class AnthropicSessions:
             has_more=result.has_next_page(),
             next_cursor=result.next_page if result.has_next_page() else None,
         )
+
+    async def walk(self, scope: Scope) -> AsyncIterator[Session]:
+        """The existing full workspace SDK paginator, with no request kwargs."""
+        authorize(self._authorization, scope, "session")
+        async for item in provider_iter(self._client.beta.sessions.list()):
+            if visible(scope, getattr(item, "metadata", None)) and visible_grant(
+                self._authorization, scope, "session", item.id
+            ):
+                yield self._session(scope, item)
 
     async def archive(self, scope: Scope, ref: ResourceRef, *, key: str) -> Operation:
         self._check(scope, ref, "session")

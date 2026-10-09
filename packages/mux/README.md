@@ -106,3 +106,8 @@ endpoints, state ownership and offline validation. Existing defaults stay Anthro
 The persistent profile is temporarily non-core until skills and artifacts land;
 its missing mandatory capabilities are surfaced by admission. Vault and multiagent
 support are unsupported, and complete workspace export/import is unknown.
+
+The native `anthropic.session_walk@1` extension exposes `SessionWalk.walk(scope)`
+as an async iterator of neutral sessions with opaque native snapshots. It sends
+no list filters and follows the SDK paginator exactly. Workspace-wide billing
+sweeps pass a justified platform scope; tenant walks retain grants and tag checks.
