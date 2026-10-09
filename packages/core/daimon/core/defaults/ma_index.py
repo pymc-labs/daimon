@@ -16,7 +16,7 @@ from typing import Literal
 
 import sentry_sdk
 import structlog
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, omit
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
@@ -31,10 +31,15 @@ from daimon.core.defaults.metadata import (
     find_mount_collision,
     strip_tenant_prefix,
 )
-from daimon.core.errors import SkillsListTruncatedError
+from daimon.core.errors import DaimonError, SkillsListTruncatedError
 from daimon.core.ma_identity import derive_agent_uuid
 
 _log = structlog.get_logger(__name__)
+
+
+class SkillVersionNotFoundError(DaimonError):
+    """A skill has no version with the asked-for epoch string."""
+
 
 # Anthropic documents a `page` / `next_page` cursor for skills. Older live
 # responses omitted `next_page` even at a page boundary (verified 2026-06-10).
@@ -240,6 +245,29 @@ async def list_skills_strict(client: AsyncAnthropic) -> list[SkillListResponse]:
             "truncated; create/delete decisions on this view are unsafe"
         )
     return rows
+
+
+async def download_skill_version(client: AsyncAnthropic, *, skill_id: str, version: str) -> bytes:
+    """Return the zip of `skill_id` at `version` (the epoch version string).
+
+    The SDK's download sends `anthropic-beta: skills-2025-10-02`, which a
+    workspace API key is refused with 403; without it the endpoint takes the
+    version's id, not its epoch string (verified against production 2026-10-09).
+    """
+    version_id = None
+    async for row in client.beta.skills.versions.list(skill_id=skill_id):
+        if row.version == version:
+            version_id = row.id
+            break
+    if version_id is None:
+        raise SkillVersionNotFoundError(f"{skill_id} has no version {version}.")
+    content = await client.beta.skills.versions.download(
+        version_id, skill_id=skill_id, extra_headers={"anthropic-beta": omit}
+    )
+    try:
+        return await content.read()
+    finally:
+        await content.close()
 
 
 async def list_skills_lenient(client: AsyncAnthropic) -> tuple[list[SkillListResponse], bool]:
