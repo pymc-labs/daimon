@@ -441,5 +441,6 @@ def test_core_platform_scopes_are_limited_to_workspace_operations() -> None:
             ("mux_backend.py", "platform_scope"): 1,  # Shared constructor, not an operation.
             ("mcp_vault_janitor.py", "archive_orphan_mcp_vaults"): 1,
             ("mcp_credential_sweep.py", "sweep_stale_admin_credentials"): 1,
+            ("pending_file_sweeper.py", "sweep_pending_file_deletes"): 1,
         }
     )
