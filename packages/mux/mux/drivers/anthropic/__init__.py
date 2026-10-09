@@ -17,6 +17,7 @@ from mux.drivers.anthropic.resources.environments import AnthropicEnvironments
 from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport, PlatformExport
 from mux.drivers.anthropic.resources.skills import AnthropicSkills, AnthropicSkillVersions
 from mux.drivers.anthropic.resources.walk import AnthropicResourceWalk, ResourceWalk
+from mux.drivers.anthropic.turn import AnthropicEvents
 from mux.errors import ExtensionVersionError, UnsupportedCapability
 from mux.profiles.anthropic import MANAGED_AGENTS
 
@@ -51,7 +52,7 @@ class AnthropicManagedAgents:
         self.agents = AnthropicAgents(client, self.account_scope_id, authorization)
         self.environments = AnthropicEnvironments(client, self.account_scope_id, authorization)
         self._sessions = sessions
-        self._events = events
+        self._events = events or AnthropicEvents(client, self.account_scope_id, authorization)
         self._artifacts = artifacts
         native_skills = AnthropicSkills(client, authorization)
         native_versions = AnthropicSkillVersions(client, authorization)

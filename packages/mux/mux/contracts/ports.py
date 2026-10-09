@@ -157,6 +157,17 @@ class Events(Protocol):
         key: str,
         expected_turn: str | None = None,
     ) -> SendReceipt: ...
+    async def open_stream(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        *,
+        after: str | None = None,
+        previews: bool = False,
+    ) -> AsyncIterator[Event]:
+        """Open the connection before returning; do not wait for its first event."""
+        ...
+
     def stream(
         self,
         scope: Scope,
