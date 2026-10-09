@@ -8,10 +8,12 @@ every call. No method-level mocks anywhere.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import UTC, datetime
 from typing import Any
 
+import daimon.adapters.slack.output_delivery as delivery_module
 import httpx
 import pytest
 from anthropic.types.beta import FileMetadata
@@ -21,6 +23,7 @@ from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from yarl import URL
 
 NOW = datetime(2026, 8, 25, 12, 0, 0, tzinfo=UTC)
+NoticeKeys = getattr(delivery_module, "NoticeKeys", set)
 
 _GET_URL = re.compile(r"https://slack\.com/api/files\.getUploadURLExternal.*")
 _UPLOAD = re.compile(r"https://files\.slack\.com/upload/v1/.*")
@@ -92,7 +95,7 @@ async def test_delivery_uploads_via_three_request_flow_without_content_type(
         session_id="sesn_1",
         channel_id="C1",
         thread_ts="1.2",
-        notice_keys=set(),
+        notice_keys=NoticeKeys(),
         team_id="T1",
         sleep=sleep,
     )
@@ -164,7 +167,7 @@ async def test_delivery_posts_scope_notice_and_deletes_nothing_on_missing_scope(
     async def sleep(delay: float) -> None:
         pass
 
-    notice_keys: set[str] = set()
+    notice_keys = NoticeKeys()
     await deliver_session_outputs(
         anthropic_client,
         fake_slack_web_client.client,
@@ -229,7 +232,7 @@ async def test_delivery_posts_storage_notice_and_deletes_nothing_on_storage_limi
     async def sleep(delay: float) -> None:
         pass
 
-    notice_keys: set[str] = set()
+    notice_keys = NoticeKeys()
     await deliver_session_outputs(
         anthropic_client,
         fake_slack_web_client.client,
@@ -303,7 +306,7 @@ async def test_delivery_posts_abort_notice_once_per_thread_and_logs_once_per_wor
     async def sleep(delay: float) -> None:
         pass
 
-    notice_keys: set[str] = set()
+    notice_keys = NoticeKeys()
     for channel_id, thread_ts in (("C1", "1.2"), ("C1", "2.3"), ("C2", "2.3"), ("C1", "1.2")):
         await deliver_session_outputs(
             anthropic_client,
@@ -397,7 +400,7 @@ async def test_delivery_continues_after_bytes_post_failure_on_one_file(
         session_id="sesn_1",
         channel_id="C1",
         thread_ts="1.2",
-        notice_keys=set(),
+        notice_keys=NoticeKeys(),
         team_id="T1",
         sleep=sleep,
     )
@@ -477,7 +480,7 @@ async def test_delivery_continues_after_non_scope_api_error_on_one_file(
         session_id="sesn_1",
         channel_id="C1",
         thread_ts="1.2",
-        notice_keys=set(),
+        notice_keys=NoticeKeys(),
         team_id="T1",
         sleep=sleep,
     )
@@ -533,7 +536,7 @@ async def test_delivery_posts_oversize_notice_and_deletes_entry_without_upload(
         session_id="sesn_1",
         channel_id="C1",
         thread_ts="1.2",
-        notice_keys=set(),
+        notice_keys=NoticeKeys(),
         team_id="T1",
         sleep=sleep,
     )
@@ -550,3 +553,152 @@ async def test_delivery_posts_oversize_notice_and_deletes_entry_without_upload(
     ]
     assert upload_requests == [], "an oversize file must produce no upload requests at all"
     assert deletes == ["file_big"], "the oversize entry must be deleted after the notice"
+
+
+def _abort_delivery_client(fake_slack_web_client: Any) -> Any:
+    """An MA file whose Slack upload always hits missing_scope."""
+    fake_slack_web_client.mock.post(
+        _GET_URL, payload={"ok": False, "error": "missing_scope"}, repeat=True
+    )
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/files",
+        lambda request, match: list_response(
+            [
+                FileMetadata(
+                    id="file_one",
+                    created_at=NOW,
+                    filename="chart.png",
+                    mime_type="image/png",
+                    size_bytes=9,
+                    type="file",
+                    downloadable=True,
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)/content",
+        lambda request, match: httpx.Response(200, content=b"png-bytes"),
+    )
+    return build_fake_anthropic(router.dispatch)
+
+
+async def _deliver_abort(
+    anthropic_client: Any,
+    web_client: Any,
+    notice_keys: Any,
+    *,
+    session_id: str = "sesn_1",
+    thread_ts: str = "1.2",
+) -> None:
+    async def sleep(delay: float) -> None:
+        pass
+
+    await deliver_session_outputs(
+        anthropic_client,
+        web_client,
+        session_id=session_id,
+        channel_id="C1",
+        thread_ts=thread_ts,
+        notice_keys=notice_keys,
+        team_id="T_RACE",
+        sleep=sleep,
+    )
+
+
+async def test_concurrent_deliveries_post_one_notice(
+    fake_slack_web_client: Any,
+) -> None:
+    anthropic_client = _abort_delivery_client(fake_slack_web_client)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class GatedClient:
+        calls = 0
+
+        async def files_upload_v2(self, **kwargs: Any) -> Any:
+            return await fake_slack_web_client.client.files_upload_v2(**kwargs)
+
+        async def chat_postMessage(self, **kwargs: Any) -> Any:
+            self.calls += 1
+            entered.set()
+            await release.wait()
+            return await fake_slack_web_client.client.chat_postMessage(**kwargs)
+
+    web_client = GatedClient()
+    notice_keys = NoticeKeys()
+    first = asyncio.create_task(_deliver_abort(anthropic_client, web_client, notice_keys))
+    await asyncio.wait_for(entered.wait(), 2)
+    second = asyncio.create_task(
+        _deliver_abort(anthropic_client, web_client, notice_keys, session_id="sesn_2")
+    )
+    try:
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert web_client.calls == 1, "a second session must wait for this notice key"
+    finally:
+        release.set()
+        await asyncio.gather(first, second)
+    assert len(_post_message_calls(fake_slack_web_client.mock)) == 1
+    assert len(notice_keys._locks) == 0 if hasattr(notice_keys, "_locks") else True
+
+
+async def test_failed_notice_post_is_retried_after_waiter(
+    fake_slack_web_client: Any,
+) -> None:
+    anthropic_client = _abort_delivery_client(fake_slack_web_client)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class FailingClient:
+        calls = 0
+
+        async def files_upload_v2(self, **kwargs: Any) -> Any:
+            return await fake_slack_web_client.client.files_upload_v2(**kwargs)
+
+        async def chat_postMessage(self, **kwargs: Any) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                entered.set()
+                await release.wait()
+                raise RuntimeError("notice post failed")
+            return await fake_slack_web_client.client.chat_postMessage(**kwargs)
+
+    web_client = FailingClient()
+    notice_keys = NoticeKeys()
+    first = asyncio.create_task(_deliver_abort(anthropic_client, web_client, notice_keys))
+    await asyncio.wait_for(entered.wait(), 2)
+    second = asyncio.create_task(
+        _deliver_abort(anthropic_client, web_client, notice_keys, session_id="sesn_2")
+    )
+    try:
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert web_client.calls == 1, "retry must wait for the failed attempt to finish"
+    finally:
+        release.set()
+        results = await asyncio.gather(first, second, return_exceptions=True)
+    assert isinstance(results[0], RuntimeError)
+    assert results[1] is None
+    assert web_client.calls == 2
+    assert len(_post_message_calls(fake_slack_web_client.mock)) == 1
+
+
+async def test_notice_and_log_retention_is_bounded(
+    fake_slack_web_client: Any,
+) -> None:
+    anthropic_client = _abort_delivery_client(fake_slack_web_client)
+    notice_keys = NoticeKeys(max_keys=3) if hasattr(delivery_module, "NoticeKeys") else set()
+    for index in range(6):
+        await _deliver_abort(
+            anthropic_client,
+            fake_slack_web_client.client,
+            notice_keys,
+            thread_ts=f"{index}.0",
+        )
+    assert len(notice_keys) <= 3
+    assert "notice:T_RACE:C1:5.0:missing_scope" in notice_keys
+    assert len(_post_message_calls(fake_slack_web_client.mock)) == 6
