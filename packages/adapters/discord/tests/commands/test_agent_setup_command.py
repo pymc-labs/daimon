@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import httpx
@@ -25,6 +25,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, setup_target_label
 from daimon.core.stores.tenants import set_provision_status
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -247,3 +248,26 @@ async def test_ready_status_names_the_channel_and_offers_setup(
     assert EMPTY_ROSTER_COPY in text, "a seeded-but-empty roster says what to do next"
     assert setup_target_label(None) in labels, "setup honestly reports that no target is selected"
     assert "Done" in labels, "and the panel can always be dismissed"
+
+
+async def test_database_error_answers_the_deferred_reply(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A database error after the defer still answers, so "thinking" never hangs."""
+    guild_id = 700000009
+    await _provision(db_session_factory, guild_id=guild_id, status="ready")
+    router, _calls = _counting_router()
+    runtime = _make_runtime(
+        db_session_factory, anthropic_client=build_fake_anthropic(router.dispatch)
+    )
+    interaction = _make_interaction(runtime, guild_id=guild_id)
+    cog = AgentSetupCog(MagicMock())
+
+    with patch(
+        "daimon.adapters.discord.commands.agent_setup.load_roster_state",
+        new=AsyncMock(side_effect=SQLAlchemyError("database unavailable")),
+    ):
+        await cog.agent_setup.callback(cog, interaction)  # pyright: ignore[reportArgumentType]
+
+    interaction.followup.send.assert_awaited_once()
+    assert "Database error" in interaction.followup.send.await_args.args[0]
