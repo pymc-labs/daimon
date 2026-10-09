@@ -41,6 +41,7 @@ from daimon.core.stores.agent_memory_stores import insert_memory_store
 from daimon.core.stores.domain import Role, TenantRow, WizardSessionRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_sessions import get_live_thread_session, list_orphaned_turns
+from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.stores.wizard_session import get_wizard_session
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.run import run_prepared_turn
@@ -606,6 +607,51 @@ async def test_a_submit_over_the_per_tenant_cap_waits_behind_its_card_then_runs(
 
     assert stream_hits, "the queued submit turn ran once the slot freed"
     assert bot.turn_queue.in_flight() == 0 and bot.turn_queue.depth() == 0
+
+
+async def test_a_submit_that_times_out_in_the_queue_leaves_nothing_behind(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The submit binds its session before it waits (its card posts after the
+    bind). Timing out there ends it like a turn that failed before its first
+    send: the ordinary error on the card, no active-turn marker (that is
+    written only after the wait), the card intent retired, the slot returned."""
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800007004")
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+    channel = _make_channel(thread_id=5037, parent_id=4037)
+    stream_hits: list[str] = []
+    router = _build_router(str(tenant.id), sent_events=[], stream_hits=stream_hits)
+    runtime = _make_runtime(db_session_factory, router)
+    runtime.settings.discord.max_concurrent_turns_per_tenant = 1
+    bot = _make_bot(runtime)
+    bot.turn_queue.max_wait_s = 0.05
+    held = bot.turn_queue.claim(tenant.id)
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    with patch("daimon.core.turn.prepare.create_session") as mock_create_session:
+        mock_create_session.return_value = ma_session(
+            id="sess_timed_out_submit", agent_id=_AGENT_ID, model=_MODEL_ID, environment_id=_ENV_ID
+        )
+        item = await WizardSubmitButton.from_custom_id(
+            interaction, MagicMock(), _submit_match(row.id)
+        )
+        assert await item.interaction_check(interaction) is True
+        await item.callback(interaction)
+        await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+
+    assert stream_hits == [], "a timed-out submit never reaches the turn stream"
+    card = channel.send.return_value
+    edits = [str(call.kwargs.get("content")) for call in card.edit.await_args_list]
+    assert edits == ["Something went wrong. Mention me to try again."], "the ordinary error"
+    assert await list_orphaned_turns(db_session, platform="discord") == [], (
+        "no active-turn marker is left on the bound session"
+    )
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="discord")
+    assert intents == [], "the card intent is retired, not left for the boot sweep"
+    assert bot.turn_queue.depth() == 0
+    assert bot.turn_queue.in_flight() == 1, "only the other turn holds a slot"
+    held.release()
 
 
 async def test_mention_claiming_last_slot_during_submit_cap_read_sheds_submit(
