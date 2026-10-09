@@ -89,3 +89,17 @@ configuration records. Turns respecify that configuration and reuse both
 continuity raises `ContinuityLost` instead of provisioning a fresh workspace.
 The scripted transport and memory storage are offline test tools, not a
 production persistence implementation or a live certification.
+
+### OpenAI driver core
+
+`mux.drivers.openai.OpenAIDriver` is an explicitly constructed, unwired Agents API
+driver for persistent hosted workspaces and opt-in conversation-only sessions.
+It uses the pinned OpenAI SDK's public HTTP primitives, normalizes root outcomes
+and previews, reconciles paginated saved work while buffering the stream, and
+reports nullable revisioned turn usage. Host authorization, recovery checkpoints
+and revision allocation are injected. Unsupported native preconditions and
+unfinished resource ports refuse explicitly. See the driver's README for verified
+endpoints, state ownership and offline validation. Existing defaults stay Anthropic.
+The persistent profile is temporarily non-core until skills and artifacts land;
+its missing mandatory capabilities are surfaced by admission. Vault and multiagent
+support are unsupported, and complete workspace export/import is unknown.

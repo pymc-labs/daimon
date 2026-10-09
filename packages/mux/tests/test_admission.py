@@ -29,6 +29,8 @@ def _optional(fallback: str) -> CapabilityRequirement:
 
 
 def _revision(**config: object) -> ConfigRevision:
+    if config.get("backend") == "openai":
+        config.setdefault("profile", "openai.persistent_workspace")
     return ConfigRevision.create(CHANNEL, 1, resolve_default(BackendConfig.model_validate(config)))
 
 
@@ -75,13 +77,18 @@ def test_optional_unsupported_is_admitted_with_its_fallback_surfaced() -> None:
 
 
 def test_emulated_support_is_admitted_and_surfaced() -> None:
-    admission = admit(_revision(backend="openai", model="gpt-6"), PERSISTENT_WORKSPACE)
+    admission = admit(
+        _revision(backend="openai", model="gpt-6", requires={"reconcile": REQUIRED}),
+        PERSISTENT_WORKSPACE,
+    )
     assert admission.emulated == ("reconcile",)
 
 
 def test_core_capabilities_are_mandatory_on_a_core_profile() -> None:
     assert set(MANAGED_AGENTS.missing_core()) == set()
-    assert MANAGED_AGENTS.core and PERSISTENT_WORKSPACE.core
+    assert MANAGED_AGENTS.core
+    assert not PERSISTENT_WORKSPACE.core
+    assert PERSISTENT_WORKSPACE.missing_core() == ("artifacts", "skills_bundle")
 
 
 def test_named_non_core_profile_is_admitted_with_waived_core_surfaced() -> None:
@@ -165,7 +172,9 @@ def test_profile_must_match_the_config() -> None:
 
 
 def test_non_default_backend_without_a_model_is_refused_at_admission() -> None:
-    resolved = resolve_default(BackendConfig(backend="openai", model="gpt-6"))
+    resolved = resolve_default(
+        BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-6")
+    )
     config = ConfigRevision.create(CHANNEL, 1, resolved)
     for model in (None, "", "  "):
         forged = config.model_copy(update={"model": model})
