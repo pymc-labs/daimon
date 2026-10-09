@@ -33,8 +33,10 @@ def test_names_on_connect_card(name: str, shown: str | None) -> None:
         )
 
 
-@pytest.mark.parametrize("variant", ["A", "B"])
-def test_variants_render_branded_slack_card(variant: Literal["A", "B"]) -> None:
+@pytest.mark.parametrize("variant", ["A", "B", "B_NO_FOOTER"])
+def test_variants_render_branded_slack_card(
+    variant: Literal["A", "B", "B_NO_FOOTER"],
+) -> None:
     card = cards.build_connect_card(
         agent_name="ResearchBot",
         identity_enabled=False,
@@ -53,11 +55,8 @@ def test_variants_render_branded_slack_card(variant: Literal["A", "B"]) -> None:
     actions = next(block for block in blocks if block["type"] == "actions")
     assert actions["elements"][0]["text"]["text"] == "🔗 Connect GitHub"
     assert actions["elements"][0]["style"] == "primary"
-    assert (card.detail, card.footer) == (
-        ("Default access: Read and write", "Only you can see the link.")
-        if variant == "B"
-        else (None, None)
-    )
+    assert card.detail == ("Default access: Read and write" if variant != "A" else None)
+    assert card.footer == ("Only you can see the link." if variant == "B" else None)
     for block in blocks:
         if block["type"] != "actions":
             assert "secret" not in json.dumps(block)

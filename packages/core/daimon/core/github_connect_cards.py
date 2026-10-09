@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 CONNECT_GITHUB_EMOJI = "🔗"
 CONNECT_CARD_COLOUR = "#0C1F40"
-VARIANT: Literal["A", "B"] = "A"
+VARIANT: Literal["A", "B", "B_NO_FOOTER"] = "A"
 
 _MACHINE_NAME = re.compile(r"^[a-z]+-[a-z0-9-]*[0-9a-f]{6,}$")
 _HEX_NAME = re.compile(r"^[0-9a-f]{16,}$", re.IGNORECASE)
@@ -26,12 +26,12 @@ class ConnectCard:
     author_icon_url: str
     description: str
     github_mark_url: str
-    variant: Literal["A", "B"]
+    variant: Literal["A", "B", "B_NO_FOOTER"]
     title: str = "Connect GitHub"
 
     @property
     def detail(self) -> str | None:
-        return "Default access: Read and write" if self.variant == "B" else None
+        return "Default access: Read and write" if self.variant != "A" else None
 
     @property
     def footer(self) -> str | None:
@@ -56,10 +56,10 @@ def build_connect_card(
     identity_enabled: bool,
     avatar_url: str | None,
     public_base_url: str,
-    variant: Literal["A", "B"] | None = None,
+    variant: Literal["A", "B", "B_NO_FOOTER"] | None = None,
 ) -> ConnectCard:
     chosen = VARIANT if variant is None else variant
-    if chosen not in ("A", "B"):
+    if chosen not in ("A", "B", "B_NO_FOOTER"):
         raise ValueError("Unknown GitHub connect card variant")
     root = public_base_url.rstrip("/")
     shown = safe_agent_name(agent_name)
