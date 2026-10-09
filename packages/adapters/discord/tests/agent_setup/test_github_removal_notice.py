@@ -38,12 +38,16 @@ async def test_removal_notice_uses_ephemeral_reconnect_button_without_dm(
     )
     interaction = SimpleNamespace(
         user=SimpleNamespace(id=123, display_name="Admin", create_dm=AsyncMock()),
+        guild_id=123,
         channel_id=456,
         application_id=789,
         token="interaction",
         followup=SimpleNamespace(send=AsyncMock()),
     )
-    runtime = SimpleNamespace(sessionmaker=_Sessions(), settings=object())
+    runtime = SimpleNamespace(
+        sessionmaker=_Sessions(),
+        settings=SimpleNamespace(mcp=SimpleNamespace(app_root_url="https://mcp.test")),
+    )
     await github_removal.send_pending_notice(
         runtime,  # pyright: ignore[reportArgumentType]
         interaction,  # pyright: ignore[reportArgumentType]
@@ -52,6 +56,7 @@ async def test_removal_notice_uses_ephemeral_reconnect_button_without_dm(
     sent = interaction.followup.send.await_args.kwargs
     assert sent["ephemeral"] is True
     assert sent["view"].children[0].url == "https://mcp.test/connect"
+    assert sent["embed"].title == "Connect GitHub"
     interaction.user.create_dm.assert_not_awaited()
     assert finish.await_args is not None
     assert finish.await_args.kwargs["delivered"] is True
