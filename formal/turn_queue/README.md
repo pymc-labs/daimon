@@ -169,4 +169,7 @@ until the model accepts those traces.
 - Unprompted participation (`try_claim`) and Teams continuation wakes
   (`claim`) never queue, so they are `Arrive` without the queue branch and are
   not separate actions.
+- How a continuation's dispatcher settles a turn that never got a slot
+  (`TurnNotStarted` in `continuity/dispatch.py`: capacity back to pending,
+  Stop settled not delivered) is outside this model; a test covers it.
 - TLC checks the abstraction, not the Python or asyncio scheduling.

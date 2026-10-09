@@ -130,6 +130,7 @@ from daimon.core.turn.errors import (
     SessionAgentMismatch,
     SessionBusyError,
     SessionPreparationFailed,
+    TurnNotStarted,
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
@@ -1003,6 +1004,12 @@ class TeamsApp:
                             "queue_full": _SHED,
                         }[slot]
                     )
+                    if reraise:
+                        # A continuation that never ran must not settle as
+                        # delivered: tell its dispatcher.
+                        if slot == "balance_depleted":
+                            raise AdmissionDenied(reason="balance_depleted")
+                        raise TurnNotStarted(slot)
                     return
                 await self._bind_and_run(
                     inbound,
@@ -1018,7 +1025,7 @@ class TeamsApp:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                if reraise and isinstance(exc, _BIND_REFUSALS):
+                if reraise and isinstance(exc, (*_BIND_REFUSALS, TurnNotStarted, AdmissionDenied)):
                     raise  # Already told the person; the dispatcher settles it.
                 # The card exists: collapse it rather than post a second message.
                 log.error(

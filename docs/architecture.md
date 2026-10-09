@@ -252,9 +252,12 @@ Stop removes a waiting turn and ends its card as Stopped. After `max_wait_s`
 notices first, and its card ends with "Something went wrong. Mention me to
 try again." A turn that waited runs the balance gate again once it has a
 slot, since `admit()` ran before the wait. The per-turn ceiling starts after
-the wait. A Discord wizard submit waits before it binds its session, so
-session preparation never runs outside the caps; its card appears once the
-slot is granted. Only a full queue (50 per tenant, 500 in total) refuses, with the plain
+the wait. A Discord wizard submit posts its card and card intent first, like a
+mention, and binds its session only once it holds the slot, so session
+preparation never runs outside the caps. A Teams continuation turn that never
+gets a slot raises `TurnNotStarted` to its dispatcher: a full queue or the max
+wait puts the row back to pending, and Stop settles it not delivered, never
+as delivered. Only a full queue (50 per tenant, 500 in total) refuses, with the plain
 capacity notice and the existing `turn.skipped.*concurrency_shed` logs, now
 with a `reason`. Discord DMs have no card and wait under the typing indicator;
 Slack DMs are not limited. Unprompted replies and Teams continuation wakes
