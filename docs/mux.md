@@ -485,3 +485,18 @@ check. Tenantless established creation uses a named legacy host capability.
 Update planning and workspace export/restore are separate follow-on changes;
 unsupported lifecycle methods fail explicitly. The driver keeps no operation cache
 and makes no request during construction.
+## Accounting observations
+
+The Anthropic usage driver converts each model-request end event into one
+`UsageObservation` with its native event ID, integer revision 1, provider
+timestamp and raw native meter. The host retains the existing `(session, event)`
+usage deduplication and `turn:{session}:{event}` debit key. Cache stages are
+subtracted from inclusive neutral input before applying the existing pricing
+formula, retaining its operation order and exact stored Decimal debits.
+
+`UsageSample` holds the neutral observation. The temporary host module
+`usage_compat` converts unchanged SDK event callers without provider requests;
+pricing also accepts the existing structural four-stage usage values during
+the M0 migration. Unknown token stages remain unpriced and cannot be written
+as measured billing rows. Higher observation revisions require the accounting
+outbox rather than a second turn debit.

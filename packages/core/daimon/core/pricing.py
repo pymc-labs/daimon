@@ -10,10 +10,60 @@ Per `guideline:architecture` "Functional core, imperative shell".
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
-)
+from mux.contracts.usage import UsageObservation
+
+
+class LegacyUsage(Protocol):
+    """Temporary structural boundary for unchanged M0 SDK/adapter callers."""
+
+    @property
+    def input_tokens(self) -> int: ...
+    @property
+    def output_tokens(self) -> int: ...
+    @property
+    def cache_creation_input_tokens(self) -> int: ...
+    @property
+    def cache_read_input_tokens(self) -> int: ...
+
+
+@dataclass(frozen=True)
+class UsageTokens:
+    """The existing four disjoint billing/telemetry columns."""
+
+    input_tokens: int
+    output_tokens: int
+    cache_creation_input_tokens: int
+    cache_read_input_tokens: int
+
+
+def uncached_input_tokens(usage: UsageObservation) -> int | None:
+    """Project the input stage when all three input counts were reported."""
+    if (
+        usage.input_tokens is None
+        or usage.input_cached_tokens is None
+        or usage.input_cache_write_tokens is None
+    ):
+        return None
+    uncached = usage.input_tokens - usage.input_cached_tokens - usage.input_cache_write_tokens
+    if uncached < 0:
+        raise ValueError("cached input exceeds inclusive input tokens")
+    return uncached
+
+
+def usage_tokens(usage: UsageObservation) -> UsageTokens | None:
+    """Project inclusive neutral counts without treating unknown as zero."""
+    uncached = uncached_input_tokens(usage)
+    if uncached is None or usage.output_tokens is None:
+        return None
+    assert usage.input_cached_tokens is not None and usage.input_cache_write_tokens is not None
+    return UsageTokens(
+        input_tokens=uncached,
+        output_tokens=usage.output_tokens,
+        cache_creation_input_tokens=usage.input_cache_write_tokens,
+        cache_read_input_tokens=usage.input_cached_tokens,
+    )
 
 
 @dataclass(frozen=True)
@@ -70,15 +120,21 @@ MODEL_PRICING: dict[str, ModelRates] = {**AGENT_MODEL_PRICING, **TOOL_MODEL_PRIC
 
 
 def cost_of(
-    usage: BetaManagedAgentsSpanModelUsage,
+    usage: UsageObservation | LegacyUsage,
     rates: ModelRates | None,
 ) -> float | None:
-    """Compute USD cost for one model_usage payload against `rates`.
+    """Compute USD cost for a neutral measurement against `rates`.
 
-    Returns None when rates is None (unknown model id).
+    Returns None for unknown rates or an unreported token stage. The float
+    operation order is retained verbatim for historical debit parity.
     """
     if rates is None:
         return None
+    if isinstance(usage, UsageObservation):
+        tokens = usage_tokens(usage)
+        if tokens is None:
+            return None
+        usage = tokens
     return (
         usage.input_tokens * rates.input / 1_000_000
         + usage.output_tokens * rates.output / 1_000_000

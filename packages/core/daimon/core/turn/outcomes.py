@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -15,15 +15,14 @@ from importlib.metadata import version
 
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
-)
 from daimon.core.context_prompt import TurnContext
-from daimon.core.pricing import MODEL_PRICING, cost_of
+from daimon.core.pricing import MODEL_PRICING, cost_of, uncached_input_tokens
 from daimon.core.runtime_health import track_turn
 from daimon.core.stores.turn_outcomes import OutcomeRecord, record
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.usage_compat import event_observation
+from mux.contracts.usage import UsageObservation
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -61,7 +60,7 @@ async def drain_outcomes() -> None:
 
 @dataclass(frozen=True)
 class UsageSample:
-    usage: BetaManagedAgentsSpanModelUsage
+    usage: UsageObservation
     model_id: str | None
     cost: Decimal | None
     metered: bool
@@ -106,17 +105,37 @@ class TurnObservation:
     )
 
     def note_usage(
-        self, event: BetaManagedAgentsSpanModelRequestEndEvent, *, metered: bool = False
+        self,
+        event: BetaManagedAgentsSpanModelRequestEndEvent | UsageObservation,
+        *,
+        metered: bool = False,
     ) -> None:
         if self.session_id is not None:
+            if isinstance(event, UsageObservation):
+                if event.session.id != self.session_id:
+                    raise ValueError("usage observation belongs to another session")
+                if event.grain != "model_request" or event.basis != "increment":
+                    raise ValueError("turn telemetry requires incremental model-request usage")
             key = (self.session_id, event.id)
             if key in self._usage:
                 return
             self._usage[key] = {"session_id": key[0], "event_id": key[1]}
             model_id = self.model_by_session.get(self.session_id)
-            cost = cost_of(event.model_usage, MODEL_PRICING.get(model_id or ""))
+            usage = (
+                event
+                if isinstance(event, UsageObservation)
+                else event_observation(
+                    event,
+                    session_id=self.session_id,
+                    model_id=model_id,
+                    tenant_id=str(self.tenant_id) if self.tenant_id is not None else None,
+                )
+            )
+            if usage.model is not None:
+                model_id = usage.model.id
+            cost = cost_of(usage, MODEL_PRICING.get(model_id or ""))
             self._samples[key] = UsageSample(
-                event.model_usage,
+                usage,
                 model_id,
                 Decimal(str(cost)) if cost is not None else None,
                 metered,
@@ -141,6 +160,13 @@ class TurnObservation:
         )
         terminal_error = error or (state.error if state else None)
         samples = list(self._samples.values())
+
+        def total(getter: Callable[[UsageObservation], int | None]) -> int | None:
+            counts = [getter(sample.usage) for sample in samples]
+            if any(count is None for count in counts):
+                return None
+            return sum(count for count in counts if count is not None)
+
         unpriced_calls = sum(sample.cost is None for sample in samples)
         postures = {sample.metered for sample in samples}
         posture = (
@@ -170,12 +196,10 @@ class TurnObservation:
             error_class=type(terminal_error).__name__ if terminal_error else None,
             release=_RELEASE,
             usage_refs=list(self._usage.values()),
-            input_tokens=sum(sample.usage.input_tokens for sample in samples),
-            output_tokens=sum(sample.usage.output_tokens for sample in samples),
-            cache_read_input_tokens=sum(sample.usage.cache_read_input_tokens for sample in samples),
-            cache_creation_input_tokens=sum(
-                sample.usage.cache_creation_input_tokens for sample in samples
-            ),
+            input_tokens=total(uncached_input_tokens),
+            output_tokens=total(lambda usage: usage.output_tokens),
+            cache_read_input_tokens=total(lambda usage: usage.input_cached_tokens),
+            cache_creation_input_tokens=total(lambda usage: usage.input_cache_write_tokens),
             model_calls=len(samples),
             model_ids=sorted(
                 {sample.model_id for sample in samples if sample.model_id is not None}

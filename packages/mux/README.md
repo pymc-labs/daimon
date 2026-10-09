@@ -69,3 +69,8 @@ delegated to session administration. Closed `anthropic.session_create@1` and
 `anthropic.session_resource_create@1` configs preserve omitted and explicit empty
 fields, agent overrides and mount ordering. Session specs carry extensions and
 records carry an opaque optional native snapshot for the temporary host codec.
+Anthropic model spans convert to `UsageObservation` in the usage driver,
+retaining event IDs, timestamps and the untouched native meter. Neutral input
+counts include cache stages; the host projects them into its existing billing
+and telemetry columns. Temporary host compatibility entrypoints accept existing
+SDK callers while turn and adapter ports migrate.

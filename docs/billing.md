@@ -665,3 +665,11 @@ Telemetry inherits the outcome writer's bounded best-effort delivery: database
 outages, saturation or abrupt process termination can lose rows. It is operational
 measurement, not an accounting reconciliation source. No prompts, answers, tool
 arguments, output text or error messages are persisted here.
+
+## Usage measurements
+
+Accounting accepts provider-neutral usage observations. Input counts include
+cache reads and writes; billing projects them back into the existing disjoint
+token stages before pricing. Unknown counts remain unknown. Anthropic model
+events retain their native event IDs, immutable revision 1 and provider
+timestamps, so replaying historical events leaves usage and ledger rows unchanged.
