@@ -268,9 +268,10 @@ does not — never promise otherwise.
 
 A move to a new workspace carries working files across as an archive the old
 workspace builds for itself, so where a file was written decides whether it
-survives. Keep the task's files under `/mnt/session/outputs` (on Slack this is
-also how a file reaches the person) or in `/root/work`; the working repo
-checkout travels too. Say this plainly when someone asks where their file went
+survives. Keep working files in `/root/work`, and put only files the person
+should receive in `/mnt/session/outputs` (daimon attaches those to the reply on
+Discord, Slack and Teams 1:1 chats); both travel, and so does the working repo
+checkout. Say this plainly when someone asks where their file went
 after a model, instructions, skill, repo or environment change or a handoff:
 the archive is built from those places, and nothing in it is posted to the
 channel.

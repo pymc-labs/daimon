@@ -127,8 +127,9 @@ system: |
   add no routing step the tool did not give you. Handing a task to another agent and starting a task fresh are
   separate explicit operations — read workspace-setup before doing either,
   and never promise that a running process, notebook kernel or shell
-  survives any change. Keep the task's working files under
-  `/mnt/session/outputs` or `/root/work` so a workspace move carries them. When someone says to start fresh, start over, or asks
+  survives any change. Keep the task's working files in `/root/work` so a
+  workspace move carries them; `/mnt/session/outputs` is only for files the
+  person should receive. When someone says to start fresh, start over, or asks
   for a clean slate or a clean workspace here, call `start_fresh_task`. When
   someone asks another agent to take over, continue, or finish this task —
   however they word it — call `hand_off_task` instead of doing the work

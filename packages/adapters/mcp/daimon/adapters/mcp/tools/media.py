@@ -221,16 +221,19 @@ def register_upload_tool(mcp: FastMCP, *, runtime: McpRuntime) -> None:
         title: str,
         mime_type: str,
     ) -> str:
-        """Attach, post, send, or share a file in Discord — step 1 of 2.
+        """Post, send, or share a file to another channel, or from a routine — step 1 of 2.
 
-        This is the ONLY way to put a file you produced (a chart, a table, an
-        image, a data file) into Discord as an attachment. Your reply text
-        delivers itself; a file never does. Reading a file, or copying it to
-        /mnt/session/outputs/, does not send it anywhere.
+        Not for attaching a file to your reply. In the chat you were invoked
+        from (Discord, Slack, a Teams 1:1 chat), save the file under
+        /mnt/session/outputs/ and daimon attaches it to your reply after the
+        turn; posting it into that thread with this tool delivers a duplicate.
+        Use this tool for a file you were asked to post to a channel or thread
+        you were not invoked from, or from a scheduled routine, which has no
+        reply to attach to.
 
         The intent words are in this first line on purpose: an agent looking
-        for "attach an image" or "post a file" has to find this tool by
-        search, and the name alone does not carry any of them.
+        for "post a file" has to find this tool by search and read where the
+        file should go, and the name alone does not carry any of that.
 
         Call this FIRST, then send the bytes from your sandbox with curl:
 
@@ -245,8 +248,8 @@ def register_upload_tool(mcp: FastMCP, *, runtime: McpRuntime) -> None:
 
         Returns an ``upload_url`` and a ``handle_id``. After the PUT succeeds,
         pass the handle id to ``send_message``'s ``file_handles`` argument to
-        post it, in the same channel/thread where the user asked — do not post
-        to a different channel unless the user explicitly names one. The URL is
+        post it, in the channel the user named — never into a channel they did
+        not name. The URL is
         single-use and expires; mint a new one per file.
         """
         auth = await _auth(ctx)
