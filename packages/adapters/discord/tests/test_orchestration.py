@@ -775,8 +775,10 @@ class TestNewThreadCreation:
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_session_creation_failure_sends_error_after_thread_created(
+    @patch("daimon.adapters.discord.bot.retire_terminal_turn_card", new_callable=AsyncMock)
+    async def test_session_creation_failure_turns_the_thread_card_into_the_error(
         self,
+        retire: AsyncMock,
         mock_resolve: AsyncMock,
         mock_create_session: AsyncMock,
         mock_run_turn: AsyncMock,
@@ -785,9 +787,10 @@ class TestNewThreadCreation:
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        """The thread + status embed go up before sessions.create, so a session
-        creation failure happens after the thread exists; the error still renders
-        through the boundary handler and the turn never runs."""
+        """The thread + status card go up before sessions.create, so a session
+        creation failure happens after the thread exists. The error replaces the
+        card in the thread (no Stop button left spinning, intent retired) and
+        nothing is posted in the parent channel."""
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         await _setup_workspace_and_config(db_session, tenant.id)
 
@@ -799,9 +802,13 @@ class TestNewThreadCreation:
         runtime = _make_runtime(tenant.id, db_session_factory)
         bot = make_bot(runtime)
         message = _make_channel_message()
+        card = MagicMock(spec=discord.Message)
+        card.id = 4242
+        card.webhook_id = None
+        card.edit = AsyncMock(return_value=card)
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 9999
-        mock_thread.send = AsyncMock()
+        mock_thread.send = AsyncMock(return_value=card)
         message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
 
         await bot.on_message(message)
@@ -810,13 +817,126 @@ class TestNewThreadCreation:
         assert any("embeds" in c.kwargs for c in mock_thread.send.call_args_list), (
             "status embed should have been posted before the session create failed"
         )
-        message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        error_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        card.edit.assert_awaited_once()
+        edit_kwargs = card.edit.call_args.kwargs
+        assert edit_kwargs["view"] is None and edit_kwargs["embed"] is None
+        error_text: str = edit_kwargs["content"]
         assert "rid:" not in error_text, "trace ids stay in logs"
         assert "couldn't reach Claude" in error_text, (
             "the connection failure should have a plain retry instruction"
         )
+        assert mock_thread.send.await_count == 1, "the error edits the card, it is not a 2nd post"
+        retire.assert_awaited_once()
+        assert retire.call_args.kwargs["expected_message_id"] == "4242"
         mock_run_turn.assert_not_called()
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    @patch("daimon.adapters.discord.bot.retire_terminal_turn_card", new_callable=AsyncMock)
+    async def test_failure_with_an_uneditable_card_posts_the_error_in_the_thread(
+        self,
+        retire: AsyncMock,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """If the card cannot be edited the error still lands in the thread, not
+        the parent channel, and the card's intent stays for recovery."""
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_create_session.side_effect = _anthropic.APIConnectionError(request=MagicMock())
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+
+        runtime = _make_runtime(tenant.id, db_session_factory)
+        bot = make_bot(runtime)
+        message = _make_channel_message()
+        card = MagicMock(spec=discord.Message)
+        card.id = 4242
+        card.webhook_id = None
+        card.edit = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=500), "boom"))
+        mock_thread = MagicMock(spec=discord.Thread)
+        mock_thread.id = 9999
+        mock_thread.send = AsyncMock(return_value=card)
+        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        assert mock_thread.send.await_count == 2, "card, then the error below it"
+        error_text: str = mock_thread.send.call_args.args[0]
+        assert "couldn't reach Claude" in error_text
+        retire.assert_not_awaited()  # the card is still up: recovery owns its intent
+        mock_run_turn.assert_not_called()
+
+    @patch("daimon.adapters.discord.bot.update_watermark", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_failure_after_the_answer_keeps_the_answer_and_posts_in_the_thread(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        mock_watermark: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A failure after the card became the answer never edits the answer away;
+        the error goes under it in the thread, not into the parent channel."""
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_create_session.return_value = ma_session(id="sess-abc")
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        mock_watermark.side_effect = OperationalError("update", {}, Exception("db down"))
+
+        runtime = _make_runtime(tenant.id, db_session_factory)
+        runtime.settings.completion_pings = {}
+        bot = make_bot(runtime)
+        message = _make_channel_message()
+        card = MagicMock(spec=discord.Message)
+        card.id = 4242
+        card.webhook_id = None
+        card.edit = AsyncMock(return_value=card)
+        mock_thread = MagicMock(spec=discord.Thread)
+        mock_thread.id = 9999
+        mock_thread.send = AsyncMock(return_value=card)
+        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
+
+        from daimon.core.turn.state import TextBlock, TurnState
+
+        async def finish_turn(*, lifecycle, **kwargs):
+            state = TurnState(content=[TextBlock(kind="text", text="The answer")])
+            await lifecycle.on_terminal_success(state)
+            return state
+
+        mock_run_turn.side_effect = finish_turn
+        await bot.on_message(message)
+
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        contents = [c.kwargs.get("content") for c in card.edit.call_args_list]
+        assert any(c is not None and "The answer" in c for c in contents)
+        db_error = "couldn't load or save this change"
+        assert not any(c is not None and db_error in c for c in contents), "answer overwritten"
+        error_text: str = mock_thread.send.call_args.args[0]
+        assert db_error in error_text
 
 
 class TestThreadMention:
@@ -1125,17 +1245,20 @@ class TestHandleMentionErrorBoundary:
         runtime = _make_runtime(tenant.id, db_session_factory)
         bot = make_bot(runtime)
         message = _make_channel_message()
+        card = MagicMock(spec=discord.Message)
+        card.id = 4242
+        card.webhook_id = None
+        card.edit = AsyncMock(return_value=card)
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 9999
-        mock_thread.send = AsyncMock()
+        mock_thread.send = AsyncMock(return_value=card)
         message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
 
         await bot.on_message(message)
 
-        # Error caught in _handle_mention sees message.channel (TextChannel),
-        # not the thread created inside _orchestrate (accepted edge case).
-        message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        error_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        # The error lands on the turn's own card in its thread, not the channel.
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        error_text: str = card.edit.call_args.kwargs["content"]
         assert "rid:" not in error_text, (
             f"error boundary must not publish trace ids; got: {error_text!r}"
         )
@@ -1168,17 +1291,20 @@ class TestHandleMentionErrorBoundary:
         runtime = _make_runtime(tenant.id, db_session_factory)
         bot = make_bot(runtime)
         message = _make_channel_message()
+        card = MagicMock(spec=discord.Message)
+        card.id = 4242
+        card.webhook_id = None
+        card.edit = AsyncMock(return_value=card)
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 9998
-        mock_thread.send = AsyncMock()
+        mock_thread.send = AsyncMock(return_value=card)
         message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
 
         await bot.on_message(message)
 
-        # Error caught in _handle_mention sees message.channel (TextChannel),
-        # not the thread created inside _orchestrate (accepted edge case).
-        message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        error_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        # The error lands on the turn's own card in its thread, not the channel.
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        error_text: str = card.edit.call_args.kwargs["content"]
         assert "couldn't reach Claude" in error_text, (
             f"the connection failure should have a plain retry instruction; got: {error_text!r}"
         )
