@@ -4,6 +4,8 @@ These 33 offline scenarios run existing tests and four boundary scenarios agains
 
 Configure `DAIMON_DATABASE__TEST_URL` for an isolated, migrated local test database before running. N3 uses `daimon_test_nc_n3`. Do not use the shared `daimon_test` or live provider credentials.
 
+Fixture setup obtains mapped metadata through the public `daimon.testing.effect_recorder.database_metadata()` helper. It pins defaults on the actual mapped tables, including Python UUID/time defaults that database reflection would omit, without importing private core models from the test tree.
+
 ```bash
 uv run pytest -n 2 -q tests/parity/test_ma_goldens.py tests/parity/test_ma_call_ratchet.py
 uv run python tests/golden/runner.py plain_discord approval_card

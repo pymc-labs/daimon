@@ -39,12 +39,11 @@ import httpx
 import pytest
 from aioresponses import aioresponses
 from daimon.core import platform_names
-from daimon.core._models import Base
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.turn import approvals, driver, outcomes
 from daimon.testing import effect_recorder, turn_fakes
-from daimon.testing.effect_recorder import EffectRecorder, json_value
+from daimon.testing.effect_recorder import EffectRecorder, database_metadata, json_value
 from daimon.testing.ma import not_found_response
 from daimon.testing.ma_transport import Json, ScriptedReply, ScriptedTransport
 from http_turn import HttpTurnFixtures, synchronize_approval_poll, synchronize_cancel_timer
@@ -283,7 +282,8 @@ def pytest_runtest_setup(item: Any) -> None:
     def fixed_now(context: Any) -> datetime:
         return NOW
 
-    for table in Base.metadata.tables.values():
+    metadata = database_metadata()
+    for table in metadata.tables.values():
         for column in table.columns:
             column_default = cast(Any, column.default)
             server_default = cast(Any, column.server_default)
@@ -306,7 +306,7 @@ def pytest_runtest_setup(item: Any) -> None:
                     PATCH.setattr(column, "default", ColumnDefault(fixed_now))
     timestamp_fields = {
         column.name
-        for table in Base.metadata.tables.values()
+        for table in metadata.tables.values()
         for column in table.columns
         if isinstance(column.type, DateTime)
     }

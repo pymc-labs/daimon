@@ -22,7 +22,7 @@ from uuid import UUID
 from daimon.core._models import Base
 from daimon.testing.ma_transport import Json, RecordedRequest
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import MetaData, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 DB_TABLES = (
@@ -109,6 +109,16 @@ IDENTITY_FIELDS = frozenset(
         "team",
     }
 )
+
+
+def database_metadata() -> MetaData:
+    """Expose mapped table metadata for deterministic offline fixture setup.
+
+    Return the live mapped metadata so fixture clocks and UUID defaults affect
+    ORM inserts as well as recorder queries. Reflected tables would lose those
+    Python defaults. Private model imports stay inside the testing package.
+    """
+    return Base.metadata
 
 
 def json_value(value: object) -> Json:
