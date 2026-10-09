@@ -536,3 +536,28 @@ pricing also accepts the existing structural four-stage usage values during
 the M0 migration. Unknown token stages remain unpriced and cannot be written
 as measured billing rows. Higher observation revisions require the accounting
 outbox rather than a second turn debit.
+
+### Gemini inline reuse
+
+The Gemini driver is available only through explicit construction and the
+non-core `gemini.inline_reuse` profile. It retains interaction history and
+workspace references between turns, and exposes workspace expiry as a visible
+continuity failure. Saved interaction steps supply authoritative events;
+streamed deltas remain previews. Interaction usage preserves missing token
+counts, raw meters and correction revisions. Gemini's separately reported
+response and thought tokens are combined into inclusive neutral output tokens.
+Unsupported capabilities fail admission or refuse before provider mutation.
+Existing default resolution continues to select Anthropic.
+
+Required actions exclude saved calls with matching results, including filesystem
+calls automatically executed in the environment. Open steps from in-progress
+snapshots enter authoritative history only after the interaction pauses or ends.
+A persisted provider timestamp watermark advances even when usage counts stay
+equal, so older snapshots cannot rewind usage or session state after a restart.
+
+Missing usage stages remain unknown pending recorded provider evidence; no zero
+counts or tool-token billing rules are inferred. Interaction meters under a
+shared root are separate observations, rather than a claimed root-turn aggregate.
+The host accounting bridge must establish coverage before summing overlapping
+grains. Production metadata storage is still injected: its transaction mechanism
+must avoid retaining database connections during provider I/O.

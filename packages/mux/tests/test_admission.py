@@ -98,14 +98,31 @@ def test_non_core_profile_still_refuses_an_explicitly_required_core_capability()
     )
     with pytest.raises(UnsupportedCapability) as caught:
         admit(config, INLINE_REUSE)
-    assert caught.value.missing == ("thread_workspace_persistence", "usage_observations")
+    assert caught.value.missing == ("thread_workspace_persistence",)
+
+
+def test_gemini_inline_reuse_requires_an_explicit_profile_and_model() -> None:
+    admission = admit(
+        _revision(backend="gemini", profile="gemini.inline_reuse", model="gemini-3"), INLINE_REUSE
+    )
+    assert admission.profile_id == "gemini.inline_reuse"
+    assert "usage_observations" in admission.emulated
+    assert "thread_workspace_persistence" in admission.waived_core
+    assert not INLINE_REUSE.core
+    with pytest.raises(InvalidConfig, match="profile"):
+        _revision(backend="gemini", model="gemini-3")
+    with pytest.raises(InvalidConfig, match="model"):
+        _revision(backend="gemini", profile="gemini.inline_reuse")
 
 
 def test_usage_observations_cannot_be_waived_even_by_a_named_non_core_profile() -> None:
     assert not INLINE_REUSE.core
     config = _revision(backend="gemini", profile="gemini.inline_reuse", model="gemini-3")
+    unmetered_gemini = INLINE_REUSE.model_copy(
+        update={"support": {**INLINE_REUSE.support, "usage_observations": "unknown"}}
+    )
     with pytest.raises(UnsupportedCapability) as caught:
-        admit(config, INLINE_REUSE)
+        admit(config, unmetered_gemini)
     assert caught.value.missing == ("usage_observations",)
     unmetered = CONVERSATION_ONLY.model_copy(
         update={"support": {**CONVERSATION_ONLY.support, "usage_observations": "unknown"}}

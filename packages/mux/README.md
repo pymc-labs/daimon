@@ -79,3 +79,13 @@ retaining event IDs, timestamps and the untouched native meter. Neutral input
 counts include cache stages; the host projects them into its existing billing
 and telemetry columns. Temporary host compatibility entrypoints accept existing
 SDK callers while turn and adapter ports migrate.
+
+Gemini's explicitly constructed `GeminiManagedAgents` driver runs the non-core
+`gemini.inline_reuse` profile. The host injects transactional driver storage,
+a StateStore and a private transport; importing or constructing it makes no
+provider requests. Agents and environment definitions are local inline
+configuration records. Turns respecify that configuration and reuse both
+`previous_interaction_id` and the returned environment ID. Expired or missing
+continuity raises `ContinuityLost` instead of provisioning a fresh workspace.
+The scripted transport and memory storage are offline test tools, not a
+production persistence implementation or a live certification.
