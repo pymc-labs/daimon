@@ -32,6 +32,7 @@ from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -158,6 +159,145 @@ def test_pending_page_names_verified_organization_safely() -> None:
     text = page.body.decode()
     assert "An owner of team&lt;one&gt; must approve Daimon." in text
     assert "team<one>" not in text
+
+
+@pytest.mark.parametrize("revoke_failure_status", [None, 503, 404])
+@pytest.mark.asyncio
+async def test_cancel_after_oauth_revokes_user_token(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    revoke_failure_status: int | None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cancel after GitHub issues a token must remove that token's App grant."""
+    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, id=tenant_id, workspace_id="cancel-workspace")
+        await make_account(session, tenant=tenant, id=account_id)
+        await set_role(session, account_id, Role.ADMIN)
+        invitation_token = await github_connect.mint_invitation(
+            session,
+            tenant_id=tenant_id,
+            requester_account_id=account_id,
+            requester_label="Alex",
+            requester_platform_user_id="123",
+            origin_platform="discord",
+        )
+    revoked: list[str] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login/oauth/access_token":
+            return httpx.Response(200, json={"access_token": "cancelled-user-token"})
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"id": 17})
+        if request.url.path == "/user/installations":
+            return httpx.Response(200, json={"installations": []})
+        if request.url.path == "/applications/client/token":
+            revoked.append(request.content.decode())
+            if revoke_failure_status is not None and len(revoked) == 1:
+                return httpx.Response(revoke_failure_status)
+            return httpx.Response(204)
+        raise AssertionError(f"unexpected GitHub path {request.url.path}")
+
+    key = Fernet.generate_key().decode()
+    connect, callback, setup, confirm = build_oauth_github_routes(
+        settings=_settings(key),
+        sessionmaker=committing_sessionmaker,
+        fernet=build_multifernet((key,)),
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+    )
+    app = Starlette(
+        routes=[
+            Route("/oauth/github/connect/{token}", connect),
+            Route("/oauth/github/callback", callback),
+            Route("/oauth/github/setup", setup),
+            Route("/oauth/github/confirm", confirm, methods=["GET", "POST"]),
+        ]
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"
+    ) as browser:
+        start = await browser.get(f"/oauth/github/connect/{invitation_token}")
+        state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+        callback_response = await browser.get(
+            "/oauth/github/callback", params={"state": state, "code": "code"}
+        )
+        assert callback_response.status_code == 307
+        cancelled = await browser.get(
+            "/oauth/github/confirm", params={"state": state, "cancel": "1"}
+        )
+        assert cancelled.status_code == 200
+        assert "Nothing was connected." in cancelled.text
+        assert ("GitHub connection token revocation failed" in caplog.text) == (
+            revoke_failure_status is not None
+        )
+        async with committing_sessionmaker.begin() as session:
+            flow = await github_connect.cancel_flow(
+                session, state=state, cookie=browser.cookies["daimon_gh_connect"]
+            )
+            assert flow is not None
+            assert flow.cancelled_at is not None
+            assert (flow.encrypted_user_token is not None) == (revoke_failure_status is not None)
+            assert not await github_connect.confirm(
+                session,
+                state=state,
+                cookie=browser.cookies["daimon_gh_connect"],
+                github_user_id=17,
+                repos=[],
+            )
+            if revoke_failure_status is not None:
+                await session.execute(
+                    text(
+                        "UPDATE github_connect_flows SET expires_at = :expired "
+                        "WHERE state_hash = :state_hash"
+                    ),
+                    {
+                        "expired": datetime.now(UTC) - timedelta(seconds=1),
+                        "state_hash": github_connect.digest(state),
+                    },
+                )
+                assert (
+                    await github_connect.delete_expired_flows(session, now=datetime.now(UTC)) == 0
+                )
+                await github_connect.create_flow(
+                    session,
+                    invitation_hash=flow.invitation_hash,
+                    state="sibling-flow",
+                    cookie="sibling-cookie",
+                    encrypted_verifier=b"verifier",
+                )
+                assert await github_connect.set_user_token(
+                    session,
+                    state="sibling-flow",
+                    encrypted_token=b"sibling-token",
+                    github_user_id=17,
+                )
+                assert await github_connect.confirm(
+                    session,
+                    state="sibling-flow",
+                    cookie="sibling-cookie",
+                    github_user_id=17,
+                    repos=[],
+                )
+                pending = await github_connect.cancel_flow(
+                    session, state=state, cookie=browser.cookies["daimon_gh_connect"]
+                )
+                assert pending is not None and pending.encrypted_user_token is not None
+        repeated = await browser.get(
+            "/oauth/github/confirm", params={"state": state, "cancel": "1"}
+        )
+        assert repeated.status_code == 200
+        assert "Nothing was connected." in repeated.text
+        if revoke_failure_status is not None:
+            async with committing_sessionmaker() as session:
+                flow = await github_connect.cancel_flow(
+                    session, state=state, cookie=browser.cookies["daimon_gh_connect"]
+                )
+                assert flow is not None
+                assert flow.encrypted_user_token is None
+
+    assert revoked == ['{"access_token":"cancelled-user-token"}'] * (
+        2 if revoke_failure_status is not None else 1
+    )
 
 
 @pytest.mark.asyncio
@@ -356,6 +496,15 @@ async def test_connection_happy_path_and_rechecks(
         )
         assert "Nothing was connected." in cancelled.text
         assert "You can close this tab." in cancelled.text
+        assert (
+            await browser.get("/oauth/github/confirm", params={"state": state})
+        ).status_code == 400
+        restart = await browser.get(f"/oauth/github/connect/{invitation_token}")
+        assert restart.status_code == 307
+        state = parse_qs(urlparse(restart.headers["location"]).query)["state"][0]
+        assert (
+            await browser.get("/oauth/github/callback", params={"state": state, "code": "code"})
+        ).status_code == 307
         installations_available = False
         install_page = await browser.get("/oauth/github/confirm", params={"state": state})
         assert "Install Daimon on GitHub" in install_page.text
@@ -583,4 +732,4 @@ async def test_connection_happy_path_and_rechecks(
         assert 'type="hidden" name="repo"' not in client_form.text
     assert any(request.url.path == "/user/installations" for request in requests)
     assert all(request.url.path != "/user/memberships/orgs" for request in requests)
-    assert sum(request.url.path == "/applications/client/token" for request in requests) == 3
+    assert sum(request.url.path == "/applications/client/token" for request in requests) == 4

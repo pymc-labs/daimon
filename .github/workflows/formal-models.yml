@@ -56,6 +56,8 @@ on:
       - "packages/core/daimon/core/skill_sync/resync.py"
       - "packages/core/alembic/versions/0025_github_push_resync_queue.py"
       - "packages/core/daimon/core/_models.py"
+      - "packages/core/daimon/core/stores/github_connect.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/oauth_github.py"
       - "packages/core/alembic/versions/0024_pending_payment_clawbacks.py"
       - "packages/core/daimon/core/stores/pending_clawbacks.py"
       - "packages/core/daimon/core/stores/payment_events.py"
@@ -148,6 +150,8 @@ on:
       # billing/
       - "packages/adapters/mcp/daimon/adapters/mcp/webhooks.py"
       - "packages/core/daimon/core/_models.py"
+      - "packages/core/daimon/core/stores/github_connect.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/oauth_github.py"
       - "packages/core/alembic/versions/0024_pending_payment_clawbacks.py"
       - "packages/core/daimon/core/stores/pending_clawbacks.py"
       - "packages/core/daimon/core/stores/payment_events.py"

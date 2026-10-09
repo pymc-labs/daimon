@@ -594,7 +594,7 @@ def build_oauth_github_routes(
     private_key = config.private_key.get_secret_value()
     callback_url = f"{root}/oauth/github/callback"
 
-    async def revoke_user_token(token: str) -> None:
+    async def revoke_user_token(token: str) -> bool:
         try:
             async with factory() as client:
                 revocation = await client.request(
@@ -607,6 +607,8 @@ def build_oauth_github_routes(
                 revocation.raise_for_status()
         except httpx.HTTPError:
             _log.warning("GitHub connection token revocation failed")
+            return False
+        return True
 
     async def successful_page(
         state: str, cookie: str, invitation_hash: str = ""
@@ -800,6 +802,33 @@ def build_oauth_github_routes(
             state = request.query_params.get("state", "")
             invitation_hash = ""
         cookie = request.cookies.get(_COOKIE, "")
+        if request.method == "GET" and request.query_params.get("cancel") == "1":
+            async with sessionmaker.begin() as session:
+                cancelled = await github_connect.cancel_flow(session, state=state, cookie=cookie)
+            if cancelled is None:
+                used = await successful_page(state, cookie)
+                return used if used is not None else _cancelled_page()
+            async with sessionmaker() as session:
+                invitation = await github_connect.get_invitation(session, cancelled.invitation_hash)
+                requester = (
+                    await get_account_with_tenant(
+                        session, account_id=invitation.requester_account_id
+                    )
+                    if invitation is not None
+                    else None
+                )
+            if cancelled.encrypted_user_token is not None:
+                token = decrypt_token(fernet, cancelled.encrypted_user_token)
+                if await revoke_user_token(token):
+                    async with sessionmaker.begin() as session:
+                        await github_connect.finish_cancel_revocation(
+                            session, state=state, cookie=cookie
+                        )
+            return _cancelled_page(
+                _back_to_chat(requester.platform, requester.external_id)
+                if requester is not None
+                else ""
+            )
         used = await successful_page(state, cookie, invitation_hash)
         if used is not None:
             return used
@@ -823,8 +852,6 @@ def build_oauth_github_routes(
             if requester is None or requester.is_external:
                 return _error()
             clients_present = await has_external_accounts(session, tenant_id=invitation.tenant_id)
-        if request.query_params.get("cancel") == "1":
-            return _cancelled_page(_back_to_chat(requester.platform, requester.external_id))
         token = decrypt_token(fernet, flow.encrypted_user_token)
         try:
             async with factory() as client:

@@ -599,6 +599,64 @@ async def test_self_serve_refuses_every_saved_github_state_at_mint_and_activatio
 
 
 @pytest.mark.asyncio
+async def test_cancel_blocks_concurrent_github_confirmation(
+    db_engine: AsyncEngine,
+    db_clean: None,
+) -> None:
+    del db_clean
+    sessionmaker = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
+    async with sessionmaker.begin() as session:
+        session.add(Tenant(id=tenant_id, platform="discord", external_id="cancel-race"))
+        await session.flush()
+        session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+        await session.flush()
+        invitation = await github_connect.mint_invitation(
+            session, tenant_id=tenant_id, requester_account_id=admin_id
+        )
+        await github_connect.create_flow(
+            session,
+            invitation_hash=github_connect.digest(invitation),
+            state="cancel-race-state",
+            cookie="cancel-race-cookie",
+            encrypted_verifier=b"encrypted",
+        )
+        assert await github_connect.set_user_token(
+            session, state="cancel-race-state", encrypted_token=b"token", github_user_id=17
+        )
+
+    cancel_locked, release_cancel = asyncio.Event(), asyncio.Event()
+
+    async def cancel() -> None:
+        async with sessionmaker.begin() as session:
+            flow = await github_connect.cancel_flow(
+                session, state="cancel-race-state", cookie="cancel-race-cookie"
+            )
+            assert flow is not None and flow.cancelled_at is not None
+            cancel_locked.set()
+            await release_cancel.wait()
+
+    async def confirm() -> bool:
+        async with sessionmaker.begin() as session:
+            return await github_connect.confirm(
+                session,
+                state="cancel-race-state",
+                cookie="cancel-race-cookie",
+                github_user_id=17,
+                repos=[],
+            )
+
+    cancel_task = asyncio.create_task(cancel())
+    await asyncio.wait_for(cancel_locked.wait(), timeout=5)
+    confirm_task = asyncio.create_task(confirm())
+    await asyncio.sleep(0.05)
+    assert not confirm_task.done(), "confirmation must wait for cancellation's row lock"
+    release_cancel.set()
+    await cancel_task
+    assert not await confirm_task
+
+
+@pytest.mark.asyncio
 async def test_mint_waits_for_concurrent_agent_key_write(
     db_engine: AsyncEngine,
     db_clean: None,
