@@ -1414,70 +1414,6 @@
       "response_access": []
     },
     {
-      "file": "packages/core/daimon/core/agent_fork.py",
-      "line": 221,
-      "end": 221,
-      "scope": "copy_agent",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "anthropic.beta.agents.retrieve(source.id)",
-      "request_keys": [],
-      "response_access": [
-        "source_ma.metadata",
-        "source_ma.metadata.get",
-        "source_ma.model_dump"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/agent_fork.py",
-      "line": 257,
-      "end": 257,
-      "scope": "copy_agent",
-      "category": "production",
-      "resource": "agents.create",
-      "call": "anthropic.beta.agents.create(**fork_params)",
-      "request_keys": [],
-      "response_access": [
-        "created.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/agent_fork.py",
-      "line": 270,
-      "end": 270,
-      "scope": "copy_agent",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "anthropic.beta.agents.retrieve(created.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/agent_fork.py",
-      "line": 155,
-      "end": 157,
-      "scope": "_copy_own_skills",
-      "category": "production",
-      "resource": "skills.versions.download",
-      "call": "anthropic.beta.skills.versions.download(skill.version, skill_id=skill.skill_id)",
-      "request_keys": [],
-      "response_access": [
-        "content.close",
-        "content.read"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/agent_fork.py",
-      "line": 167,
-      "end": 167,
-      "scope": "_copy_own_skills",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "anthropic.beta.agents.retrieve(copy.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
       "file": "packages/core/daimon/core/agent_mcp_credentials.py",
       "line": 280,
       "end": 280,
@@ -1521,28 +1457,6 @@
         "token",
         "type"
       ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/channel_copies.py",
-      "line": 175,
-      "end": 175,
-      "scope": "archive_channel_copy",
-      "category": "production",
-      "resource": "agents.archive",
-      "call": "client.beta.agents.archive(agent.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/channel_rules.py",
-      "line": 536,
-      "end": 536,
-      "scope": "_archive_unused_copy",
-      "category": "production",
-      "resource": "agents.archive",
-      "call": "anthropic.beta.agents.archive(agent_id)",
-      "request_keys": [],
       "response_access": []
     },
     {
@@ -2647,177 +2561,6 @@
         "agent.archived_at",
         "agent.metadata",
         "agent.metadata.get"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/skill_sync/orchestrator.py",
-      "line": 118,
-      "end": 118,
-      "scope": "_get_sync_target_agent",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "anthropic_client.beta.agents.retrieve(target_ma_agent_id)",
-      "request_keys": [],
-      "response_access": [
-        "agent.archived_at",
-        "agent.metadata"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/skill_sync/orchestrator.py",
-      "line": 404,
-      "end": 407,
-      "scope": "_process_one",
-      "category": "production",
-      "resource": "skills.versions.create",
-      "call": "anthropic_client.beta.skills.versions.create(skill_id=existing.anthropic_id, files=[('SKILL.zip', io.BytesIO(zip_bytes), 'application/zip')])",
-      "request_keys": [],
-      "response_access": [
-        "resp.version"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/skill_sync/orchestrator.py",
-      "line": 911,
-      "end": 915,
-      "scope": "_apply",
-      "category": "production",
-      "resource": "agents.update",
-      "call": "anthropic_client.beta.agents.update(fresh.id, version=fresh.version, skills=union_list)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/skill_sync/orchestrator.py",
-      "line": 360,
-      "end": 363,
-      "scope": "_process_one",
-      "category": "production",
-      "resource": "skills.create",
-      "call": "anthropic_client.beta.skills.create(display_title=display_title, files=[('SKILL.zip', io.BytesIO(zip_bytes), 'application/zip')])",
-      "request_keys": [],
-      "response_access": [
-        "created.id",
-        "created.latest_version"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/skill_sync/orchestrator.py",
-      "line": 905,
-      "end": 910,
-      "scope": "_apply",
-      "category": "production",
-      "resource": "agents.update",
-      "call": "anthropic_client.beta.agents.update(fresh.id, version=fresh.version, skills=union_list, tools=tools_arg)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/skill_sync/orchestrator.py",
-      "line": 394,
-      "end": 397,
-      "scope": "_process_one",
-      "category": "production",
-      "resource": "skills.versions.create",
-      "call": "anthropic_client.beta.skills.versions.create(skill_id=recovered.id, files=[('SKILL.zip', io.BytesIO(zip_bytes), 'application/zip')])",
-      "request_keys": [],
-      "response_access": [
-        "resp.version"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/skill_sync/orchestrator.py",
-      "line": 782,
-      "end": 782,
-      "scope": "sync_agent_skills",
-      "category": "production",
-      "resource": "skills.delete",
-      "call": "anthropic_client.beta.skills.delete(row.anthropic_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/skills/add.py",
-      "line": 299,
-      "end": 299,
-      "scope": "add_agent_skill",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "client.beta.agents.retrieve(agent.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/skills/add.py",
-      "line": 475,
-      "end": 480,
-      "scope": "_apply",
-      "category": "production",
-      "resource": "agents.update",
-      "call": "client.beta.agents.update(fresh.id, version=fresh.version, skills=merged, tools=tools)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/skills/add.py",
-      "line": 313,
-      "end": 318,
-      "scope": "add_agent_skill",
-      "category": "production",
-      "resource": "skills.create",
-      "call": "client.beta.skills.create(display_title=tenant_scoped_display_title(tenant_id=tenant_id, name=preview.name, agent_name=agent_name), files=[('SKILL.zip', io.BytesIO(bundle.zip_bytes), 'application/zip')])",
-      "request_keys": [],
-      "response_access": [
-        "created.id",
-        "created.latest_version"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/skills/add.py",
-      "line": 321,
-      "end": 324,
-      "scope": "add_agent_skill",
-      "category": "production",
-      "resource": "skills.versions.create",
-      "call": "client.beta.skills.versions.create(skill_id=skill_id, files=[('SKILL.zip', io.BytesIO(bundle.zip_bytes), 'application/zip')])",
-      "request_keys": [],
-      "response_access": [
-        "pushed.version"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/skills/add.py",
-      "line": 470,
-      "end": 470,
-      "scope": "_apply",
-      "category": "production",
-      "resource": "agents.update",
-      "call": "client.beta.agents.update(fresh.id, version=fresh.version, skills=merged)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/skills/sync.py",
-      "line": 141,
-      "end": 144,
-      "scope": "sync_skills",
-      "category": "production",
-      "resource": "skills.versions.create",
-      "call": "client.beta.skills.versions.create(skill_id=ma_match.id, files=[('SKILL.zip', fh, 'application/zip')])",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/skills/sync.py",
-      "line": 169,
-      "end": 172,
-      "scope": "sync_skills",
-      "category": "production",
-      "resource": "skills.create",
-      "call": "client.beta.skills.create(display_title=canonical, files=[('SKILL.zip', fh, 'application/zip')])",
-      "request_keys": [],
-      "response_access": [
-        "created.id"
       ]
     },
     {
@@ -5409,8 +5152,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 172,
-      "end": 172,
+      "line": 183,
+      "end": 183,
       "scope": "test_agent_create_has_no_extra_or_missing_fields",
       "category": "test",
       "resource": "agents.create",
@@ -5422,8 +5165,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 215,
-      "end": 215,
+      "line": 226,
+      "end": 226,
       "scope": "test_environment_create_preserves_configuration",
       "category": "test",
       "resource": "environments.create",
@@ -5435,8 +5178,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 240,
-      "end": 240,
+      "line": 252,
+      "end": 252,
       "scope": "test_agent_update_keeps_version_and_null_clear_semantics",
       "category": "test",
       "resource": "agents.update",
@@ -5446,8 +5189,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 438,
-      "end": 438,
+      "line": 450,
+      "end": 450,
       "scope": "test_skills_listing_keeps_pagination_and_truncation_signal",
       "category": "test",
       "resource": "skills.list",
@@ -5459,8 +5202,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 259,
-      "end": 259,
+      "line": 271,
+      "end": 271,
       "scope": "test_remaining_defaults_requests_match",
       "category": "test",
       "resource": "agents.retrieve",
@@ -5470,8 +5213,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 374,
-      "end": 377,
+      "line": 386,
+      "end": 389,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.create",
@@ -5483,8 +5226,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 521,
-      "end": 521,
+      "line": 533,
+      "end": 533,
       "scope": "test_skill_walks_keep_sdk_terminal_page_stop_rule",
       "category": "test",
       "resource": "skills.list",
@@ -5522,8 +5265,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 262,
-      "end": 262,
+      "line": 274,
+      "end": 274,
       "scope": "test_remaining_defaults_requests_match",
       "category": "test",
       "resource": "agents.archive",
@@ -5533,8 +5276,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 386,
-      "end": 388,
+      "line": 398,
+      "end": 400,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.create",
@@ -5546,8 +5289,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 462,
-      "end": 462,
+      "line": 474,
+      "end": 474,
       "scope": "test_missing_page_data_keeps_sdks_empty_iterator_behavior",
       "category": "test",
       "resource": "agents.list",
@@ -5557,8 +5300,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 470,
-      "end": 470,
+      "line": 482,
+      "end": 482,
       "scope": "test_missing_page_data_keeps_sdks_empty_iterator_behavior",
       "category": "test",
       "resource": "environments.list",
@@ -5568,8 +5311,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 514,
-      "end": 514,
+      "line": 526,
+      "end": 526,
       "scope": "test_skill_walks_keep_sdk_terminal_page_stop_rule",
       "category": "test",
       "resource": "skills.versions.list",
@@ -5581,8 +5324,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 265,
-      "end": 265,
+      "line": 277,
+      "end": 277,
       "scope": "test_remaining_defaults_requests_match",
       "category": "test",
       "resource": "environments.archive",
@@ -5592,8 +5335,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 273,
-      "end": 273,
+      "line": 285,
+      "end": 285,
       "scope": "test_remaining_defaults_requests_match",
       "category": "test",
       "resource": "environments.update",
@@ -5603,8 +5346,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 394,
-      "end": 394,
+      "line": 406,
+      "end": 406,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.download",
@@ -5617,8 +5360,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 418,
-      "end": 418,
+      "line": 430,
+      "end": 430,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.list",
@@ -5630,8 +5373,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 424,
-      "end": 424,
+      "line": 436,
+      "end": 436,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.delete",
@@ -5641,8 +5384,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 408,
-      "end": 408,
+      "line": 420,
+      "end": 420,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.list",
@@ -5654,8 +5397,8 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 420,
-      "end": 420,
+      "line": 432,
+      "end": 432,
       "scope": "test_skill_multipart_version_walk_and_cleanup_match",
       "category": "test",
       "resource": "skills.versions.delete",
@@ -5915,8 +5658,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 255,
-      "end": 255,
+      "line": 276,
+      "end": 276,
       "scope": "walk",
       "category": "production",
       "resource": "agents.list",
@@ -5926,8 +5669,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 180,
-      "end": 180,
+      "line": 201,
+      "end": 201,
       "scope": "create",
       "category": "production",
       "resource": "agents.create",
@@ -5937,8 +5680,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 188,
-      "end": 188,
+      "line": 209,
+      "end": 209,
       "scope": "retrieve",
       "category": "production",
       "resource": "agents.retrieve",
@@ -5948,8 +5691,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 203,
-      "end": 203,
+      "line": 224,
+      "end": 224,
       "scope": "list",
       "category": "production",
       "resource": "agents.list",
@@ -5959,8 +5702,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 224,
-      "end": 224,
+      "line": 245,
+      "end": 245,
       "scope": "update",
       "category": "production",
       "resource": "agents.update",
@@ -5970,8 +5713,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 232,
-      "end": 232,
+      "line": 253,
+      "end": 253,
       "scope": "archive",
       "category": "production",
       "resource": "agents.archive",
@@ -12414,7 +12157,7 @@
     },
     {
       "file": "packages/core/daimon/core/skill_sync/orchestrator.py",
-      "line": 45,
+      "line": 44,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -12423,7 +12166,7 @@
     },
     {
       "file": "packages/core/daimon/core/skill_sync/orchestrator.py",
-      "line": 46,
+      "line": 45,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsAgent",
@@ -14300,7 +14043,7 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
-      "line": 361,
+      "line": 373,
       "module": "anthropic",
       "names": [
         "APIStatusError"
@@ -15606,7 +15349,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 201,
+      "line": 222,
       "module": "anthropic.types.beta.agent_list_params",
       "names": [
         "AgentListParams"

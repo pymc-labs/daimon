@@ -93,9 +93,18 @@ class AnthropicManagedAgents:
         return _required(self._usage, "usage")
 
     def capabilities(self) -> Profile:
+        addresses = {(namespace, version) for _, namespace, version in self._extensions}
+        addresses.update(
+            (namespace, 1)
+            for namespace in (
+                "anthropic.model_config",
+                "anthropic.environment_config",
+                "anthropic.agent_create_nulls",
+            )
+        )
         extra = tuple(
             ExtensionRef(namespace=namespace, version=version)
-            for _, namespace, version in self._extensions
+            for namespace, version in sorted(addresses)
             if not any(
                 e.namespace == namespace and e.version == version for e in MANAGED_AGENTS.extensions
             )

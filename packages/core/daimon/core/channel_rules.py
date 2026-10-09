@@ -38,6 +38,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_agent
 from daimon.core.permissions import (
     AgentRule,
     ChannelRule,
@@ -533,7 +535,7 @@ async def _archive_unused_copy(
         _log.warning("channel_rules.copy_kept", reason="channel_points_at_it", **log_fields)
         return
     try:
-        await anthropic.beta.agents.archive(agent_id)
+        await archive_agent(anthropic, agent_id, scope=resource_scope(tenant_id=str(tenant_id)))
     except APIError:
         _log.warning("channel_rules.copy_archive_failed", exc_info=True, **log_fields)
 

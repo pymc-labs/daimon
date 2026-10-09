@@ -45,6 +45,8 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import create_agent, download_skill_version, retrieve_agent
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import bundle_from_upload
 from daimon.core.specs import merge_default_agent_toolset
@@ -152,19 +154,20 @@ async def _copy_own_skills(
         try:
             if skill.version is None:
                 raise DaimonError(f"{skill.body} has no version to copy.")
-            content = await anthropic.beta.skills.versions.download(
-                skill.version, skill_id=skill.skill_id
+            data = await download_skill_version(
+                anthropic,
+                skill.skill_id,
+                skill.version,
+                scope=resource_scope(tenant_id=str(tenant_id)),
             )
-            try:
-                data = await content.read()
-            finally:
-                await content.close()
             # A new skill under the copy's title, never a share of the source's id.
             added = await add_agent_skill(
                 anthropic,
                 sessionmaker,
                 tenant_id=tenant_id,
-                agent=await anthropic.beta.agents.retrieve(copy.id),
+                agent=await retrieve_agent(
+                    anthropic, copy.id, scope=resource_scope(tenant_id=str(tenant_id))
+                ),
                 agent_name=new_name,
                 bundle=bundle_from_upload(data, filename="SKILL.zip"),
                 origin=skill.upload.origin if skill.upload else f"copied from {source_name}",
@@ -218,7 +221,9 @@ async def copy_agent(
         )
     if not decision:
         raise DaimonError("Only a workspace or server admin can copy an agent.")
-    source_ma = await anthropic.beta.agents.retrieve(source.id)
+    source_ma = await retrieve_agent(
+        anthropic, source.id, scope=resource_scope(tenant_id=str(tenant_id))
+    )
     params = source_ma.model_dump(mode="json")
     fork_params: dict[str, object] = {k: params[k] for k in _FORK_COPY_FIELDS if k in params}
     fork_params["name"] = new_name
@@ -254,7 +259,9 @@ async def copy_agent(
     )
     if "skills" in fork_params:
         fork_params["skills"] = split.kept
-    created = await anthropic.beta.agents.create(**fork_params)  # type: ignore[arg-type]  # a validated copy of the source's own create fields
+    created = await create_agent(
+        anthropic, fork_params, scope=resource_scope(tenant_id=str(tenant_id))
+    )
     if not split.own:
         return AgentCopy(created, tuple(split.dropped))
     copied, failed = await _copy_own_skills(
@@ -267,7 +274,9 @@ async def copy_agent(
         own=split.own,
     )
     try:
-        agent = await anthropic.beta.agents.retrieve(created.id)
+        agent = await retrieve_agent(
+            anthropic, created.id, scope=resource_scope(tenant_id=str(tenant_id))
+        )
     except APIError as exc:
         # The copy exists: raising would leave it orphaned and unreported, so
         # return the create's snapshot; `copied_skills` names what it lacks.

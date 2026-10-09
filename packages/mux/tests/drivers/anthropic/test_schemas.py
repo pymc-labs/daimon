@@ -78,3 +78,38 @@ def test_wrong_extension_version_is_rejected():
         agent_tools(
             ExtensionConfig(namespace="anthropic.agent_tools", version=2, value={"tools": []})
         )
+
+
+def test_legacy_create_nulls_are_a_closed_field_allowlist():
+    from mux.drivers.anthropic.schemas import AgentCreateNulls
+
+    assert AgentCreateNulls(fields=["description"]).model_dump() == {"fields": ["description"]}
+    with pytest.raises(ValidationError):
+        AgentCreateNulls.model_validate({"fields": ["name"]})
+    with pytest.raises(ValidationError):
+        AgentCreateNulls.model_validate({"fields": ["description"], "arbitrary": None})
+
+
+async def test_duplicate_native_config_namespaces_fail_before_io():
+    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.contracts.extensions import ExtensionConfig
+    from mux.contracts.ids import ModelRef, Scope
+    from mux.contracts.resources import AgentSpec
+    from mux.drivers.anthropic import AnthropicManagedAgents
+
+    extension = ExtensionConfig(namespace="anthropic.agent_tools", version=1, value={"tools": []})
+    transport = ScriptedTransport()
+    async with transport.client() as sdk:
+        backend = AnthropicManagedAgents(sdk)
+        spec = AgentSpec(
+            name="one",
+            model=ModelRef(provider="anthropic", id="claude-sonnet-4-6"),
+            extensions=(extension, extension),
+        )
+        with pytest.raises(ValueError, match="duplicate agent extension"):
+            await backend.agents.create(
+                Scope.platform(reason="test duplicate namespace"),
+                spec,
+                key="key",
+            )
+    assert transport.requests == []

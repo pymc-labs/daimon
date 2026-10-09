@@ -27,6 +27,8 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL_COPY, MA_METAD
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.memory_resource import archive_memory_store_for_agent
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_agent
 from daimon.core.permissions import AgentRule, with_agent_rule
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.access_policy import (
@@ -172,7 +174,7 @@ async def archive_channel_copy(
         )
         if refusal is not None:
             raise ChannelCopyArchiveRefused(refusal)
-        await client.beta.agents.archive(agent.id)
+        await archive_agent(client, agent.id, scope=resource_scope(tenant_id=str(tenant_id)))
         updated = _without_rules(policy, names)
         if updated != policy:
             await set_access_policy(session, tenant_id=tenant_id, policy=updated)

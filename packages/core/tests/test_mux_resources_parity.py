@@ -136,6 +136,17 @@ async def test_full_list_walk_makes_identical_requests(resource, include_archive
         {"name": "example", "model": "claude-sonnet-4-6"},
         {
             "name": "example",
+            "model": {"id": "claude-sonnet-4-6", "speed": None},
+            "description": None,
+            "system": None,
+            "tools": None,
+            "mcp_servers": None,
+            "skills": None,
+            "metadata": None,
+            "multiagent": None,
+        },
+        {
+            "name": "example",
             "model": "claude-sonnet-4-6",
             "description": "",
             "system": "",
@@ -224,6 +235,7 @@ async def test_environment_create_preserves_configuration(payload):
     "payload",
     [
         {"name": "example", "skills": []},
+        {"multiagent": None},
         {
             "description": None,
             "system": "",
