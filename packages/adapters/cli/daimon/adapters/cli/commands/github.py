@@ -22,6 +22,8 @@ from daimon.core.github_app_session import (
 )
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_session
 from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.accounts import get_account_with_tenant
@@ -275,7 +277,10 @@ def _run_grant_command(
                                     rotated_ids.add(mapped.ma_session_id)
                                     continue
                             if mapped.ma_session_id not in archived_ids:
-                                await anthropic.beta.sessions.archive(mapped.ma_session_id)
+                                scope = resource_scope(
+                                    tenant_id=str(tenant), account_id=str(account.account_id)
+                                )
+                                await archive_session(anthropic, mapped.ma_session_id, scope=scope)
                                 if snapshot is not None:
                                     vault_id = snapshot.vault_id
                                     if snapshot.github_mode == "app":
@@ -290,7 +295,9 @@ def _run_grant_command(
                                             fernet=fernet,
                                         )
                                         if vault_id is not None:
-                                            await archive_app_vault(anthropic, vault_id=vault_id)
+                                            await archive_app_vault(
+                                                anthropic, vault_id=vault_id, scope=scope
+                                            )
                                 archived_ids.add(mapped.ma_session_id)
                             async with sessionmaker.begin() as session:
                                 await mark_dead(session, id=mapped.id)

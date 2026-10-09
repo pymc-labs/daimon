@@ -576,3 +576,12 @@ lists the implemented surface and refused operations.
 The persistent profile remains non-core until the skills and artifacts resource
 slice is proved. Required vault and multiagent capabilities refuse admission;
 complete workspace export/import has no verified mapping and is unknown.
+## CLI GitHub grant cleanup
+
+GitHub grant changes archive live sessions and their App vaults through
+resource ports. Both archive operations use the tenant and CLI admin
+account established by the existing authorization check. Session archive,
+token revocation, vault archive and local session retirement retain their
+existing order, duplicate-session handling, operator output and SDK errors.
+Repeated vault cleanup keeps its existing missing, conflict and already-archived
+responses. Grant edits that can rotate tokens in place keep that path.
