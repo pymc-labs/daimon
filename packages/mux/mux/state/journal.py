@@ -2,7 +2,9 @@
 projection derived from them.
 
 Entries are unique on (session, source_key, revision), so a page of saved
-items that overlaps buffered stream events adds nothing twice. An append,
+items that overlaps buffered stream events adds nothing twice. Previews are
+deduplicated in their own namespace: a preview never takes the place of the
+authoritative entry with the same source key. An append,
 the projection it produces and the stream cursor commit together. Preview
 events are kept but never complete a turn or bill.
 """
@@ -27,6 +29,9 @@ from mux.contracts.resources import ProjectionSnapshot
 
 _AUTHORITATIVE = frozenset({"record", "reconciled"})
 
+type EntryIdentity = tuple[str, int, bool]
+"""(source_key, revision, is_preview): what the journal deduplicates on."""
+
 
 class JournalEntry(Contract):
     """An event to append. `source_key` names it upstream (usually the
@@ -36,6 +41,10 @@ class JournalEntry(Contract):
     source_key: str
     revision: int = Field(default=1, ge=1)
     event: Event
+
+    @property
+    def identity(self) -> EntryIdentity:
+        return (self.source_key, self.revision, self.event.authority == "preview")
 
 
 class JournalAppend(Contract):
@@ -58,7 +67,7 @@ def empty_projection(session: ResourceRef, now: datetime) -> ProjectionSnapshot:
 
 def plan_append(
     session_id: str,
-    seen: AbstractSet[tuple[str, int]],
+    seen: AbstractSet[EntryIdentity],
     next_sequence: int,
     entries: Iterable[JournalEntry],
 ) -> tuple[list[tuple[JournalEntry, Event]], int]:
@@ -71,7 +80,7 @@ def plan_append(
     for entry in entries:
         if entry.event.session_id != session_id:
             raise ValueError(f"event {entry.event.id} belongs to session {entry.event.session_id}")
-        identity = (entry.source_key, entry.revision)
+        identity = entry.identity
         if identity in seen:
             duplicates += 1
             continue

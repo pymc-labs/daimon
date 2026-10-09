@@ -142,20 +142,36 @@ Asking for a namespace the profile does not offer raises
 `mux.state.store.StateStore` is the durable state a host keeps for the
 library. Each method is one atomic transaction, and every decision it makes
 comes from a pure function in `mux.state`, so every store implementation
-decides the same way. Time is passed in; nothing reads a clock.
+decides the same way. Records a store returns are copies: changing one never
+changes what was committed.
+
+A binding lives in a slot: a thread plus the caller account that owns it.
+Per-caller threads (the default) have one private slot per account, keyed by
+the binding's `legacy_account_id`; a thread opted into sharing has one slot
+with no account. Leases are per slot.
 
 | Record | Unique on | Rule |
 | --- | --- | --- |
 | config revision | (channel, local) | Immutable. The same number with different content raises `ConfigRevisionConflict`. |
-| binding | (thread, generation) | Compare-and-swap on generation (0 = unbound); the loser raises `BindingConflict`. A rebind keeps the binding `id`. `bind_new_thread` returns the winner of a race. |
-| operation | (tenant, account, key) | Persisted as `pending` before any I/O, marked `sent` before the request goes out. The same key and request digest returns the existing record; a different digest raises `OperationConflict`. Moves follow `operations.TRANSITIONS`. |
-| lease | thread | One active root turn. Each acquisition gets a higher fence; a write carrying a lease that is no longer active raises `StaleFence`. Taking over an expired lease sets `took_over`. |
-| journal | (session, sequence) and (session, source key, revision) | An append, its projection and the stream cursor commit together; an entry already journaled is dropped. Preview events are kept but never change the projection. |
-| usage | (binding, observation, revision) | A higher revision writes one outbox row of signed deltas; an equal or lower one is ignored. |
-| accounting outbox | (binding, observation, revision) | `mark_outbox_applied` is true once per row. |
+| binding | (slot, generation) | Compare-and-swap on generation (0 = unbound); the loser raises `BindingConflict`. A rebind keeps the binding `id`, and an `id` names one slot only. `bind_new_slot` returns the winner of a race. |
+| operation | (tenant, account, key) | Owned by the principal that began it; another principal gets `ScopeViolation`. Persisted as `pending` before any I/O. The same key and request digest returns the existing record; a different digest raises `OperationConflict`. Only `claim_send`, a compare-and-swap from `pending`, moves it to `sent`, so exactly one caller sends. It goes back to `pending` only when reconciling proves the provider never got it. |
+| lease | slot | One active root turn per slot. Each acquisition gets a higher fence. Taking over an expired lease sets `took_over`. |
+| journal | (session, sequence) and (session, source key, revision, preview) | An append, its projection and the stream cursor commit together; an entry already journaled is dropped. Previews are kept in their own namespace and never change the projection, so they can neither complete a turn nor block the record that does. |
+| usage | (binding, observation, revision) | A higher revision writes one outbox row of signed deltas; a lower one is ignored, and the same revision with different counts raises `UsageRevisionConflict`. |
+| accounting outbox | (binding, observation, revision) | Each row carries `prior_applied_revision`, the revision its deltas are measured against. `mark_outbox_applied` is true once per row. |
+
+Fencing: `claim_send` and `advance_operation` on an operation begun with a
+slot, and every `append_events`, need the active lease of the record's own
+slot. A journal belongs to the slot of its first append. A missing or
+foreign lease raises `ScopeViolation`, and a superseded one raises
+`StaleFence`. The other writes are safe without a lease: beginning an
+operation is idempotent, `put_binding` is its own compare-and-swap,
+usage is ordered by revision, and an outbox row flips once. Time is passed
+in, but a database store checks lease expiry against its own transaction
+clock.
 
 After a crash, `operations.recovery` says what a successor does with an
-operation it finds: send a `pending` one, reconcile a `sent` or
+operation it finds: claim and send a `pending` one, reconcile a `sent` or
 `outcome_unknown` one, observe an `accepted` one. A lost lease never means
 the request was not sent.
 

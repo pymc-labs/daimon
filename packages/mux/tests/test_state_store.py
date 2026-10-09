@@ -1,4 +1,4 @@
-"""StateStore behaviour (C02, C03, C05, C07, C13 and leases), on the memory store."""
+"""StateStore behaviour (C02, C03, C05, C07, C13, leases, isolation), on the memory store."""
 
 from __future__ import annotations
 
@@ -12,17 +12,20 @@ from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.contracts.usage import UsageObservation
-from mux.errors import BindingConflict, OperationConflict
+from mux.errors import BindingConflict, OperationConflict, ScopeViolation
 from mux.state.journal import JournalEntry
-from mux.state.lease import LeaseBusy, StaleFence
+from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence
 from mux.state.memory import MemoryStateStore
-from mux.state.operations import InvalidTransition, recovery, request_digest
-from mux.state.store import ConfigRevisionConflict, StateStore, bind_new_thread
+from mux.state.operations import InvalidTransition, SendClaimed, recovery, request_digest
+from mux.state.store import ConfigRevisionConflict, StateStore, bind_new_slot
+from mux.state.usage_ledger import UsageRevisionConflict
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
 TTL = timedelta(minutes=5)
 CHANNEL = ChannelRef(tenant_id="t1", platform="discord", channel_id="c1")
 THREAD = ThreadRef(channel=CHANNEL, thread_id="th1")
+SHARED = Slot(thread=THREAD)
+PRIVATE_A = Slot(thread=THREAD, account_id="a1")
 SCOPE = Scope(tenant_id="t1", account_id="a1", principal_id="u1", authorization_id="z1")
 SESSION = ResourceRef(id="s1", kind="session", provider="anthropic", account_scope_id="ws")
 PROV = NativeProvenance(provider="anthropic", api_revision="2026-07")
@@ -33,15 +36,26 @@ def store() -> StateStore:
     return MemoryStateStore()
 
 
-def _binding(generation: int = 1, session: str = "sesn_1", id_: str = "b1") -> ProviderBinding:
+async def _lease(store: StateStore, slot: Slot = PRIVATE_A, holder: str = "w1") -> Lease:
+    return await store.acquire_lease(slot, holder=holder, turn_id="turn_1", now=NOW, ttl=TTL)
+
+
+def _binding(
+    generation: int = 1,
+    session: str = "sesn_1",
+    id_: str = "b1",
+    account: str | None = None,
+    thread: ThreadRef = THREAD,
+) -> ProviderBinding:
     return ProviderBinding(
         id=id_,
-        thread=THREAD,
+        thread=thread,
         provider="anthropic",
         profile="anthropic.managed_agents",
         native_refs={"session": session, "environment": "env_1"},
         generation=generation,
         config_revision=1,
+        legacy_account_id=account,
     )
 
 
@@ -56,7 +70,7 @@ def _entry(
 ) -> JournalEntry:
     event = Event.model_validate(
         {
-            "id": f"ev_{source}_{revision}",
+            "id": f"ev_{source}_{revision}_{authority}",
             "session_id": SESSION.id,
             "sequence": 0,
             "type": type_,
@@ -70,6 +84,11 @@ def _entry(
     return JournalEntry(source_key=source, revision=revision, event=event)
 
 
+def _message(source: str, text: str = "hi") -> JournalEntry:
+    content = [{"type": "text", "text": text}]
+    return _entry(source, "agent.message", {"item_id": source, "content": content})
+
+
 def _usage(revision: int, output: int | None) -> UsageObservation:
     return UsageObservation(
         id="obs_1",
@@ -80,6 +99,12 @@ def _usage(revision: int, output: int | None) -> UsageObservation:
         output_tokens=output,
         completeness="measured" if output is not None else "unknown",
         observed_at=NOW,
+    )
+
+
+async def _begin(store: StateStore, scope: Scope = SCOPE, slot: Slot | None = PRIVATE_A) -> None:
+    await store.begin_operation(
+        scope, key="k", request_digest="d", operation_id="op", now=NOW, slot=slot
     )
 
 
@@ -97,9 +122,19 @@ async def test_config_revisions_are_immutable(store: StateStore) -> None:
 
 async def test_c13_parallel_new_binding_race_yields_one_binding(store: StateStore) -> None:
     candidates = [_binding(session=f"sesn_{i}", id_=f"b{i}") for i in range(8)]
-    winners = await asyncio.gather(*(bind_new_thread(store, c) for c in candidates))
+    winners = await asyncio.gather(*(bind_new_slot(store, c) for c in candidates))
     assert len({w.id for w in winners}) == 1
-    assert await store.get_binding(THREAD) == winners[0]
+    assert await store.get_binding(SHARED) == winners[0]
+
+
+async def test_private_bindings_of_one_thread_stay_apart(store: StateStore) -> None:
+    a = await bind_new_slot(store, _binding(session="sesn_a", id_="ba", account="a1"))
+    b = await bind_new_slot(store, _binding(session="sesn_b", id_="bb", account="a2"))
+    assert a.native_refs["session"] == "sesn_a"
+    assert b.native_refs["session"] == "sesn_b"
+    assert await store.get_binding(PRIVATE_A) == a
+    assert await store.get_binding(Slot(thread=THREAD, account_id="a2")) == b
+    assert await store.get_binding(SHARED) is None
 
 
 async def test_binding_cas_on_generation(store: StateStore) -> None:
@@ -110,27 +145,37 @@ async def test_binding_cas_on_generation(store: StateStore) -> None:
     with pytest.raises(ValueError, match="keeps binding id"):
         await store.put_binding(_binding(2, id_="other"), expected_generation=1)
     rebound = await store.put_binding(_binding(2, session="sesn_2"), expected_generation=1)
-    assert await store.get_binding(THREAD) == rebound
+    assert await store.get_binding(SHARED) == rebound
+
+
+async def test_a_binding_id_names_one_slot(store: StateStore) -> None:
+    await store.put_binding(_binding(), expected_generation=0)
+    elsewhere = ThreadRef(channel=CHANNEL, thread_id="th2")
+    with pytest.raises(ValueError, match="another slot"):
+        await store.put_binding(_binding(thread=elsewhere), expected_generation=0)
 
 
 async def test_c02_binding_survives_restart_and_is_never_silently_replaced() -> None:
     first = MemoryStateStore()
-    bound = await bind_new_thread(first, _binding())
+    bound = await bind_new_slot(first, _binding())
     second = first.restart()
-    assert await second.get_binding(THREAD) == bound
+    assert await second.get_binding(SHARED) == bound
     assert dict(bound.native_refs) == {"session": "sesn_1", "environment": "env_1"}
     # A fresh session for the thread needs an explicit rebind, not a new first binding.
-    assert await bind_new_thread(second, _binding(session="sesn_fresh", id_="b9")) == bound
+    assert await bind_new_slot(second, _binding(session="sesn_fresh", id_="b9")) == bound
 
 
 async def test_c03_operation_key_reuse(store: StateStore) -> None:
+    fence = await _lease(store)
     digest = request_digest({"text": "hi", "mode": "new_turn"})
     begun = await store.begin_operation(
-        SCOPE, key="k1", request_digest=digest, operation_id="op1", now=NOW
+        SCOPE, key="k1", request_digest=digest, operation_id="op1", now=NOW, slot=PRIVATE_A
     )
     assert begun.fresh and begun.record.operation.status == "pending"
-    await store.advance_operation(SCOPE, "k1", "sent", now=NOW)
-    await store.advance_operation(SCOPE, "k1", "accepted", now=NOW, result={"input_ids": ["in_1"]})
+    await store.claim_send(SCOPE, "k1", now=NOW, fence=fence)
+    await store.advance_operation(
+        SCOPE, "k1", "accepted", now=NOW, fence=fence, result={"input_ids": ["in_1"]}
+    )
     # A retry with a fresh authorization finds the same operation and its result.
     retry_scope = SCOPE.model_copy(update={"authorization_id": "z2"})
     again = await store.begin_operation(
@@ -139,6 +184,7 @@ async def test_c03_operation_key_reuse(store: StateStore) -> None:
         request_digest=request_digest({"mode": "new_turn", "text": "hi"}),
         operation_id="op2",
         now=NOW,
+        slot=PRIVATE_A,
     )
     assert not again.fresh
     assert again.record.operation.id == "op1"
@@ -150,16 +196,63 @@ async def test_c03_operation_key_reuse(store: StateStore) -> None:
             request_digest=request_digest({"text": "bye"}),
             operation_id="op3",
             now=NOW,
+            slot=PRIVATE_A,
         )
 
 
 async def test_c03_timeout_after_acceptance_is_unknown_not_resent(store: StateStore) -> None:
-    await store.begin_operation(SCOPE, key="k", request_digest="d", operation_id="op", now=NOW)
-    await store.advance_operation(SCOPE, "k", "sent", now=NOW)
-    record = await store.advance_operation(SCOPE, "k", "outcome_unknown", now=NOW)
+    fence = await _lease(store)
+    await _begin(store)
+    await store.claim_send(SCOPE, "k", now=NOW, fence=fence)
+    record = await store.advance_operation(SCOPE, "k", "outcome_unknown", now=NOW, fence=fence)
     assert recovery(record.operation) == "reconcile"
+    with pytest.raises(SendClaimed):
+        await store.claim_send(SCOPE, "k", now=NOW, fence=fence)
     with pytest.raises(InvalidTransition):
-        await store.advance_operation(SCOPE, "k", "sent", now=NOW)
+        await store.advance_operation(SCOPE, "k", "sent", now=NOW, fence=fence)
+
+
+async def test_exactly_one_concurrent_sender_wins_the_claim(store: StateStore) -> None:
+    fence = await _lease(store)
+    await _begin(store)
+    # Same holder and turn: every caller shares the fence, so only the claim decides.
+    fences = [await _lease(store) for _ in range(8)]
+    assert all(f == fence for f in fences)
+    outcomes = await asyncio.gather(
+        *(store.claim_send(SCOPE, "k", now=NOW, fence=f) for f in fences),
+        return_exceptions=True,
+    )
+    assert sum(not isinstance(o, BaseException) for o in outcomes) == 1
+    assert sum(isinstance(o, SendClaimed) for o in outcomes) == 7
+
+
+async def test_reconciled_absence_allows_one_resend_under_the_same_key(store: StateStore) -> None:
+    fence = await _lease(store)
+    await _begin(store)
+    await store.claim_send(SCOPE, "k", now=NOW, fence=fence)
+    reopened = await store.advance_operation(SCOPE, "k", "pending", now=NOW, fence=fence)
+    assert recovery(reopened.operation) == "send"
+    resent = await store.claim_send(SCOPE, "k", now=NOW, fence=fence)
+    assert resent.operation.status == "sent" and resent.operation.id == "op"
+    await store.advance_operation(SCOPE, "k", "processed", now=NOW, fence=fence)
+    with pytest.raises(InvalidTransition):
+        await store.advance_operation(SCOPE, "k", "pending", now=NOW, fence=fence)
+
+
+async def test_another_principal_cannot_use_an_operation_key(store: StateStore) -> None:
+    fence = await _lease(store)
+    await _begin(store)
+    other = SCOPE.model_copy(update={"principal_id": "u2"})
+    with pytest.raises(ScopeViolation):
+        await _begin(store, other)
+    with pytest.raises(ScopeViolation):
+        await store.get_operation(other, "k")
+    with pytest.raises(ScopeViolation):
+        await store.claim_send(other, "k", now=NOW, fence=fence)
+    with pytest.raises(ScopeViolation):
+        await store.advance_operation(other, "k", "failed", now=NOW, fence=fence)
+    record = await store.get_operation(SCOPE, "k")
+    assert record is not None and record.operation.status == "pending"
 
 
 async def test_operation_keys_are_per_tenant_and_account(store: StateStore) -> None:
@@ -171,56 +264,103 @@ async def test_operation_keys_are_per_tenant_and_account(store: StateStore) -> N
     assert begun.fresh
 
 
+async def test_an_operation_slot_must_be_in_scope(store: StateStore) -> None:
+    foreign = Slot(thread=THREAD, account_id="a2")
+    with pytest.raises(ScopeViolation):
+        await _begin(store, slot=foreign)
+    other_tenant = Slot(
+        thread=ThreadRef(channel=CHANNEL.model_copy(update={"tenant_id": "t9"}), thread_id="th1")
+    )
+    with pytest.raises(ScopeViolation):
+        await _begin(store, slot=other_tenant)
+
+
+async def test_a_slot_bound_operation_needs_its_own_lease(store: StateStore) -> None:
+    await _begin(store)
+    with pytest.raises(ScopeViolation):
+        await store.claim_send(SCOPE, "k", now=NOW, fence=None)
+    other_thread = Slot(thread=ThreadRef(channel=CHANNEL, thread_id="th2"), account_id="a1")
+    foreign = await _lease(store, other_thread)
+    with pytest.raises(ScopeViolation):
+        await store.claim_send(SCOPE, "k", now=NOW, fence=foreign)
+    mine = await _lease(store)
+    forged = mine.model_copy(update={"holder": "intruder"})
+    with pytest.raises(StaleFence):
+        await store.claim_send(SCOPE, "k", now=NOW, fence=forged)
+    forged_turn = mine.model_copy(update={"turn_id": "turn_9"})
+    with pytest.raises(StaleFence):
+        await store.claim_send(SCOPE, "k", now=NOW, fence=forged_turn)
+    await store.claim_send(SCOPE, "k", now=NOW, fence=mine)
+
+
 async def test_lease_one_root_turn_and_monotonic_fence(store: StateStore) -> None:
-    first = await store.acquire_lease(THREAD, holder="w1", turn_id="t1", now=NOW, ttl=TTL)
+    first = await _lease(store)
     assert first.fence == 1 and not first.took_over
-    same = await store.acquire_lease(THREAD, holder="w1", turn_id="t1", now=NOW, ttl=TTL)
-    assert same == first
     with pytest.raises(LeaseBusy):
-        await store.acquire_lease(THREAD, holder="w2", turn_id="t2", now=NOW, ttl=TTL)
+        await _lease(store, holder="w2")
+    # Another caller's private slot on the same thread is its own lease.
+    assert (await _lease(store, Slot(thread=THREAD, account_id="a2"), "w2")).fence == 1
     await store.release_lease(first)
     await store.release_lease(first)
-    second = await store.acquire_lease(THREAD, holder="w2", turn_id="t2", now=NOW, ttl=TTL)
+    second = await _lease(store, holder="w2")
     assert second.fence == 2
     with pytest.raises(StaleFence):
         await store.release_lease(first)
+    with pytest.raises(StaleFence):
+        await store.renew_lease(second.model_copy(update={"holder": "w1"}), now=NOW, ttl=TTL)
 
 
 async def test_stale_fence_cannot_commit(store: StateStore) -> None:
-    old = await store.acquire_lease(THREAD, holder="w1", turn_id="t1", now=NOW, ttl=TTL)
+    old = await _lease(store)
     later = NOW + TTL + timedelta(seconds=1)
-    new = await store.acquire_lease(THREAD, holder="w2", turn_id="t1", now=later, ttl=TTL)
+    new = await store.acquire_lease(PRIVATE_A, holder="w2", turn_id="t1", now=later, ttl=TTL)
     assert new.fence == 2 and new.took_over
-    await store.begin_operation(SCOPE, key="k", request_digest="d", operation_id="o", now=NOW)
+    await _begin(store)
     with pytest.raises(StaleFence):
-        await store.advance_operation(SCOPE, "k", "sent", now=later, fence=old)
+        await store.claim_send(SCOPE, "k", now=later, fence=old)
     with pytest.raises(StaleFence):
-        await store.append_events(
-            SESSION,
-            [_entry("e1", "agent.message", {"item_id": "i1", "content": []})],
-            cursor="c1",
-            now=later,
-            fence=old,
-        )
+        await store.append_events(SESSION, [_message("e1")], fence=old, cursor="c1", now=later)
     with pytest.raises(StaleFence):
         await store.renew_lease(old, now=later, ttl=TTL)
     assert await store.read_events(SESSION.id) == []
-    await store.append_events(SESSION, [], cursor="c1", now=later, fence=new)
+    await store.append_events(SESSION, [], fence=new, cursor="c1", now=later)
+
+
+async def test_a_session_journal_takes_only_its_slot_lease(store: StateStore) -> None:
+    mine = await _lease(store)
+    await store.append_events(SESSION, [_message("e1")], fence=mine, cursor="c1", now=NOW)
+    for slot in (
+        Slot(thread=THREAD, account_id="a2"),
+        Slot(thread=ThreadRef(channel=CHANNEL, thread_id="th2"), account_id="a1"),
+        Slot(
+            thread=ThreadRef(
+                channel=CHANNEL.model_copy(update={"tenant_id": "t2"}), thread_id="th1"
+            ),
+            account_id="a1",
+        ),
+    ):
+        foreign = await _lease(store, slot)
+        with pytest.raises(ScopeViolation):
+            await store.append_events(
+                SESSION, [_message("e2")], fence=foreign, cursor="c2", now=NOW
+            )
+    assert len(await store.read_events(SESSION.id)) == 1
 
 
 async def test_c05_overlapping_pages_and_child_completion(store: StateStore) -> None:
+    fence = await _lease(store)
     running = _entry("e1", "session.status_running", {"root_turn_id": "root"}, turn_id="root")
-    message = _entry("e2", "agent.message", {"item_id": "i1", "content": []}, turn_id="root")
+    message = _message("e2")
     child_end = _entry(
         "e3",
         "session.turn_ended",
         {"root_turn_id": "child", "outcome": "completed"},
         turn_id="child",
     )
-    await store.append_events(SESSION, [running, message], cursor="c2", now=NOW)
+    await store.append_events(SESSION, [running, message], fence=fence, cursor="c2", now=NOW)
     # The saved-items page overlaps what the stream already delivered.
     result = await store.append_events(
-        SESSION, [message, child_end, child_end], cursor="c3", now=NOW
+        SESSION, [message, child_end, child_end], fence=fence, cursor="c3", now=NOW
     )
     assert result.duplicates == 2
     assert [e.sequence for e in await store.read_events(SESSION.id)] == [0, 1, 2]
@@ -229,45 +369,69 @@ async def test_c05_overlapping_pages_and_child_completion(store: StateStore) -> 
     assert result.projection.cursor == "c3"
     gap = _entry("e4", "session.history_gap", {"domain": "stream", "recoverable": False})
     end = _entry(
-        "e5", "session.turn_ended", {"root_turn_id": "root", "outcome": "completed"}, turn_id="root"
-    )
-    final = await store.append_events(SESSION, [gap, end], cursor="c5", now=NOW)
-    assert final.projection.state == "idle"
-    assert final.projection.gaps == ("ev_e4_1",)
-
-
-async def test_previews_never_complete_a_turn(store: StateStore) -> None:
-    await store.append_events(
-        SESSION,
-        [_entry("e1", "session.status_running", {"root_turn_id": "root"}, turn_id="root")],
-        cursor="c1",
-        now=NOW,
-    )
-    preview = _entry(
-        "p1",
+        "e5",
         "session.turn_ended",
         {"root_turn_id": "root", "outcome": "completed"},
-        authority="preview",
         turn_id="root",
     )
-    result = await store.append_events(SESSION, [preview], cursor="c2", now=NOW)
+    final = await store.append_events(SESSION, [gap, end], fence=fence, cursor="c5", now=NOW)
+    assert final.projection.state == "idle"
+    assert final.projection.gaps == ("ev_e4_1_record",)
+
+
+async def test_previews_never_complete_a_turn_nor_block_the_record(store: StateStore) -> None:
+    fence = await _lease(store)
+    running = _entry("e1", "session.status_running", {"root_turn_id": "root"}, turn_id="root")
+    await store.append_events(SESSION, [running], fence=fence, cursor="c1", now=NOW)
+    ended = {"root_turn_id": "root", "outcome": "completed"}
+    preview = _entry("end", "session.turn_ended", ended, authority="preview", turn_id="root")
+    result = await store.append_events(SESSION, [preview], fence=fence, cursor="c2", now=NOW)
     assert len(result.appended) == 1
     assert result.projection.state == "running"
+    record = _entry("end", "session.turn_ended", ended, turn_id="root")
+    result = await store.append_events(SESSION, [record], fence=fence, cursor="c3", now=NOW)
+    assert len(result.appended) == 1
+    assert result.projection.state == "idle"
 
 
 async def test_journal_revision_of_same_source_is_a_new_entry(store: StateStore) -> None:
+    fence = await _lease(store)
     end = {"root_turn_id": "turn_1", "outcome": "errored"}
     corrected = {"root_turn_id": "turn_1", "outcome": "completed"}
     await store.append_events(
-        SESSION, [_entry("e1", "session.turn_ended", end)], cursor="a", now=NOW
+        SESSION, [_entry("e1", "session.turn_ended", end)], fence=fence, cursor="a", now=NOW
     )
     result = await store.append_events(
         SESSION,
         [_entry("e1", "session.turn_ended", corrected, authority="reconciled", revision=2)],
+        fence=fence,
         cursor="b",
         now=NOW,
     )
     assert len(result.appended) == 1 and result.appended[0].sequence == 1
+
+
+async def test_committed_state_cannot_be_changed_through_values() -> None:
+    store = MemoryStateStore()
+    fence = await _lease(store)
+    await _begin(store)
+    await store.claim_send(SCOPE, "k", now=NOW, fence=fence)
+    record = await store.advance_operation(
+        SCOPE, "k", "accepted", now=NOW, fence=fence, result={"input_ids": ["in_1"]}
+    )
+    input_ids = record.result["input_ids"]
+    assert isinstance(input_ids, list)
+    input_ids.append("forged")
+    entry = _message("e1", "original")
+    await store.append_events(SESSION, [entry], fence=fence, cursor="c", now=NOW)
+    entry.event.payload["content"][0]["text"] = "forged"  # type: ignore[index]
+    (read,) = await store.read_events(SESSION.id)
+    read.payload["content"][0]["text"] = "forged too"  # type: ignore[index]
+    restarted = store.restart()
+    stored = await restarted.get_operation(SCOPE, "k")
+    assert stored is not None and stored.result["input_ids"] == ["in_1"]
+    (event,) = await restarted.read_events(SESSION.id)
+    assert event.payload["content"][0]["text"] == "original"  # type: ignore[index]
 
 
 async def test_c07_usage_revisions_apply_signed_deltas_once(store: StateStore) -> None:
@@ -289,6 +453,12 @@ async def test_c07_usage_revisions_apply_signed_deltas_once(store: StateStore) -
         total += row.deltas["output_tokens"] or 0
     assert total == 110
     assert await store.pending_outbox() == []
+
+
+async def test_a_changed_replay_of_the_current_revision_is_refused(store: StateStore) -> None:
+    await store.record_usage("b1", _usage(1, 110))
+    with pytest.raises(UsageRevisionConflict):
+        await store.record_usage("b1", _usage(1, 999))
 
 
 async def test_usage_null_after_known_keeps_the_accounted_value(store: StateStore) -> None:

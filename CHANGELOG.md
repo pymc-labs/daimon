@@ -258,9 +258,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Managed Agents with per-caller threads) and a pure `admit` check. The old
   `Capabilities`/`FLOOR`/`MuxEvent` scaffold is gone. Daimon does not call
   `mux` yet, so nothing a user sees changes. See `docs/mux.md`.
-- `mux.state` adds the `StateStore` protocol (config revisions, thread
-  bindings, idempotent operations, fenced thread leases, the event journal
-  and the usage-revision outbox) with a restartable in-memory store. Daimon
+- `mux.state` adds the `StateStore` protocol (config revisions, per-slot
+  bindings, idempotent operations with a single send claim, fenced leases,
+  the event journal and the usage-revision outbox) with a restartable in-memory store. Daimon
   has no Postgres implementation of it yet, so nothing a user sees changes.
 - Tool approval cards on Discord, Slack and Teams now name the action and consequence, show plain labelled inputs in Details, and collapse after a decision. Each blocked call gets its own card and confirmation event.
 - If a turn stops after an approval click but before its confirmation is sent, the answered card now shows Stopped.
