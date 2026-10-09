@@ -258,6 +258,7 @@ class UpdatePlan(Contract):
     operations: tuple[UpdateOperation, ...] = ()
     losses: tuple[str, ...] = ()
     unmet: tuple[str, ...] = ()
+    extensions: FrozenMap[str, ExtensionConfig] = Field(default_factory=dict[str, ExtensionConfig])
 
 
 class ExportRequirements(Contract):

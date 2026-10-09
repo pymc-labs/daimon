@@ -14,11 +14,15 @@ from typing import cast
 from anthropic import AsyncAnthropic
 from anthropic._models import construct_type_unchecked
 from anthropic.types.beta import BetaManagedAgentsSession
+from anthropic.types.beta.beta_managed_agents_session_agent_update_param import (
+    BetaManagedAgentsSessionAgentUpdateParam,
+)
 from anthropic.types.beta.session_create_params import Agent, Resource
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import Revision, Scope
+from mux.contracts.ports import SessionResources
 from mux.contracts.resources import ResourceBinding, Session, SessionSpec
 from pydantic import JsonValue
 
@@ -164,5 +168,55 @@ async def archive_session_record(client: AsyncAnthropic, session_id: str, *, sco
     await legacy_call(
         backend.sessions.archive(
             scope, resource_ref(backend, "session", session_id, scope=scope), key=token_hex(16)
+        )
+    )
+
+
+async def update_session_record(
+    client: AsyncAnthropic,
+    session_id: str,
+    *,
+    scope: Scope,
+    agent_id: str,
+    revision: Revision,
+    agent: BetaManagedAgentsSessionAgentUpdateParam,
+) -> None:
+    backend = managed_agents(
+        client, scope=scope, resources=frozenset({("session", session_id), ("agent", agent_id)})
+    )
+    desired = SessionSpec(
+        agent=resource_ref(backend, "agent", agent_id, scope=scope),
+        agent_revision=revision,
+        config_revision=0,
+        extensions={
+            "anthropic.session_update": ExtensionConfig(
+                namespace="anthropic.session_update",
+                version=1,
+                value={"agent": cast(JsonValue, dict(agent))},
+            )
+        },
+    )
+    ref = resource_ref(backend, "session", session_id, scope=scope)
+    plan = await backend.sessions.plan_update(scope, ref, desired)
+    await legacy_call(
+        backend.sessions.apply_update(scope, plan, expected=revision, key=token_hex(16))
+    )
+
+
+async def remove_session_resource_record(
+    client: AsyncAnthropic,
+    session_id: str,
+    resource_id: str,
+    *,
+    scope: Scope,
+) -> None:
+    backend = managed_agents(client, scope=scope, resources=frozenset({("session", session_id)}))
+    port = backend.extension(SessionResources, namespace="anthropic.session_resources", version=1)
+    await legacy_call(
+        port.remove(
+            scope,
+            resource_ref(backend, "session", session_id, scope=scope),
+            resource_id,
+            key=token_hex(16),
         )
     )

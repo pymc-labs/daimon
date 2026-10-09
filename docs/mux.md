@@ -518,8 +518,7 @@ policy, billing checkpoints, recovery order and first feedback remain unchanged.
 Tenant-aware creation also forwards its scope through vault bootstrap, credential
 mirroring and rollback; vault discovery retains its existing exact-name inventory
 check. Tenantless established creation uses a named legacy host capability.
-Update planning and workspace export/restore are separate follow-on changes;
-unsupported lifecycle methods fail explicitly. The driver keeps no operation cache
+Workspace export/restore remain unsupported lifecycle methods and fail explicitly. The driver keeps no operation cache
 and makes no request during construction.
 ## Accounting observations
 
@@ -595,3 +594,18 @@ The native `anthropic.session_walk@1` extension exposes `SessionWalk.walk(scope)
 as an async iterator of neutral sessions with opaque native snapshots. It sends
 no list filters and follows the SDK paginator exactly. Workspace-wide billing
 sweeps pass a justified platform scope; tenant walks retain grants and tag checks.
+### In-place session updates
+
+Session tool/MCP changes use a pure plan followed by one apply request. The closed
+`anthropic.session_update@1` config accepts only the native agent tool/MCP patch
+and session metadata; it retains native ordering, omissions, nulls and empty
+arrays. Plans carry the caller's snapshot revision and apply rejects a different
+revision before I/O. The Anthropic endpoint does not offer server revision CAS.
+An explicit empty patch reuses the session without I/O; unsupported generic
+revision/environment changes and fresh-state requests fail explicitly. The host
+still decides changes and preserves existing busy deferral and snapshots.
+
+Mount deletion and repository token rotation use session administration. Token
+material is resolved and redacted at the existing driver boundary. Secret file
+upload and inherited-seal reads receive the existing tenant/account context.
+An unreadable predecessor remains conservatively sealed to the successor thread.

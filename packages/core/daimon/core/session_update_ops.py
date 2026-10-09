@@ -55,6 +55,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_app_session import rotate_live_app_tokens
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import resolve_clone_token
+from daimon.core.mux_compat import rotate_session_repo_token
 from daimon.core.session_compat import (
     ChangeReason,
     RemirrorVaultCredentials,
@@ -63,6 +64,11 @@ from daimon.core.session_compat import (
     RotateAppTokens,
     RotateRepoToken,
     UpdateOp,
+)
+from daimon.core.session_ports_compat import (
+    remove_session_resource_record,
+    session_scope,
+    update_session_record,
 )
 from daimon.core.session_snapshot import (
     MaTool,
@@ -76,6 +82,7 @@ from daimon.core.session_snapshot import (
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.tool_safety import ToolSafetyPolicy
+from mux.contracts.ids import Revision, Scope
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -163,6 +170,7 @@ async def _replace_env_file(
     snapshot: SessionSnapshot,
     tenant_id: uuid.UUID,
     agent_uuid: uuid.UUID,
+    scope: Scope,
 ) -> SessionSnapshot:
     """Swap the session's `.env` for the agent's current secrets, in place.
 
@@ -176,7 +184,9 @@ async def _replace_env_file(
     if snapshot.github_mode == "app":
         rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
 
-    file_id = await upload_env_file(anthropic, sessionmaker, rows=rows) if rows else None
+    file_id = (
+        await upload_env_file(anthropic, sessionmaker, rows=rows, scope=scope) if rows else None
+    )
     cleared = snapshot.model_copy(
         update={"env_sha256": None, "env_file_id": None, "env_resource_id": None}
     )
@@ -186,7 +196,7 @@ async def _replace_env_file(
         resource_id = await _find_env_resource_id(anthropic, session_id)
     if resource_id is not None:
         try:
-            await anthropic.beta.sessions.resources.delete(resource_id, session_id=session_id)
+            await remove_session_resource_record(anthropic, session_id, resource_id, scope=scope)
         except APIStatusError as error:
             # Already gone is the state we were asking for.
             if error.status_code != 404:
@@ -225,6 +235,7 @@ async def _rotate_repo_token(
     github_app_id: str | None,
     github_app_private_key: str | None,
     now: dt.datetime,
+    scope: Scope,
 ) -> bool:
     """Mint a fresh clone credential and hand it to the mounted repo resource."""
     async with sessionmaker() as session:
@@ -251,9 +262,7 @@ async def _rotate_repo_token(
             ),
             now=int(now.timestamp()),
         )
-    await anthropic.beta.sessions.resources.update(
-        op.resource_id, session_id=session_id, authorization_token=token
-    )
+    await rotate_session_repo_token(anthropic, session_id, op.resource_id, token, scope=scope)
     return True
 
 
@@ -287,6 +296,9 @@ async def apply_update_ops(
     coarse — the axes an op touches, not the exact fields that differed; the
     caller intersects it with its own decision's reasons.
     """
+    scope = session_scope(
+        tenant_id=tenant_id, account_id=account_id, call_site="session_update_ops:apply_update_ops"
+    )
     snapshot = recorded
     applied: list[ChangeReason] = []
 
@@ -301,6 +313,7 @@ async def apply_update_ops(
                     snapshot=snapshot,
                     tenant_id=tenant_id,
                     agent_uuid=agent_uuid,
+                    scope=scope,
                 )
                 applied.append("env_file")
             case ReplaceToolsAndMcpServers():
@@ -323,8 +336,15 @@ async def apply_update_ops(
                     agent, hidden, tool_safety=tool_safety, public_url=public_url
                 )
                 try:
-                    await anthropic.beta.sessions.update(
-                        session_id, agent=_agent_update(tools, servers)
+                    await update_session_record(
+                        anthropic,
+                        session_id,
+                        scope=scope,
+                        agent_id=agent.id,
+                        revision=Revision(
+                            local=snapshot.agent_version, native=str(snapshot.agent_version)
+                        ),
+                        agent=_agent_update(tools, servers),
                     )
                 except APIStatusError as error:
                     if not _is_session_running(error):
@@ -351,6 +371,7 @@ async def apply_update_ops(
                     github_app_id=github_app_id,
                     github_app_private_key=github_app_private_key,
                     now=now,
+                    scope=scope,
                 )
                 if rotated:
                     snapshot = snapshot.model_copy(

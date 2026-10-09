@@ -9,6 +9,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.session_create_params import SessionCreateParams
 from anthropic.types.beta.session_list_params import SessionListParams
+from anthropic.types.beta.session_update_params import SessionUpdateParams
 from pydantic import BaseModel, Field, JsonValue
 
 from mux.contracts.actions import UserMessage
@@ -24,6 +25,7 @@ from mux.contracts.resources import (
     SessionExport,
     SessionFilter,
     SessionSpec,
+    UpdateOperation,
     UpdatePlan,
 )
 from mux.drivers.anthropic.resources._authorization import (
@@ -36,7 +38,7 @@ from mux.drivers.anthropic.resources._authorization import (
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.schemas import AgentTool, NativeConfig
-from mux.errors import MigrationUnsupported, ScopeViolation, UnsupportedCapability
+from mux.errors import MigrationUnsupported, ProviderError, ScopeViolation, UnsupportedCapability
 
 
 def _native_json(value: object) -> JsonValue:
@@ -93,6 +95,18 @@ class SessionCreateConfig(NativeConfig):
 
     agent: Annotated[AgentOverrides | AgentVersion, Field(discriminator="type")] | None = None
     vault_ids: list[str] | None = None
+
+
+class SessionAgentUpdate(NativeConfig):
+    tools: list[AgentTool] | None = None
+    mcp_servers: list[MCPServer] | None = None
+
+
+class SessionUpdateConfig(NativeConfig):
+    """anthropic.session_update@1: native in-place changes only."""
+
+    agent: SessionAgentUpdate | None = None
+    metadata: dict[str, str] | None = None
 
 
 class FileMount(NativeConfig):
@@ -380,12 +394,96 @@ class AnthropicSessions:
         return await self._archive.archive(scope, ref, key=key)
 
     async def plan_update(self, scope: Scope, ref: ResourceRef, desired: SessionSpec) -> UpdatePlan:
-        raise UnsupportedCapability(("session_update",), "anthropic.managed_agents")
+        """Pure plan: no provider fetch and no implicit replacement of a thread.
+
+        The native endpoint has no revision CAS. The plan records the caller's
+        snapshot revision; apply checks that the caller still supplies that
+        revision, without promising a server-side comparison.
+        """
+        self._check(scope, ref, "session")
+        self._check(scope, desired.agent, "agent")
+        if desired.environment is not None:
+            self._check(scope, desired.environment, "environment")
+        check_record(scope, ref.id, desired.metadata)
+        if desired.state_mode == "fresh" or desired.resources:
+            return UpdatePlan(
+                session=ref,
+                expected_revision=desired.agent_revision,
+                action="refuse",
+                unmet=(
+                    "session_replacement" if desired.state_mode == "fresh" else "session_resources",
+                ),
+            )
+        if not desired.extensions and "metadata" not in desired.model_fields_set:
+            # Generic desired revisions/environments are not mutable at this
+            # endpoint. Without a native patch, we cannot infer a safe change
+            # (or claim reuse) without an extra provider read.
+            return UpdatePlan(
+                session=ref,
+                expected_revision=desired.agent_revision,
+                action="refuse",
+                unmet=("session_update_native_config",),
+            )
+        payload: dict[str, JsonValue] = {}
+        for namespace, extension in desired.extensions.items():
+            if namespace != "anthropic.session_update":
+                raise ValueError(f"unsupported session update extension {namespace!r}")
+            _config(extension, namespace, SessionUpdateConfig)
+            payload = dict(extension.value)
+        if "metadata" in desired.model_fields_set:
+            if "metadata" in payload:
+                raise ValueError("session metadata was configured twice")
+            payload["metadata"] = dict(desired.metadata)
+        checked = SessionUpdateConfig.model_validate(payload)
+        check_record(scope, ref.id, checked.metadata)
+        extensions = (
+            {
+                "anthropic.session_update": ExtensionConfig(
+                    namespace="anthropic.session_update", version=1, value=payload
+                )
+            }
+            if payload
+            else {}
+        )
+        return UpdatePlan(
+            session=ref,
+            expected_revision=desired.agent_revision,
+            action="in_place" if payload else "reuse",
+            operations=(UpdateOperation(kind="native", detail={"fields": list(payload)}),)
+            if payload
+            else (),
+            extensions=extensions,
+        )
 
     async def apply_update(
         self, scope: Scope, plan: UpdatePlan, *, expected: Revision, key: str
     ) -> UpdateReceipt:
-        raise UnsupportedCapability(("session_update",), "anthropic.managed_agents")
+        self._check(scope, plan.session, "session")
+        if expected != plan.expected_revision:
+            raise ProviderError(
+                "conflict", retryable=False, native_code="session_plan_revision", operation_id=key
+            )
+        if plan.action not in ("reuse", "in_place") or plan.losses or plan.unmet:
+            raise UnsupportedCapability(
+                plan.unmet or ("session_update_plan",), "anthropic.managed_agents"
+            )
+        if plan.action == "in_place":
+            if set(plan.extensions) != {"anthropic.session_update"}:
+                raise ValueError("in-place session update requires exactly one native config")
+            extension = plan.extensions["anthropic.session_update"]
+            checked = _config(extension, "anthropic.session_update", SessionUpdateConfig)
+            check_record(scope, plan.session.id, checked.metadata)
+            # Keep the closed-schema-checked original key order at the SDK.
+            await provider_call(
+                self._client.beta.sessions.update(
+                    plan.session.id, **cast(SessionUpdateParams, dict(extension.value))
+                )
+            )
+        elif plan.operations or plan.extensions:
+            raise ValueError("reuse plan must not contain changes")
+        return UpdateReceipt(
+            operation_id=key, status="processed", applies="now", session=plan.session
+        )
 
     async def delete(self, scope: Scope, ref: ResourceRef, *, key: str) -> DeletionReceipt:
         raise UnsupportedCapability(("session_delete",), "anthropic.managed_agents")

@@ -111,3 +111,8 @@ The native `anthropic.session_walk@1` extension exposes `SessionWalk.walk(scope)
 as an async iterator of neutral sessions with opaque native snapshots. It sends
 no list filters and follows the SDK paginator exactly. Workspace-wide billing
 sweeps pass a justified platform scope; tenant walks retain grants and tag checks.
+In-place session changes use closed `anthropic.session_update@1` configs, carried
+by SessionSpec and UpdatePlan extensions. Planning performs no provider read;
+apply checks the caller's plan revision and makes one native update. Anthropic's
+endpoint has no server revision CAS. Unsupported generic revision/environment
+changes and fresh-state requests are refused; they never silently replace a thread.
