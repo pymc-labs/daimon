@@ -11,6 +11,7 @@ from daimon.adapters.slack import routine_delivery as poster_mod
 from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_identity import AgentIdentity
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineRow
@@ -63,6 +64,7 @@ def _poster(
         SlackRuntime,
         SimpleNamespace(
             sessionmaker=sm,
+            anthropic=MagicMock(),
             settings=SimpleNamespace(direct_message_policies={}),
             deployment_default=DeploymentDefault(),
         ),
@@ -86,6 +88,73 @@ async def test_posts_into_a_thread_without_broadcasting(
     client.conversations_replies.assert_awaited_once_with(channel="C1", ts="1717.5", limit=1)
     assert "<!channel>" not in kwargs["text"], "a routine never broadcasts"
     assert "<@U7>" in kwargs["text"], "mentions of people survive"
+
+
+def _with_identity(monkeypatch: pytest.MonkeyPatch, identity: AgentIdentity) -> None:
+    async def resolve(*args: object, **kwargs: Any) -> AgentIdentity:
+        assert kwargs["platform"] == "slack" and kwargs["workspace_id"] == "T_ROUTINES"
+        return identity
+
+    monkeypatch.setattr(poster_mod, "resolve_routine_identity", resolve)
+
+
+async def test_with_identity_the_result_posts_as_the_agent_without_from_wording(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = await _routine(db_session, kind="channel", destination_id="C1")
+    post, client = _poster(db_session_factory, monkeypatch)
+    client.token = "xoxb-routine-identity"
+    _with_identity(
+        monkeypatch, AgentIdentity(name="research", avatar_url="https://app/a.png", builtin=False)
+    )
+
+    assert (await post(row)).status == "delivered"
+
+    kwargs = client.chat_postMessage.await_args.kwargs
+    assert (kwargs["username"], kwargs["icon_url"]) == ("research", "https://app/a.png")
+    assert kwargs["text"].startswith("Routine result (0 9 * * 1, UTC):\n\nDone")
+    assert "<!channel>" not in kwargs["text"], "a routine never broadcasts"
+
+
+async def test_without_customize_scope_the_plain_post_keeps_the_agents_name(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from slack_sdk.errors import SlackApiError
+    from slack_sdk.web.async_slack_response import AsyncSlackResponse
+
+    row = await _routine(db_session, kind="channel", destination_id="C1")
+    post, client = _poster(db_session_factory, monkeypatch)
+    client.token = "xoxb-routine-no-customize"
+    response = MagicMock(spec=AsyncSlackResponse)
+    response.data = {"ok": False, "error": "missing_scope", "needed": "chat:write.customize"}
+    client.chat_postMessage = AsyncMock(side_effect=[SlackApiError("scope", response), None])
+    _with_identity(monkeypatch, AgentIdentity(name="research", avatar_url=None, builtin=False))
+
+    assert (await post(row)).status == "delivered"
+
+    retry = client.chat_postMessage.await_args_list[-1].kwargs
+    assert "username" not in retry
+    assert retry["text"].startswith("Routine result from daimon (0 9 * * 1, UTC):")
+
+
+async def test_the_built_in_agent_keeps_todays_text(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = await _routine(db_session, kind="channel", destination_id="C1")
+    post, client = _poster(db_session_factory, monkeypatch)
+    _with_identity(monkeypatch, AgentIdentity(name="daimon", avatar_url=None, builtin=True))
+
+    assert (await post(row)).status == "delivered"
+
+    kwargs = client.chat_postMessage.await_args.kwargs
+    assert "username" not in kwargs
+    assert kwargs["text"].startswith("Routine result from daimon (0 9 * * 1, UTC):")
 
 
 async def test_a_protected_channel_is_refused(

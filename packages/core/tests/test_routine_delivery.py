@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 
+import anthropic
+import httpx
 import pytest
+from daimon.core import routine_delivery as routine_delivery_module
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_identity import AgentIdentity
+from daimon.core.config import Settings
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     DeliveryTarget,
@@ -19,6 +25,7 @@ from daimon.core.routine_delivery import (
     poll_deliveries_once,
     render_fallback_post,
     render_routine_controls,
+    resolve_routine_identity,
     teams_thread_id,
 )
 from daimon.core.stores.access_policy import set_access_policy
@@ -180,6 +187,95 @@ def test_destination_shape(platform: str, kind: str, destination_id: str, ok: bo
 
 def test_the_fallback_post_carries_the_tail() -> None:
     assert render_fallback_post(_row()).endswith("\n\nAll green.")
+
+
+def test_the_fallback_post_names_the_agent_unless_the_post_carries_its_identity() -> None:
+    row = _row(agent_name="research", cron_expr="0 17 * * 5", timezone="Europe/London")
+    assert render_fallback_post(row) == (
+        "Routine result from research (0 17 * * 5, Europe/London):\n\nAll green."
+    )
+    assert render_fallback_post(row, as_agent=True) == (
+        "Routine result (0 17 * * 5, Europe/London):\n\nAll green."
+    ), "the agent's own header says who it is from; the schedule stays"
+
+
+def _identity_settings(*, enabled: bool) -> Settings:
+    return Settings.model_validate(
+        {
+            "database": {"url": "postgresql+asyncpg://test:test@localhost/daimon_test"},
+            "anthropic": {"api_key": "test"},
+            "agent_identity": {"enabled": enabled},
+        }
+    )
+
+
+async def test_routine_identity_is_plain_when_identity_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_lookup(*args: object, **kwargs: object) -> None:
+        raise AssertionError("identity off needs no agent lookup")
+
+    monkeypatch.setattr(routine_delivery_module, "find_agent_by_daimon_tag", no_lookup)
+    identity = await resolve_routine_identity(
+        MagicMock(),
+        MagicMock(),
+        _identity_settings(enabled=False),
+        row=_row(agent_name="research"),
+        platform="slack",
+        workspace_id="T1",
+        default_agent_name="daimon",
+    )
+    assert identity == AgentIdentity(name="research", avatar_url=None, builtin=True)
+
+
+async def test_routine_identity_resolves_the_agents_face_and_waits_for_it(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    async def lookup(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def resolve(session: object, **kwargs: object) -> AgentIdentity:
+        calls.append(kwargs)
+        return AgentIdentity(name="research", avatar_url="https://app/a.png", builtin=False)
+
+    monkeypatch.setattr(routine_delivery_module, "find_agent_by_daimon_tag", lookup)
+    monkeypatch.setattr(routine_delivery_module, "resolve_agent_identity", resolve)
+    row = _row(agent_name="research")
+    identity = await resolve_routine_identity(
+        db_session_factory,
+        MagicMock(),
+        _identity_settings(enabled=True),
+        row=row,
+        platform="discord",
+        workspace_id="123",
+        default_agent_name="daimon",
+    )
+    assert identity.avatar_url == "https://app/a.png"
+    (call,) = calls
+    assert call["is_builtin"] is False and call["wait_for_face"] is True
+    assert call["tenant_id"] == row.tenant_id
+
+
+async def test_routine_identity_falls_back_to_plain_when_the_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failing(*args: object, **kwargs: object) -> None:
+        raise anthropic.APIConnectionError(request=httpx.Request("GET", "https://api.test"))
+
+    monkeypatch.setattr(routine_delivery_module, "find_agent_by_daimon_tag", failing)
+    identity = await resolve_routine_identity(
+        MagicMock(),
+        MagicMock(),
+        _identity_settings(enabled=True),
+        row=_row(agent_name="research"),
+        platform="slack",
+        workspace_id="T1",
+        default_agent_name="daimon",
+    )
+    assert identity.builtin, "a failed lookup posts the way it always has"
 
 
 @pytest.mark.parametrize(

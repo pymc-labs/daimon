@@ -31,12 +31,18 @@ async def post_as_agent(
     client: AsyncWebClient,
     identity: AgentIdentity | None,
     on_customized: Callable[[bool], None] | None = None,
+    plain_text: str | None = None,
     **kwargs: Any,  # noqa: ANN401
 ) -> AsyncSlackResponse:
-    """Retry once as the bot only when Slack explicitly needs customize scope."""
+    """Retry once as the bot only when Slack explicitly needs customize scope.
+
+    `plain_text` replaces `text` whenever the message goes out under the app's
+    own name, for a text that relies on the agent's header to say who it is from.
+    """
     token = getattr(client, "token", None)
+    plain_kwargs = kwargs if plain_text is None else {**kwargs, "text": plain_text}
     if identity is None or identity.builtin or missing_customize_scope(token):
-        response = await client.chat_postMessage(**kwargs)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
+        response = await client.chat_postMessage(**plain_kwargs)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
         if on_customized is not None:
             on_customized(False)
         return response
@@ -57,7 +63,7 @@ async def post_as_agent(
         if data.get("error") != "missing_scope" or "chat:write.customize" not in needed:
             raise
         remember_missing_customize_scope(token)
-        response = await client.chat_postMessage(**kwargs)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
+        response = await client.chat_postMessage(**plain_kwargs)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
         if on_customized is not None:
             on_customized(False)
         return response

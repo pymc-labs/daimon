@@ -78,6 +78,7 @@ from daimon.adapters.discord.bot import (
 from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.thread_send import safe_thread_send
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.turn_card_recovery import (
@@ -91,6 +92,7 @@ from daimon.adapters.discord.wizard import (
     _reply_or_followup,  # pyright: ignore[reportPrivateUsage]  # shared is_done()-gated reply helper the sibling dispatch classes use -- reused verbatim
 )
 from daimon.adapters.discord.wizard_render import build_wizard_view
+from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.domain import Role, WizardSessionRow
@@ -530,12 +532,44 @@ async def run_wizard_submit_turn_observed(
         session_account_id = admission.account_id
         user_message = format_answer_block(spec, state)
 
+        # The answer goes out as the agent, through the same transport and
+        # identity a mention turn uses.
+        identity_enabled = identity_enabled_for(
+            bot.runtime.settings, "discord", interaction.guild_id
+        )
+        try:
+            async with bot.runtime.sessionmaker.begin() as identity_session:
+                identity = await resolve_agent_identity(
+                    identity_session,
+                    tenant_id=row.tenant_id,
+                    agent_name=agent.name,
+                    is_builtin=agent.name.casefold() == "daimon",
+                    public_base_url=bot.runtime.settings.mcp.app_root_url,
+                    enabled=identity_enabled,
+                    background_sessionmaker=bot.runtime.sessionmaker,
+                    wait_for_face=True,
+                )
+        except Exception as exc:
+            _log.warning("wizard_submit.identity_resolution_failed", error_type=type(exc).__name__)
+            identity = AgentIdentity(name=agent.name, avatar_url=None, builtin=True)
+        transport = DiscordPostTransport(
+            bot,
+            channel,
+            name=identity.name,
+            avatar_url=identity.avatar_url,
+            builtin=identity.builtin,
+            identity_enabled=identity_enabled,
+        )
+
         # kwargs are forwarded verbatim to discord.py's overloaded send()/edit().
         async def _send_embed(**kwargs: Any) -> discord.Message:  # noqa: ANN401
-            return await channel.send(**kwargs)
+            return await transport.send(**kwargs)
 
         async def _edit_message(msg: discord.Message, **kwargs: Any) -> None:  # noqa: ANN401
-            await msg.edit(**kwargs)
+            await transport.edit(msg, **kwargs)
+
+        async def _delete_message(msg: discord.Message) -> None:
+            await transport.delete(msg)
 
         cancel = asyncio.Event()
 
@@ -551,7 +585,9 @@ async def run_wizard_submit_turn_observed(
                 is True,
                 send=_send_embed,
                 edit=_edit_message,
+                delete=_delete_message,
                 agent_name=agent.name,
+                fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
                 markup=bot.runtime.turn_deps.markup,
                 cancel_view=CancelView(

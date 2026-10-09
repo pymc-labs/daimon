@@ -16,6 +16,11 @@ to the creator by direct message instead, if the tenant's direct-message
 policy allows them, so it never silently goes nowhere.
 Mentions are disabled on every post: the text is the agent's, and a routine
 must not ping anyone on its own.
+
+With agent identity on, the destination post goes through
+`DiscordPostTransport`, so it carries the agent's name and face (or, where
+webhooks are unavailable, the bot with the agent's name label) and drops the
+"from <agent>" wording. The fallback direct message stays Daimon's own notice.
 """
 
 from __future__ import annotations
@@ -23,7 +28,10 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 import structlog
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_identity import AgentIdentity
+from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import (
@@ -52,6 +60,8 @@ ChannelFetcher = Callable[[int], Awaitable[object]]
 #: `send`. Raises `discord.HTTPException` (or `LookupError`) when it cannot.
 DmOpener = Callable[[int, int], Awaitable[discord.abc.Messageable]]
 DmPolicyLookup = Callable[[RoutineRow], DirectMessagePolicy]
+#: The identity a routine's result posts under: `(row, guild_id)` → identity.
+IdentityResolver = Callable[[RoutineRow, str], Awaitable[AgentIdentity]]
 
 _UNRESOLVED = object()
 
@@ -138,8 +148,13 @@ def make_discord_routine_poster(
     fetch_channel: ChannelFetcher,
     open_dm: DmOpener,
     dm_policy: DmPolicyLookup,
+    client: discord.Client | None = None,
+    resolve_identity: IdentityResolver | None = None,
 ) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
-    """A poster bound to the bot's channel lookup (cache first, then REST)."""
+    """A poster bound to the bot's channel lookup (cache first, then REST).
+
+    Without `client` and `resolve_identity` every result posts as the bot.
+    """
 
     async def _dm_fallback(row: RoutineRow, reason: str, guild_id: str) -> DeliveryOutcome:
         creator = row.created_by_user_id
@@ -222,9 +237,31 @@ def make_discord_routine_poster(
             log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
             return await fallback("protected_channel")
         assert isinstance(channel, discord.Thread | discord.TextChannel)
-        await channel.send(
-            content=render_fallback_post(row)[:_DISCORD_MAX_CHARS],
+        identity = (
+            await resolve_identity(row, tenant.external_id)
+            if client is not None and resolve_identity is not None
+            else None
+        )
+        if client is None or identity is None or identity.builtin:
+            await channel.send(
+                content=render_fallback_post(row)[:_DISCORD_MAX_CHARS],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return DeliveryOutcome(status="delivered")
+        # A bot fallback puts the name label on top, so leave room for it.
+        limit = _DISCORD_MAX_CHARS - len(fallback_name_prefix(identity.name, ""))
+        transport = DiscordPostTransport(
+            client,
+            channel,
+            name=identity.name,
+            avatar_url=identity.avatar_url,
+            builtin=False,
+            identity_enabled=True,
+        )
+        await transport.send(
+            content=render_fallback_post(row, as_agent=True)[:limit],
             allowed_mentions=discord.AllowedMentions.none(),
+            _prefix_if_fallback=True,
         )
         return DeliveryOutcome(status="delivered")
 

@@ -18,9 +18,10 @@ allowed to invoke the agent gets nothing — no post and no direct message.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import cast
+from typing import Any, cast
 
 import structlog
+from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -34,6 +35,7 @@ from daimon.core.routine_delivery import (
     delivery_target,
     render_fallback_dm,
     render_fallback_post,
+    resolve_routine_identity,
     slack_creator_may_post,
 )
 from daimon.core.rule_views import keeps_routine_inside
@@ -196,16 +198,32 @@ def make_slack_routine_poster(
         if refusal is not None:
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=refusal)
             return await fallback(refusal)
-        text = escape_mrkdwn_preserving_mentions(render_fallback_post(row))
+        identity = await resolve_routine_identity(
+            runtime.sessionmaker,
+            runtime.anthropic,
+            runtime.settings,
+            row=row,
+            platform="slack",
+            workspace_id=tenant.external_id,
+            default_agent_name=runtime.deployment_default.agent_name,
+        )
+        place: dict[str, Any] = (
+            {"channel": target.channel_id, "thread_ts": target.thread_ts}
+            if target.thread_ts is not None
+            else {"channel": target.channel_id}
+        )
         try:
-            if target.thread_ts is not None:
-                await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                    channel=target.channel_id, thread_ts=target.thread_ts, text=text
-                )
-            else:
-                await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                    channel=target.channel_id, text=text
-                )
+            # Under the agent's own header the text drops "from <agent>"; if
+            # Slack posts it as the app instead, the plain text keeps the name.
+            await post_as_agent(
+                client,
+                identity,
+                text=escape_mrkdwn_preserving_mentions(
+                    render_fallback_post(row, as_agent=not identity.builtin)
+                ),
+                plain_text=escape_mrkdwn_preserving_mentions(render_fallback_post(row)),
+                **place,
+            )
         except SlackApiError as err:
             error = str(cast("dict[str, object]", err.response.data).get("error", ""))  # pyright: ignore[reportUnknownMemberType]
             if error in _UNUSABLE_DESTINATION:
