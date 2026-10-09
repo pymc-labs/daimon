@@ -1780,6 +1780,8 @@ async def test_fork_agent_reports_the_skills_it_copied_even_when_its_reread_fail
             created = {**skills[0], "id": "sk_new", "display_title": "copy"}
             skills.append(created)
             return httpx.Response(200, json=created)
+        if method == "GET" and path.endswith("/versions"):
+            return list_response([{"id": "skill_version_own", "version": "1"}])
         if method == "GET" and path.endswith("/content"):
             return httpx.Response(200, content=notes.zip_bytes)
         copy = next((a for i, a in state.agents.items() if i != "agent_src"), None)

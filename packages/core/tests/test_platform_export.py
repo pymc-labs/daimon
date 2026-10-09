@@ -63,8 +63,14 @@ class ExportTransport:
         elif path == "/v1/skills":
             data = [skill] * (int(request.url.params["limit"]) if self.truncated else 1)
         elif path == "/v1/skills/skill1/versions":
-            data = [{"version": "v1"}, {"version": "v2"}]
+            data = [
+                {"id": "skill_version_1", "version": "1"},
+                {"id": "skill_version_2", "version": "2"},
+            ]
         elif path.endswith("/content"):
+            refusal = workspace_key_download_refusal(request)
+            if refusal is not None:
+                return refusal
             if self.fail_download:
                 return httpx.Response(
                     500, json={"error": {"type": "api_error", "message": "unavailable"}}
@@ -80,6 +86,19 @@ class ExportTransport:
         else:
             raise AssertionError(f"Unexpected export route: {path}")
         return httpx.Response(200, json={"data": data, "next_page": None})
+
+
+def workspace_key_download_refusal(request: httpx.Request) -> httpx.Response | None:
+    """Answer a skill download as a production workspace API key gets it."""
+    if "skills-2025-10-02" in request.headers.get("anthropic-beta", ""):
+        message = "Downloading skill content is not supported with a workspace API key"
+        return httpx.Response(403, json={"error": {"type": "permission_error", "message": message}})
+    if "/versions/skill_version_" not in request.url.path:
+        message = "Invalid version id"
+        return httpx.Response(
+            400, json={"error": {"type": "invalid_request_error", "message": message}}
+        )
+    return None
 
 
 def export_client(transport):

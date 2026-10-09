@@ -583,7 +583,18 @@ async def test_fork_agent_leaves_off_credentialed_servers_and_copies_its_own_ski
             created = skill_row(f"sk_new_{len(skills)}", found.group(1).decode())
             skills.append(created)
             return httpx.Response(200, json=created)
+        if request.method == "GET" and path.endswith("/versions"):
+            return list_response([{"id": f"skill_version_{path.split('/')[3]}", "version": "1"}])
         if request.method == "GET" and path.endswith("/content"):
+            if "skills-2025-10-02" in request.headers.get("anthropic-beta", ""):
+                return httpx.Response(
+                    403,
+                    json={
+                        "type": "error",
+                        "error": {"type": "permission_error", "message": "workspace API key"},
+                    },
+                )
+            assert "/versions/skill_version_" in path, "a download names the version's id"
             downloads.append(path)
             if "skill_own" in path:
                 return httpx.Response(200, content=notes.zip_bytes)
@@ -692,6 +703,8 @@ async def test_fork_agent_returns_the_copy_when_its_final_reread_fails(
             created = {**skills[0], "id": "sk_new", "display_title": "copy"}
             skills.append(created)
             return httpx.Response(200, json=created)
+        if method == "GET" and path.endswith("/versions"):
+            return list_response([{"id": "skill_version_own", "version": "1"}])
         if method == "GET" and path.endswith("/content"):
             return httpx.Response(200, content=notes.zip_bytes)
         copy = next((a for i, a in state.agents.items() if i != "agent_src"), None)
