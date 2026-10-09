@@ -568,6 +568,9 @@ async def run_turn(
     # turn interrupts the session and starts over. A second refusal is a
     # normal upstream failure.
     unwedge_attempts = [0]
+    # Set when recovery failed: the retried pump re-raises the original
+    # refusal from its send, so `_pump` finalizes it as any upstream error.
+    unwedge_failure: list[BaseException | None] = [None]
 
     async def _send_initial() -> None:
         content: list[BetaManagedAgentsImageBlockParam | BetaManagedAgentsTextBlockParam] = [
@@ -592,6 +595,8 @@ async def run_turn(
             if before_send is not None:
                 # A last check by the caller, after the stream is open (`run_prepared_turn`).
                 await before_send()
+            if unwedge_failure[0] is not None:
+                raise unwedge_failure[0]
             try:
                 await anthropic.beta.sessions.events.send(session_id, events=batch)
             except _anthropic.BadRequestError as err:
@@ -625,9 +630,13 @@ async def run_turn(
     async def _pump_unwedging() -> TurnState:
         try:
             return await _new_pump()
-        except _SessionAwaitingConfirmations:
+        except _SessionAwaitingConfirmations as stuck:
             log.warning("turn.session_awaiting_confirmations", session_id=session_id)
-            await _interrupt_and_settle(anthropic, session_id=session_id)
+            settled = await _interrupt_and_settle(anthropic, session_id=session_id, cancel=cancel)
+            if settled == "failed":
+                unwedge_failure[0] = stuck.__cause__
+            # "cancelled" leaves `cancel` set: the retried pump ends as a Stop.
+            # "idle": the retried pump runs the turn normally.
             return await _new_pump()
 
     pump_coro = _pump_unwedging()
@@ -665,23 +674,54 @@ class _SessionAwaitingConfirmations(Exception):
     """MA refused the turn's user.message: the session waits on confirmations."""
 
 
-async def _interrupt_and_settle(anthropic: AsyncAnthropic, *, session_id: str) -> None:
+async def _interrupt_and_settle(
+    anthropic: AsyncAnthropic, *, session_id: str, cancel: asyncio.Event
+) -> Literal["idle", "cancelled", "failed"]:
     """Interrupt a session stuck on confirmations and wait until it is idle.
 
     An interrupt answers the pending calls and ends MA's turn (verified on
     staging, 2026-10-09). No stream is open here, so the interrupt's own
-    events cannot end the retried turn early.
+    events cannot end the retried turn early. The whole recovery is bounded
+    by `_UNWEDGE_SETTLE_S` and raced against Stop; only a confirmed `idle`
+    counts as settled, since MA ignores a message sent while it runs.
     """
-    await anthropic.beta.sessions.events.send(session_id, events=[{"type": "user.interrupt"}])
-    loop = asyncio.get_running_loop()
-    give_up = loop.time() + _UNWEDGE_SETTLE_S
-    while loop.time() < give_up:
-        session = await anthropic.beta.sessions.retrieve(session_id)
-        if session.status != "running":
-            log.info("turn.session_unwedged", session_id=session_id, status=session.status)
-            return
-        await asyncio.sleep(0.5)
-    log.warning("turn.session_unwedge_timeout", session_id=session_id)
+
+    async def _recover() -> bool:
+        await anthropic.beta.sessions.events.send(session_id, events=[{"type": "user.interrupt"}])
+        while True:
+            session = await anthropic.beta.sessions.retrieve(session_id)
+            if session.status == "idle":
+                return True
+            if session.status == "terminated":
+                return False
+            await asyncio.sleep(0.5)
+
+    recovery = asyncio.ensure_future(_recover())
+    stop = asyncio.ensure_future(cancel.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {recovery, stop}, timeout=_UNWEDGE_SETTLE_S, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        for task in (recovery, stop):
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
+    if stop in done:
+        log.info("turn.session_unwedge_cancelled", session_id=session_id)
+        return "cancelled"
+    if recovery not in done:
+        log.warning("turn.session_unwedge_timeout", session_id=session_id)
+        return "failed"
+    if (error := recovery.exception()) is not None:
+        log.warning("turn.session_unwedge_failed", session_id=session_id, error=str(error))
+        return "failed"
+    if not recovery.result():
+        log.warning("turn.session_unwedge_failed", session_id=session_id, error="terminated")
+        return "failed"
+    log.info("turn.session_unwedged", session_id=session_id)
+    return "idle"
 
 
 async def _pump(

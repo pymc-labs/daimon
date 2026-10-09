@@ -20,7 +20,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import anthropic
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.errors import TurnError
 from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.errors import AdmissionDenialReason
 from daimon.core.turn.state import ToolUseBlock, TurnState
@@ -56,13 +58,16 @@ _STUCK_SESSION = (
 )
 
 
-def _stuck_session(error: BaseException | None) -> bool:
-    """Whether the turn failed because its session is still stuck after recovery."""
-    while error is not None:
-        if _STUCK_SESSION_MARK in str(error):
-            return True
-        error = error.__cause__
-    return False
+def _stuck_session(reason: TerminationReason, error: BaseException | None) -> bool:
+    """Whether an upstream end came from MA still refusing a stuck session.
+
+    Typed, not a text match on any error: only an upstream `TurnError` whose
+    cause is MA's `BadRequestError` for pending confirmations qualifies.
+    """
+    if reason is not TerminationReason.UPSTREAM or not isinstance(error, TurnError):
+        return False
+    cause = error.cause
+    return isinstance(cause, anthropic.BadRequestError) and _STUCK_SESSION_MARK in str(cause)
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,7 +384,7 @@ def render_termination_notice(
     copy = _COPY.get(reason, _FALLBACK)
     if spend_limit_error(error or (state.error if state is not None else None)) is not None:
         copy = _Copy("Model usage limit reached", _SPEND_LIMIT_MESSAGE, _KEPT, "")
-    elif _stuck_session(error or (state.error if state is not None else None)):
+    elif _stuck_session(reason, error or (state.error if state is not None else None)):
         headline, cause, next_step = _STUCK_SESSION
         copy = _Copy(headline, cause, "", next_step)
     cause = copy.cause
