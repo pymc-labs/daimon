@@ -33,7 +33,7 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.errors import SkillsListTruncatedError
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mux_backend import platform_scope
+from daimon.core.mux_backend import platform_scope, resource_scope
 from daimon.core.mux_compat import collect_skills, list_agents, list_environments
 
 _log = structlog.get_logger(__name__)
@@ -74,7 +74,7 @@ async def find_agents_by_daimon_tag(
     """
     matches: list[BetaManagedAgentsAgent] = []
     async for ag in list_agents(
-        client, include_archived=include_archived, scope=platform_scope("defaults.ma_index")
+        client, include_archived=include_archived, scope=resource_scope(tenant_id=str(tenant_id))
     ):
         if (
             ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
@@ -120,7 +120,7 @@ async def find_environments_by_daimon_tag(
     """Parity with `find_agents_by_daimon_tag` — canonical first, duplicates follow."""
     matches: list[BetaEnvironment] = []
     async for env in list_environments(
-        client, include_archived=False, scope=platform_scope("defaults.ma_index")
+        client, include_archived=False, scope=resource_scope(tenant_id=str(tenant_id))
     ):
         if (
             env.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
@@ -147,7 +147,7 @@ async def list_agents_by_tenant(
     """Return all non-archived MA agents tagged with tenant_id."""
     results: list[BetaManagedAgentsAgent] = []
     async for ag in list_agents(
-        client, include_archived=False, scope=platform_scope("defaults.ma_index")
+        client, include_archived=False, scope=resource_scope(tenant_id=str(tenant_id))
     ):
         if ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(ag)
@@ -219,7 +219,7 @@ async def list_environments_by_tenant(
     """Return all non-archived MA environments tagged with tenant_id."""
     results: list[BetaEnvironment] = []
     async for env in list_environments(
-        client, include_archived=False, scope=platform_scope("defaults.ma_index")
+        client, include_archived=False, scope=resource_scope(tenant_id=str(tenant_id))
     ):
         if env.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(env)
