@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Annotated, Final, cast
+from typing import Annotated, Final
 
 import typer
 from daimon.adapters.cli.commands.channels import agent_rule_app
@@ -41,6 +41,8 @@ from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.errors import SpecError, StoreError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_agent, retrieve_agent, update_agent
 from daimon.core.specs import load_agent_spec, merge_default_agent_toolset
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
@@ -415,7 +417,7 @@ async def agents_archive(
     agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account or system defaults.")
-    await rt.anthropic.beta.agents.archive(agent.id)
+    await archive_agent(rt.anthropic, agent.id, scope=resource_scope(tenant_id=str(tenant_id)))
     await archive_memory_store_best_effort(
         anthropic=rt.anthropic,
         sessionmaker=rt.sessionmaker,
@@ -589,7 +591,9 @@ async def agents_backfill_toolset(
     confirm_or_abort(console, summary, yes=yes)
 
     for row in report_rows:
-        fresh = await rt.anthropic.beta.agents.retrieve(row.agent_id)
+        fresh = await retrieve_agent(
+            rt.anthropic, row.agent_id, scope=resource_scope(tenant_id=row.tenant_id)
+        )
         # Re-check predicate against fresh copy — a concurrent edit may have
         # already added the toolset; skip rather than double-apply.
         already_has_toolset = any(tool.type == "agent_toolset_20260401" for tool in fresh.tools)
@@ -601,10 +605,12 @@ async def agents_backfill_toolset(
         patched_tools = merge_default_agent_toolset(
             [t.model_dump(mode="json", exclude_none=True) for t in fresh.tools]  # type: ignore[arg-type]
         )
-        await rt.anthropic.beta.agents.update(
+        await update_agent(
+            rt.anthropic,
             fresh.id,
             version=fresh.version,
-            tools=patched_tools,  # type: ignore[arg-type]
+            payload={"tools": patched_tools},
+            scope=resource_scope(tenant_id=row.tenant_id),
         )
         console.print(f"[green]✓[/green] patched {row.agent_name!r}")
 
@@ -777,7 +783,9 @@ async def agents_rekey(
     for (tid, guild_acct, agent_id, _agent_name, _current_acct), new_name in zip(
         to_rekey, post_rekey_names, strict=True
     ):
-        agent = await rt.anthropic.beta.agents.retrieve(agent_id)
+        agent = await retrieve_agent(
+            rt.anthropic, agent_id, scope=resource_scope(tenant_id=str(tid))
+        )
         new_meta = build_metadata(
             tenant_id=tid,
             name=new_name,  # renamed if collision; original name otherwise
@@ -790,11 +798,12 @@ async def agents_rekey(
         for key in (MA_METADATA_KEY_READER_OF, MA_METADATA_KEY_READER_SOURCE):
             if key in agent.metadata:
                 new_meta[key] = agent.metadata[key]
-        await rt.anthropic.beta.agents.update(
+        await update_agent(
+            rt.anthropic,
             agent.id,
             version=agent.version,
-            name=new_name,
-            metadata=cast("dict[str, str | None]", new_meta),
+            payload={"name": new_name, "metadata": new_meta},
+            scope=resource_scope(tenant_id=str(tid)),
         )
 
     console.print(f"[green]✓ Re-keyed {n_agents} agent(s).[/green]")

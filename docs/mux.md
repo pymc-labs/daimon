@@ -366,3 +366,16 @@ cursor to None; native full walks retain the SDK stop rule.
 Skill import and repository-sync call-site checks retain the legacy multipart
 file field, `SKILL.zip` filename, `application/zip` media type and archive bytes
 for create, version and duplicate-title recovery uploads.
+
+
+## CLI resource consumers
+
+CLI agent archive, toolset backfill and ownership rekey, environment create,
+update, archive, delete and retrieval, skill version inspection and title
+backfill, routine agent-name backfill and session bootstrap use the resource
+ports. Each operation passes the tenant established by the existing host
+lookup; bootstrap also supplies the caller account. Skill deletion helpers
+receive explicit tenant scopes, including each legacy skill's backfill tenant.
+Request order, version checks, multipart filenames and bytes, output and SDK
+exception types are retained. The CLI's temporary `mux_compat` module decodes
+native records at the adapter edge without issuing SDK calls.

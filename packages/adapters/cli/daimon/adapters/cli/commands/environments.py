@@ -11,6 +11,7 @@ from anthropic import APIStatusError
 from anthropic.types.beta.beta_cloud_config_params import BetaCloudConfigParams
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION, YES_OPTION
+from daimon.adapters.cli.mux_compat import delete_environment, retrieve_environment
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
@@ -23,6 +24,8 @@ from daimon.core.defaults.ma_index import (
 )
 from daimon.core.defaults.metadata import build_metadata
 from daimon.core.errors import StoreError
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_environment, create_environment, update_environment
 from daimon.core.specs import load_environment_spec
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_write import clear_environment_references
@@ -128,9 +131,13 @@ async def environments_create(*, rt: CliRuntime, console: Console, path: Path) -
             f"environment {spec.name!r} already exists in this server — pick a different name, "
             "or use 'daimon environments update' to modify it."
         )
-    await rt.anthropic.beta.environments.create(
-        **spec.model_dump(exclude_none=True),
-        metadata=build_metadata(tenant_id=tenant_id, name=spec.name),
+    await create_environment(
+        rt.anthropic,
+        {
+            **spec.model_dump(exclude_none=True),
+            "metadata": build_metadata(tenant_id=tenant_id, name=spec.name),
+        },
+        scope=resource_scope(tenant_id=str(tenant_id)),
     )
     console.print(f"[green]✓ created environment {spec.name!r}[/green]")
 
@@ -163,13 +170,14 @@ async def environments_update(*, rt: CliRuntime, console: Console, name: str, pa
         raise StoreError(f"no environment named {name!r} in your account.")
     if spec.name != name:
         console.print(f"[yellow]note: renaming environment {name!r} -> {spec.name!r}[/yellow]")
-    await rt.anthropic.beta.environments.update(
+    await update_environment(
+        rt.anthropic,
         env.id,
-        **spec.model_dump(exclude_none=True),
-        metadata=cast(
-            dict[str, str | None],
-            build_metadata(tenant_id=tenant_id, name=spec.name),
-        ),
+        {
+            **spec.model_dump(exclude_none=True),
+            "metadata": build_metadata(tenant_id=tenant_id, name=spec.name),
+        },
+        scope=resource_scope(tenant_id=str(tenant_id)),
     )
     console.print(f"[green]✓ updated environment {spec.name!r}[/green]")
 
@@ -200,7 +208,7 @@ async def environments_archive(*, rt: CliRuntime, console: Console, name: str, y
     env = await find_environment_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
     if env is None:
         raise StoreError(f"no environment named {name!r} in your account or system defaults.")
-    await rt.anthropic.beta.environments.archive(env.id)
+    await archive_environment(rt.anthropic, env.id, scope=resource_scope(tenant_id=str(tenant_id)))
     await _clear_picks(rt, console, tenant_id=tenant_id, name=name)
     console.print(f"[green]✓ archived environment {name!r}[/green]")
 
@@ -246,10 +254,14 @@ async def environments_delete(*, rt: CliRuntime, console: Console, name: str, ye
         raise StoreError(f"no environment named {name!r} in your account or system defaults.")
     archived_instead = False
     try:
-        await rt.anthropic.beta.environments.delete(env.id)
+        await delete_environment(
+            rt.anthropic, env.id, scope=resource_scope(tenant_id=str(tenant_id))
+        )
     except APIStatusError as err:
         if err.status_code == 409:
-            await rt.anthropic.beta.environments.archive(env.id)
+            await archive_environment(
+                rt.anthropic, env.id, scope=resource_scope(tenant_id=str(tenant_id))
+            )
             archived_instead = True
         else:
             raise
@@ -314,10 +326,14 @@ async def environments_fork(
     source = await find_environment_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=src)
     if source is None:
         raise StoreError(f"no environment named {src!r} in your account or system defaults.")
-    source_ma = await rt.anthropic.beta.environments.retrieve(source.id)
+    source_ma = await retrieve_environment(
+        rt.anthropic, source.id, scope=resource_scope(tenant_id=str(tenant_id))
+    )
     source_cfg = source_ma.config.model_dump(mode="json")
     allowed = ("type", "networking", "packages")
     fork_cfg = {k: source_cfg[k] for k in allowed if k in source_cfg}
+    # Await the driver's explicit-null environment create support before moving
+    # this call: fork preserves a null source description in the SDK request.
     await rt.anthropic.beta.environments.create(
         name=dst,
         config=cast(BetaCloudConfigParams, fork_cfg),
