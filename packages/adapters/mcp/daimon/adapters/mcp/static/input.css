@@ -69,7 +69,7 @@
 .web-brand { display: flex; align-items: center; gap: 12px; line-height: 1.2; }
 .web-brand strong { display: block; font-size: 16px; font-weight: 700; letter-spacing: -.02em; }
 .web-brand small { display: block; font-size: 12px; color: var(--muted-foreground); }
-.web-mark { width: 38px; height: 38px; object-fit: contain; flex: none; }
+.web-mark { width: 38px; height: 38px; object-fit: cover; border-radius: 50%; flex: none; }
 .web-context { @apply inline-flex items-center rounded-full border bg-white px-2.5 py-1 text-xs font-semibold text-foreground; }
 .web-main { max-width: 680px; margin: auto; padding: 64px 32px 120px; }
 .web-main--wide { max-width: 1040px; padding-top: 40px; padding-bottom: 150px; }

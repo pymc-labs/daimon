@@ -16,6 +16,7 @@ Integration tests cover:
 
 from __future__ import annotations
 
+import hashlib
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -73,7 +74,7 @@ def test_page_shell_contains_root_tokens() -> None:
     response = _page(title="test page", state_bar="", body_html="<p>hello</p>")
     body = response.body.decode()
     assert 'href="/web/web.css"' in body
-    assert 'src="/web/daimon.png"' in body
+    assert 'src="/web/daimon-face.png"' in body
 
 
 def test_page_shell_contains_viewport_meta() -> None:
@@ -808,12 +809,15 @@ async def test_shared_web_assets_are_served(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         css = await client.get("/web/web.css")
-        face = await client.get("/web/daimon.png")
+        face = await client.get("/web/daimon-face.png")
         font = await client.get("/web/Inter-Regular.ttf")
     assert css.status_code == face.status_code == font.status_code == 200
     assert "text/css" in css.headers["content-type"]
     assert b"--primary" in css.content
     assert face.content.startswith(b"\x89PNG")
+    assert hashlib.sha256(face.content).hexdigest() == (
+        "a3a3305a7d9d3ec4420cdb420d4d27bc0d2f029b618a4a6dc7fb781556a7d73e"
+    )
 
 
 async def test_slack_routes_not_mounted_without_slack_settings(

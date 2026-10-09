@@ -115,7 +115,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse, Response
+from starlette.responses import FileResponse, PlainTextResponse, Response
 from starlette.staticfiles import StaticFiles
 
 if TYPE_CHECKING:
@@ -187,6 +187,11 @@ def _build_avatar_route(
         )
 
     return avatar
+
+
+async def _web_face(_req: Request) -> FileResponse:
+    """Serve the packaged face, sourced once from assets/daimon-face.png."""
+    return FileResponse(STATIC_DIR / "daimon-face.png", media_type="image/png")
 
 
 def create_mcp_app(
@@ -474,6 +479,7 @@ def create_mcp_app(
         middleware=[Middleware(StripSessionIdMiddleware)],
     )
     app.state.mcp = mcp
+    app.add_route("/web/daimon-face.png", _web_face, methods=["GET", "HEAD"])
     app.mount("/web", StaticFiles(directory=STATIC_DIR), name="web")
     app.add_route(
         "/uploads/{token}",

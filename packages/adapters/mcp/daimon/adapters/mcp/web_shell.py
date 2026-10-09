@@ -40,7 +40,7 @@ def render_page(
 <title>Daimon: {safe_title}</title>
 <link rel="stylesheet" href="/web/web.css"></head>
 <body><header class="web-header"><div class="web-header-inner">
-<div class="web-brand"><img class="web-mark" src="/web/daimon.png" alt="Daimon">
+<div class="web-brand"><img class="web-mark" src="/web/daimon-face.png" alt="Daimon">
 <span><strong>Daimon</strong><small>by PyMC Labs</small></span></div>{badge}
 </div></header>
 <main class="web-main{" web-main--wide" if wide else ""}">{content}</main>
