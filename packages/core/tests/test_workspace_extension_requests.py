@@ -12,11 +12,15 @@ from daimon.core.workspace_transfer import (
     FullHandoff,
     HistoryOnly,
     TranscriptOnly,
+    TransferOutcome,
     WorkspaceTransferRunner,
     as_prepared_replacement,
 )
 from daimon.testing.ma_models import ma_session
 from daimon.testing.ma_transport import ScriptedTransport
+from mux.contracts.extensions import ExtensionConfig
+from mux.contracts.ids import ResourceRef, Scope
+from mux.contracts.resources import ResourceBinding, SessionExport
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicWorkspaceTransfer
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
@@ -33,21 +37,36 @@ NOW = datetime(2026, 10, 9, tzinfo=UTC)
     ],
 )
 async def test_runner_declares_and_accepts_losses_without_changing_prepared_inputs(
-    outcome, monkeypatch
-):
+    outcome: TransferOutcome, monkeypatch: pytest.MonkeyPatch
+) -> None:
     transfer = AsyncMock(return_value=outcome)
     monkeypatch.setattr(workspace_transfer, "transfer_workspace", transfer)
-    snapshots = []
+    snapshots: list[SessionExport] = []
     exports, restores = AnthropicWorkspaceTransfer.export, AnthropicWorkspaceTransfer.restore
 
-    def observe_export(self, scope, source, *, inline, key):
+    def observe_export(
+        self: AnthropicWorkspaceTransfer,
+        scope: Scope,
+        source: ResourceRef,
+        *,
+        inline: ExtensionConfig,
+        key: str,
+    ) -> SessionExport:
         result = exports(self, scope, source, inline=inline, key=key)
         snapshots.append(result)
         return result
 
-    accepted = []
+    accepted: list[frozenset[str]] = []
 
-    def observe_restore(self, scope, export, *, inline, accept_losses, key):
+    def observe_restore(
+        self: AnthropicWorkspaceTransfer,
+        scope: Scope,
+        export: SessionExport,
+        *,
+        inline: ExtensionConfig,
+        accept_losses: frozenset[str],
+        key: str,
+    ) -> tuple[ResourceBinding, ...]:
         accepted.append(accept_losses)
         return restores(self, scope, export, inline=inline, accept_losses=accept_losses, key=key)
 
@@ -83,6 +102,7 @@ async def test_runner_declares_and_accepts_losses_without_changing_prepared_inpu
         requested_work="continue",
     )
     transfer.assert_awaited_once()
+    assert transfer.await_args is not None
     assert transfer.await_args.kwargs["before_send"] is before_send
     assert transfer.await_args.kwargs["markup"] == Decimal("1.2")
     assert transfer.await_args.kwargs["channel_id"] == "channel"

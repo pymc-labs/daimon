@@ -4,6 +4,7 @@ import contextlib
 import io
 import uuid
 from datetime import UTC, datetime
+from typing import Self, cast
 from unittest.mock import AsyncMock
 
 import httpx
@@ -15,6 +16,7 @@ from daimon.core.session_ports_compat import session_scope
 from daimon.core.session_seal import session_facts
 from daimon.testing.ma_models import ma_session
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
 TENANT = uuid.UUID(int=1)
@@ -22,18 +24,20 @@ ACCOUNT = uuid.UUID(int=2)
 
 
 class SessionFactory:
-    def __call__(self):
+    def __call__(self) -> contextlib.nullcontext[Self]:
         return contextlib.nullcontext(self)
 
-    def begin(self):
+    def begin(self) -> contextlib.nullcontext[Self]:
         return contextlib.nullcontext(self)
 
 
 @pytest.mark.parametrize("status", [200, 404])
-async def test_recorded_handoff_sessions_keep_wire_request_and_fail_closed(status, monkeypatch):
+async def test_recorded_handoff_sessions_keep_wire_request_and_fail_closed(
+    status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from types import SimpleNamespace
 
-    factory = SessionFactory()
+    factory = cast(async_sessionmaker[AsyncSession], SessionFactory())
     row = SimpleNamespace(ma_session_id="sess_handoff", account_id=ACCOUNT)
     monkeypatch.setattr(thread_handoff, "list_live_thread_sessions", AsyncMock(return_value=[row]))
     seals = AsyncMock()
@@ -73,9 +77,14 @@ async def test_recorded_handoff_sessions_keep_wire_request_and_fail_closed(statu
 
 
 @pytest.mark.parametrize("status", [200, 400])
-async def test_rehost_keeps_default_upload_beta_and_bundle_queue_outcome(status, monkeypatch):
+async def test_rehost_keeps_default_upload_beta_and_bundle_queue_outcome(
+    status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Pin multipart boundary entropy so the entire request bytes can be compared.
-    monkeypatch.setattr("httpx._multipart.os.urandom", lambda count: b"\x05" * count)
+    def pinned_entropy(count: int) -> bytes:
+        return b"\x05" * count
+
+    monkeypatch.setattr("httpx._multipart.os.urandom", pinned_entropy)
     content = b"dummy-gzip-bundle"
     bundle = FileMetadata(
         id="file_output",
@@ -89,7 +98,7 @@ async def test_rehost_keeps_default_upload_beta_and_bundle_queue_outcome(status,
     uploaded = bundle.model_copy(update={"id": "file_upload"})
     queued = AsyncMock()
     monkeypatch.setattr(workspace_transfer, "enqueue_pending_file_delete", queued)
-    factory = SessionFactory()
+    factory = cast(async_sessionmaker[AsyncSession], SessionFactory())
     old, new = ScriptedTransport(), ScriptedTransport()
     for transport in (old, new):
         transport.queue(
@@ -117,14 +126,14 @@ async def test_rehost_keeps_default_upload_beta_and_bundle_queue_outcome(status,
             )
         )
     async with old.client() as legacy, new.client() as client:
-        response = await legacy.beta.files.download(bundle.id, betas=[workspace_transfer._MA_BETA])
+        response = await legacy.beta.files.download(bundle.id, betas=["managed-agents-2026-04-01"])
         assert await response.read() == content
-        await legacy.beta.files.delete(bundle.id, betas=[workspace_transfer._MA_BETA])
+        await legacy.beta.files.delete(bundle.id, betas=["managed-agents-2026-04-01"])
         with contextlib.suppress(APIStatusError):
             await legacy.beta.files.upload(
                 file=(bundle.filename, io.BytesIO(content), "application/gzip")
             )
-        result = await workspace_transfer._rehost_bundle(
+        result = await workspace_transfer._rehost_bundle(  # pyright: ignore[reportPrivateUsage]
             client,
             factory,
             bundle=bundle,

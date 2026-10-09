@@ -10,12 +10,12 @@ from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.sessions_lifecycle import WorkspaceTransfer, WorkspaceTransferConfig
 from mux.errors import ScopeViolation
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
 SCOPE = Scope(
     tenant_id="tenant", account_id="account", principal_id="host", authorization_id="auth"
 )
-PAYLOADS = [
+PAYLOADS: list[dict[str, JsonValue]] = [
     {
         "type": "full",
         "file_id": "file_bundle",
@@ -34,7 +34,9 @@ PAYLOADS = [
 
 
 @pytest.mark.parametrize("payload", PAYLOADS)
-async def test_transfer_export_restore_roundtrip_declares_losses_without_requests(payload):
+async def test_transfer_export_restore_roundtrip_declares_losses_without_requests(
+    payload: dict[str, JsonValue],
+) -> None:
     transport = ScriptedTransport()
     inline = ExtensionConfig(
         namespace="anthropic.workspace_transfer", version=1, value={"outcome": payload}
@@ -76,7 +78,9 @@ async def test_transfer_export_restore_roundtrip_declares_losses_without_request
             assert export.included == {"workspace", "transcript"}
             assert mounts[0].resource == export.artifacts[0]
             assert mounts[0].target_path == payload["mount_path"]
-            assert payload["unpreserved"][0] in export.losses
+            unpreserved = payload["unpreserved"]
+            assert isinstance(unpreserved, list)
+            assert unpreserved[0] in export.losses
         else:
             assert mounts == ()
             assert "workspace" in export.excluded
@@ -90,7 +94,7 @@ async def test_transfer_export_restore_roundtrip_declares_losses_without_request
     assert transport.requests == []
 
 
-async def test_transfer_rejects_forged_scope_ungranted_archive_and_mutated_inline_data():
+async def test_transfer_rejects_forged_scope_ungranted_archive_and_mutated_inline_data() -> None:
     transport = ScriptedTransport()
     inline = ExtensionConfig(
         namespace="anthropic.workspace_transfer", version=1, value={"outcome": PAYLOADS[0]}
@@ -154,6 +158,8 @@ async def test_transfer_rejects_forged_scope_ungranted_archive_and_mutated_inlin
 @pytest.mark.parametrize(
     "patch", [{"extra_kwarg": "no"}, {"type": "fresh"}, {"bytes_transferred": -1}]
 )
-def test_native_transfer_schema_is_closed_and_never_accepts_a_silent_fresh_start(patch):
+def test_native_transfer_schema_is_closed_and_never_accepts_a_silent_fresh_start(
+    patch: dict[str, JsonValue],
+) -> None:
     with pytest.raises(ValidationError):
         WorkspaceTransferConfig.model_validate({"outcome": {**PAYLOADS[0], **patch}})
