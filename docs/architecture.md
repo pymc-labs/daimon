@@ -197,7 +197,10 @@ the current picture remains in use until it is stored. Slack is expected to keep
 answer; each new turn post is recorded under the turn's agent and card intent.
 
 Discord starts a turn on a direct bot mention or a reply to a recorded bot or
-application-owned webhook post in the same tenant and channel. The usual
+application-owned webhook post in the same tenant and channel. With agent
+identity off, the reply must be to a turn post the bot itself sent (the card or
+any chunk of the answer), so a reply to the second message of a long answer
+counts like a reply to the first, pinged or not. The usual
 admission path follows either trigger. Agent turn posts use a pool of up to
 three application-owned webhooks per text or forum channel, with each thread
 assigned by its ID; built-in Daimon posts use the bot. If a webhook is
@@ -845,7 +848,13 @@ per-MA-session-chained sweep of downloadable session files through
 `daimon.core.output_delivery`. It posts each file into the conversation thread
 before deleting its MA listing entry. Failed posts stay listed for a later
 sweep. Discord uses the guild's upload limit, skips oversize files with an
-in-thread notice, and checks the channel's writers before posting.
+in-thread notice, and checks the channel's writers before posting. A file
+Daimon already attached in the thread after the turn's card (the agent sent it
+itself), with the same name and size, is cleared from the listing without a
+second post. Once the sweep ends, the answer's summary line moves onto the
+turn's last post if that is a plain message the bot posted after the answer,
+so it always closes the turn; the 👍 👎 🙋 emoji move with it. A long answer carries it on its last chunk on
+both platforms.
 
 Reconnection is two loops for two failure modes. The outer loop handles
 eventless cycles — the server closes cleanly roughly every ten minutes by

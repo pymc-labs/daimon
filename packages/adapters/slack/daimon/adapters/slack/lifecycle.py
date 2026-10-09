@@ -401,12 +401,12 @@ class SlackTurnLifecycle:
             self._last_flush = now
 
     def _apply_usage(self, state: TurnState) -> None:
-        """Fold accumulated token totals + priced cost onto the Block Kit state.
+        """Price accumulated token totals onto the Block Kit state.
 
         Reconstructs a per-turn BetaManagedAgentsSpanModelUsage from the four
         cache-split totals and prices it through cost_of, so the displayed cost
         matches the billing ledger to the cent. An unpriced model yields None
-        cost — Details omits the cost line.
+        cost and the summary line omits it.
         """
         t = state.usage_totals
         usage = BetaManagedAgentsSpanModelUsage(
@@ -417,13 +417,7 @@ class SlackTurnLifecycle:
             speed="standard",
         )
         cost = cost_of(usage, MODEL_PRICING.get(self._model_id))
-        merged_in = t.input_tokens + t.cache_creation_input_tokens + t.cache_read_input_tokens
-        self._state = dataclasses.replace(
-            self._state,
-            usage_in=merged_in,
-            usage_out=t.output_tokens,
-            cost_str=format_cost(cost),
-        )
+        self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
 
     async def _post_or_update(self, blocks: list[dict[str, Any]], text: str) -> None:
         """Post the status message the first time, or update it in place after.
@@ -681,13 +675,14 @@ class SlackTurnLifecycle:
                     continue
                 blocks: list[dict[str, Any]] = [block]
                 notification_chunk = chunk
-                if index == 0:
-                    if mention and block.get("type") == "table":
-                        blocks.insert(0, {"type": "markdown", "text": mention})
-                        notification_chunk = f"{mention}\n{chunk}"
+                if index == 0 and mention and block.get("type") == "table":
+                    blocks.insert(0, {"type": "markdown", "text": mention})
+                    notification_chunk = f"{mention}\n{chunk}"
+                if index == len(deliveries) - 1:
+                    # The summary line closes the answer, under its last chunk.
                     blocks.extend(to_blocks(self._state, now=self._clock(), answer_visible=True))
-                if index == len(deliveries) - 1 and not cancelled:
-                    blocks.append(self._feedback_block())
+                    if not cancelled:
+                        blocks.append(self._feedback_block())
                 try:
                     if index == 0 and not notify_on_completion:
                         await self._post_or_update(blocks, _notification_text(notification_chunk))

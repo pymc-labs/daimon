@@ -55,6 +55,7 @@ from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.status_lines import (
     format_duration,
     format_headline,
+    format_summary,
 )
 
 EmbedEvent = _CardEvent
@@ -77,14 +78,6 @@ INTERRUPTED_NOTICE: str = "Stopped: Daimon restarted.\nMention me to try again."
 # ---------------------------------------------------------------------------
 # Pure functions
 # ---------------------------------------------------------------------------
-
-
-def _fmt_tokens(n: int) -> str:
-    """Humanize a token count: <1000 verbatim, else one-decimal k with trailing
-    ``.0`` stripped (``320`` -> ``"320"``, ``1500`` -> ``"1.5k"``, ``12000`` -> ``"12k"``)."""
-    if n < 1000:
-        return str(n)
-    return f"{n / 1000:.1f}".rstrip("0").rstrip(".") + "k"
 
 
 def to_fallback_text(state: State, *, now: float | None) -> str:
@@ -130,20 +123,19 @@ def to_blocks(
         - actions  : Cancel button  (action_id="cancel_turn", style="danger")
 
     Terminal (DONE / ERROR):
-        - context  : Details with time, cost, tokens and balance
+        - context  : one line with name, time, cost and money left
                      ERROR adds a separate notice section when available
         No actions block (cancel button removed on terminal).
     """
     if state.phase in _TERMINAL_PHASES:
-        # Terminal collapse: outcome above, metrics grouped under Details.
-        elapsed = int(now - state.started_at) if now is not None else 0
-        tokens = f"{_fmt_tokens(state.usage_in)} in / {_fmt_tokens(state.usage_out)} out"
-        parts: list[str] = [f"Time: {elapsed}s"]
-        if state.cost_str is not None:
-            parts.append(f"Cost: {state.cost_str}")
-        parts.append(f"Tokens: {tokens}")
-        if state.balance_str is not None:
-            parts.append(f"Balance: {state.balance_str}")
+        # Terminal collapse: outcome above, the numbers on one quiet line.
+        elapsed = now - state.started_at if now is not None else 0
+        summary = format_summary(
+            agent_name=None if state.header_customized else state.agent_name,
+            elapsed_seconds=elapsed,
+            cost=state.cost_str,
+            left=state.balance_str,
+        )
         blocks: list[dict[str, Any]] = []
         if state.phase is TurnPhase.ERROR:
             blocks.append(
@@ -170,17 +162,7 @@ def to_blocks(
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "Done."}})
         if blocks:
             blocks.append({"type": "divider"})
-        if state.agent_name and not state.header_customized:
-            blocks.append(
-                {"type": "context", "elements": [{"type": "mrkdwn", "text": state.agent_name}]}
-            )
-        details_label = "" if state.phase is TurnPhase.ERROR and state.notice else "*Details*\n"
-        blocks.append(
-            {
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": details_label + "\n".join(parts)}],
-            }
-        )
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": summary}]})
         return blocks
 
     # Non-terminal: the headline, the tool lines, then the latest draft.

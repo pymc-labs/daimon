@@ -588,11 +588,13 @@ class DaimonBot(commands.Bot):
         thread: discord.Thread,
         tenant_id: uuid.UUID,
         session_id: str,
+        lifecycle: DiscordTurnLifecycle | None = None,
     ) -> None:
         # A previous sweep owns post-then-delete for this MA session until it finishes.
         if previous is not None:
             with contextlib.suppress(Exception):
                 await previous
+        posted: list[int] = []
         try:
             await deliver_session_outputs(
                 self.runtime.turn_deps.anthropic,
@@ -600,6 +602,8 @@ class DaimonBot(commands.Bot):
                 session_id=session_id,
                 may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
                 notice_thread_ids=self._delivery_notice_thread_ids,
+                turn_window=lifecycle.turn_window if lifecycle is not None else None,
+                posted=posted,
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
             log.warning(
@@ -608,6 +612,8 @@ class DaimonBot(commands.Bot):
                 thread_id=thread.id,
                 error=str(exc)[:300],
             )
+        if lifecycle is not None:
+            await lifecycle.move_summary_last(thread, swept=posted)
 
     async def _archive_requested(self, origin_id: uuid.UUID) -> bool:
         """Whether the agent asked, during this turn, to archive its own thread.
@@ -667,13 +673,23 @@ class DaimonBot(commands.Bot):
                 self._spawn(self.on_message(queued))
 
     def _schedule_output_sweep(
-        self, outcome: RunOutcome, *, thread: discord.Thread, tenant_id: uuid.UUID
+        self,
+        outcome: RunOutcome,
+        *,
+        thread: discord.Thread,
+        tenant_id: uuid.UUID,
+        lifecycle: DiscordTurnLifecycle | None = None,
     ) -> None:
+        """Sweep the session's files, then seat the summary under the turn's last post."""
         if not any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
+            if lifecycle is not None:
+                self._spawn(lifecycle.move_summary_last(thread))
             return
         session_id = outcome.ma_session_id
         previous = self._output_sweeps.get(session_id)
-        task = self._spawn(self._sweep_session_outputs(previous, thread, tenant_id, session_id))
+        task = self._spawn(
+            self._sweep_session_outputs(previous, thread, tenant_id, session_id, lifecycle)
+        )
         self._output_sweeps[session_id] = task
         task.add_done_callback(functools.partial(self._forget_output_sweep, session_id))
 
@@ -1729,11 +1745,19 @@ class DaimonBot(commands.Bot):
                 )
             )
         )
+        identity_on = identity_enabled_for(
+            self.runtime.settings, "discord", str(message.guild.id) if message.guild else None
+        )
+        # Without identity every agent post is the bot's own, so a reply to any of
+        # them (a later answer chunk, unpinged) counts, not only a pinged reply.
+        resolved_is_bot = (
+            isinstance(resolved, discord.Message)
+            and self.user is not None
+            and resolved.author.id == self.user.id
+        )
         if (
-            identity_enabled_for(
-                self.runtime.settings, "discord", str(message.guild.id) if message.guild else None
-            )
-            and not bot_mentioned
+            not bot_mentioned
+            and (identity_on or resolved_is_bot)
             and isinstance(reference, discord.MessageReference)
             and reference.type is discord.MessageReferenceType.reply
             and reference.message_id is not None
@@ -1760,7 +1784,9 @@ class DaimonBot(commands.Bot):
                         channel_id=str(message.channel.id),
                         message_id=str(reference.message_id),
                     )
-                reply_to_recorded_post = post is not None and post.source != "auto_thread"
+                reply_to_recorded_post = post is not None and (
+                    post.source != "auto_thread" if identity_on else post.source == "turn"
+                )
             except Exception as exc:
                 log.warning("reply_gate.lookup_failed", error_type=type(exc).__name__)
         if not should_process_message(
@@ -1768,9 +1794,6 @@ class DaimonBot(commands.Bot):
             author_id=str(message.author.id),
             bot_mentioned=bot_mentioned,
             reply_to_recorded_post=reply_to_recorded_post,
-            identity_enabled=identity_enabled_for(
-                self.runtime.settings, "discord", str(message.guild.id) if message.guild else None
-            ),
             author_is_webhook=is_webhook_post,
             guild_id=str(message.guild.id) if message.guild else None,
             self_user_id=str(self.user.id) if self.user is not None else None,
@@ -2690,9 +2713,13 @@ class DaimonBot(commands.Bot):
                         watermark_message_id=final_lifecycle.final_message_id,
                     )
                     await session.commit()
-            if final_lifecycle.was_answered and final_lifecycle.final_message_id is not None:
-                await seed_feedback_reactions(thread, message_id=final_lifecycle.final_message_id)
-        self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)
+            if final_lifecycle.was_answered and final_lifecycle.feedback_message_id is not None:
+                await seed_feedback_reactions(
+                    thread, message_id=final_lifecycle.feedback_message_id
+                )
+        self._schedule_output_sweep(
+            outcome, thread=thread, tenant_id=tenant_id, lifecycle=final_lifecycle
+        )
         if archive_after:
             await self._archive_after_outputs(outcome, thread)
 
@@ -3632,8 +3659,10 @@ class DaimonBot(commands.Bot):
             # the vote affordance under a cancellation notice is exactly what
             # this guard prevents. Not gated on mapping_id, which is about
             # session mapping, not whether the turn actually answered.
-            if final_lifecycle.was_answered and final_lifecycle.final_message_id is not None:
-                await seed_feedback_reactions(thread, message_id=final_lifecycle.final_message_id)
+            if final_lifecycle.was_answered and final_lifecycle.feedback_message_id is not None:
+                await seed_feedback_reactions(
+                    thread, message_id=final_lifecycle.feedback_message_id
+                )
             # A change queued behind this turn (it was already running when the
             # change landed) applies at the caller's NEXT message, not this one
             # -- said only after the answer, so it never reads as a caveat on
@@ -3647,6 +3676,8 @@ class DaimonBot(commands.Bot):
             await self._dispatch_continuations(
                 tenant_id=tenant_id, thread=thread, guild_id=guild_id
             )
-        self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)
+        self._schedule_output_sweep(
+            outcome, thread=thread, tenant_id=tenant_id, lifecycle=final_lifecycle
+        )
         if archive_after:
             await self._archive_after_outputs(outcome, thread)

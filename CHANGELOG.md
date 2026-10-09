@@ -9,8 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A finished Discord or Slack answer ends with one short line instead of a five-line Details block: `Ada  12s  $0.042 used  $41.20 left`. Fields are set apart by spacing, not dots. Token counts are gone, and a channel budget's remainder reads `$8.10 left` like the prepaid balance.
+- The summary line and Discord's 👍 👎 🙋 sit under the last message of an answer, not the first: the last chunk of a long answer on Discord and Slack, or on Discord a file Daimon posts after it.
+- Discord no longer attaches a generated file twice when the agent already sent it in the thread itself.
+- On Discord, a reply to any message of an answer reaches the agent, not only a reply to the first one. With agent identity off, a reply without the ping to the card or a later chunk used to be ignored.
 - Hackathon staging layouts accept the existing QA admin bot and recognize Discord Administrator permissions, so private team roles can be provisioned without the roleless fallback.
-
 - The file-handling skill now tells agents to export only the current turn's finished deliverables, keeping working directories and already delivered files out of outputs to avoid duplicate attachments.
 - A copied agent keeps the skills its source added itself again. Copying (a channel's own agent made with `--copy-from`, or `fork_agent`) downloaded each skill with a header a workspace API key is refused for, so the copy silently left those skills off. The workspace recovery export downloads skills the same way and is fixed too.
 ||||||| parent of fc92a34c1 (fix(core): count an approval as taken only when its tool result appears)
@@ -109,7 +112,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   come with messages the read already returns, so a sealed thread's files
   stay out. Each file is now an object with `name` and `url`, not a name.
 - Agent setup uses short Picture labels on Slack and Discord. Discord Change opens a file upload form; the attachment option on `/agent-setup` remains available.
-- Status cards and follow-up prompts use short labels on Discord, Slack and Teams. Working cards show Stop, tool steps sit under Details, and finished Discord and Slack cards show time, cost, tokens and balance under Details for everyone. Error, stop, restart and post-failure notices show a clear next step. Feedback and help forms use the same short wording across platforms. Threads whose channel responder changed offer Switch to the new agent and a new-thread hint; staying with the old agent in that thread is not a supported action.
+- Status cards and follow-up prompts use short labels on Discord, Slack and Teams. Working cards show Stop, tool steps sit under Details, and finished Discord and Slack cards end with one summary line of time, cost and money left for everyone. Error, stop, restart and post-failure notices show a clear next step. Feedback and help forms use the same short wording across platforms. Threads whose channel responder changed offer Switch to the new agent and a new-thread hint; staying with the old agent in that thread is not a supported action.
 - **Teams files in private and shared channels, turned on by asking.** The
   Enable files sign-in now starts from a channel and grants daimon that
   channel's own SharePoint site: the team's for a standard channel, a site of

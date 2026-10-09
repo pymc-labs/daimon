@@ -13,7 +13,8 @@ import types
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
+from unittest.mock import AsyncMock, MagicMock
 
 import daimon.adapters.discord.lifecycle as lifecycle_module
 import discord
@@ -36,6 +37,7 @@ from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
+from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -332,6 +334,85 @@ class TestCleanReplace:
         overflow_sends = len(sends) - initial_sends
         assert overflow_sends >= 1, "overflow chunks should be posted as new sends"
 
+    async def test_long_answer_carries_the_summary_on_its_last_message(self) -> None:
+        """The summary line closes the answer: it leaves the first chunk for the last."""
+        lc, sends, edits = _make_lifecycle()
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+        initial_sends = len(sends)
+
+        state = TurnState(content=[TextBlock(kind="text", text="x" * 4000)])
+        await lc.on_terminal_success(state)
+
+        first = edits[-1][1]
+        assert first.get("content", "").startswith("x"), "the first chunk replaces the card"
+        assert first.get("embeds") == [], "the first chunk drops the summary"
+        overflow = sends[initial_sends:]
+        assert len(overflow) >= 2, "4,000 characters overflow into at least two more messages"
+        assert all("embeds" not in send for send in overflow[:-1]), "middle chunks stay bare"
+        footer = overflow[-1]["embeds"][0].footer.text
+        assert footer is not None and footer.startswith("test-agent"), (
+            "the last chunk carries the summary"
+        )
+
+    async def test_long_answer_takes_the_vote_emoji_on_its_last_message(self) -> None:
+        sent = iter(range(1, 10))
+
+        async def send(**kwargs: Any) -> object:
+            return types.SimpleNamespace(id=next(sent))
+
+        async def edit(ref: Any, **kwargs: Any) -> None:
+            pass
+
+        lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+        await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="x" * 4000)]))
+
+        assert lc.final_message_id == "1", "the answer still starts on the card"
+        assert lc.feedback_message_id == "3", "the vote emoji go on the last chunk"
+
+    async def test_short_answer_keeps_the_summary_on_its_one_message(self) -> None:
+        lc, _sends, edits = _make_lifecycle()
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+
+        await lc.on_terminal_success(_make_success_state())
+
+        assert "embeds" not in edits[-1][1], "a one-message answer keeps the card's summary"
+
+    async def test_completion_ping_answer_carries_the_summary_and_the_card_goes(self) -> None:
+        deleted: list[object] = []
+        card, answer = types.SimpleNamespace(id=1), types.SimpleNamespace(id=2)
+        sends: list[dict[str, Any]] = []
+
+        async def send(**kwargs: Any) -> object:
+            sends.append(kwargs)
+            return card if len(sends) == 1 else answer
+
+        async def edit(ref: Any, **kwargs: Any) -> None:
+            pass
+
+        async def delete(ref: Any) -> None:
+            deleted.append(ref)
+
+        lc = DiscordTurnLifecycle(
+            send=send,
+            edit=edit,
+            delete=delete,
+            agent_name="test-agent",
+            model_id="m",
+            requester_id=123,
+            notify_on_completion=True,
+        )
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+        await lc.on_terminal_success(_make_success_state())
+
+        footer = sends[-1]["embeds"][0].footer.text
+        assert footer is not None and footer.startswith("test-agent"), "the answer has it"
+        assert deleted == [card], "the card above the answer is removed"
+
     async def test_final_answer_with_everyone_disables_all_mention_channels(self) -> None:
         """T-22-01: a final answer containing ``@everyone`` (reachable via prompt
         injection through tool output) must not ping the guild. The clean-replace
@@ -415,7 +496,7 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     assert "**Next:**" not in embed.fields[0].value
     assert "`fit_model`" in embed.fields[0].value, "work in flight is named"
     assert "`rid: " in embed.fields[0].value
-    assert "Tokens:" in embed.fields[1].value
+    assert len(embed.fields) == 1, "the numbers ride the footer, not a Details field"
     assert "xxx" not in str(embed.to_dict()), "raw error stays in the logs"
 
 
@@ -454,8 +535,7 @@ async def test_terminal_failure_notice_fits_discord_limits_with_many_long_names(
     assert len(embed.footer.text) <= 2048
     assert "and 42 more" in embed.fields[0].value
     assert "`rid: " in embed.fields[0].value
-    assert embed.fields[1].name == "Details"
-    assert "Tokens:" in embed.fields[1].value
+    assert len(embed.fields) == 1, "the numbers ride the footer, not a Details field"
 
 
 async def test_a_notice_that_fails_to_build_still_turns_the_card_red(
@@ -1003,6 +1083,13 @@ def _terminal_embed(edits: list[tuple[Any, dict[str, Any]]]) -> discord.Embed:
     raise AssertionError("no terminal embed was flushed")
 
 
+def _terminal_footer(edits: list[tuple[Any, dict[str, Any]]]) -> str:
+    """The terminal embed's one summary line."""
+    text = _terminal_embed(edits).footer.text
+    assert text is not None
+    return text
+
+
 @pytest.mark.asyncio
 async def test_terminal_footer_shows_prepaid_balance_only(
     db_session: AsyncSession,
@@ -1022,7 +1109,7 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     await lc.on_sse_event(_thinking_event())
     await lc.on_render(TurnState())
     await lc.on_terminal_success(_make_success_state())
-    assert "Balance: $12.50 left" in _terminal_embed(edits).fields[0].value
+    assert _terminal_footer(edits).endswith(f"{GAP}$12.50 left")
 
     async with db_session_factory() as s, s.begin():
         await set_funding_mode(s, tenant_id=tenant.id, funding_mode="operator_funded")
@@ -1030,7 +1117,188 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     await lc.on_sse_event(_thinking_event())
     await lc.on_render(TurnState())
     await lc.on_terminal_success(_make_success_state())
-    assert "$12.50 left" not in _terminal_embed(edits).fields[0].value
+    assert "left" not in _terminal_footer(edits)
+
+
+def _move_fixture(
+    last: Any,
+) -> tuple[DiscordTurnLifecycle, list[tuple[Any, dict[str, Any]]], discord.Thread]:
+    """A lifecycle whose card is message 100, in a thread whose newest message is `last`."""
+    edits: list[tuple[Any, dict[str, Any]]] = []
+    card = MagicMock()
+    card.id = 100
+    card.remove_reaction = AsyncMock()
+
+    async def send(**kwargs: Any) -> object:
+        return card
+
+    async def edit(ref: Any, **kwargs: Any) -> object:
+        edits.append((ref, kwargs))
+        return types.SimpleNamespace(id=ref.id, edited_at=datetime.now(UTC))
+
+    lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
+
+    async def history(**kwargs: Any) -> Any:
+        assert kwargs == {"limit": 1}
+        if last is not None:
+            yield last
+
+    thread = MagicMock(spec=discord.Thread)
+    thread.guild.me.id = 42
+    thread.history = MagicMock(side_effect=history)
+    thread.get_partial_message.return_value.add_reaction = AsyncMock()
+    return lc, edits, cast(discord.Thread, thread)
+
+
+def _bot_post(message_id: int, *, author_id: int = 42, embeds: list[Any] | None = None) -> Any:
+    post = MagicMock()
+    post.id = message_id
+    post.author.id = author_id
+    post.embeds = embeds or []
+    post.edit = AsyncMock()
+    return post
+
+
+@pytest.mark.asyncio
+async def test_summary_moves_under_a_file_posted_after_the_answer() -> None:
+    """Files and the agent's own posts land below the answer; the summary follows them."""
+    file_post = _bot_post(200)
+    lc, edits, thread = _move_fixture(file_post)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(_make_success_state())
+
+    await lc.move_summary_last(thread)
+
+    summary = file_post.edit.await_args.kwargs["embeds"][0]
+    assert summary.footer.text.startswith("test-agent"), "the file post gains the summary"
+    assert edits[-1][1] == {"embeds": []}, "the answer gives it up"
+
+
+@pytest.mark.asyncio
+async def test_the_turn_window_closes_on_discords_clock() -> None:
+    """The bound comes from Discord's own stamps, so a fast host clock cannot widen it."""
+    lc, _edits, _thread = _move_fixture(None)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(_make_success_state())
+
+    window = lc.turn_window
+    assert window is not None
+    assert window[0] == 100, "the window opens at the card"
+    host_now = discord.utils.time_snowflake(datetime.now(UTC), high=True)
+    assert window[1] <= host_now + 1, "it closes at the last Discord stamp the turn saw"
+
+
+@pytest.mark.asyncio
+async def test_an_unstamped_terminal_falls_back_to_the_host_clock() -> None:
+    """With no Discord stamp at the end (edits that return nothing), the host clock
+    closes the window, so a file the agent posted mid-turn still counts as the turn's."""
+    card = types.SimpleNamespace(id=100)
+
+    async def send(**kwargs: Any) -> object:
+        return card
+
+    async def edit(ref: Any, **kwargs: Any) -> None:
+        pass
+
+    lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_render(TurnState())
+    mid_turn_post = discord.utils.time_snowflake(datetime.now(UTC))
+    await lc.on_terminal_success(_make_success_state())
+
+    window = lc.turn_window
+    assert window is not None
+    assert window[0] < mid_turn_post < window[1], "the stale card id must not close it"
+
+
+@pytest.mark.asyncio
+async def test_a_tool_only_turn_still_closes_its_window() -> None:
+    """A tool-only turn posts files too; its sweep needs the window for the dedup."""
+    lc, _edits, _thread = _move_fixture(None)
+    await lc.on_sse_event(_thinking_event())
+    tool = ToolUseBlock(
+        kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}, status="complete"
+    )
+    await lc.on_terminal_success(TurnState(content=[tool]))
+
+    assert lc.turn_window is not None
+
+
+@pytest.mark.asyncio
+async def test_a_tool_only_card_keeps_done_and_its_summary_moves_under_the_files() -> None:
+    file_post = _bot_post(2**62)
+    lc, edits, thread = _move_fixture(file_post)
+    await lc.on_sse_event(_thinking_event())
+    tool = ToolUseBlock(
+        kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}, status="complete"
+    )
+    await lc.on_terminal_success(TurnState(content=[tool]))
+
+    await lc.move_summary_last(thread, swept=[2**62])
+
+    moved = file_post.edit.await_args.kwargs["embeds"][0]
+    assert moved.footer.text.startswith("test-agent") and moved.description is None
+    kept = edits[-1][1]["embeds"][0]
+    assert kept.description == "Done." and kept.footer.text is None, "the card stays as Done."
+
+
+@pytest.mark.asyncio
+async def test_summary_moves_under_a_file_its_own_sweep_posted_after_the_turn() -> None:
+    file_post = _bot_post(2**62)
+    lc, edits, thread = _move_fixture(file_post)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(_make_success_state())
+
+    await lc.move_summary_last(thread, swept=[2**62])
+
+    assert file_post.edit.await_count == 1
+    assert edits[-1][1] == {"embeds": []}
+
+
+@pytest.mark.asyncio
+async def test_the_vote_emoji_follow_the_summary_to_the_last_post() -> None:
+    """👍 👎 🙋 sit on the same message as the summary line."""
+    file_post = _bot_post(200)
+    lc, _edits, thread = _move_fixture(file_post)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(_make_success_state())
+    assert lc.feedback_message_id == "100", "first seeded where the summary is: the answer"
+
+    await lc.move_summary_last(thread)
+
+    card = lc.message_ref
+    assert card is not None
+    removed = [call.args[0] for call in cast(AsyncMock, card.remove_reaction).await_args_list]
+    assert removed == ["👍", "👎", "🙋"], "the answer gives up the bot's own seeds"
+    get_partial = cast(MagicMock, thread.get_partial_message)
+    get_partial.assert_called_with(200)
+    added = [call.args[0] for call in get_partial.return_value.add_reaction.await_args_list]
+    assert added == ["👍", "👎", "🙋"], "the last post gets them"
+
+
+@pytest.mark.parametrize(
+    "last",
+    [
+        None,
+        _bot_post(200, author_id=7),
+        _bot_post(200, embeds=[object()]),
+        _bot_post(50),
+        _bot_post(2**62),
+    ],
+    ids=["empty", "a-person", "a-newer-card", "older", "a-later-turns-post"],
+)
+@pytest.mark.asyncio
+async def test_summary_stays_put_unless_the_bot_posted_plainly_after_it(last: Any) -> None:
+    lc, edits, thread = _move_fixture(last)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(_make_success_state())
+    edits_before = len(edits)
+
+    await lc.move_summary_last(thread)
+
+    assert len(edits) == edits_before
+    if last is not None:
+        assert last.edit.await_count == 0
 
 
 class TestWasAnswered:
@@ -1120,8 +1388,8 @@ class TestTurnSummaryFooter:
         )
         state = dataclasses.replace(state, content=[TextBlock(kind="text", text="hi")])
         await lc.on_terminal_success(state)
-        details = _terminal_embed(edits).fields[-1].value
-        assert "Cost: $" in details
+        assert f"{GAP}$" in _terminal_footer(edits)
+        assert _terminal_footer(edits).endswith(" used")
 
     async def test_unpriced_model_omits_cost(self) -> None:
         lc, _sends, edits = _make_lifecycle(model_id="unknown-model")
@@ -1138,27 +1406,7 @@ class TestTurnSummaryFooter:
             ),
         )
         await lc.on_terminal_failure(state, Exception("boom"))
-        details = _terminal_embed(edits).fields[-1].value
-        assert "Cost:" not in details
-        assert "1k in / 200 out" in _terminal_embed(edits).fields[-1].value
-
-    async def test_merged_input_count_in_footer(self) -> None:
-        lc, _sends, edits = _make_lifecycle(model_id="claude-sonnet-4-6")
-        await lc.on_sse_event(_thinking_event())
-        await lc.on_render(TurnState())
-        state = apply(
-            TurnState(),
-            _span_usage_event(
-                event_id="u1",
-                input_tokens=1000,
-                cache_creation_input_tokens=500,
-                cache_read_input_tokens=2000,
-                output_tokens=300,
-            ),
-        )
-        await lc.on_terminal_failure(state, Exception("boom"))
-        # merged_in = 1000 + 500 + 2000 = 3500 -> "3.5k"; out = 300
-        assert "3.5k in / 300 out" in _terminal_embed(edits).fields[-1].value
+        assert "used" not in _terminal_footer(edits)
 
     async def test_footer_cost_equals_billing_ledger_with_cache_reads(self) -> None:
         # The whole point: footer cost == cost_of for the same 4 cache-split ints.
@@ -1188,10 +1436,9 @@ class TestTurnSummaryFooter:
             MODEL_PRICING["claude-sonnet-4-6"],
         )
         expected = format_cost(ledger_cost)
-        details = _terminal_embed(edits).fields[0].value
         assert expected is not None
-        assert f"Cost: {expected}" in details, (
-            f"Details cost must equal the billing-ledger cost {expected} to the cent"
+        assert f"{GAP}{expected} used" in _terminal_footer(edits), (
+            f"footer cost must equal the billing-ledger cost {expected} to the cent"
         )
 
 
@@ -1652,10 +1899,10 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
         await lc.on_sse_event(_thinking_event())
         await lc.on_render(TurnState())
         await lc.on_terminal_success(_make_success_state())
-        footers[channel] = _terminal_embed(edits).fields[0].value
-    assert footers["C1"].endswith("Balance: $3.75 of channel budget left"), "the budget's remainder"
+        footers[channel] = _terminal_footer(edits)
+    assert footers["C1"].endswith(f"{GAP}$3.75 left"), "the budget's remainder"
     for channel in ("C2", "C3", None):
-        assert footers[channel].endswith("Balance: $11.25 left"), (
+        assert footers[channel].endswith(f"{GAP}$11.25 left"), (
             f"{channel}: an inactive or missing budget shows the tenant balance"
         )
 
@@ -1676,7 +1923,7 @@ async def test_answer_keeps_the_channel_budget_footer_on_the_visible_message(
     await lc.post_initial()
     await lc.on_terminal_success(_make_success_state())
 
-    assert _terminal_embed(edits).fields[0].value.endswith("Balance: $25.00 of channel budget left")
+    assert _terminal_footer(edits).endswith(f"{GAP}$25.00 left")
     final_edit = edits[-1][1]
     assert final_edit["content"] == "Hello response"
     assert "embed" not in final_edit, "editing the answer must retain the terminal embed"
