@@ -36,6 +36,7 @@ from daimon.core._models import (
     ProviderBinding,
     ProviderBindingSlot,
     ThreadLease,
+    ThreadSession,
     UsageObservation,
 )
 from mux.contracts.config import ConfigRevision
@@ -649,6 +650,36 @@ async def mark_outbox_applied(session: AsyncSession, row: OutboxRow) -> bool:
     if await session.scalar(select(AccountingOutbox.revision).where(*where)) is None:
         raise KeyError(f"no outbox row {row.key}")
     return False
+
+
+# Legacy thread_sessions links
+
+
+async def link_legacy_thread_sessions(session: AsyncSession, *, batch: int = 2000) -> int:
+    """Fill `binding_id`/`binding_generation` on up to `batch` backfilled rows.
+
+    Migration 0074 leaves them NULL so it never holds a long lock on
+    `thread_sessions`. Run this in its own short transaction, repeatedly,
+    until it returns 0; rows already linked are skipped, so it is safe to
+    stop and rerun at any time.
+    """
+    pending = (
+        select(ThreadSession.id)
+        .join(ProviderBinding, ProviderBinding.legacy_row_id == ThreadSession.id)
+        .where(ThreadSession.binding_id.is_(None))
+        .limit(batch)
+        .with_for_update(of=ThreadSession, skip_locked=True)
+        .scalar_subquery()
+    )
+    linked = await session.execute(
+        update(ThreadSession)
+        .where(ThreadSession.id.in_(pending), ProviderBinding.legacy_row_id == ThreadSession.id)
+        .values(
+            binding_id=ProviderBinding.binding_id, binding_generation=ProviderBinding.generation
+        )
+        .returning(ThreadSession.id)
+    )
+    return len(linked.all())
 
 
 class PostgresStateStore:

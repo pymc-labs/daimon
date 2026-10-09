@@ -203,11 +203,17 @@ observation), and lease expiry follows the database's wall clock, read
 after the locks a decision depends on are held. Its module
 functions take an `AsyncSession`, so `mark_outbox_applied` can run in the
 transaction that writes the ledger rows. The migration backfills a binding for
-each caller's thread that has a live `thread_sessions` row; its current
+each caller's thread (keyed by tenant, platform, thread and account, as the
+legacy reader is) that has a live `thread_sessions` row. Its current
 generation is the newest live row, the one Daimon resumes today, and the
 caller's other rows are earlier generations. A thread with no live row
 gets no binding. Rows with no account are not backfilled, and a session
-recorded by two callers is owned by neither. Nothing in Daimon calls
+recorded by two callers is owned by neither. The migration only reads
+`thread_sessions`; its sole exclusive lock there is two instant nullable
+`ADD COLUMN`s, run last. It leaves `binding_id` and `binding_generation`
+NULL: `mux_state.link_legacy_thread_sessions(session, batch=2000)` fills
+backfilled rows a batch per call, skipping rows already linked, so it can
+be run, stopped and rerun at any time. Nothing in Daimon calls
 the store yet.
 
 ## Events

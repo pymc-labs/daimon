@@ -6,19 +6,28 @@ them yet, and no existing query or default changes.
 
 Backfill. A binding's current generation must be the row the legacy
 reader (`get_live_thread_session`) returns today: the newest `live` row of
-a caller's thread. So only caller-owned slots (account_id set) with a live
-row get a binding. Its generations are the slot's rows with the live ones
-last, each group in creation order, so the newest live row is the highest
-generation; the binding id is the slot's first row in that order. A slot
-with no live row gets no binding, as today such a thread cold-creates a
-fresh session. Rows with no account (frozen before per-caller sessions)
+a caller's thread, keyed like that reader by (tenant, platform, thread,
+account) and not by channel. So only caller-owned threads (account_id set)
+with a live row get a binding. Its generations are the caller's rows with
+the live ones last, each group in creation order, so the newest live row is
+the highest generation; the binding id is the first row in that order and
+the slot's channel is the newest channel any of its rows recorded ('' if
+none). A thread with no live row gets no binding, as today it cold-creates
+a fresh session. Rows with no account (frozen before per-caller sessions)
 are left alone: they match no caller today, and a binding with no account
-would read as a shared thread. A row with no recorded channel gets an
-empty channel id.
+would read as a shared thread. Each backfilled generation records the row
+it came from in `provider_binding.legacy_row_id`.
 
-A session id recorded in more than one slot is ambiguous: no slot owns it,
-so it takes no journal appends and no usage, and a slot whose live session
-is ambiguous gets no binding. The host resolves it by binding explicitly.
+A session id recorded in more than one caller's thread is ambiguous: no
+slot owns it, so it takes no journal appends and no usage, and a thread
+whose live session is ambiguous gets no binding. The host resolves it by
+binding explicitly.
+
+Locking. The backfill only reads `thread_sessions`. Its only ACCESS
+EXCLUSIVE lock is the two nullable `ADD COLUMN`s (no default, so no rewrite),
+run last so the lock is held only until the commit right after. The new
+columns stay NULL here; `daimon.core.stores.mux_state.link_legacy_thread_sessions`
+fills them in short batches, idempotently, whenever it is run.
 
 downgrade: destructive
 """
@@ -56,15 +65,21 @@ def _binding_fk() -> sa.ForeignKey:
 
 _SLOT = ("tenant_id", "platform", "channel_id", "thread_id", "account_id")
 
-_BACKFILL = """
+_ROWS = """
 WITH caller_rows AS (
     SELECT
-        ts.*,
-        coalesce(ts.channel_id, '') AS slot_channel,
+        ts.id, ts.tenant_id, ts.platform, ts.thread_id, ts.account_id::text AS account_id,
+        ts.ma_session_id, ts.ma_agent_id, ts.status, ts.created_at,
         dense_rank() OVER (
-            ORDER BY ts.tenant_id, ts.platform, coalesce(ts.channel_id, ''), ts.thread_id,
-                     ts.account_id
-        ) AS slot
+            ORDER BY ts.tenant_id, ts.platform, ts.thread_id, ts.account_id
+        ) AS slot,
+        coalesce(
+            first_value(ts.channel_id) OVER (
+                PARTITION BY ts.tenant_id, ts.platform, ts.thread_id, ts.account_id
+                ORDER BY ts.channel_id IS NULL, ts.created_at DESC, ts.id DESC
+            ),
+            ''
+        ) AS channel_id
     FROM thread_sessions ts
     WHERE ts.account_id IS NOT NULL
 ),
@@ -82,72 +97,65 @@ bound AS (
 ),
 rows AS (
     SELECT
-        r.id, r.tenant_id, r.platform, r.slot_channel AS channel_id, r.thread_id,
-        r.account_id::text AS account_id, r.ma_session_id, r.ma_agent_id, r.created_at,
+        r.*,
         row_number() OVER slot_order AS generation,
         first_value(r.id::text) OVER slot_order AS binding_id,
         count(*) OVER (PARTITION BY r.slot) AS generations
     FROM caller_rows r JOIN bound USING (slot)
-    WINDOW slot_order AS (
-        PARTITION BY r.slot ORDER BY r.status = 'live', r.created_at, r.id
-    )
-),
+    WINDOW slot_order AS (PARTITION BY r.slot ORDER BY r.status = 'live', r.created_at, r.id)
+)
+"""
+
+_BINDINGS = (
+    _ROWS
+    + """,
 slots AS (
     INSERT INTO provider_binding_slot
         (binding_id, tenant_id, platform, channel_id, thread_id, account_id, generation)
     SELECT binding_id, tenant_id, platform, channel_id, thread_id, account_id, generations
     FROM rows WHERE generation = 1
     RETURNING binding_id
-),
-bindings AS (
-    INSERT INTO provider_binding
-        (binding_id, generation, tenant_id, provider, profile, binding, created_at)
-    SELECT
-        r.binding_id, r.generation, r.tenant_id, 'anthropic', 'anthropic.managed_agents',
-        jsonb_build_object(
-            'id', r.binding_id,
-            'thread', jsonb_build_object(
-                'channel', jsonb_build_object(
-                    'tenant_id', r.tenant_id::text,
-                    'platform', r.platform,
-                    'channel_id', r.channel_id
-                ),
-                'thread_id', r.thread_id
-            ),
-            'provider', 'anthropic',
-            'profile', 'anthropic.managed_agents',
-            'native_refs', jsonb_strip_nulls(
-                jsonb_build_object('session', r.ma_session_id, 'agent', r.ma_agent_id)
-            ),
-            'generation', r.generation,
-            'config_revision', 0,
-            'legacy_account_id', r.account_id
-        ),
-        r.created_at
-    FROM rows r JOIN slots s ON s.binding_id = r.binding_id
-    RETURNING binding_id
 )
-UPDATE thread_sessions ts
-SET binding_id = r.binding_id, binding_generation = r.generation
-FROM rows r
-WHERE ts.id = r.id AND EXISTS (SELECT 1 FROM bindings b WHERE b.binding_id = r.binding_id)
+INSERT INTO provider_binding
+    (binding_id, generation, tenant_id, provider, profile, binding, legacy_row_id, created_at)
+SELECT
+    r.binding_id, r.generation, r.tenant_id, 'anthropic', 'anthropic.managed_agents',
+    jsonb_build_object(
+        'id', r.binding_id,
+        'thread', jsonb_build_object(
+            'channel', jsonb_build_object(
+                'tenant_id', r.tenant_id::text,
+                'platform', r.platform,
+                'channel_id', r.channel_id
+            ),
+            'thread_id', r.thread_id
+        ),
+        'provider', 'anthropic',
+        'profile', 'anthropic.managed_agents',
+        'native_refs', jsonb_strip_nulls(
+            jsonb_build_object('session', r.ma_session_id, 'agent', r.ma_agent_id)
+        ),
+        'generation', r.generation,
+        'config_revision', 0,
+        'legacy_account_id', r.account_id
+    ),
+    r.id,
+    r.created_at
+FROM rows r JOIN slots s ON s.binding_id = r.binding_id
 """
+)
 
-_SESSIONS = """
+_SESSIONS = (
+    _ROWS
+    + """
 INSERT INTO journal_session (session_id, tenant_id, binding_id)
-SELECT DISTINCT ON (ts.ma_session_id) ts.ma_session_id, ts.tenant_id, ts.binding_id
-FROM thread_sessions ts
-WHERE ts.binding_id IS NOT NULL
-  AND ts.ma_session_id NOT IN (
-      SELECT ma_session_id FROM thread_sessions
-      WHERE account_id IS NOT NULL
-      GROUP BY ma_session_id
-      HAVING count(DISTINCT (tenant_id, platform, coalesce(channel_id, ''), thread_id,
-                             account_id)) > 1
-  )
-ORDER BY ts.ma_session_id, ts.created_at, ts.id
+SELECT DISTINCT ON (r.ma_session_id) r.ma_session_id, r.tenant_id, r.binding_id
+FROM rows r
+WHERE r.ma_session_id NOT IN (SELECT ma_session_id FROM ambiguous)
+ORDER BY r.ma_session_id, r.created_at, r.id
 ON CONFLICT (session_id) DO NOTHING
 """
+)
 
 
 def upgrade() -> None:
@@ -184,10 +192,17 @@ def upgrade() -> None:
         sa.Column("provider", sa.Text(), nullable=False),
         sa.Column("profile", sa.Text(), nullable=False),
         sa.Column("binding", postgresql.JSONB(), nullable=False),
+        sa.Column("legacy_row_id", sa.UUID(), nullable=True),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.PrimaryKeyConstraint("binding_id", "generation"),
+    )
+    op.create_index(
+        "provider_binding_legacy_row_idx",
+        "provider_binding",
+        ["legacy_row_id"],
+        postgresql_where=sa.text("legacy_row_id IS NOT NULL"),
     )
     op.create_table(
         "thread_lease",
@@ -269,10 +284,21 @@ def upgrade() -> None:
         ["created_at"],
         postgresql_where=sa.text("applied_at IS NULL"),
     )
+    backfill()
+    add_columns()
+
+
+def backfill() -> None:
+    """Fill the new tables. Reads `thread_sessions`; locks nothing a turn needs."""
+    connection = op.get_bind()
+    connection.execute(sa.text(_BINDINGS))
+    connection.execute(sa.text(_SESSIONS))
+
+
+def add_columns() -> None:
+    """The only ACCESS EXCLUSIVE on `thread_sessions`: instant, and the last step."""
     op.add_column("thread_sessions", sa.Column("binding_id", sa.Text(), nullable=True))
     op.add_column("thread_sessions", sa.Column("binding_generation", sa.Integer(), nullable=True))
-    connection.execute(sa.text(_BACKFILL))
-    connection.execute(sa.text(_SESSIONS))
 
 
 def downgrade() -> None:

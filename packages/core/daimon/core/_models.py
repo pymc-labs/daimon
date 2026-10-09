@@ -499,8 +499,9 @@ class ThreadSession(Base):
     identity_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     mutable_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The provider-neutral binding this row backs (`provider_binding`), and its
-    # generation. Backfilled for caller-owned rows; NULL on rows written since,
-    # until the mux turn path writes them. No existing query reads them.
+    # generation. NULL until `stores.mux_state.link_legacy_thread_sessions`
+    # fills backfilled rows (in batches, never under the migration's lock) or
+    # the mux turn path writes them. No existing query reads them.
     binding_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     binding_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Lineage of one continuing task across session replacements.
@@ -3171,7 +3172,14 @@ class ProviderBinding(Base):
     """Every generation of a binding; the slot's current one is the highest."""
 
     __tablename__ = "provider_binding"
-    __table_args__ = (PrimaryKeyConstraint("binding_id", "generation"),)
+    __table_args__ = (
+        PrimaryKeyConstraint("binding_id", "generation"),
+        Index(
+            "provider_binding_legacy_row_idx",
+            "legacy_row_id",
+            postgresql_where=text("legacy_row_id IS NOT NULL"),
+        ),
+    )
 
     binding_id: Mapped[str] = mapped_column(
         Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
@@ -3182,6 +3190,8 @@ class ProviderBinding(Base):
     profile: Mapped[str] = mapped_column(Text, nullable=False)
     # A `mux.contracts.resources.ProviderBinding` as JSON.
     binding: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # The `thread_sessions` row a backfilled generation came from; NULL otherwise.
+    legacy_row_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
