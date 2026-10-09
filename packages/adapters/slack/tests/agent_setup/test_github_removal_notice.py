@@ -31,7 +31,10 @@ async def test_removal_notice_uses_ephemeral_button_without_dm(
     send_link = AsyncMock()
     monkeypatch.setattr(github_removal, "send_link", send_link)
     client = SimpleNamespace(conversations_open=AsyncMock(), chat_postMessage=AsyncMock())
-    runtime = SimpleNamespace(sessionmaker=_Sessions(), settings=object())
+    runtime = SimpleNamespace(
+        sessionmaker=_Sessions(),
+        settings=SimpleNamespace(mcp=SimpleNamespace(app_root_url="https://mcp.test")),
+    )
     await github_removal.send_pending_notice(
         runtime,  # pyright: ignore[reportArgumentType]
         client,  # pyright: ignore[reportArgumentType]
@@ -48,6 +51,7 @@ async def test_removal_notice_uses_ephemeral_button_without_dm(
     assert send_link.await_args.kwargs["channel_id"] == "C1"
     assert send_link.await_args.kwargs["user_id"] == "U1"
     assert send_link.await_args.kwargs["url"] == "https://mcp.test/connect"
+    assert send_link.await_args.kwargs["app_root_url"] == "https://mcp.test"
     client.conversations_open.assert_not_awaited()
     client.chat_postMessage.assert_not_awaited()
     assert finish.await_args is not None
