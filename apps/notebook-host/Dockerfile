@@ -2,7 +2,7 @@
 # bake into this image. The only secret is DAIMON_NOTEBOOK__ADMIN_SECRET,
 # supplied at runtime via `fly secrets set` or an equivalent mechanism.
 
-FROM python:3.12-slim
+FROM mirror.gcr.io/library/python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
