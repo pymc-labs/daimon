@@ -448,3 +448,47 @@ async def test_on_request_help_slash_when_command_arrives_still_routes_correctly
     assert "help" in spawned_cmds, (
         "/help slash must still route to handle_help_command (regression guard)"
     )
+
+
+async def test_on_request_stale_avatar_upload_submission_is_refused_and_writes_nothing() -> None:
+    """A picture form opened before uploads were turned off gets the refusal; nothing runs."""
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+    payload = {
+        "type": "view_submission",
+        "team": {"id": "T_TEST"},
+        "user": {"id": "U_TEST"},
+        "view": {
+            "callback_id": "agent_setup__avatar_upload",
+            "id": "V_UPLOAD",
+            "private_metadata": encode_panel_metadata(
+                PanelMetadata(
+                    team_id="T_TEST",
+                    channel_id="C_TEST",
+                    view="avatar_upload",
+                    agent_name="research-bot",
+                    root_view_id="V_ROOT",
+                )
+            ),
+            "state": {
+                "values": {
+                    "agent_setup__avatar_file": {
+                        "agent_setup__avatar_file": {"files": [{"id": "F1", "size": 42}]}
+                    }
+                }
+            },
+        },
+    }
+    req = SocketModeRequest(type="interactive", envelope_id="env_avatar_stale_001", payload=payload)
+
+    with patch("daimon.core.stores.agent_avatars.replace_avatar") as replace_avatar:
+        await app.on_request(fake_client, req)  # type: ignore[arg-type]
+        await _drain(app)
+
+    assert fake_client.call_log == ["send_socket_mode_response"]
+    ack_payload: dict[str, Any] = fake_client.sent_responses[0].payload or {}  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    assert ack_payload["response_action"] == "update"
+    assert "Custom pictures are turned off." in json.dumps(ack_payload["view"])
+    assert not app._bg_tasks  # pyright: ignore[reportPrivateUsage]
+    replace_avatar.assert_not_called()
+    app.runtime.sessionmaker.assert_not_called()  # type: ignore[attr-defined]

@@ -2164,6 +2164,22 @@ class TestCredentialButtonRegistration:
             "dynamic item after setup_hook runs"
         )
 
+    async def test_setup_hook_registers_the_stale_picture_change_button(
+        self, db_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
+
+        bot = make_bot(_make_runtime(db_session_factory))
+        bot.start_orphan_recovery = MagicMock()  # type: ignore[method-assign]  # the boot sweep is not under test
+
+        await bot.setup_hook()
+
+        dynamic_items = (
+            bot._connection._view_store._dynamic_items  # pyright: ignore[reportPrivateUsage]  # discord.py exposes no public accessor
+        )
+        template = StalePictureChangeButton.__discord_ui_compiled_template__
+        assert dynamic_items.get(template) is StalePictureChangeButton
+
 
 class TestGuildInstallLifecycle:
     async def test_delayed_remove_cannot_archive_after_rejoin(

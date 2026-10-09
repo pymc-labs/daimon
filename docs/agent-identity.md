@@ -186,7 +186,8 @@ Named-agent routing is tracked separately from this identity work.
   name normalized as #409 normalizes names (NFKC, casefolded), so an agent the
   resolver recreates keeps its avatar. A rename moves the row; archiving or
   deleting the agent, and tenant purge, delete it, so a later agent reusing
-  the name starts from a fresh default. Uploads remain 256×256 PNG, at most 256 KB.
+  the name starts from a fresh default. Pictures uploaded before uploads were
+  turned off stay as stored 256×256 PNGs.
 - With the identity switch on, the first turn reads the current picture without
   waiting for artwork. A missing face is generated after the turn proceeds; an
   existing initials URL stays valid after the new PNG is stored, until an admin
@@ -216,13 +217,15 @@ Named-agent routing is tracked separately from this identity work.
   open its image, and platform and browser caches keep it after we delete it.
   The panel says so. The same route accepts `?size=128` or `?size=512` for a
   resized PNG; a size without a query returns the stored bytes.
-- Setup panel: an Avatar row on the agent's detail screen with **Change** and
-  **Reset** (back to the generated one). Change takes an uploaded image, never
-  a URL we fetch: a Slack modal `file_input` (downloaded from Slack's file API
-  with the bot token) and on Discord an attachment option on the agent setup
-  command (downloaded from Discord's CDN). The download is bounded in time and
-  bytes, decoded with a pixel cap, center-cropped, resized and re-encoded as
-  PNG without metadata. Admin only, recorded in the panel audit.
+- Setup panel: a Picture row on the agent's detail screen with **Use default**
+  (back to the generated face) and **Details**. Admin only, recorded in the
+  panel audit. Custom uploads are turned off: there is no Change button and no
+  attachment option on Discord's agent setup command. A Change button, Slack
+  upload form or `/agent-setup` picture option left over from before answers
+  "Custom pictures are turned off." and writes nothing. A Discord upload form
+  left open across a restart shows Discord's "interaction failed". An agent
+  that already has an uploaded picture keeps showing it until an admin uses
+  **Use default**.
 
 ## Permissions and app changes
 

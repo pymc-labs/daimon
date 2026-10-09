@@ -35,11 +35,7 @@ from daimon.adapters.slack.agent_setup.add_skill import (
     evaluate_add_skill_submission,
     run_add_skill_submission,
 )
-from daimon.adapters.slack.agent_setup.avatar import (
-    AvatarSubmission,
-    evaluate_avatar_submission,
-    run_avatar_submission,
-)
+from daimon.adapters.slack.agent_setup.avatar import evaluate_avatar_submission
 from daimon.adapters.slack.agent_setup.channel_admins import (
     ChannelAdminsSubmission,
     evaluate_channel_admins_submission,
@@ -1068,27 +1064,12 @@ class SlackApp:
 
                     self._spawn(_run_add_skill())
             elif cb_id == CALLBACK_AVATAR_UPLOAD:
-                _av = evaluate_avatar_submission(payload)
                 await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id, payload=_av.response_payload)
+                    SocketModeResponse(
+                        envelope_id=req.envelope_id,
+                        payload=evaluate_avatar_submission(payload),
+                    )
                 )
-                if _av.proceed:
-                    _av_team: dict[str, Any] = payload.get("team") or {}
-                    _av_user: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_avatar(
-                        *,
-                        _t: str = str(_av_team.get("id") or ""),
-                        _u: str = str(_av_user.get("id") or ""),
-                        _s: AvatarSubmission = _av,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is not None:
-                            await run_avatar_submission(
-                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
-                            )
-
-                    self._spawn(_run_avatar())
             elif cb_id == "feedback_text":
                 # Pure evaluate (no I/O) — must run before the single ack.
                 _fb_decision = evaluate_feedback_text_submission(payload)

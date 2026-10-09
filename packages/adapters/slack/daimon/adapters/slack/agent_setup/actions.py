@@ -127,7 +127,11 @@ from daimon.adapters.slack.setup_conversations import (
     setup_link,
     setup_reply_button,
 )
-from daimon.core.agent_identity import identity_enabled_for, resolve_agent_identity
+from daimon.core.agent_identity import (
+    CUSTOM_PICTURES_OFF,
+    identity_enabled_for,
+    resolve_agent_identity,
+)
 from daimon.core.answering_map import AnsweringMap, routed_agent_names
 from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
@@ -848,40 +852,11 @@ async def _dispatch_panel_action(
     is_admin = await resolve_is_admin(client, user_id=user_id)
 
     if action_id == panel_views.ACTION_AVATAR_CHANGE:
-        if (
-            not identity_enabled_for(runtime.settings, "slack", meta.team_id)
-            or not meta.agent_name
-            or not is_admin
-        ):
-            await record_panel_write(
-                runtime.sessionmaker,
-                tenant_id=tenant_id,
-                platform="slack",
-                platform_user_id=user_id,
-                op="agent_avatar_change",
-                outcome="denied",
-                reason="needs_admin_or_agent_gone",
-                agent_name=meta.agent_name,
-            )
-            if not identity_enabled_for(runtime.settings, "slack", meta.team_id) and view_id:
-                await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-                    view_id=view_id,
-                    view=panel_views.build_avatar_status_view(
-                        meta=meta, message="Agent pictures are turned off."
-                    ),
-                )
-            return
-        form = panel_views.build_avatar_upload_form(
-            meta=meta.with_view(
-                "avatar_upload",
-                agent_name=meta.agent_name,
-                root_view_id=meta.root_view_id or view_id,
-            )
-        )
+        refusal = panel_views.build_avatar_status_view(meta=meta, message=CUSTOM_PICTURES_OFF)
         if meta.view == "avatar_upload":
-            await client.views_update(view_id=view_id, view=form)  # pyright: ignore[reportUnknownMemberType]
+            await client.views_update(view_id=view_id, view=refusal)  # pyright: ignore[reportUnknownMemberType]
         else:
-            await client.views_push(trigger_id=trigger_id, view=form)  # pyright: ignore[reportUnknownMemberType]
+            await client.views_push(trigger_id=trigger_id, view=refusal)  # pyright: ignore[reportUnknownMemberType]
         return
 
     if action_id == panel_views.ACTION_AVATAR_DETAILS:
