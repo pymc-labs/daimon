@@ -203,6 +203,7 @@ async def _retire(
             view=_ConfirmationView(card, prompt, answer=None),
             allowed_mentions=discord.AllowedMentions.none(),
         ),
+        card_key=("discord", message.id),
         budget_s=RETIRE_TIMEOUT_S,
         failure_errors=(discord.HTTPException,),
         failed_event="tool_confirmation.retire_failed",

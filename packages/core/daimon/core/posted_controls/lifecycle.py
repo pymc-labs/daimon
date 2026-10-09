@@ -23,8 +23,13 @@ from daimon.core.posted_controls.confirmation import (
 
 _log = structlog.get_logger(__name__)
 
-#: Card edits still running after their budget; held so they are not collected.
+#: Every card edit not yet finished, held so none is collected mid-flight.
 _BACKGROUND_EDITS: set[asyncio.Future[object]] = set()
+#: The latest edit per card, so edits to one card land in call order.
+_LAST_EDIT: dict[object, asyncio.Future[object]] = {}
+#: Most an edit waits for the card's previous edit, so one hung platform call
+#: cannot freeze every later edit to that card.
+ORDER_WAIT_S = 30.0
 
 
 def pending_card_edits() -> int:
@@ -32,9 +37,18 @@ def pending_card_edits() -> int:
     return len(_BACKGROUND_EDITS)
 
 
+def cancel_pending_card_edits() -> None:
+    """Cancel every unfinished card edit; for test isolation only."""
+    for task in list(_BACKGROUND_EDITS):
+        task.cancel()
+    _BACKGROUND_EDITS.clear()
+    _LAST_EDIT.clear()
+
+
 async def edit_card_within(
     edit: Awaitable[object],
     *,
+    card_key: object,
     budget_s: float,
     failure_errors: tuple[type[BaseException], ...],
     failed_event: str,
@@ -44,32 +58,40 @@ async def edit_card_within(
     Retiring or answering a card runs while a turn is being stopped or timed
     out, so a slow platform must not hold the turn. Cancelling the edit at the
     budget left the card showing live buttons under load (staging, 2026-10-09:
-    two of six expiries timed out at 2s). The edit now completes on its own,
-    and only a real failure is logged as `failed_event`.
+    two of six expiries timed out at 2s). The edit now completes on its own.
+
+    Edits to one card (`card_key`) run one after another in call order, so a
+    slow Approved edit can never land after the Stopped edit that followed it.
+    The edit is tracked from creation, so cancelling the caller neither drops
+    it nor leaves its failure unobserved; a failure is logged as `failed_event`.
     """
-    task = asyncio.ensure_future(edit)
+    previous = _LAST_EDIT.get(card_key)
+
+    async def _in_order() -> object:
+        if previous is not None and not previous.done():
+            await asyncio.wait({previous}, timeout=ORDER_WAIT_S)
+        return await edit
+
+    task: asyncio.Future[object] = asyncio.ensure_future(_in_order())
+    _LAST_EDIT[card_key] = task
+    _BACKGROUND_EDITS.add(task)
 
     def _finished(done: asyncio.Future[object]) -> None:
         _BACKGROUND_EDITS.discard(done)
+        if _LAST_EDIT.get(card_key) is done:
+            del _LAST_EDIT[card_key]
         if done.cancelled():
             return
         err = done.exception()
         if err is not None:
             _log.warning(failed_event, error=str(err) or type(err).__name__)
+            if not isinstance(err, failure_errors):
+                _log.error("tool_confirmation.edit_unexpected_error", event_name=failed_event)
 
+    task.add_done_callback(_finished)
     done, _ = await asyncio.wait({task}, timeout=budget_s)
     if not done:
-        _BACKGROUND_EDITS.add(task)
-        task.add_done_callback(_finished)
         _log.info("tool_confirmation.edit_deferred", edit_event=failed_event, budget_s=budget_s)
-        return
-    err = task.exception()
-    if err is None:
-        return
-    if isinstance(err, failure_errors):
-        _log.warning(failed_event, error=str(err) or type(err).__name__)
-        return
-    raise err
 
 
 class PromptCard(Protocol):

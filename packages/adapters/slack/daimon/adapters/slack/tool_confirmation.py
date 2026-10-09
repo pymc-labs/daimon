@@ -188,6 +188,7 @@ async def _edit(
             mrkdwn=False,
             parse="none",
         ),
+        card_key=("slack", posted.channel, posted.ts),
         budget_s=EDIT_TIMEOUT_S,
         failure_errors=(SlackApiError,),
         failed_event="slack.tool_confirmation.edit_failed",

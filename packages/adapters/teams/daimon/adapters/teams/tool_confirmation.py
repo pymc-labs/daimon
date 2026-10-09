@@ -219,6 +219,7 @@ class TeamsConfirmationCards:
         # Bounded for the turn, finished in the background (`edit_card_within`).
         await edit_card_within(
             self._sender.send(posted.conversation_id, edit, service_url=posted.service_url),
+            card_key=("teams", posted.conversation_id, posted.message_id),
             budget_s=EDIT_TIMEOUT_S,
             failure_errors=TEAMS_SEND_ERRORS,
             failed_event="teams.tool_confirmation.edit_failed",

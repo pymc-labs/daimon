@@ -315,7 +315,11 @@ async def test_a_slow_card_edit_returns_within_budget_and_still_lands() -> None:
     loop = asyncio.get_running_loop()
     started = loop.time()
     await edit_card_within(
-        slow_edit(), budget_s=0.05, failure_errors=(ValueError,), failed_event="test.edit_failed"
+        slow_edit(),
+        card_key="card-1",
+        budget_s=0.05,
+        failure_errors=(ValueError,),
+        failed_event="test.edit_failed",
     )
     assert loop.time() - started < 1.0, "the turn waits no longer than the budget"
     assert landed == [] and pending_card_edits() == 1
@@ -336,5 +340,70 @@ async def test_a_card_edit_failure_inside_the_budget_is_logged_not_raised() -> N
         raise ValueError("gone")
 
     await edit_card_within(
-        failing_edit(), budget_s=1.0, failure_errors=(ValueError,), failed_event="test.edit_failed"
+        failing_edit(),
+        card_key="card-2",
+        budget_s=1.0,
+        failure_errors=(ValueError,),
+        failed_event="test.edit_failed",
     )
+
+
+async def test_edits_to_one_card_land_in_call_order() -> None:
+    """Review of #504: a slow Approved edit that finished after the Stopped
+    edit following it left a refused card showing Approved."""
+    import asyncio
+
+    from daimon.core.posted_controls.lifecycle import edit_card_within, pending_card_edits
+
+    release = asyncio.Event()
+    landed: list[str] = []
+
+    async def approved() -> None:
+        await release.wait()
+        landed.append("approved")
+
+    async def stopped() -> None:
+        landed.append("stopped")
+
+    for edit in (approved(), stopped()):
+        await edit_card_within(
+            edit, card_key="card-3", budget_s=0.01, failure_errors=(ValueError,), failed_event="x"
+        )
+    assert landed == [], "the second edit waits for the first"
+    release.set()
+    for _ in range(50):
+        if len(landed) == 2 and pending_card_edits() == 0:
+            break
+        await asyncio.sleep(0)
+    assert landed == ["approved", "stopped"]
+
+
+async def test_cancelling_the_caller_keeps_the_edit_tracked_and_landing() -> None:
+    import asyncio
+    import contextlib
+
+    from daimon.core.posted_controls.lifecycle import edit_card_within, pending_card_edits
+
+    release = asyncio.Event()
+    landed: list[str] = []
+
+    async def slow() -> None:
+        await release.wait()
+        landed.append("expired")
+
+    caller = asyncio.create_task(
+        edit_card_within(
+            slow(), card_key="card-4", budget_s=10.0, failure_errors=(ValueError,), failed_event="x"
+        )
+    )
+    await asyncio.sleep(0)
+    caller.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await caller
+    assert pending_card_edits() == 1, "the edit outlives its cancelled caller"
+    release.set()
+    for _ in range(50):
+        if landed and pending_card_edits() == 0:
+            break
+        await asyncio.sleep(0)
+    assert landed == ["expired"]
