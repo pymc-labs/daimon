@@ -77,8 +77,9 @@ def strip_mentions(text: str) -> str:
 def naming_text(text: str, attachment_names: Sequence[str]) -> str:
     """What the naming model reads: attached file names first, then the text.
 
-    Names go first so ``max_input_chars`` never cuts them off. A mention with
-    only a file still gets a title from the file's name.
+    Names go first: ``max_input_chars`` cuts a long message's tail, which
+    matters less than what was attached. A mention with only a file still
+    gets a title from the file's name.
     """
     if not attachment_names:
         return text

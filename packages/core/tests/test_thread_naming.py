@@ -46,7 +46,7 @@ def test_strip_mentions_leaves_only_empty_for_attachment_only_mention() -> None:
 def test_naming_text_puts_file_names_before_the_text() -> None:
     assert naming_text("shorten this", ["brief.pdf", "notes.md"]) == (
         "Attached: brief.pdf, notes.md\nshorten this"
-    ), "file names lead so max_input_chars never cuts them off"
+    ), "file names lead, ahead of a long message tail that max_input_chars may cut"
 
 
 def test_naming_text_names_a_file_only_mention_and_leaves_plain_text_alone() -> None:
