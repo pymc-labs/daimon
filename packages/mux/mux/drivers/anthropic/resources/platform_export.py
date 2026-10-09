@@ -9,6 +9,7 @@ from pydantic import JsonValue
 from mux.contracts.ids import Page, PageRequest, Scope
 from mux.contracts.ports import PlatformExport as CorePlatformExport
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
+from mux.drivers.anthropic.resources.skills import AnthropicSkillVersions
 from mux.errors import ScopeViolation, UnsupportedCapability
 
 
@@ -29,6 +30,9 @@ class PlatformExport(CorePlatformExport, Protocol):
         self, scope: Scope, skill_id: str
     ) -> AsyncIterator[dict[str, JsonValue]]: ...
     async def download_skill_version(self, scope: Scope, skill_id: str, version: str) -> bytes: ...
+    async def download_skill_version_id(
+        self, scope: Scope, skill_id: str, version_id: str
+    ) -> bytes: ...
     def memory_stores(self, scope: Scope) -> AsyncIterator[dict[str, JsonValue]]: ...
     def memories(self, scope: Scope, store_id: str) -> AsyncIterator[dict[str, JsonValue]]: ...
     async def memory(self, scope: Scope, store_id: str, memory_id: str) -> dict[str, JsonValue]: ...
@@ -120,6 +124,19 @@ class AnthropicPlatformExport:
             return await provider_call(content.read())
         finally:
             await provider_call(content.close())
+
+    async def download_skill_version_id(
+        self, scope: Scope, skill_id: str, version_id: str
+    ) -> bytes:
+        self._authorize(scope)
+        return b"".join(
+            [
+                chunk
+                async for chunk in AnthropicSkillVersions(self._client).download_by_id(
+                    scope, skill_id, version_id
+                )
+            ]
+        )
 
     async def memory_stores(self, scope: Scope) -> AsyncIterator[dict[str, JsonValue]]:
         self._authorize(scope)

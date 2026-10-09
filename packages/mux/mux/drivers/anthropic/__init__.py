@@ -15,7 +15,11 @@ from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources.agents import AnthropicAgents
 from mux.drivers.anthropic.resources.environments import AnthropicEnvironments
 from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport, PlatformExport
-from mux.drivers.anthropic.resources.skills import AnthropicSkills, AnthropicSkillVersions
+from mux.drivers.anthropic.resources.skills import (
+    AnthropicSkills,
+    AnthropicSkillVersions,
+    NativeSkillVersions,
+)
 from mux.drivers.anthropic.resources.walk import AnthropicResourceWalk, ResourceWalk
 from mux.errors import ExtensionVersionError, UnsupportedCapability
 from mux.profiles.anthropic import MANAGED_AGENTS
@@ -66,6 +70,7 @@ class AnthropicManagedAgents:
             (PlatformExport, "anthropic.platform_export", 1): native_export,
             (CorePlatformExport, "anthropic.platform_export", 1): native_export,
             (SkillVersions, "anthropic.skills_versions", 1): native_versions,
+            (NativeSkillVersions, "anthropic.skills_versions", 1): native_versions,
         }
 
     @property

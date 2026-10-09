@@ -29,6 +29,7 @@ from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.authz import Action, Subject, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import (
+    download_skill_version,
     find_agent_by_daimon_tag,
     find_agents_by_daimon_tag,
     list_agents_by_tenant,
@@ -46,7 +47,7 @@ from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import create_agent, download_skill_version, retrieve_agent
+from daimon.core.mux_compat import create_agent, retrieve_agent
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import bundle_from_upload
 from daimon.core.specs import merge_default_agent_toolset
@@ -156,8 +157,8 @@ async def _copy_own_skills(
                 raise DaimonError(f"{skill.body} has no version to copy.")
             data = await download_skill_version(
                 anthropic,
-                skill.skill_id,
-                skill.version,
+                skill_id=skill.skill_id,
+                version=skill.version,
                 scope=resource_scope(tenant_id=str(tenant_id)),
             )
             # A new skill under the copy's title, never a share of the source's id.

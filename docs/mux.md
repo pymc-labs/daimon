@@ -352,3 +352,11 @@ cursor to None; native full walks retain the SDK stop rule.
 Skill import and repository-sync call-site checks retain the legacy multipart
 file field, `SKILL.zip` filename, `application/zip` media type and archive bytes
 for create, version and duplicate-title recovery uploads.
+
+Workspace-key skill downloads from main #494 use the native version ID and omit
+`anthropic-beta` on the content request through `anthropic.skills_versions@1`.
+Agent forks resolve the pinned epoch version with the existing lazy SDK walk,
+stopping at the first match; operator exports already have the ID and download
+without another lookup. Forks use their authorized tenant scope; recovery exports
+retain the explicit operator scope. Other pinned-version downloads retain their
+existing SDK headers and arguments.

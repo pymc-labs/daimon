@@ -79,6 +79,7 @@ async def dispatch_pending_continuations(
                             public_base_url=public_base_url,
                             enabled=identity_enabled,
                             background_sessionmaker=sessionmaker,
+                            wait_for_face=True,
                         )
                 except Exception as exc:
                     log.warning(

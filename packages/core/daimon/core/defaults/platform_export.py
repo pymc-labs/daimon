@@ -70,8 +70,8 @@ async def export_platform(client: AsyncAnthropic, destination: Path) -> None:
                     version_prefix = f"{prefix}/{len(checksums)}"
                     write_json(f"{version_prefix}/version.json", version)
                     content = await legacy_call(
-                        native.download_skill_version(
-                            scope, str(skill["id"]), str(version["version"])
+                        native.download_skill_version_id(
+                            scope, str(skill["id"]), str(version["id"])
                         )
                     )
                     write(f"{version_prefix}/content.zip", content)
