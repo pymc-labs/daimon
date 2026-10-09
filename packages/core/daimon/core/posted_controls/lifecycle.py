@@ -42,25 +42,20 @@ def cancel_pending_card_edits() -> None:
     _LAST_EDIT.clear()
 
 
-async def edit_card_within(
+def queue_card_edit(
     edit: Awaitable[object],
     *,
     card_key: object,
-    budget_s: float,
     failure_errors: tuple[type[BaseException], ...],
     failed_event: str,
-) -> None:
-    """Wait up to `budget_s` for a card edit, then let it finish in the background.
-
-    Retiring or answering a card runs while a turn is being stopped or timed
-    out, so a slow platform must not hold the turn. Cancelling the edit at the
-    budget left the card showing live buttons under load (staging, 2026-10-09:
-    two of six expiries timed out at 2s). The edit now completes on its own.
+) -> asyncio.Future[object]:
+    """Queue a card edit behind the card's previous one, synchronously.
 
     Edits to one card (`card_key`) run one after another in call order, so a
     slow Approved edit can never land after the Stopped edit that followed it.
-    The edit is tracked from creation, so cancelling the caller neither drops
-    it nor leaves its failure unobserved; a failure is logged as `failed_event`.
+    The edit is registered and tracked before this returns, so a caller can
+    queue it and return at once (Teams answers a click this way), and
+    cancelling a caller neither drops the edit nor hides its failure.
     """
     previous = _LAST_EDIT.get(card_key)
 
@@ -88,6 +83,27 @@ async def edit_card_within(
                 _log.error("tool_confirmation.edit_unexpected_error", event_name=failed_event)
 
     task.add_done_callback(_finished)
+    return task
+
+
+async def edit_card_within(
+    edit: Awaitable[object],
+    *,
+    card_key: object,
+    budget_s: float,
+    failure_errors: tuple[type[BaseException], ...],
+    failed_event: str,
+) -> None:
+    """Queue a card edit (`queue_card_edit`), waiting at most `budget_s` for it.
+
+    Retiring or answering a card runs while a turn is being stopped or timed
+    out, so a slow platform must not hold the turn. Cancelling the edit at the
+    budget left the card showing live buttons under load (staging, 2026-10-09:
+    two of six expiries timed out at 2s). The edit now completes on its own.
+    """
+    task = queue_card_edit(
+        edit, card_key=card_key, failure_errors=failure_errors, failed_event=failed_event
+    )
     done, _ = await asyncio.wait({task}, timeout=budget_s)
     if not done:
         _log.info("tool_confirmation.edit_deferred", edit_event=failed_event, budget_s=budget_s)

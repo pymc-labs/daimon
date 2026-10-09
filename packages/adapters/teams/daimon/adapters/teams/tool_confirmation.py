@@ -8,13 +8,13 @@ in-process, like the cancel registry: a restart ends the card and its turn toget
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from datetime import UTC
 
 import structlog
 from daimon.adapters.teams.card_actions import (
     button,
-    replace_card,
     submitted_fields,
     toast,
 )
@@ -33,7 +33,11 @@ from daimon.core.posted_controls.confirmation import (
     build_confirmation_card,
     confirmation_card_text,
 )
-from daimon.core.posted_controls.lifecycle import PostedConfirmations, edit_card_within
+from daimon.core.posted_controls.lifecycle import (
+    PostedConfirmations,
+    edit_card_within,
+    queue_card_edit,
+)
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -57,6 +61,12 @@ log = structlog.get_logger(__name__)
 
 VERB = "tool_confirm"
 _ANSWERS: dict[str, ConfirmationAnswer] = {"approve": "approved", "deny": "denied"}
+#: The click's brief acknowledgement; the card itself updates through its queue.
+_ANSWER_TOASTS: dict[ConfirmationAnswer, str] = {
+    "approved": "Approved",
+    "denied": "Denied",
+    "expired": "Expired",
+}
 
 #: Most time a card edit may take.
 EDIT_TIMEOUT_S = 2.0
@@ -208,19 +218,36 @@ class TeamsConfirmationCards:
             posted.prompt, state=answer, answered_by_platform_user_id=clicker
         )
         name = activity.from_.name
-        response = replace_card(confirmation_adaptive_card(card, posted.prompt, answered_by=name))
+        # The answered card goes through the card's edit queue, registered
+        # before this returns, rather than as the invoke response: a delayed
+        # response could otherwise land after a Stopped retire that followed.
+        queue_card_edit(
+            self._send_card(posted, card, answered_by=name),
+            card_key=self._card_key(posted),
+            failure_errors=TEAMS_SEND_ERRORS,
+            failed_event="teams.tool_confirmation.edit_failed",
+        )
         posted.answered_edit_done.set()
-        return response
+        return toast(_ANSWER_TOASTS[answer])
+
+    @staticmethod
+    def _card_key(posted: _PostedCard) -> object:
+        return ("teams", posted.conversation_id, posted.message_id)
+
+    def _send_card(
+        self, posted: _PostedCard, card: ConfirmationCard, *, answered_by: str | None = None
+    ) -> Awaitable[object]:
+        edit = MessageActivityInput(id=posted.message_id).add_card(
+            confirmation_adaptive_card(card, posted.prompt, answered_by=answered_by)
+        )
+        return self._sender.send(posted.conversation_id, edit, service_url=posted.service_url)
 
     async def _edit(self, posted: _PostedCard, state: ConfirmationCardState) -> None:
         card = build_confirmation_card(posted.prompt, state=state)
-        edit = MessageActivityInput(id=posted.message_id).add_card(
-            confirmation_adaptive_card(card, posted.prompt)
-        )
         # Bounded for the turn, finished in the background (`edit_card_within`).
         await edit_card_within(
-            self._sender.send(posted.conversation_id, edit, service_url=posted.service_url),
-            card_key=("teams", posted.conversation_id, posted.message_id),
+            self._send_card(posted, card),
+            card_key=self._card_key(posted),
             budget_s=EDIT_TIMEOUT_S,
             failure_errors=TEAMS_SEND_ERRORS,
             failed_event="teams.tool_confirmation.edit_failed",
