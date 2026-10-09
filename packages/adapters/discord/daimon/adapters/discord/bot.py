@@ -2706,8 +2706,10 @@ class DaimonBot(commands.Bot):
                         watermark_message_id=final_lifecycle.final_message_id,
                     )
                     await session.commit()
-            if final_lifecycle.was_answered and final_lifecycle.final_message_id is not None:
-                await seed_feedback_reactions(thread, message_id=final_lifecycle.final_message_id)
+            if final_lifecycle.was_answered and final_lifecycle.feedback_message_id is not None:
+                await seed_feedback_reactions(
+                    thread, message_id=final_lifecycle.feedback_message_id
+                )
         self._schedule_output_sweep(
             outcome, thread=thread, tenant_id=tenant_id, lifecycle=final_lifecycle
         )
@@ -3650,8 +3652,10 @@ class DaimonBot(commands.Bot):
             # the vote affordance under a cancellation notice is exactly what
             # this guard prevents. Not gated on mapping_id, which is about
             # session mapping, not whether the turn actually answered.
-            if final_lifecycle.was_answered and final_lifecycle.final_message_id is not None:
-                await seed_feedback_reactions(thread, message_id=final_lifecycle.final_message_id)
+            if final_lifecycle.was_answered and final_lifecycle.feedback_message_id is not None:
+                await seed_feedback_reactions(
+                    thread, message_id=final_lifecycle.feedback_message_id
+                )
             # A change queued behind this turn (it was already running when the
             # change landed) applies at the caller's NEXT message, not this one
             # -- said only after the answer, so it never reads as a caveat on

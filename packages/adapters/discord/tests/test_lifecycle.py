@@ -355,6 +355,23 @@ class TestCleanReplace:
             "the last chunk carries the summary"
         )
 
+    async def test_long_answer_takes_the_vote_emoji_on_its_last_message(self) -> None:
+        sent = iter(range(1, 10))
+
+        async def send(**kwargs: Any) -> object:
+            return types.SimpleNamespace(id=next(sent))
+
+        async def edit(ref: Any, **kwargs: Any) -> None:
+            pass
+
+        lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+        await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="x" * 4000)]))
+
+        assert lc.final_message_id == "1", "the answer still starts on the card"
+        assert lc.feedback_message_id == "3", "the vote emoji go on the last chunk"
+
     async def test_short_answer_keeps_the_summary_on_its_one_message(self) -> None:
         lc, _sends, edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
@@ -1108,7 +1125,9 @@ def _move_fixture(
 ) -> tuple[DiscordTurnLifecycle, list[tuple[Any, dict[str, Any]]], discord.Thread]:
     """A lifecycle whose card is message 100, in a thread whose newest message is `last`."""
     edits: list[tuple[Any, dict[str, Any]]] = []
-    card = types.SimpleNamespace(id=100)
+    card = MagicMock()
+    card.id = 100
+    card.remove_reaction = AsyncMock()
 
     async def send(**kwargs: Any) -> object:
         return card
@@ -1127,6 +1146,7 @@ def _move_fixture(
     thread = MagicMock(spec=discord.Thread)
     thread.guild.me.id = 42
     thread.history = MagicMock(side_effect=history)
+    thread.get_partial_message.return_value.add_reaction = AsyncMock()
     return lc, edits, cast(discord.Thread, thread)
 
 
@@ -1233,6 +1253,27 @@ async def test_summary_moves_under_a_file_its_own_sweep_posted_after_the_turn() 
 
     assert file_post.edit.await_count == 1
     assert edits[-1][1] == {"embeds": []}
+
+
+@pytest.mark.asyncio
+async def test_the_vote_emoji_follow_the_summary_to_the_last_post() -> None:
+    """👍 👎 🙋 sit on the same message as the summary line."""
+    file_post = _bot_post(200)
+    lc, _edits, thread = _move_fixture(file_post)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(_make_success_state())
+    assert lc.feedback_message_id == "100", "first seeded where the summary is: the answer"
+
+    await lc.move_summary_last(thread)
+
+    card = lc.message_ref
+    assert card is not None
+    removed = [call.args[0] for call in cast(AsyncMock, card.remove_reaction).await_args_list]
+    assert removed == ["👍", "👎", "🙋"], "the answer gives up the bot's own seeds"
+    get_partial = cast(MagicMock, thread.get_partial_message)
+    get_partial.assert_called_with(200)
+    added = [call.args[0] for call in get_partial.return_value.add_reaction.await_args_list]
+    assert added == ["👍", "👎", "🙋"], "the last post gets them"
 
 
 @pytest.mark.parametrize(

@@ -70,3 +70,13 @@ async def seed_feedback_reactions(channel: discord.abc.Messageable, *, message_i
             err_type=type(exc).__name__,
             error=str(exc),
         )
+
+
+async def unseed_feedback_reactions(message: discord.Message, *, me: discord.abc.Snowflake) -> None:
+    """Take the bot's own seeded emoji off `message`; people's votes stay. Best-effort."""
+    try:
+        for emoji in (THUMBS_UP, THUMBS_DOWN, ESCALATE):
+            await message.remove_reaction(emoji, me)
+    except Exception as exc:
+        # best-effort: a leftover seed is cosmetic, never a turn failure
+        log.warning("feedback.unseed_failed", message_id=message.id, err_type=type(exc).__name__)

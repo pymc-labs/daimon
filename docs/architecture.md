@@ -850,7 +850,7 @@ Daimon already attached in the thread after the turn's card (the agent sent it
 itself), with the same name and size, is cleared from the listing without a
 second post. Once the sweep ends, the answer's summary line moves onto the
 turn's last post if that is a plain message the bot posted after the answer,
-so it always closes the turn. A long answer carries it on its last chunk on
+so it always closes the turn; the 👍 👎 🙋 emoji move with it. A long answer carries it on its last chunk on
 both platforms.
 
 Reconnection is two loops for two failure modes. The outer loop handles

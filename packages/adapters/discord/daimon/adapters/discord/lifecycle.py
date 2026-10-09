@@ -37,6 +37,10 @@ from daimon.adapters.discord.embed import (
     update_activity,
 )
 from daimon.adapters.discord.errors import bound_request_id
+from daimon.adapters.discord.feedback_seed import (
+    seed_feedback_reactions,
+    unseed_feedback_reactions,
+)
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.agent_post_identity import fallback_name_prefix
@@ -602,6 +606,13 @@ class DiscordTurnLifecycle:
         log.info("turn.terminal_success")
 
     @property
+    def feedback_message_id(self) -> str | None:
+        """Where the vote emoji go: the message carrying the summary line."""
+        if self._summary_ref is not None:
+            return str(self._summary_ref.id)
+        return self.final_message_id
+
+    @property
     def turn_window(self) -> tuple[int, int] | None:
         """Message ids bounding the turn's own posts: after its card, before its end."""
         card = self._card_message_ref
@@ -633,6 +644,10 @@ class DiscordTurnLifecycle:
                 return
             await last.edit(embeds=[embed])
             await self._edit_message(holder, embeds=self._holder_rest)
+            if self._was_answered:
+                # The vote emoji sit with the summary, under the turn's last post.
+                await unseed_feedback_reactions(holder, me=thread.guild.me)
+                await seed_feedback_reactions(thread, message_id=str(last.id))
         except discord.HTTPException as exc:
             log.warning("turn.summary_move_failed", error_type=type(exc).__name__)
             return
