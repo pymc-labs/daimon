@@ -235,7 +235,7 @@ async def test_the_summary_line_leaves_out_a_name_shown_above_and_money_it_canno
     sender = FakeSender()
     tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
     await (await _posted(sender, **kw)).on_terminal_success(TurnState(content=[tool]))
-    _done, summary = _card_body(sender, -1)
+    _done, summary, _votes = _card_body(sender, -1)
     assert summary["text"] == "Ada\u2003\u20030s", "no answer above names the agent here"
 
 
@@ -513,10 +513,11 @@ def _card_text(sender: FakeSender, index: int) -> str:
 
 
 def _rated(activity: MessageActivityInput) -> bool:
+    """The 👍/👎 buttons, never Teams' own feedback loop."""
     data = activity.channel_data
-    return (
-        data is not None and data.feedback_loop is not None and data.feedback_loop.type == "custom"
-    )
+    assert data is None or data.feedback_loop is None
+    rendered = activity.model_dump_json(by_alias=True)
+    return card.VOTE_UP_DIALOG in rendered and card.VOTE_DOWN_DIALOG in rendered
 
 
 def _asks(sender: FakeSender, index: int) -> bool:

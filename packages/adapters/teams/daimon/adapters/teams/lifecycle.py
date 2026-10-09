@@ -2,7 +2,7 @@
 
 Like Slack's: the card is posted before session setup, edited at most every
 five seconds, and replaced by the first answer chunk; overflow chunks follow,
-then a card with Slack's summary line, Ask a human and 👍/👎
+then a card with Slack's summary line, 👍/👎 and Ask a human
 (`card.controls_card`). With a completion ping
 the card closes instead and the answer is posted fresh, so Teams notifies,
 leading with an @mention of `requester` when given. Teams streaming is unused:
@@ -180,7 +180,7 @@ class TeamsTurnLifecycle:
         self._shown: dict[str, str] = {}
         # Shown messages that are notice cards, not answers: edited as cards,
         # with their buttons, whether they carry 👍/👎, and their summary line.
-        self._notices: dict[str, tuple[tuple[Action, ...], bool, str | None]] = {}
+        self._notices: dict[str, tuple[tuple[Action, ...], str | None]] = {}
         # Edits of a shown answer, from the turn and the output sweep, one at a time.
         self._answer_edits = asyncio.Lock()
 
@@ -261,20 +261,15 @@ class TeamsTurnLifecycle:
         text: str,
         *,
         actions: tuple[Action, ...] = (),
-        rated: bool = False,
         summary: str | None = None,
     ) -> None:
-        """Replace the card with a final notice; an edit that timed out is sent once more.
-
-        `rated` adds the feedback buttons: a tool-only turn's result is an answer too.
-        """
+        """Replace the card with a final notice; an edit that timed out is sent once more."""
         notice = card.notice_card(text, actions=actions, summary=summary)
-        notice = card.rated(notice) if rated else notice
         self._message_id = message_id = await self._edit(notice, self._message_id)
         self.final_message_id = self._answer_id = message_id
         self.card_closed = True
         # A tool-only or failed turn's notice still carries what is edited into it.
-        self._notices[message_id] = (actions, rated, summary)
+        self._notices[message_id] = (actions, summary)
         self._shown[message_id] = text
 
     async def _summary(self, state: TurnState, *, named_above: bool = False) -> str:
@@ -345,9 +340,12 @@ class TeamsTurnLifecycle:
                 if tool_only and degraded is not None:
                     text = f"{degraded}\n\n{text}"
                 # As on Slack: a cancelled turn carries no controls, a tool-only one does.
-                ask = (card.ask_human_action(),) if tool_only and self._ask_human else ()
+                # A tool-only turn's result is an answer too: it can be voted on.
+                actions = (*card.vote_actions(),) if tool_only else ()
+                if tool_only and self._ask_human:
+                    actions = (*actions, card.ask_human_action())
                 summary = await self._summary(state)
-                await self._close(text, actions=ask, rated=tool_only, summary=summary)
+                await self._close(text, actions=actions, summary=summary)
                 return
             if self.answer_prefix is not None:
                 answer = f"{self.answer_prefix}\n\n{answer}"
@@ -446,9 +444,8 @@ class TeamsTurnLifecycle:
             if len(updated) > card.TEAMS_LIMIT:
                 return False
             if message_id in self._notices:
-                actions, rated, summary = self._notices[message_id]
+                actions, summary = self._notices[message_id]
                 rendered = card.notice_card(updated, actions=actions, summary=summary)
-                rendered = card.rated(rendered) if rated else rendered
             else:
                 mention = self._requester if message_id == self._answer_id else None
                 rendered = card.answer_message(updated, mention=mention)

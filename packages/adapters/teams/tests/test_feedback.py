@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 import structlog
-from daimon.adapters.teams import feedback, support
+from daimon.adapters.teams import card, feedback, support
 from daimon.adapters.teams.answer_access import IN_DIRECT_CHAT, NOT_ALLOWED, AnswerPlace
 from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, feedback_text, form_details, sent_form
 from daimon.adapters.teams.http_service import TeamsHttpService
@@ -58,8 +58,16 @@ def _running(
 
 
 async def _click(service: TeamsHttpService, reaction: str, *, user: str = AAD_OBJECT_ID) -> Any:
+    """The answer card's 👍 (`like`) or 👎 button."""
+    dialog_id = card.VOTE_UP_DIALOG if reaction == "like" else card.VOTE_DOWN_DIALOG
+    value = {"data": {"dialog_id": dialog_id}}
+    return await post_activity(service, make_invoke("task/fetch", value, user=user))
+
+
+async def _native_click(service: TeamsHttpService, reaction: str) -> Any:
+    """Teams' own 👍/👎, on an answer posted before the buttons."""
     value = {"data": {"actionName": "feedback", "actionValue": {"reaction": reaction}}}
-    return await post_activity(service, make_invoke("message/fetchTask", value, user=user))
+    return await post_activity(service, make_invoke("message/fetchTask", value))
 
 
 async def _send(
@@ -229,6 +237,18 @@ async def test_someone_who_could_not_ask_there_cannot_vote(
 
     assert {_message(up), _message(down), _message(sent)} == {NOT_ALLOWED}, "told, every time"
     assert await _rows(db_session_factory) == [], "a refused vote records nothing"
+
+
+async def test_teams_own_thumbs_on_an_older_answer_still_vote(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with _running(db_session_factory, teams_api_fake) as service:
+        up = await _native_click(service, "like")
+        form = _form(await _native_click(service, "dislike"))
+
+    assert _message(up) == feedback.THANKS_VOTE and form["actions"], "thanks, then the form"
+    [row] = await _rows(db_session_factory)
+    assert row["vote"] == "down", "the later click wins, as on the buttons"
 
 
 async def test_teams_built_in_form_on_an_older_answer_still_records(

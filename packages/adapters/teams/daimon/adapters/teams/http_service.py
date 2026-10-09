@@ -409,6 +409,8 @@ def create_teams_http_service(
     teams_app.on_dialog_submit(CHANNEL_DIALOG, channel_settings.on_submit)
     teams_app.on_dialog_open(CREDENTIAL_DIALOG, turns.credentials.on_dialog_open)
     teams_app.on_dialog_submit(credential_requests.SUBMIT, turns.credentials.on_dialog_submit)
+    teams_app.on_dialog_open(card.VOTE_UP_DIALOG, feedback.on_up)
+    teams_app.on_dialog_open(card.VOTE_DOWN_DIALOG, feedback.on_down)
     teams_app.on_message_fetch_task(feedback.on_fetch)
     teams_app.on_dialog_submit(FEEDBACK_DIALOG, feedback.on_submit)
     teams_app.on_message_submit_feedback(feedback.on_builtin)

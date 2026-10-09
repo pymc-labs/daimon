@@ -68,7 +68,7 @@ restart runs again.
 
 ### Feedback and Ask a human
 
-The card below an answer carries Teams' thumbs up/down: Teams refuses an edit
+The card below an answer carries 👍 and 👎 buttons: Teams refuses an edit
 with both text and a card, so they cannot sit on the answer itself. 👍 records
 the vote; 👎 opens a "What went wrong?" form with optional reasons and text, at
 least one required. When support is set up the card also has an Ask a person

@@ -183,6 +183,13 @@ def _feedback(request: SentRequest) -> object:
     return cast(dict[str, Any], request.body.get("channelData") or {}).get("feedbackLoop")
 
 
+def _titles(request: SentRequest) -> list[str]:
+    return [a["title"] for a in _actions(request)]
+
+
+VOTES = ["\N{THUMBS UP SIGN}", "\N{THUMBS DOWN SIGN}"]
+
+
 async def _until(condition: Callable[[], bool]) -> None:
     async with asyncio.timeout(10):
         while not condition():
@@ -221,8 +228,8 @@ async def test_answer_replaces_the_status_card_in_the_conversation_it_came_from(
     assert name == "test-agent" and used.endswith(" used") and left.endswith(" left"), (
         "Slack's summary line: the agent, the time, the debit, the money left"
     )
-    assert _actions(controls) == [], "no Ask a human without support"
-    assert _feedback(controls) == {"type": "custom"}, "Teams' thumbs, answered by our own form"
+    assert _titles(controls) == VOTES, "emoji-only 👍/👎, no Ask a human without support"
+    assert _feedback(controls) is None, "not Teams' own thumbs"
 
 
 async def test_with_support_on_ask_a_human_follows_the_answer_in_a_card_teams_accepts(
@@ -236,10 +243,11 @@ async def test_with_support_on_ask_a_human_follows_the_answer_in_a_card_teams_ac
     assert answer.method == "PUT" and answer.body["text"] == AGENT_TEXT, "the card becomes text"
     assert not answer.body.get("attachments"), "no card beside the answer's text"
     assert controls.method == "POST", "the controls follow in a message of their own"
-    assert _feedback(controls) == {"type": "custom"}, "the thumbs beside the button"
-    [button] = _actions(controls)
-    assert (button["type"], button["title"]) == ("Action.Submit", card.ASK_HUMAN)
-    assert button["data"]["msteams"]["type"] == "task/fetch", "it opens a dialog"
+    assert _feedback(controls) is None, "not Teams' own thumbs"
+    assert _titles(controls) == [*VOTES, card.ASK_HUMAN], "the thumbs beside the button"
+    for button in _actions(controls):
+        assert button["type"] == "Action.Submit"
+        assert button["data"]["msteams"]["type"] == "task/fetch", "each opens a dialog"
 
 
 def _echo_sessions(router: MARouter) -> None:
@@ -342,7 +350,7 @@ async def test_long_answer_splits_into_ordered_parts_and_keeps_its_code_block_wh
     whole = [code in str(r.body["text"]) for r in parts]
     assert whole == [False, True, False], "the code block stays whole in one part"
     assert [_feedback(r) for r in parts] == [None, None, None], "no part asks for feedback"
-    assert _feedback(controls) == {"type": "custom"}, "the card after the last part does"
+    assert _titles(controls) == VOTES, "the card after the last part does"
     labels = ["AIGeneratedContent" in str(r.body["entities"]) for r in parts]
     assert all(labels), "every part is labelled AI generated"
 
@@ -396,7 +404,7 @@ async def test_tool_use_edits_the_status_card_before_the_answer_replaces_it(
     assert _texts(progress)[0].startswith("**Working on it…**"), "the card shows active work"
     assert [a["verb"] for a in _actions(progress)] == [card.CANCEL_VERB], "Cancel stays"
     assert str(answer.body["text"]).startswith(AGENT_TEXT), "then the answer replaces it"
-    assert controls.method == "POST" and _feedback(controls), "and its controls follow"
+    assert controls.method == "POST" and _titles(controls) == VOTES, "and its controls follow"
 
 
 async def test_stream_that_drops_mid_answer_leaves_the_failure_notice_and_no_answer(
