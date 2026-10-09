@@ -1,6 +1,6 @@
 # Neutral-core current-path oracle
 
-These 33 offline scenarios run existing tests and four boundary scenarios against the production path from integration `546ed15c7765d270a228beb730258002dbe09e98`. No production module changed while recording. The pytest test in `tests/parity/test_ma_goldens.py` replays every scenario and compares its entire transcript. Failure of the original scenario test is also a failure of the oracle.
+These 33 offline scenarios run existing tests and four boundary scenarios against the production path from integration `546ed15c7765d270a228beb730258002dbe09e98`. No production module changed while recording. The stack is now rebased onto integration `4d61c7391a5098f8ae1cffd7ca1a80fb077af326` (#488); its main-merge timing changes are reviewed in the timing audit, and baseline transcripts remain subject to full replay on that base. The pytest test in `tests/parity/test_ma_goldens.py` replays every scenario and compares its entire transcript. Failure of the original scenario test is also a failure of the oracle.
 
 Configure `DAIMON_DATABASE__TEST_URL` for an isolated, migrated local test database before running. N3 uses `daimon_test_nc_n3`. Do not use the shared `daimon_test` or live provider credentials.
 

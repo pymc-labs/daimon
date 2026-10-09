@@ -1,8 +1,10 @@
 # Golden timing audit
 
-Audited all 33 source tests, their selected helpers/fixtures and current production boundaries on unchanged integration `17ce8c2f46ed9eede9567afc8689b43df800272c`. The three short fixture timing assumptions are now synchronized to actual stream/card events. Original production behavior and assertions remain; no larger sleep, reduced assertion, sorted effect sequence or retry of a failed replay is used.
+Audited all 33 source tests, their selected helpers/fixtures and current production boundaries on unchanged integration `4d61c7391a5098f8ae1cffd7ca1a80fb077af326`. The three short fixture timing assumptions are now synchronized to actual stream/card events. Original production behavior and assertions remain; no larger sleep, reduced assertion, sorted effect sequence or retry of a failed replay is used.
 
 Application/SQL/observation clocks are frozen, periodic renderer ticks are blocked, forced terminal renders still run, and background DB writes are drained before snapshotting. Long host/checkpoint watchdogs are safety guards, rather than triggers for the expected behavior. The runner's 120s process guard and 30s event-wait guards fail missing progress instead of selecting a different golden transcript. sleep(0) in posted-control fixtures is a scheduling yield tied to observed trace state, with no wall-clock or iteration cap.
+
+The #488 main merge adds a two-second Discord webhook-creation window. The selected Discord thread builders have an unspecced mock parent, so `_destination()` returns None; DM destinations are also outside TextChannel/ForumChannel, and approval cards use their direct platform posting boundary. These goldens do not enter webhook creation or its timed fallback. That path remains covered by the dedicated Discord/MCP post-transport tests and formal webhook models; this oracle does not certify webhook warmup/load latency. The other merged changes affect OAuth/web pages and provider-neutral state modules, outside these source scenarios.
 
 | Scenario | Timing control / audit result |
 | --- | --- |
