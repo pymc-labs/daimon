@@ -174,8 +174,20 @@ class FakeEventsResource:
         self.streams.append(fake_stream)
         return fake_stream
 
-    def list(self, *, session_id: str) -> _FakeEventList:
-        return _FakeEventList(list(self.replay_events))
+    def list(
+        self,
+        *,
+        session_id: str,
+        types: list[str] | None = None,
+        order: str = "asc",
+        limit: int | None = None,
+    ) -> _FakeEventList:
+        # `limit` is the SDK's page size; iterating the list walks every page.
+        del limit
+        events = [e for e in self.replay_events if types is None or e.type in types]
+        if order == "desc":
+            events.reverse()
+        return _FakeEventList(events)
 
     async def send(self, session_id: str, *, events: list[dict[str, Any]]) -> None:
         self.sent_events.append((session_id, list(events)))
