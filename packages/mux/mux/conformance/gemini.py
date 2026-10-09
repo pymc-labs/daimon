@@ -31,27 +31,23 @@ PENDING_REASONS = {
     ),
     "C04": PendingReason(
         PendingKind.ADAPTER_DEPENDENCY,
-        "Host fenced journal/cursor bridge is absent; send crash tests alone are insufficient.",
+        "Ambiguous accepted POST reconciliation is absent; provider offers no idempotency lookup.",
     ),
     "C05": PendingReason(
         PendingKind.ADAPTER_DEPENDENCY,
         "No durable saved-item/SSE gap bridge; preview and EOF tests do not prove this fixture.",
     ),
     "C08": PendingReason(
-        PendingKind.CAPABILITY_UNAVAILABLE,
-        "Inline reuse exposes no implemented in-place mount mutation transaction.",
+        PendingKind.ADAPTER_DEPENDENCY,
+        "Driver next-turn tool/mount update port is not implemented.",
     ),
     "C09": PendingReason(
         PendingKind.CAPABILITY_UNAVAILABLE,
-        "PR3 snapshot downloads are absent; shared provider vault/delete is unsupported.",
-    ),
-    "C10": PendingReason(
-        PendingKind.ADAPTER_DEPENDENCY,
-        "Static Gemini support declarations cannot be changed by native admission faults.",
+        "No provider vault API; snapshot artifact support is deferred to PR3.",
     ),
     "C11": PendingReason(
-        PendingKind.CAPABILITY_UNAVAILABLE,
-        "Inline skills mount on an interaction, not a standalone provider skill upload API.",
+        PendingKind.ADAPTER_DEPENDENCY,
+        "Driver inline skill bundle port is scheduled for PR3.",
     ),
 }
 
@@ -137,7 +133,7 @@ class GeminiScript(FakeTransport):
                     self.saved["root"] = response
                     await self.ma.usage.reconcile(self.scope, session.ref)
             session = await self.ma.sessions.retrieve(self.scope, session.ref)
-        elif fixture_id not in ("C13", "C15", "C16"):
+        elif fixture_id not in ("C10", "C13", "C15", "C16"):
             raise ValueError("unsupported executable fixture")
         return Scenario(
             self.scope, self.scope.model_copy(update={"tenant_id": "foreign"}), session, spec
@@ -149,6 +145,10 @@ class GeminiScript(FakeTransport):
             self.timeout_after_accept = True
         elif name == "observed_stop":
             self.saved["root"] = native("root", status="cancelled", output=None)
+        elif name in ("admission_unsupported", "admission_unknown"):
+            # memory_stores is statically unsupported in the real profile;
+            # either missing-support probe must be refused without native I/O.
+            pass
         else:
             raise ValueError("unsupported scripted fault")
 

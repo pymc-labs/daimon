@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add an opt-in Gemini inline-reuse driver with offline transport probes, explicit continuity loss, normalized turn events and revisioned usage; Anthropic remains the default.
 - Filter completed Gemini function calls from required actions, defer open saved steps, and persist parsed usage timestamp watermarks without duplicate charges.
-- Register offline Gemini conformance probes with typed deferred reasons and a pinned six-pass, twelve-pending matrix; incomplete scenarios cannot certify.
+- Register offline Gemini conformance probes with accurate typed deferred reasons and a pinned seven-pass, eleven-pending matrix; admission and fixture-family mutants reject broken drivers, and incomplete scenarios cannot certify.
 
 - Add an unwired, offline-tested OpenAI Agents API driver core with hosted and conversation-only profiles, root-turn event normalization, saved-state recovery and revisioned usage; existing backend defaults remain Anthropic.
 - Keep the OpenAI hosted profile non-core until its skills and artifact ports land; refuse required unimplemented vault, multiagent and whole-workspace export/import capabilities.
