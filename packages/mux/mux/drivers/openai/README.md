@@ -120,6 +120,25 @@ fingerprints describe a retrieved record; they are not native conditional-write
 preconditions. Input-mode/steering/cancel-target checks depend on host serialization,
 not on a provider CAS. Generic tool confirmations and native input bypasses refuse.
 
+### Observed Agents model eligibility
+
+Guarded probes on **2026-10-09** in the sprint's OpenAI project accepted minimal
+agent creation with `gpt-6-luna` and `gpt-6-astra`; both created agents were deleted.
+The same minimal body (`name`, `model` only) with `gpt-5-nano` returned
+`invalid_request_error`. Read access passed independently. The retained error
+identifiers did not provide a more specific rejection reason. These findings are
+project-specific observations, not a complete provider model allowlist.
+
+The cheapest accepted model in those probes, `gpt-6-luna`, then passed one hosted
+session / one turn / one cancel smoke: the root interruption was observed through
+both the stream and stop check, and session/agent cleanup succeeded. Astra was
+tested only for creation. Usage counts were null, so billing remains unknown.
+No recordings or full live conformance certificate were produced. The smoke's
+model choice does not change production defaults; callers must still select a
+model explicitly. Admission-time model eligibility validation remains a follow-up.
+The current turn port has no `max_output_tokens` setting; the smoke used a bounded
+deadline and an explicit guard reservation, which is not a native generation cap.
+
 Run `uv run --all-packages --all-extras pytest packages/mux/tests/drivers/openai`.
 Synthetic fixtures and `httpx.MockTransport` exercise the actual pinned SDK without
 provider access. No live certificate is implied by these tests.
@@ -175,9 +194,9 @@ unavailable. C08 and deployed repository/MCP certification remain pending.
 | Reconcile | C05 and recovery tests: consume stream before all saved pages, deduplicate overlaps, preserve terminal journal and publish an explicit unrecoverable gap |
 
 Host durability, batching, attribution, pricing, wake generations and registry
-selection still require their shared fixture adapters. A guarded smoke on
-2026-10-09 returned `invalid_request`, with unknown billing and a retained $0.45
-reservation; it did not establish live correctness. No recorder fixtures were made.
+selection still require their shared fixture adapters. The guarded Luna smoke
+above verifies a narrow live lifecycle path; it does not certify these host
+guarantees or resource workflows. No recorder fixtures were made.
 
 ## Offline conformance
 
