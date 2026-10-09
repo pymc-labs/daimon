@@ -1,4 +1,4 @@
-"""A bare connection confirms privately, once the browser transaction commits."""
+"""Connect confirmations stay at the originating Discord interaction or thread."""
 
 import uuid
 from contextlib import asynccontextmanager
@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import discord
 import pytest
 from aioresponses import aioresponses
 from cryptography.fernet import Fernet
@@ -23,27 +24,33 @@ class _Sessions:
 
 
 @pytest.mark.asyncio
-async def test_bare_connect_confirms_in_requester_dm(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_expired_followup_posts_count_only_in_origin_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     tenant_id = uuid.uuid4()
     monkeypatch.setattr(
         tenants, "get_tenant", AsyncMock(return_value=SimpleNamespace(external_id="123"))
     )
-    dm = SimpleNamespace(send=AsyncMock())
+    thread = AsyncMock(spec=discord.abc.Messageable)
     bot = SimpleNamespace(
         runtime=SimpleNamespace(sessionmaker=_Sessions()),
-        open_member_dm=AsyncMock(return_value=dm),
+        _channel_by_id=AsyncMock(return_value=thread),
+        open_member_dm=AsyncMock(),
     )
     notice = ConnectNotice(
         token_hash="abc",
         tenant_id=tenant_id,
         requester_platform_user_id="456",
         agent_name="ResearchBot",
+        origin_parent_channel_id="100",
+        origin_thread_id="200",
         connected_repos=[{"name": "private/repo", "access": "write"}],
         notice_claimed_at=datetime.now(UTC),
     )
     assert await DaimonBot._send_connect_notice(bot, notice)  # type: ignore[arg-type]
-    bot.open_member_dm.assert_awaited_once_with(123, 456)
-    assert dm.send.await_args.args[0] == "Connected private/repo, Read and write. Ready."
+    bot._channel_by_id.assert_awaited_once_with(200)
+    bot.open_member_dm.assert_not_awaited()
+    assert thread.send.await_args.args[0] == "Connected 1 repo(s), Read and write. Ready."
 
 
 @pytest.mark.asyncio
@@ -59,12 +66,15 @@ async def test_slash_connect_confirms_ephemerally_without_dm(
             sessionmaker=_Sessions(), settings=SimpleNamespace(crypto=SimpleNamespace(keys=[key]))
         ),
         open_member_dm=AsyncMock(),
+        _channel_by_id=AsyncMock(),
     )
     notice = ConnectNotice(
         token_hash="abc",
         tenant_id=uuid.uuid4(),
         requester_platform_user_id="456",
         agent_name="ResearchBot",
+        origin_parent_channel_id="100",
+        origin_thread_id="200",
         encrypted_origin_followup=encrypt_token(
             build_multifernet((key.get_secret_value(),)), "789:private-interaction"
         ),
@@ -78,3 +88,4 @@ async def test_slash_connect_confirms_ephemerally_without_dm(
         )
         assert await DaimonBot._send_connect_notice(bot, notice)  # type: ignore[arg-type]
     bot.open_member_dm.assert_not_awaited()
+    bot._channel_by_id.assert_not_awaited()

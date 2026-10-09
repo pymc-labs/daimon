@@ -153,6 +153,8 @@ async def _handle_add(
                     verified_tenant_admin=is_admin,
                     agent_id=agent_id,
                     agent_name=meta.agent_name,
+                    origin_parent_channel_id=channel_id,
+                    origin_thread_id=meta.thread_id,
                 )
         except ValueError as error:
             await post_ephemeral(
@@ -165,6 +167,7 @@ async def _handle_add(
         await send_link(
             client,
             channel_id=channel_id,
+            thread_id=meta.thread_id,
             user_id=user_id,
             url=url,
             line=f"Connect GitHub for {meta.agent_name}.",

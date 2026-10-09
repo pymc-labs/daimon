@@ -95,6 +95,7 @@ class PanelMetadata:
     team_id: str
     channel_id: str
     view: PanelViewName
+    thread_id: str | None = None
     channel_name: str | None = None
     page: int = 0
     agent_name: str | None = None
@@ -162,6 +163,8 @@ def encode_panel_metadata(meta: PanelMetadata) -> str:
     default is left out entirely rather than written as null.
     """
     payload: dict[str, Any] = {"t": meta.team_id, "c": meta.channel_id, "v": meta.view}
+    if meta.thread_id is not None:
+        payload["q"] = meta.thread_id
     if meta.page:
         payload["p"] = meta.page
     if meta.agent_name is not None:
@@ -212,8 +215,11 @@ def decode_panel_metadata(raw: str) -> PanelMetadata | None:
     payload = cast("dict[str, object]", decoded)
     team_id = payload.get("t")
     channel_id = payload.get("c")
+    thread_id = payload.get("q")
     view = payload.get("v")
     if not isinstance(team_id, str) or not isinstance(channel_id, str):
+        return None
+    if thread_id is not None and not isinstance(thread_id, str):
         return None
     if not isinstance(view, str) or view not in _PANEL_VIEW_NAMES:
         return None
@@ -286,6 +292,7 @@ def decode_panel_metadata(raw: str) -> PanelMetadata | None:
     return PanelMetadata(
         team_id=team_id,
         channel_id=channel_id,
+        thread_id=thread_id,
         channel_name=channel_name,
         view=cast("PanelViewName", view),
         page=page,

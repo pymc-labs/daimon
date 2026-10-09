@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
@@ -154,6 +155,10 @@ async def connect_link(
     start_over: bool = False,
     agent_id: uuid.UUID | None = None,
     agent_name: str | None = None,
+    origin_parent_channel_id: str | None = None,
+    origin_thread_id: str | None = None,
+    origin_followup_token: str | None = None,
+    origin_followup_expires_at: datetime | None = None,
 ) -> str:
     """Mint for the clicker after resolving their current tenant-admin account."""
     root = connect_root(settings)
@@ -174,6 +179,7 @@ async def connect_link(
             tenant_id=tenant_id,
             requester_account_id=account_id,
         )
+    fernet = build_multifernet(tuple(key.get_secret_value() for key in settings.crypto.keys))
     token = await mint_invitation(
         session,
         tenant_id=tenant_id,
@@ -184,8 +190,13 @@ async def connect_link(
         agent_id=agent_id,
         agent_name=agent_name,
         origin_platform=platform,
+        origin_parent_channel_id=origin_parent_channel_id,
+        origin_thread_id=origin_thread_id,
+        encrypted_origin_followup=(
+            encrypt_token(fernet, origin_followup_token) if origin_followup_token else None
+        ),
+        origin_followup_expires_at=origin_followup_expires_at,
     )
-    fernet = build_multifernet(tuple(key.get_secret_value() for key in settings.crypto.keys))
     await set_invitation_encrypted_token(
         session, token=token, encrypted_token=encrypt_token(fernet, token)
     )

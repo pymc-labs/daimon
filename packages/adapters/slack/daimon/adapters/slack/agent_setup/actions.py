@@ -55,7 +55,7 @@ import contextlib
 import dataclasses
 import uuid
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import aiohttp
@@ -298,6 +298,7 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
     meta = PanelMetadata(
         team_id=team_id,
         channel_id=channel_id,
+        thread_id=thread_id,
         view="agents",
         channel_name=str(payload.get("channel_name") or "")[:80] or None,
     )
@@ -1080,6 +1081,14 @@ async def _dispatch_panel_action(
                         else None
                     ),
                     agent_name=agent.name if agent is not None else None,
+                    origin_parent_channel_id=meta.channel_id or None,
+                    origin_thread_id=meta.thread_id,
+                    origin_followup_token=str(payload.get("response_url") or "") or None,
+                    origin_followup_expires_at=(
+                        datetime.now(UTC) + timedelta(minutes=30)
+                        if payload.get("response_url")
+                        else None
+                    ),
                 )
         except ValueError as error:
             await post_ephemeral(
@@ -1089,7 +1098,13 @@ async def _dispatch_panel_action(
                 text=safe_github_error(error),
             )
             return
-        await send_link(client, channel_id=meta.channel_id or user_id, user_id=user_id, url=url)
+        await send_link(
+            client,
+            channel_id=meta.channel_id or user_id,
+            thread_id=meta.thread_id,
+            user_id=user_id,
+            url=url,
+        )
         return
 
     if action_id == panel_views.ACTION_DETAILS:

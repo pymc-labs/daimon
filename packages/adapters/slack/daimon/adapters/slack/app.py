@@ -526,13 +526,21 @@ class SlackApp:
                         return True
                     if response.status >= 500:
                         return False
-            opened = await client.conversations_open(  # pyright: ignore[reportUnknownMemberType]
-                users=notice.requester_platform_user_id
-            )
-            channel_data = cast(dict[str, str], opened["channel"])
-            await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                channel=channel_data["id"], text=notice.text
-            )
+            if notice.origin_parent_channel_id is None:
+                return True  # Old invitations have no private origin; never open a DM.
+            if notice.origin_thread_id is not None:
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=notice.origin_parent_channel_id,
+                    user=notice.requester_platform_user_id,
+                    thread_ts=notice.origin_thread_id,
+                    text=notice.text,
+                )
+            else:
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=notice.origin_parent_channel_id,
+                    user=notice.requester_platform_user_id,
+                    text=notice.text,
+                )
             return True
         except aiohttp.ClientError:
             return False

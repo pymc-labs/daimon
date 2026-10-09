@@ -112,15 +112,22 @@ def test_slack_waiting_review_hides_unconnected_repo_name() -> None:
 
 
 @pytest.mark.asyncio
-async def test_slack_connect_link_in_dm_has_private_actions() -> None:
+async def test_slack_connect_link_uses_ephemeral_actions() -> None:
     client = MagicMock()
     client.chat_postMessage = AsyncMock()
     client.chat_postEphemeral = AsyncMock()
-    await send_link(client, channel_id="D123", user_id="U123", url="https://example.test/link")
-    client.chat_postMessage.assert_awaited_once()
-    client.chat_postEphemeral.assert_not_awaited()
-    posted = client.chat_postMessage.await_args.kwargs
-    assert posted["channel"] == "D123"
+    await send_link(
+        client,
+        channel_id="C123",
+        thread_id="123.456",
+        user_id="U123",
+        url="https://example.test/link",
+    )
+    client.chat_postMessage.assert_not_awaited()
+    client.chat_postEphemeral.assert_awaited_once()
+    posted = client.chat_postEphemeral.await_args.kwargs
+    assert posted["channel"] == "C123"
+    assert posted["thread_ts"] == "123.456"
     assert posted["text"] == "Connect GitHub"
     assert "https://example.test/link" not in posted["text"]
     assert [block["type"] for block in posted["blocks"]] == ["section", "actions"]

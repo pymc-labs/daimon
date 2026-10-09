@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
 from daimon.adapters.discord.agent_setup.github_embed_panel import (
     EmbedActionRow,
@@ -221,6 +223,10 @@ class GitHubHomeView(PanelViewBase):
                         else None
                     ),
                     agent_name=agent.name if agent is not None else None,
+                    origin_parent_channel_id=str(interaction.channel_id),
+                    origin_thread_id=str(interaction.channel_id),
+                    origin_followup_token=f"{interaction.application_id}:{interaction.token}",
+                    origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
                 )
         except ValueError as error:
             await interaction.followup.send(safe_github_error(error), ephemeral=True)

@@ -1,4 +1,4 @@
-"""A bare connection confirms in a private Slack DM."""
+"""Connect confirmations stay in private Slack interaction surfaces."""
 
 import uuid
 from contextlib import asynccontextmanager
@@ -22,14 +22,17 @@ class _Sessions:
 
 
 @pytest.mark.asyncio
-async def test_bare_connect_confirms_in_requester_dm(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_bare_connect_confirms_ephemerally_in_origin_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     tenant_id = uuid.uuid4()
     monkeypatch.setattr(
         slack_app, "get_tenant", AsyncMock(return_value=SimpleNamespace(external_id="T1"))
     )
     client = SimpleNamespace(
-        conversations_open=AsyncMock(return_value={"channel": {"id": "D1"}}),
+        conversations_open=AsyncMock(),
         chat_postMessage=AsyncMock(),
+        chat_postEphemeral=AsyncMock(),
     )
     resolver = AsyncMock(return_value=client)
     monkeypatch.setattr(slack_app, "resolve_web_client", resolver)
@@ -39,14 +42,20 @@ async def test_bare_connect_confirms_in_requester_dm(monkeypatch: pytest.MonkeyP
         tenant_id=tenant_id,
         requester_platform_user_id="U1",
         agent_name="ResearchBot",
+        origin_parent_channel_id="C1",
+        origin_thread_id="123.456",
         connected_repos=[{"name": "private/repo", "access": "read"}],
         notice_claimed_at=datetime.now(UTC),
     )
     assert await slack_app.SlackApp._send_connect_notice(app, notice)  # type: ignore[arg-type]
     resolver.assert_awaited_once_with(app.runtime, team_id="T1")
-    client.conversations_open.assert_awaited_once_with(users="U1")
-    client.chat_postMessage.assert_awaited_once_with(
-        channel="D1", text="Connected private/repo, Read only. Ready."
+    client.conversations_open.assert_not_awaited()
+    client.chat_postMessage.assert_not_awaited()
+    client.chat_postEphemeral.assert_awaited_once_with(
+        channel="C1",
+        user="U1",
+        thread_ts="123.456",
+        text="Connected private/repo, Read only. Ready.",
     )
 
 
@@ -57,7 +66,9 @@ async def test_slash_connect_confirms_ephemerally_without_dm(
     monkeypatch.setattr(
         slack_app, "get_tenant", AsyncMock(return_value=SimpleNamespace(external_id="T1"))
     )
-    client = SimpleNamespace(conversations_open=AsyncMock(), chat_postMessage=AsyncMock())
+    client = SimpleNamespace(
+        conversations_open=AsyncMock(), chat_postMessage=AsyncMock(), chat_postEphemeral=AsyncMock()
+    )
     monkeypatch.setattr(slack_app, "resolve_web_client", AsyncMock(return_value=client))
     key = SecretStr(Fernet.generate_key().decode())
     app = SimpleNamespace(
@@ -70,6 +81,7 @@ async def test_slash_connect_confirms_ephemerally_without_dm(
         tenant_id=uuid.uuid4(),
         requester_platform_user_id="U1",
         agent_name="ResearchBot",
+        origin_parent_channel_id="C1",
         encrypted_origin_followup=encrypt_token(
             build_multifernet((key.get_secret_value(),)),
             "https://hooks.slack.com/services/test",
@@ -85,3 +97,4 @@ async def test_slash_connect_confirms_ephemerally_without_dm(
         assert await slack_app.SlackApp._send_connect_notice(app, notice)  # type: ignore[arg-type]
     client.conversations_open.assert_not_awaited()
     client.chat_postMessage.assert_not_awaited()
+    client.chat_postEphemeral.assert_not_awaited()

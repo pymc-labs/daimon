@@ -661,6 +661,36 @@ async def set_invitation_encrypted_token(
     row.encrypted_token = encrypted_token
 
 
+async def bind_discord_connect_click(
+    session: AsyncSession,
+    *,
+    token_hash: str,
+    tenant_id: uuid.UUID,
+    requester_platform_user_id: str,
+    thread_id: str,
+    encrypted_followup: bytes,
+    followup_expires_at: datetime,
+) -> tuple[bytes, str | None] | None:
+    """Fetch a still-live link for its requester and remember this private click."""
+    row = await session.get(GitHubConnectInvitation, token_hash, with_for_update=True)
+    if (
+        row is None
+        or row.tenant_id != tenant_id
+        or row.origin_platform != "discord"
+        or row.operator_issued
+        or row.requester_platform_user_id != requester_platform_user_id
+        or row.origin_thread_id != thread_id
+        or row.used_at is not None
+        or row.expires_at <= datetime.now(UTC)
+        or row.encrypted_token is None
+    ):
+        return None
+    row.encrypted_origin_followup = encrypted_followup
+    row.origin_followup_expires_at = followup_expires_at
+    await session.flush()
+    return row.encrypted_token, row.agent_name
+
+
 async def requester_linked_github_user_id(
     session: AsyncSession, *, account_id: uuid.UUID
 ) -> int | None:

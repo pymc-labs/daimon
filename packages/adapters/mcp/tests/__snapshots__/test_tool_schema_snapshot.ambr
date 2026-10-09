@@ -2988,7 +2988,7 @@
       'description': '''
         Connect this agent to GitHub when someone asks to set up GitHub.
         <blank line>
-        Send the admin a private, single-use link bound to the selected agent.
+        Show the admin a single-use connection button bound to the selected agent.
         Members get Ask an admin and a recorded request. Never repeat a private
         link in a shared reply. For a setup target, pass its current name and
         MA id from turn_controls; otherwise this defaults to the responder.

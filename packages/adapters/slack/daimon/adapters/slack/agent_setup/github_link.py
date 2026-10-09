@@ -9,6 +9,7 @@ from daimon.adapters.slack.agent_setup.panel_views import build_github_home_view
 from daimon.adapters.slack.agent_setup.state import PanelMetadata
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.github_connect_cards import connect_button_blocks
 from daimon.core.github_panel import CONNECT_COPY
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.github_connected_repos import summary
@@ -17,41 +18,25 @@ from slack_sdk.web.async_client import AsyncWebClient
 ACTION_BACK = "github_link__back"
 
 
-def connect_button_blocks(url: str, line: str) -> list[dict[str, Any]]:
-    """One readable line and a URL button, with no link in Slack fallback text."""
-    return [
-        {"type": "section", "text": {"type": "plain_text", "text": line}},
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "action_id": "github_link__open",
-                    "text": {"type": "plain_text", "text": "Connect GitHub"},
-                    "url": url,
-                }
-            ],
-        },
-    ]
-
-
 async def send_link(
     client: AsyncWebClient,
     *,
     channel_id: str,
+    thread_id: str | None = None,
     user_id: str,
     url: str,
     line: str = CONNECT_COPY,
 ) -> None:
     blocks = connect_button_blocks(url, line)
-    if channel_id.startswith("D"):
-        await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-            channel=channel_id, text="Connect GitHub", blocks=blocks
-        )
-    else:
-        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
-            channel=channel_id, user=user_id, text="Connect GitHub", blocks=blocks
-        )
+    kwargs: dict[str, Any] = {
+        "channel": channel_id,
+        "user": user_id,
+        "text": "Connect GitHub",
+        "blocks": blocks,
+    }
+    if thread_id is not None:
+        kwargs["thread_ts"] = thread_id
+    await client.chat_postEphemeral(**kwargs)  # pyright: ignore[reportUnknownMemberType]
 
 
 async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:

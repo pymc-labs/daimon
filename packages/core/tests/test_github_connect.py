@@ -146,6 +146,56 @@ async def test_bare_connect_notice_claim_is_single_and_failure_retries(
     assert await claim_next(db_session, platform="slack", now=datetime.now(UTC)) is None
 
 
+@pytest.mark.asyncio
+async def test_discord_connect_button_reveals_only_to_requester_in_origin_thread(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, admin_id, agent_id = (uuid.uuid4() for _ in range(3))
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="123"))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    token = await github_connect.mint_invitation(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=admin_id,
+        requester_platform_user_id="456",
+        agent_id=agent_id,
+        agent_name="ResearchBot",
+        origin_platform="discord",
+        origin_parent_channel_id="100",
+        origin_thread_id="200",
+    )
+    await github_connect.set_invitation_encrypted_token(
+        db_session, token=token, encrypted_token=b"encrypted-link"
+    )
+    token_hash = github_connect.digest(token)
+    args = dict(
+        token_hash=token_hash,
+        tenant_id=tenant_id,
+        encrypted_followup=b"encrypted-interaction",
+        followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
+    )
+    assert (
+        await github_connect.bind_discord_connect_click(
+            db_session, requester_platform_user_id="999", thread_id="200", **args
+        )
+        is None
+    )
+    assert (
+        await github_connect.bind_discord_connect_click(
+            db_session, requester_platform_user_id="456", thread_id="201", **args
+        )
+        is None
+    )
+    assert await github_connect.bind_discord_connect_click(
+        db_session, requester_platform_user_id="456", thread_id="200", **args
+    ) == (b"encrypted-link", "ResearchBot")
+    invitation = await github_connect.get_invitation(db_session, token_hash)
+    assert invitation is not None
+    assert invitation.encrypted_origin_followup == b"encrypted-interaction"
+
+
 def test_effective_access_properties() -> None:
     levels = ("none", "read", "write")
     for ability in levels:

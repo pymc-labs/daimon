@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
 from daimon.adapters.discord.agent_setup.github_embed_panel import (
@@ -283,6 +284,10 @@ class GitHubAddReposView(PanelViewBase):
                     requester_label=interaction.user.display_name,
                     agent_id=agent_id,
                     agent_name=self.agent.name,
+                    origin_parent_channel_id=str(interaction.channel_id),
+                    origin_thread_id=str(interaction.channel_id),
+                    origin_followup_token=f"{interaction.application_id}:{interaction.token}",
+                    origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
                 )
         except ValueError as error:
             await interaction.followup.send(safe_github_error(error), ephemeral=True)

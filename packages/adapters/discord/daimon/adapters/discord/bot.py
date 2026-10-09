@@ -833,6 +833,10 @@ class DaimonBot(commands.Bot):
 
         self.add_dynamic_items(HandOverButton)
 
+        from daimon.adapters.discord.github_connect_button import GitHubConnectButton
+
+        self.add_dynamic_items(GitHubConnectButton)
+
     async def _post_to_guild(self, guild: discord.Guild, embed: discord.Embed) -> None:
         """Post an embed via the fallback chain: text channel → DM owner → skip."""
         channel = _pick_post_channel(guild)
@@ -2273,10 +2277,15 @@ class DaimonBot(commands.Bot):
                         return True
                     if response.status >= 500:
                         return False
-            recipient = await self.open_member_dm(
-                int(tenant.external_id), int(notice.requester_platform_user_id)
+            destination_id = notice.origin_thread_id or notice.origin_parent_channel_id
+            if destination_id is None:
+                return True  # Old invitations have no public origin; never send a DM.
+            destination = await self._channel_by_id(int(destination_id))
+            if not isinstance(destination, discord.abc.Messageable):
+                return True
+            await destination.send(
+                notice.public_text, allowed_mentions=discord.AllowedMentions.none()
             )
-            await recipient.send(notice.text, allowed_mentions=discord.AllowedMentions.none())
             return True
         except aiohttp.ClientError:
             return False

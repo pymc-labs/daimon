@@ -149,6 +149,8 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     agent_id=agent_id,
                     agent_name=target_name,
                     origin_platform="discord",
+                    origin_parent_channel_id=str(interaction.channel_id),
+                    origin_thread_id=str(interaction.channel_id),
                     encrypted_origin_followup=encrypt_token(
                         build_multifernet(
                             tuple(key.get_secret_value() for key in runtime.settings.crypto.keys)

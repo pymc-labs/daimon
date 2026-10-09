@@ -18,6 +18,8 @@ class ConnectNotice(BaseModel):
     tenant_id: uuid.UUID
     requester_platform_user_id: str
     agent_name: str | None
+    origin_parent_channel_id: str | None = None
+    origin_thread_id: str | None = None
     encrypted_origin_followup: bytes | None = None
     origin_followup_expires_at: datetime | None = None
     connected_repos: list[dict[str, str]]
@@ -29,6 +31,12 @@ class ConnectNotice(BaseModel):
         access = {repo["access"] for repo in self.connected_repos}
         level = "Read and write" if access == {"write"} else "Read only"
         return f"Connected {names}, {level}. Ready."
+
+    @property
+    def public_text(self) -> str:
+        access = {repo["access"] for repo in self.connected_repos}
+        level = "Read and write" if access == {"write"} else "Read only"
+        return f"Connected {len(self.connected_repos)} repo(s), {level}. Ready."
 
 
 async def claim_next(

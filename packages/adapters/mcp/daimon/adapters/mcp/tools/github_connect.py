@@ -4,25 +4,34 @@ from __future__ import annotations
 
 from typing import Literal
 
+import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
+from daimon.adapters.mcp.tools.discord._client import (
+    _require_bot_token,  # pyright: ignore[reportPrivateUsage]
+    rest_client,
+)
 from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     require_turn_origin,
     resolve_setup_agent,
 )
+from daimon.adapters.mcp.tools.slack._client import slack_web_client
+from daimon.core.github_connect_cards import connect_button_blocks
+from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_connect import (
     CLIENT_AGENT_MESSAGE,
     ClientAgentConnectionError,
+    digest,
     mint_invitation,
     record_connect_request,
     require_app_eligible_agent,
     revoke_invitation,
+    set_invitation_encrypted_token,
 )
 from daimon.core.stores.security_audit import append_event
 from fastmcp import Context, FastMCP
@@ -33,8 +42,58 @@ from pydantic import BaseModel, ConfigDict
 class ConnectResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    status: Literal["sent", "ask_admin", "dm_blocked", "client_agent"]
+    status: Literal["sent", "ask_admin", "delivery_failed", "client_agent"]
     message: str
+
+
+async def _post_discord_connect_card(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    thread_id: str,
+    requester_id: str,
+    token_hash: str,
+    agent_name: str,
+) -> None:
+    view = discord.ui.View(timeout=None)
+    view.add_item(
+        discord.ui.Button(
+            label="Connect GitHub",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"gh_connect:{requester_id}:{token_hash}",
+        )
+    )
+    async with rest_client(_require_bot_token(runtime)) as client:
+        channel = await client.fetch_channel(int(thread_id))
+        if not isinstance(channel, discord.Thread) or str(channel.guild.id) != auth.external_id:
+            raise ToolError("GitHub setup requires the originating Discord thread.")
+        await channel.send(
+            f"Connect GitHub for {agent_name}.",
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+async def _post_slack_connect_card(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    channel_id: str,
+    thread_id: str,
+    requester_id: str,
+    url: str,
+    agent_name: str,
+) -> None:
+    if auth.external_id is None:
+        raise ToolError("GitHub setup requires a Slack workspace.")
+    client = await slack_web_client(runtime, team_id=auth.external_id)
+    await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+        channel=channel_id,
+        thread_ts=thread_id,
+        user=requester_id,
+        text="Connect GitHub",
+        blocks=connect_button_blocks(url, f"Connect GitHub for {agent_name}."),
+    )
 
 
 async def _github_connect_impl(
@@ -52,6 +111,8 @@ async def _github_connect_impl(
         raise ToolError("GitHub setup is for members of this workspace.")
     root = runtime.settings.mcp.app_root_url
     config = runtime.settings.github_app
+    if runtime.fernet is None:
+        raise ToolError("GitHub setup is unavailable on this server.")
     if root is None or not all(
         (config.app_id, config.app_slug, config.private_key, config.client_id, config.client_secret)
     ):
@@ -119,6 +180,9 @@ async def _github_connect_impl(
             origin_ma_agent_id=str(agent.id),
             requested_work=requested_work,
         )
+        await set_invitation_encrypted_token(
+            session, token=token, encrypted_token=encrypt_token(runtime.fernet, token)
+        )
         await append_event(
             session,
             tenant_id=auth.tenant_id,
@@ -133,20 +197,33 @@ async def _github_connect_impl(
         )
     url = f"{root}/oauth/github/connect/{token}"
     try:
-        await send_direct_message_impl(
-            runtime,
-            auth,
-            recipient_id=auth.platform_user_id,
-            content=f"Connect GitHub for {agent.name}.",
-            connect_url=url,
-        )
+        if auth.platform == "discord":
+            await _post_discord_connect_card(
+                runtime,
+                auth,
+                thread_id=origin.thread_id,
+                requester_id=auth.platform_user_id,
+                token_hash=digest(token),
+                agent_name=agent.name,
+            )
+        else:
+            await _post_slack_connect_card(
+                runtime,
+                auth,
+                channel_id=origin.parent_channel_id,
+                thread_id=origin.thread_id,
+                requester_id=auth.platform_user_id,
+                url=url,
+                agent_name=agent.name,
+            )
     except Exception:
         async with runtime.session_factory.begin() as session:
             await revoke_invitation(session, token=token)
         return ConnectResult(
-            status="dm_blocked", message="I can't DM you. Run /github connect here."
+            status="delivery_failed",
+            message="I couldn't show the GitHub connection button. Try again.",
         )
-    return ConnectResult(status="sent", message="I sent you a private link.")
+    return ConnectResult(status="sent", message="I showed the GitHub connection button.")
 
 
 def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -160,7 +237,7 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> ConnectResult:
         """Connect this agent to GitHub when someone asks to set up GitHub.
 
-        Send the admin a private, single-use link bound to the selected agent.
+        Show the admin a single-use connection button bound to the selected agent.
         Members get Ask an admin and a recorded request. Never repeat a private
         link in a shared reply. For a setup target, pass its current name and
         MA id from turn_controls; otherwise this defaults to the responder.
