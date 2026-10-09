@@ -32,10 +32,9 @@ policy. Two limits to check when adding a rule:
 
 The channel admin rules are the worked example: `Subject.administered_channel_ids`
 is filled by `build_subject` (and `mcp_subject` on the MCP side) from stored
-grants, and decided under CONFIGURE, MINT_CODING_TOKEN, SET_CHANNEL_ENVIRONMENT
-and READ_SESSION. SET_CHANNEL_BUDGET and SET_CHANNEL_SKILLS are the
-counter-examples: money and what a shared agent may do stay with server
-admins, so a grant never counts there.
+grants, and decided under CONFIGURE, MINT_CODING_TOKEN, SET_CHANNEL_ENVIRONMENT,
+SET_CHANNEL_SKILLS and READ_SESSION. SET_CHANNEL_BUDGET is the counter-example:
+money stays with server admins, so a grant never counts there.
 
 The rules, in the vocabulary of the formal model (`formal/access_control`):
 
@@ -87,6 +86,9 @@ The rules, in the vocabulary of the formal model (`formal/access_control`):
   is `daimon.core.channel_copies`'s.
 - **Channel budgets**: only a server admin sets, clears or raises a channel's
   budget; a channel admin may not, even for the channels they administer.
+- **Channel skills**: a server admin adds or removes any channel's; a channel
+  admin those of the channels they administer, since they reach only turns
+  there.
 - **Fork**: an admin's call, and an agent with a rule can't be copied at all.
 - **Channel default**: nobody makes an agent the default of a channel outside
   its rule, since it would refuse every turn there. A channel admin
@@ -793,10 +795,20 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             return ALLOW
         return _deny("admin_required")
 
-    if req.action in (Action.SET_CHANNEL_BUDGET, Action.SET_CHANNEL_SKILLS):
-        # Money, and what a shared agent may do, stay with server admins; an
-        # admin's own agent key keeps the rights it always had.
+    if req.action is Action.SET_CHANNEL_BUDGET:
+        # Money stays with server admins; an admin's own agent key keeps the
+        # rights it always had.
         return ALLOW if subject.is_admin else _deny("admin_required")
+
+    if req.action is Action.SET_CHANNEL_SKILLS:
+        # A channel's skills reach only its own turns, so its admins may change
+        # them, as they pick its environment. An admin's own agent key keeps the
+        # rights it always had; a channel admin's key never acts as them.
+        if subject.is_admin:
+            return ALLOW
+        if subject.via_agent_key or place.channel_id not in subject.administered_channel_ids:
+            return _deny("admin_required")
+        return ALLOW
 
     if req.action is Action.MINT_CODING_TOKEN:
         if subject.is_admin and not subject.via_agent_key:

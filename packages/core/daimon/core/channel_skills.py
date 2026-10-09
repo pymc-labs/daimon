@@ -1,9 +1,9 @@
 """Channel skills: extra skills a channel's turns run with, on top of the agent's own.
 
 A shared agent can carry a skill one team needs without every channel
-getting it. Only a server admin or an operator token adds or removes one
-(`authorize`'s SET_CHANNEL_SKILLS); a channel's own admins can't, since a
-skill changes what a shared agent does.
+getting it. A server admin, an operator token or an admin of that channel adds
+or removes one (`authorize`'s SET_CHANNEL_SKILLS): it reaches only the
+channel's own turns.
 
 A channel may add a workspace library skill (`{t8}-{name}`), or one uploaded
 to an agent (`{t8}-{agent}/{name}`) only while that agent answers there and
@@ -76,7 +76,8 @@ REFUSALS: Final[dict[ChannelSkillRefusal, str]] = {
 
 
 def may_set_channel_skills(subject: Subject, channel_id: str) -> Decision:
-    """Whether `subject` may add or remove `channel_id`'s skills: server admins only. Pure."""
+    """Whether `subject` may add or remove `channel_id`'s skills: a server admin or an
+    admin of the channel. Pure."""
     return authorize(
         TenantAccessPolicy(),
         subject=subject,

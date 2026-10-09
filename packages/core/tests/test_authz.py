@@ -1659,7 +1659,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             ),
         ]
     ),
-    # --- channel skills: server admins only, never a channel's own admins ---
+    # --- channel skills: server admins, and a channel's own admins for that channel ---
     *(
         (
             name,
@@ -1670,9 +1670,15 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         for name, subject, place, expected in [
             ("server admin sets any channel's skills", ADMIN, Place(channel_id="C_X"), ALLOW),
             (
-                "channel admin can't set their own channel's skills",
+                "channel admin sets their own channel's skills",
                 ACME_CHANNEL_ADMIN,
                 Place(channel_id="C_ACME"),
+                ALLOW,
+            ),
+            (
+                "channel admin sets no other channel's skills",
+                ACME_CHANNEL_ADMIN,
+                Place(channel_id="C_X"),
                 _deny("admin_required"),
             ),
             (
