@@ -30,6 +30,8 @@ from dataclasses import dataclass
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
+from daimon.core.mux_backend import platform_scope
+from daimon.core.mux_compat import archive_vault, list_vaults
 from daimon.core.stores.accounts import load_live_account_ids
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -114,10 +116,11 @@ async def archive_orphan_mcp_vaults(
     nothing is lost beyond a few credentials that the warm-path rebind
     rebuilds.
     """
+    scope = platform_scope("mcp_vault_janitor.archive_orphan_mcp_vaults")
     async with session_factory() as session, session.begin():
         live_account_ids = await load_live_account_ids(session)
 
-    vaults = [v async for v in client.beta.vaults.list()]
+    vaults = [v async for v in list_vaults(client, scope=scope)]
     orphan_ids, unparseable_ids = partition_orphan_vault_ids(
         vaults, live_account_ids=live_account_ids
     )
@@ -133,7 +136,7 @@ async def archive_orphan_mcp_vaults(
     if not dry_run:
         for vault_id in orphan_ids:
             _log.info("mcp_vault_janitor.archive", vault_id=vault_id)
-            await client.beta.vaults.archive(vault_id)
+            await archive_vault(client, vault_id, scope=scope)
             archived_ids.append(vault_id)
 
     return JanitorReport(

@@ -74,3 +74,14 @@ def visible_skill(
         and authorization is not None
         and ("skill", skill_id) in authorization.resources
     )
+
+
+def visible_grant(
+    authorization: ResourceAuthorization | None, scope: Scope, kind: str, resource_id: str
+) -> bool:
+    """Untagged organization resources need an explicit host ID grant."""
+    return (
+        scope.is_platform
+        or scope.is_legacy_host_authorized
+        or (authorization is not None and (kind, resource_id) in authorization.resources)
+    )

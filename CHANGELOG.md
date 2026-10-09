@@ -10,8 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route CLI agent, environment and skill operations through tenant-scoped neutral resource ports, preserving requests, output and SDK error handling.
 - MCP agent, environment and skill operations now consume tenant-scoped neutral resource ports.
 - Discord, Slack, Teams and scheduler agent operations now consume tenant-scoped neutral resource ports.
+- Preserve original credential JSON key order and redact alternate quote-escaped secret echoes; verify `.env` upload filename, media type and bytes at the host call site.
+
+- Advertise closed session create, resource-mount and update configuration namespaces for backend admission.
+
+- Preserve explicit null environment descriptions on native create requests and
+  resolve and redact all repository tokens in session resource lists together.
+
+- Route vault bootstrap, credential mirroring, MCP OAuth writes and secret file
+  upload through resource ports while preserving request order, locking, retries
+  and cleanup; keep credential material out of SDK errors and DEBUG logs.
 
 - Verify legacy skill upload filenames, media types and archive bytes at import and repository-sync call sites.
+
+- Route vault administration, credential writes, secret file uploads and session mount administration through resource ports with host-held secret references.
 
 - Limit tenant skill list results to authorized custom skills and shared provider catalog skills without changing provider pagination.
 

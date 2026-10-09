@@ -1,5 +1,5 @@
 {
-  "files_scanned": 1973,
+  "files_scanned": 1982,
   "parse_errors": [],
   "calls": [
     {
@@ -1265,65 +1265,6 @@
       "response_access": []
     },
     {
-      "file": "packages/core/daimon/core/agent_mcp_credentials.py",
-      "line": 280,
-      "end": 280,
-      "scope": "_read_vault_slots",
-      "category": "production",
-      "resource": "vaults.credentials.list",
-      "call": "client.beta.vaults.credentials.list(vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": [
-        "existing.auth",
-        "existing.auth.mcp_server_url",
-        "existing.auth.type",
-        "existing.id",
-        "existing.metadata"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/agent_mcp_credentials.py",
-      "line": 326,
-      "end": 332,
-      "scope": "_mirror_one",
-      "category": "production",
-      "resource": "vaults.credentials.update",
-      "call": "client.beta.vaults.credentials.update(credential_id, vault_id=vault_id, auth={'type': 'static_bearer', 'token': cred.token}, metadata={METADATA_VERSION_KEY: cred.version})",
-      "request_keys": [
-        "token",
-        "type"
-      ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/agent_mcp_credentials.py",
-      "line": 307,
-      "end": 315,
-      "scope": "_mirror_one",
-      "category": "production",
-      "resource": "vaults.credentials.create",
-      "call": "client.beta.vaults.credentials.create(vault_id=vault_id, auth={'type': 'static_bearer', 'mcp_server_url': cred.mcp_server_url, 'token': cred.token}, metadata={METADATA_VERSION_KEY: cred.version})",
-      "request_keys": [
-        "mcp_server_url",
-        "token",
-        "type"
-      ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/credential_env.py",
-      "line": 84,
-      "end": 86,
-      "scope": "upload_env_file",
-      "category": "production",
-      "resource": "files.upload",
-      "call": "anthropic.beta.files.upload(file=(_MOUNT_PATH, io.BytesIO(content), 'text/plain'))",
-      "request_keys": [],
-      "response_access": [
-        "uploaded.id"
-      ]
-    },
-    {
       "file": "packages/core/daimon/core/direct_messages.py",
       "line": 111,
       "end": 111,
@@ -1331,179 +1272,6 @@
       "category": "production",
       "resource": "sessions.archive",
       "call": "deps.anthropic.beta.sessions.archive(session_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/github_app_session.py",
-      "line": 153,
-      "end": 153,
-      "scope": "create_session_vault",
-      "category": "production",
-      "resource": "vaults.create",
-      "call": "anthropic.beta.vaults.create(display_name=f'github-session:{uuid.uuid4()}')",
-      "request_keys": [],
-      "response_access": [
-        "vault.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/github_app_session.py",
-      "line": 476,
-      "end": 476,
-      "scope": "add_app_credentials",
-      "category": "production",
-      "resource": "vaults.credentials.list",
-      "call": "anthropic.beta.vaults.credentials.list(vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": [
-        "cred.auth",
-        "cred.auth.mcp_server_url",
-        "cred.auth.secret_name",
-        "cred.auth.secret_name.startswith",
-        "cred.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/github_app_session.py",
-      "line": 433,
-      "end": 433,
-      "scope": "add_app_credentials",
-      "category": "production",
-      "resource": "vaults.credentials.list",
-      "call": "anthropic.beta.vaults.credentials.list(vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": [
-        "cred.auth",
-        "cred.auth.mcp_server_url",
-        "cred.auth.secret_name",
-        "cred.auth.secret_name.startswith",
-        "cred.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/github_app_session.py",
-      "line": 591,
-      "end": 591,
-      "scope": "archive_app_vault",
-      "category": "production",
-      "resource": "vaults.archive",
-      "call": "anthropic.beta.vaults.archive(vault_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/github_app_session.py",
-      "line": 156,
-      "end": 168,
-      "scope": "create_session_vault",
-      "category": "production",
-      "resource": "vaults.credentials.create",
-      "call": "anthropic.beta.vaults.credentials.create(vault_id=vault.id, auth={'type': 'static_bearer', 'mcp_server_url': public_url, 'token': mint_jwt(account_id=account_id, chat_agent_id=agent_id, secret=jwt_secret, now=datetime.now(UTC))})",
-      "request_keys": [
-        "mcp_server_url",
-        "token",
-        "type"
-      ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/github_app_session.py",
-      "line": 170,
-      "end": 170,
-      "scope": "create_session_vault",
-      "category": "production",
-      "resource": "vaults.archive",
-      "call": "anthropic.beta.vaults.archive(vault.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/github_app_session.py",
-      "line": 439,
-      "end": 443,
-      "scope": "add_app_credentials",
-      "category": "production",
-      "resource": "vaults.credentials.update",
-      "call": "anthropic.beta.vaults.credentials.update(existing[name], vault_id=vault_id, auth={'type': 'environment_variable', 'secret_value': token})",
-      "request_keys": [
-        "secret_value",
-        "type"
-      ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/github_app_session.py",
-      "line": 445,
-      "end": 457,
-      "scope": "add_app_credentials",
-      "category": "production",
-      "resource": "vaults.credentials.create",
-      "call": "anthropic.beta.vaults.credentials.create(vault_id=vault_id, auth={'type': 'environment_variable', 'secret_name': name, 'secret_value': token, 'networking': {'type': 'limited', 'allowed_hosts': ['api.github.com', 'github.com', 'uploads.github.com']}, 'injection_location': {'header': True, 'body': False}})",
-      "request_keys": [
-        "allowed_hosts",
-        "body",
-        "header",
-        "injection_location",
-        "networking",
-        "secret_name",
-        "secret_value",
-        "type"
-      ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/github_app_session.py",
-      "line": 464,
-      "end": 464,
-      "scope": "add_app_credentials",
-      "category": "production",
-      "resource": "vaults.credentials.delete",
-      "call": "anthropic.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/github_app_session.py",
-      "line": 481,
-      "end": 481,
-      "scope": "add_app_credentials",
-      "category": "production",
-      "resource": "vaults.credentials.delete",
-      "call": "anthropic.beta.vaults.credentials.delete(cred.id, vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/github_app_session.py",
-      "line": 741,
-      "end": 745,
-      "scope": "rotate_live_app_tokens",
-      "category": "production",
-      "resource": "sessions.resources.update",
-      "call": "anthropic.beta.sessions.resources.update(resource_id, session_id=session_id, authorization_token=resource['authorization_token'])",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/github_app_session.py",
-      "line": 819,
-      "end": 819,
-      "scope": "rotate_live_app_tokens",
-      "category": "production",
-      "resource": "sessions.archive",
-      "call": "anthropic.beta.sessions.archive(session_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/github_app_session.py",
-      "line": 805,
-      "end": 809,
-      "scope": "rotate_live_app_tokens",
-      "category": "production",
-      "resource": "sessions.resources.update",
-      "call": "anthropic.beta.sessions.resources.update(resource_id, session_id=session_id, authorization_token=resource['authorization_token'])",
       "request_keys": [],
       "response_access": []
     },
@@ -1736,347 +1504,6 @@
       "category": "production",
       "resource": "agents.update",
       "call": "client.beta.agents.update(fresh.id, version=fresh.version, mcp_servers=servers, tools=tools)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_credential_sweep.py",
-      "line": 155,
-      "end": 155,
-      "scope": "sweep_stale_admin_credentials",
-      "category": "production",
-      "resource": "vaults.credentials.list",
-      "call": "client.beta.vaults.credentials.list(vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": [
-        "cred.auth",
-        "cred.auth.mcp_server_url",
-        "cred.auth.type",
-        "cred.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_credential_sweep.py",
-      "line": 128,
-      "end": 128,
-      "scope": "sweep_stale_admin_credentials",
-      "category": "production",
-      "resource": "vaults.list",
-      "call": "client.beta.vaults.list()",
-      "request_keys": [],
-      "response_access": [
-        "v.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_credential_sweep.py",
-      "line": 186,
-      "end": 189,
-      "scope": "sweep_stale_admin_credentials",
-      "category": "production",
-      "resource": "vaults.credentials.delete",
-      "call": "client.beta.vaults.credentials.delete(target_cred_id, vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_credential_sweep.py",
-      "line": 197,
-      "end": 204,
-      "scope": "sweep_stale_admin_credentials",
-      "category": "production",
-      "resource": "vaults.credentials.create",
-      "call": "client.beta.vaults.credentials.create(vault_id=vault_id, auth={'type': 'static_bearer', 'mcp_server_url': public_url, 'token': token})",
-      "request_keys": [
-        "mcp_server_url",
-        "token",
-        "type"
-      ],
-      "response_access": [
-        "new_cred.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_oauth/complete.py",
-      "line": 245,
-      "end": 245,
-      "scope": "_withdraw_grant",
-      "category": "production",
-      "resource": "vaults.credentials.delete",
-      "call": "anthropic.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_oauth/vault.py",
-      "line": 134,
-      "end": 134,
-      "scope": "put_mcp_oauth_credential",
-      "category": "production",
-      "resource": "vaults.credentials.list",
-      "call": "anthropic.beta.vaults.credentials.list(vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": [
-        "existing.auth",
-        "existing.auth.mcp_server_url",
-        "existing.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_oauth/vault.py",
-      "line": 147,
-      "end": 151,
-      "scope": "put_mcp_oauth_credential",
-      "category": "production",
-      "resource": "vaults.credentials.create",
-      "call": "anthropic.beta.vaults.credentials.create(vault_id=vault_id, auth=auth, display_name=f'oauth:{mcp_server_url}'[:255])",
-      "request_keys": [],
-      "response_access": [
-        "created.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_oauth/vault.py",
-      "line": 143,
-      "end": 143,
-      "scope": "put_mcp_oauth_credential",
-      "category": "production",
-      "resource": "vaults.credentials.delete",
-      "call": "anthropic.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_token_connect.py",
-      "line": 93,
-      "end": 93,
-      "scope": "connect_mcp_server_with_token",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "client.beta.agents.retrieve(agent.id)",
-      "request_keys": [],
-      "response_access": [
-        "fresh.mcp_servers"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 327,
-      "end": 327,
-      "scope": "add_github_copilot_credential",
-      "category": "production",
-      "resource": "vaults.credentials.list",
-      "call": "client.beta.vaults.credentials.list(vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": [
-        "cred.auth",
-        "cred.auth.mcp_server_url",
-        "cred.auth.type",
-        "cred.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 160,
-      "end": 160,
-      "scope": "_ensure_agent_mcp_vault_locked",
-      "category": "production",
-      "resource": "vaults.credentials.list",
-      "call": "client.beta.vaults.credentials.list(vault_id=oldest.id)",
-      "request_keys": [],
-      "response_access": [
-        "cred.auth",
-        "cred.auth.mcp_server_url",
-        "cred.auth.type",
-        "cred.id",
-        "cred.metadata"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 206,
-      "end": 206,
-      "scope": "_ensure_agent_mcp_vault_locked",
-      "category": "production",
-      "resource": "vaults.create",
-      "call": "client.beta.vaults.create(display_name=display_name)",
-      "request_keys": [],
-      "response_access": [
-        "vault.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 214,
-      "end": 222,
-      "scope": "_ensure_agent_mcp_vault_locked",
-      "category": "production",
-      "resource": "vaults.credentials.create",
-      "call": "client.beta.vaults.credentials.create(vault_id=vault.id, metadata={'daimon_chat_identity': str(agent_id)}, auth={'type': 'static_bearer', 'mcp_server_url': public_url, 'token': token})",
-      "request_keys": [
-        "daimon_chat_identity",
-        "mcp_server_url",
-        "token",
-        "type"
-      ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 51,
-      "end": 51,
-      "scope": "_find_vault_by_name",
-      "category": "production",
-      "resource": "vaults.list",
-      "call": "client.beta.vaults.list()",
-      "request_keys": [],
-      "response_access": [
-        "v.created_at",
-        "v.display_name"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 341,
-      "end": 345,
-      "scope": "add_github_copilot_credential",
-      "category": "production",
-      "resource": "vaults.credentials.update",
-      "call": "client.beta.vaults.credentials.update(existing[0], vault_id=vault_id, auth={'type': 'static_bearer', 'token': token})",
-      "request_keys": [
-        "token",
-        "type"
-      ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 349,
-      "end": 356,
-      "scope": "add_github_copilot_credential",
-      "category": "production",
-      "resource": "vaults.credentials.create",
-      "call": "client.beta.vaults.credentials.create(vault_id=vault_id, auth={'type': 'static_bearer', 'mcp_server_url': GITHUB_COPILOT_MCP_URL, 'token': token})",
-      "request_keys": [
-        "mcp_server_url",
-        "token",
-        "type"
-      ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 423,
-      "end": 430,
-      "scope": "add_external_mcp_credential",
-      "category": "production",
-      "resource": "vaults.credentials.create",
-      "call": "client.beta.vaults.credentials.create(vault_id=vault_id, auth={'type': 'static_bearer', 'mcp_server_url': mcp_server_url, 'token': token})",
-      "request_keys": [
-        "mcp_server_url",
-        "token",
-        "type"
-      ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 189,
-      "end": 203,
-      "scope": "_ensure_agent_mcp_vault_locked",
-      "category": "production",
-      "resource": "vaults.credentials.create",
-      "call": "client.beta.vaults.credentials.create(vault_id=oldest.id, metadata={'daimon_chat_identity': str(agent_id)}, auth={'type': 'static_bearer', 'mcp_server_url': public_url, 'token': mint_jwt(account_id=account_id, chat_agent_id=agent_id, slack_turn_context_id=slack_turn_context_id, secret=jwt_secret, now=now)})",
-      "request_keys": [
-        "daimon_chat_identity",
-        "mcp_server_url",
-        "token",
-        "type"
-      ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 338,
-      "end": 338,
-      "scope": "add_github_copilot_credential",
-      "category": "production",
-      "resource": "vaults.credentials.delete",
-      "call": "client.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 347,
-      "end": 347,
-      "scope": "add_github_copilot_credential",
-      "category": "production",
-      "resource": "vaults.credentials.delete",
-      "call": "client.beta.vaults.credentials.delete(duplicate_id, vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 416,
-      "end": 416,
-      "scope": "add_external_mcp_credential",
-      "category": "production",
-      "resource": "vaults.credentials.list",
-      "call": "client.beta.vaults.credentials.list(vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": [
-        "cred.auth",
-        "cred.auth.mcp_server_url",
-        "cred.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 421,
-      "end": 421,
-      "scope": "add_external_mcp_credential",
-      "category": "production",
-      "resource": "vaults.credentials.delete",
-      "call": "client.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault.py",
-      "line": 170,
-      "end": 184,
-      "scope": "_ensure_agent_mcp_vault_locked",
-      "category": "production",
-      "resource": "vaults.credentials.update",
-      "call": "client.beta.vaults.credentials.update(cred.id, vault_id=oldest.id, auth={'type': 'static_bearer', 'token': mint_jwt(account_id=account_id, chat_agent_id=agent_id, slack_turn_context_id=slack_turn_context_id, secret=jwt_secret, now=now)}, metadata={**(cred.metadata or {}), 'daimon_chat_identity': str(agent_id)})",
-      "request_keys": [
-        "daimon_chat_identity",
-        "token",
-        "type"
-      ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault_janitor.py",
-      "line": 120,
-      "end": 120,
-      "scope": "archive_orphan_mcp_vaults",
-      "category": "production",
-      "resource": "vaults.list",
-      "call": "client.beta.vaults.list()",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/mcp_vault_janitor.py",
-      "line": 136,
-      "end": 136,
-      "scope": "archive_orphan_mcp_vaults",
-      "category": "production",
-      "resource": "vaults.archive",
-      "call": "client.beta.vaults.archive(vault_id)",
       "request_keys": [],
       "response_access": []
     },
@@ -5002,6 +4429,30 @@
       ]
     },
     {
+      "file": "packages/core/tests/test_mux_credential_security.py",
+      "line": 401,
+      "end": 403,
+      "scope": "send",
+      "category": "test",
+      "resource": "sessions.create",
+      "call": "client.beta.sessions.create(agent='agent', environment_id='environment', **kwargs)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_environment_nulls.py",
+      "line": 38,
+      "end": 38,
+      "scope": "test_environment_create_keeps_explicit_description_null_and_configuration",
+      "category": "test",
+      "resource": "environments.create",
+      "call": "before.beta.environments.create(**payload)",
+      "request_keys": [],
+      "response_access": [
+        "expected.id"
+      ]
+    },
+    {
       "file": "packages/core/tests/test_mux_resources_parity.py",
       "line": 183,
       "end": 183,
@@ -5256,6 +4707,414 @@
       "call": "before.beta.skills.versions.delete(version.version, skill_id='skill1')",
       "request_keys": [],
       "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 332,
+      "end": 344,
+      "scope": "test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callbacks",
+      "category": "test",
+      "resource": "vaults.credentials.create",
+      "call": "before.beta.vaults.credentials.create(vault_id='vault', auth={'type': 'environment_variable', 'secret_name': 'GH_TOKEN_ORG_READ', 'secret_value': 'dummy-app', 'networking': {'type': 'limited', 'allowed_hosts': ['api.github.com', 'github.com', 'uploads.github.com']}, 'injection_location': {'header': True, 'body': False}})",
+      "request_keys": [
+        "allowed_hosts",
+        "body",
+        "header",
+        "injection_location",
+        "networking",
+        "secret_name",
+        "secret_value",
+        "type"
+      ],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 345,
+      "end": 345,
+      "scope": "test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callbacks",
+      "category": "test",
+      "resource": "vaults.credentials.delete",
+      "call": "before.beta.vaults.credentials.delete('old', vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 408,
+      "end": 408,
+      "scope": "test_env_upload_call_site_keeps_multipart_filename_type_bytes_and_ttl",
+      "category": "test",
+      "resource": "files.upload",
+      "call": "before.beta.files.upload(file=('.env', io.BytesIO(content), 'text/plain'))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 133,
+      "end": 133,
+      "scope": "test_vault_bootstrap_keeps_discovery_then_tenant_writes",
+      "category": "test",
+      "resource": "vaults.list",
+      "call": "before.beta.vaults.list()",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 135,
+      "end": 135,
+      "scope": "test_vault_bootstrap_keeps_discovery_then_tenant_writes",
+      "category": "test",
+      "resource": "vaults.create",
+      "call": "before.beta.vaults.create(display_name=name)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 139,
+      "end": 143,
+      "scope": "test_vault_bootstrap_keeps_discovery_then_tenant_writes",
+      "category": "test",
+      "resource": "vaults.credentials.create",
+      "call": "before.beta.vaults.credentials.create(vault_id='vault', metadata={'daimon_chat_identity': str(AGENT)}, auth={'type': 'static_bearer', 'mcp_server_url': PUBLIC, 'token': token})",
+      "request_keys": [
+        "daimon_chat_identity",
+        "mcp_server_url",
+        "token",
+        "type"
+      ],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 186,
+      "end": 186,
+      "scope": "test_copilot_replacement_keeps_duplicate_order_and_token_only_update",
+      "category": "test",
+      "resource": "vaults.credentials.list",
+      "call": "before.beta.vaults.credentials.list(vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 188,
+      "end": 190,
+      "scope": "test_copilot_replacement_keeps_duplicate_order_and_token_only_update",
+      "category": "test",
+      "resource": "vaults.credentials.update",
+      "call": "before.beta.vaults.credentials.update('first', vault_id='vault', auth={'type': 'static_bearer', 'token': 'dummy-pat'})",
+      "request_keys": [
+        "token",
+        "type"
+      ],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 191,
+      "end": 191,
+      "scope": "test_copilot_replacement_keeps_duplicate_order_and_token_only_update",
+      "category": "test",
+      "resource": "vaults.credentials.delete",
+      "call": "before.beta.vaults.credentials.delete('duplicate', vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 195,
+      "end": 202,
+      "scope": "test_copilot_replacement_keeps_duplicate_order_and_token_only_update",
+      "category": "test",
+      "resource": "vaults.credentials.create",
+      "call": "before.beta.vaults.credentials.create(vault_id='vault', auth={'type': 'static_bearer', 'mcp_server_url': GITHUB_COPILOT_MCP_URL, 'token': 'dummy-pat'})",
+      "request_keys": [
+        "mcp_server_url",
+        "token",
+        "type"
+      ],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 224,
+      "end": 224,
+      "scope": "test_mirror_404_rechecks_once_and_preserves_a_persons_oauth_grant",
+      "category": "test",
+      "resource": "vaults.credentials.list",
+      "call": "before.beta.vaults.credentials.list(vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 228,
+      "end": 233,
+      "scope": "test_mirror_404_rechecks_once_and_preserves_a_persons_oauth_grant",
+      "category": "test",
+      "resource": "vaults.credentials.update",
+      "call": "before.beta.vaults.credentials.update('old', vault_id='vault', auth={'type': 'static_bearer', 'token': 'dummy-new'}, metadata={METADATA_VERSION_KEY: 'v2'})",
+      "request_keys": [
+        "token",
+        "type"
+      ],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 234,
+      "end": 234,
+      "scope": "test_mirror_404_rechecks_once_and_preserves_a_persons_oauth_grant",
+      "category": "test",
+      "resource": "vaults.credentials.list",
+      "call": "before.beta.vaults.credentials.list(vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 331,
+      "end": 331,
+      "scope": "test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callbacks",
+      "category": "test",
+      "resource": "vaults.credentials.list",
+      "call": "before.beta.vaults.credentials.list(vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 346,
+      "end": 346,
+      "scope": "test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callbacks",
+      "category": "test",
+      "resource": "vaults.credentials.list",
+      "call": "before.beta.vaults.credentials.list(vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 137,
+      "end": 137,
+      "scope": "test_vault_bootstrap_keeps_discovery_then_tenant_writes",
+      "category": "test",
+      "resource": "vaults.credentials.list",
+      "call": "before.beta.vaults.credentials.list(vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 145,
+      "end": 150,
+      "scope": "test_vault_bootstrap_keeps_discovery_then_tenant_writes",
+      "category": "test",
+      "resource": "vaults.credentials.update",
+      "call": "before.beta.vaults.credentials.update('existing', vault_id='vault', auth={'type': 'static_bearer', 'token': token}, metadata={'kept': 'yes', 'daimon_chat_identity': str(AGENT)})",
+      "request_keys": [
+        "daimon_chat_identity",
+        "kept",
+        "token",
+        "type"
+      ],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 194,
+      "end": 194,
+      "scope": "test_copilot_replacement_keeps_duplicate_order_and_token_only_update",
+      "category": "test",
+      "resource": "vaults.credentials.delete",
+      "call": "before.beta.vaults.credentials.delete(native_id, vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 284,
+      "end": 284,
+      "scope": "test_oauth_conflict_retries_the_same_requests_and_access_checks",
+      "category": "test",
+      "resource": "vaults.credentials.list",
+      "call": "before.beta.vaults.credentials.list(vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 286,
+      "end": 288,
+      "scope": "test_oauth_conflict_retries_the_same_requests_and_access_checks",
+      "category": "test",
+      "resource": "vaults.credentials.create",
+      "call": "before.beta.vaults.credentials.create(vault_id='vault', auth=auth, display_name=f'oauth:{SERVER}')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_parity.py",
+      "line": 81,
+      "end": 81,
+      "scope": "test_vault_list_create_archive_preserves_pagination_and_models",
+      "category": "test",
+      "resource": "vaults.create",
+      "call": "before.beta.vaults.create(display_name='test')",
+      "request_keys": [],
+      "response_access": [
+        "expected.model_dump"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_parity.py",
+      "line": 84,
+      "end": 84,
+      "scope": "test_vault_list_create_archive_preserves_pagination_and_models",
+      "category": "test",
+      "resource": "vaults.archive",
+      "call": "before.beta.vaults.archive('vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_parity.py",
+      "line": 149,
+      "end": 149,
+      "scope": "test_credential_create_list_delete_keeps_auth_and_metadata_payload",
+      "category": "test",
+      "resource": "vaults.credentials.create",
+      "call": "before.beta.vaults.credentials.create(vault_id='vault', **payload)",
+      "request_keys": [],
+      "response_access": [
+        "expected.model_dump"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_parity.py",
+      "line": 161,
+      "end": 161,
+      "scope": "test_credential_create_list_delete_keeps_auth_and_metadata_payload",
+      "category": "test",
+      "resource": "vaults.credentials.delete",
+      "call": "before.beta.vaults.credentials.delete('credential', vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_parity.py",
+      "line": 199,
+      "end": 201,
+      "scope": "test_credential_update_keeps_explicit_nulls",
+      "category": "test",
+      "resource": "vaults.credentials.update",
+      "call": "before.beta.vaults.credentials.update('credential', vault_id='vault', **payload)",
+      "request_keys": [],
+      "response_access": [
+        "expected.model_dump"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_parity.py",
+      "line": 223,
+      "end": 223,
+      "scope": "test_secret_file_upload_keeps_multipart_bytes_filename_type_and_beta",
+      "category": "test",
+      "resource": "files.upload",
+      "call": "before.beta.files.upload(file=('.env', io.BytesIO(content), 'text/plain'))",
+      "request_keys": [],
+      "response_access": [
+        "expected.model_dump"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_parity.py",
+      "line": 272,
+      "end": 274,
+      "scope": "test_repo_token_update_and_archive_keep_requests_and_touch_no_shared_resources",
+      "category": "test",
+      "resource": "sessions.resources.update",
+      "call": "before.beta.sessions.resources.update('repo', session_id='session', authorization_token='dummy-token')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_parity.py",
+      "line": 276,
+      "end": 276,
+      "scope": "test_repo_token_update_and_archive_keep_requests_and_touch_no_shared_resources",
+      "category": "test",
+      "resource": "sessions.archive",
+      "call": "before.beta.sessions.archive('session')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_parity.py",
+      "line": 313,
+      "end": 315,
+      "scope": "test_session_resource_list_add_delete_keep_existing_native_requests",
+      "category": "test",
+      "resource": "sessions.resources.add",
+      "call": "before.beta.sessions.resources.add('session', type='file', file_id='file', mount_path='/data')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_parity.py",
+      "line": 323,
+      "end": 323,
+      "scope": "test_session_resource_list_add_delete_keep_existing_native_requests",
+      "category": "test",
+      "resource": "sessions.resources.delete",
+      "call": "before.beta.sessions.resources.delete('mount', session_id='session')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_parity.py",
+      "line": 78,
+      "end": 78,
+      "scope": "test_vault_list_create_archive_preserves_pagination_and_models",
+      "category": "test",
+      "resource": "vaults.list",
+      "call": "before.beta.vaults.list()",
+      "request_keys": [],
+      "response_access": [
+        "v.model_dump"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_parity.py",
+      "line": 154,
+      "end": 154,
+      "scope": "test_credential_create_list_delete_keeps_auth_and_metadata_payload",
+      "category": "test",
+      "resource": "vaults.credentials.list",
+      "call": "before.beta.vaults.credentials.list(vault_id='vault')",
+      "request_keys": [],
+      "response_access": [
+        "v.model_dump"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_parity.py",
+      "line": 307,
+      "end": 307,
+      "scope": "test_session_resource_list_add_delete_keep_existing_native_requests",
+      "category": "test",
+      "resource": "sessions.resources.list",
+      "call": "before.beta.sessions.resources.list('session')",
+      "request_keys": [],
+      "response_access": [
+        "r.model_dump",
+        "r.native",
+        "r.native.value"
+      ]
     },
     {
       "file": "packages/core/tests/test_output_delivery.py",
@@ -5574,9 +5433,75 @@
       "response_access": []
     },
     {
+      "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
+      "line": 82,
+      "end": 82,
+      "scope": "upload",
+      "category": "production",
+      "resource": "files.upload",
+      "call": "self._client.beta.files.upload(file=(filename, content, media_type))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
+      "line": 92,
+      "end": 98,
+      "scope": "send",
+      "category": "production",
+      "resource": "files.upload",
+      "call": "self._client.beta.files.upload(file=(cast(str, kwargs['filename']), io.BytesIO(cast(bytes, kwargs['content'])), cast(str, kwargs['media_type'])))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
+      "line": 121,
+      "end": 121,
+      "scope": "list",
+      "category": "production",
+      "resource": "files.list",
+      "call": "self._client.beta.files.list(**kwargs)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
+      "line": 131,
+      "end": 131,
+      "scope": "download",
+      "category": "production",
+      "resource": "files.download",
+      "call": "self._client.beta.files.download(ref.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
+      "line": 145,
+      "end": 145,
+      "scope": "delete",
+      "category": "production",
+      "resource": "files.delete",
+      "call": "self._client.beta.files.delete(ref.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
+      "line": 106,
+      "end": 106,
+      "scope": "retrieve",
+      "category": "production",
+      "resource": "files.retrieve_metadata",
+      "call": "self._client.beta.files.retrieve_metadata(ref.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 202,
-      "end": 202,
+      "line": 207,
+      "end": 207,
       "scope": "walk",
       "category": "production",
       "resource": "environments.list",
@@ -5586,8 +5511,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 115,
-      "end": 117,
+      "line": 120,
+      "end": 122,
       "scope": "create",
       "category": "production",
       "resource": "environments.create",
@@ -5597,8 +5522,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 125,
-      "end": 125,
+      "line": 130,
+      "end": 130,
       "scope": "retrieve",
       "category": "production",
       "resource": "environments.retrieve",
@@ -5608,8 +5533,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 141,
-      "end": 141,
+      "line": 146,
+      "end": 146,
       "scope": "list",
       "category": "production",
       "resource": "environments.list",
@@ -5619,8 +5544,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 167,
-      "end": 169,
+      "line": 172,
+      "end": 174,
       "scope": "update",
       "category": "production",
       "resource": "environments.update",
@@ -5630,8 +5555,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 177,
-      "end": 177,
+      "line": 182,
+      "end": 182,
       "scope": "archive",
       "category": "production",
       "resource": "environments.archive",
@@ -5641,8 +5566,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 195,
-      "end": 195,
+      "line": 200,
+      "end": 200,
       "scope": "delete",
       "category": "production",
       "resource": "environments.delete",
@@ -5772,6 +5697,61 @@
       "response_access": []
     },
     {
+      "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
+      "line": 117,
+      "end": 117,
+      "scope": "add",
+      "category": "production",
+      "resource": "sessions.resources.add",
+      "call": "self._client.beta.sessions.resources.add(session.id, **kwargs)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
+      "line": 125,
+      "end": 125,
+      "scope": "remove",
+      "category": "production",
+      "resource": "sessions.resources.delete",
+      "call": "self._client.beta.sessions.resources.delete(resource_id, session_id=session.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
+      "line": 135,
+      "end": 139,
+      "scope": "send",
+      "category": "production",
+      "resource": "sessions.resources.update",
+      "call": "self._client.beta.sessions.resources.update(resource_id, session_id=session.id, authorization_token=cast(str, kwargs['authorization_token']))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
+      "line": 148,
+      "end": 148,
+      "scope": "archive",
+      "category": "production",
+      "resource": "sessions.archive",
+      "call": "self._client.beta.sessions.archive(session.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
+      "line": 99,
+      "end": 99,
+      "scope": "list",
+      "category": "production",
+      "resource": "sessions.resources.list",
+      "call": "self._client.beta.sessions.resources.list(session.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
       "file": "packages/mux/mux/drivers/anthropic/resources/skills.py",
       "line": 186,
       "end": 186,
@@ -5881,6 +5861,96 @@
       "resource": "skills.retrieve",
       "call": "self._client.beta.skills.retrieve(skill_id)",
       "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 155,
+      "end": 155,
+      "scope": "walk",
+      "category": "production",
+      "resource": "vaults.list",
+      "call": "self._client.beta.vaults.list()",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 207,
+      "end": 207,
+      "scope": "credential_walk",
+      "category": "production",
+      "resource": "vaults.credentials.list",
+      "call": "self._client.beta.vaults.credentials.list(vault_id=vault.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 189,
+      "end": 189,
+      "scope": "list",
+      "category": "production",
+      "resource": "vaults.list",
+      "call": "self._client.beta.vaults.list(**cast(VaultListParams, kwargs))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 298,
+      "end": 298,
+      "scope": "remove",
+      "category": "production",
+      "resource": "vaults.credentials.delete",
+      "call": "self._client.beta.vaults.credentials.delete(credential_id, vault_id=vault.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 305,
+      "end": 305,
+      "scope": "archive",
+      "category": "production",
+      "resource": "vaults.archive",
+      "call": "self._client.beta.vaults.archive(vault.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 165,
+      "end": 165,
+      "scope": "create",
+      "category": "production",
+      "resource": "vaults.create",
+      "call": "self._client.beta.vaults.create(display_name=display_name)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 235,
+      "end": 237,
+      "scope": "_send_credential",
+      "category": "production",
+      "resource": "vaults.credentials.create",
+      "call": "self._client.beta.vaults.credentials.create(vault_id=vault.id, **cast(CredentialCreateParams, kwargs))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 255,
+      "end": 257,
+      "scope": "update_credential",
+      "category": "production",
+      "resource": "vaults.credentials.update",
+      "call": "self._client.beta.vaults.credentials.update(credential_id, **cast(CredentialUpdateParams, {'vault_id': vault.id, **kwargs}))",
+      "request_keys": [
+        "vault_id"
+      ],
       "response_access": []
     },
     {
@@ -11149,7 +11219,7 @@
     },
     {
       "file": "packages/core/daimon/core/credential_env.py",
-      "line": 20,
+      "line": 19,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -11158,7 +11228,7 @@
     },
     {
       "file": "packages/core/daimon/core/credential_env.py",
-      "line": 21,
+      "line": 20,
       "module": "anthropic.types.beta",
       "names": [
         "FileMetadata"
@@ -11167,7 +11237,7 @@
     },
     {
       "file": "packages/core/daimon/core/credential_env.py",
-      "line": 22,
+      "line": 21,
       "module": "anthropic.types.beta.beta_managed_agents_file_resource_params",
       "names": [
         "BetaManagedAgentsFileResourceParams"
@@ -11810,6 +11880,7 @@
       "names": [
         "BetaEnvironment",
         "BetaManagedAgentsAgent",
+        "FileMetadata",
         "SkillCreateResponse",
         "SkillListResponse"
       ],
@@ -11817,11 +11888,74 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 20,
+      "line": 21,
       "module": "anthropic.types.beta.skills",
       "names": [
         "VersionCreateResponse",
         "VersionListResponse"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/mux_compat.py",
+      "line": 43,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsVault"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/mux_compat.py",
+      "line": 44,
+      "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
+      "names": [
+        "BetaManagedAgentsCredential"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/mux_compat.py",
+      "line": 533,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsVault"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/mux_compat.py",
+      "line": 543,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsVault"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/mux_compat.py",
+      "line": 560,
+      "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
+      "names": [
+        "BetaManagedAgentsCredential"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/mux_compat.py",
+      "line": 576,
+      "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
+      "names": [
+        "BetaManagedAgentsCredential"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/mux_compat.py",
+      "line": 628,
+      "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
+      "names": [
+        "BetaManagedAgentsCredential"
       ],
       "category": "production"
     },
@@ -14132,11 +14266,38 @@
       "category": "test"
     },
     {
+      "file": "packages/core/tests/test_mux_credential_security.py",
+      "line": 9,
+      "module": "anthropic",
+      "names": [
+        "APIStatusError"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/core/tests/test_mux_resources_parity.py",
       "line": 373,
       "module": "anthropic",
       "names": [
         "APIStatusError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 225,
+      "module": "anthropic",
+      "names": [
+        "NotFoundError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/test_mux_vault_call_sites.py",
+      "line": 281,
+      "module": "anthropic",
+      "names": [
+        "ConflictError"
       ],
       "category": "test"
     },
@@ -15411,6 +15572,18 @@
       "category": "production"
     },
     {
+      "file": "packages/mux/mux/drivers/anthropic/resources/_secrets.py",
+      "line": 11,
+      "module": "anthropic",
+      "names": [
+        "AnthropicError",
+        "APIConnectionError",
+        "APIStatusError",
+        "APITimeoutError"
+      ],
+      "category": "production"
+    },
+    {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
       "line": 9,
       "module": "anthropic",
@@ -15452,6 +15625,33 @@
       "module": "anthropic.types.beta.agent_list_params",
       "names": [
         "AgentListParams"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
+      "line": 7,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
+      "line": 8,
+      "module": "anthropic.types.beta",
+      "names": [
+        "FileMetadata"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
+      "line": 9,
+      "module": "anthropic.types.beta.file_list_params",
+      "names": [
+        "FileListParams"
       ],
       "category": "production"
     },
@@ -15519,6 +15719,42 @@
       "category": "production"
     },
     {
+      "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
+      "line": 5,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
+      "line": 6,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "ResourceUpdateResponse"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
+      "line": 7,
+      "module": "anthropic.types.beta.sessions.beta_managed_agents_session_resource",
+      "names": [
+        "BetaManagedAgentsSessionResource"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
+      "line": 10,
+      "module": "anthropic.types.beta.sessions.resource_add_params",
+      "names": [
+        "ResourceAddParams"
+      ],
+      "category": "production"
+    },
+    {
       "file": "packages/mux/mux/drivers/anthropic/resources/skills.py",
       "line": 6,
       "module": "anthropic",
@@ -15572,6 +15808,60 @@
       "module": "anthropic.types.beta.skill_create_params",
       "names": [
         "SkillCreateParams"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 9,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 10,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsVault"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 11,
+      "module": "anthropic.types.beta.vault_list_params",
+      "names": [
+        "VaultListParams"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 12,
+      "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
+      "names": [
+        "BetaManagedAgentsCredential"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 13,
+      "module": "anthropic.types.beta.vaults.credential_create_params",
+      "names": [
+        "CredentialCreateParams"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 14,
+      "module": "anthropic.types.beta.vaults.credential_update_params",
+      "names": [
+        "CredentialUpdateParams"
       ],
       "category": "production"
     },

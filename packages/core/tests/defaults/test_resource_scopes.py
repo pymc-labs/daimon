@@ -439,5 +439,7 @@ def test_core_platform_scopes_are_limited_to_workspace_operations() -> None:
             ("defaults/platform_export.py", "export_platform"): 1,
             ("defaults/preflight.py", "check_model_accepted"): 2,
             ("mux_backend.py", "platform_scope"): 1,  # Shared constructor, not an operation.
+            ("mcp_vault_janitor.py", "archive_orphan_mcp_vaults"): 1,
+            ("mcp_credential_sweep.py", "sweep_stale_admin_credentials"): 1,
         }
     )

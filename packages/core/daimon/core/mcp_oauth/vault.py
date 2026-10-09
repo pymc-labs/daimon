@@ -26,6 +26,8 @@ from anthropic.types.beta.vaults.beta_managed_agents_mcp_oauth_refresh_params im
 )
 from daimon.core.mcp_oauth.models import ClientRegistration, TokenResponse
 from daimon.core.mcp_vault import same_server_url
+from daimon.core.mux_compat import create_credential, delete_credential, list_credentials
+from mux.contracts.ids import Scope
 
 # Anthropic wants a bound expiry. A server that omits `expires_in` but hands
 # out a refresh token gets a short lifetime, since Anthropic renews it anyway;
@@ -96,6 +98,7 @@ async def put_mcp_oauth_credential(
     resource: str | None,
     now: dt.datetime,
     before_write: Callable[[], Awaitable[None]] | None = None,
+    scope: Scope | None = None,
 ) -> str:
     """Replace whatever credential the vault holds for the URL; return the new id.
 
@@ -119,6 +122,9 @@ async def put_mcp_oauth_credential(
     to `_WRITE_ATTEMPTS` times; that retry is not what makes the common
     case safe, the lock is.
     """
+    scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.mcp_oauth.vault:put_mcp_oauth_credential"
+    )
     auth = build_mcp_oauth_auth(
         mcp_server_url=mcp_server_url,
         tokens=tokens,
@@ -131,7 +137,7 @@ async def put_mcp_oauth_credential(
         # Collect first: deleting while the list paginates can skip an entry.
         stale = [
             existing.id
-            async for existing in anthropic.beta.vaults.credentials.list(vault_id=vault_id)
+            async for existing in list_credentials(anthropic, vault_id, scope=scope)
             if not isinstance(existing.auth, BetaManagedAgentsEnvironmentVariableAuthResponse)
             and same_server_url(existing.auth.mcp_server_url, mcp_server_url)
         ]
@@ -140,14 +146,15 @@ async def put_mcp_oauth_credential(
         for credential_id in stale:
             # Already gone: another writer removed it, which is what we wanted.
             with contextlib.suppress(NotFoundError):
-                await anthropic.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
+                await delete_credential(anthropic, vault_id, credential_id, scope=scope)
         if before_write is not None:
             await before_write()
         try:
-            created = await anthropic.beta.vaults.credentials.create(
-                vault_id=vault_id,
-                auth=auth,
-                display_name=f"oauth:{mcp_server_url}"[:255],
+            created = await create_credential(
+                anthropic,
+                vault_id,
+                {"auth": auth, "display_name": f"oauth:{mcp_server_url}"[:255]},
+                scope=scope,
             )
         except ConflictError:
             # A concurrent writer filled the slot after our delete; re-read it.

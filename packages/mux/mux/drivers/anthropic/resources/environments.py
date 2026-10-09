@@ -48,11 +48,16 @@ def environment_payload(spec: EnvironmentSpec | EnvironmentPatch) -> dict[str, o
         else:
             if native.namespace != "anthropic.environment_config" or native.version != 1:
                 raise ValueError("expected anthropic.environment_config@1")
+            config = EnvironmentConfig.model_validate(dict(native.value))
             result.update(
-                EnvironmentConfig.model_validate(dict(native.value)).model_dump(
-                    mode="json", exclude_unset=True
-                )
+                config.model_dump(mode="json", exclude_unset=True, exclude={"create_nulls"})
             )
+            for name in config.create_nulls:
+                if isinstance(spec, EnvironmentPatch) or getattr(spec, name) is not None:
+                    raise ValueError(
+                        "environment create null must name an explicit null create field"
+                    )
+                result[name] = None
     if "network" in fields and spec.network is not None:
         network: dict[str, object] = {"type": spec.network.mode}
         if spec.network.mode == "limited":

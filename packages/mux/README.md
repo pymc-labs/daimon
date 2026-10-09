@@ -6,6 +6,13 @@ store (`mux.state`), with one driver package per provider under
 `mux/drivers/`. Daimon wraps its existing Anthropic client with resource
 ports while retaining host policy, authorization, locking and client lifetime.
 Turn and event ports remain independently injectable in the driver factory.
+Resource drivers include vault credentials, files and session administration;
+credential specifications carry opaque references resolved for one request.
+Credential errors and SDK request logs redact raw, quote-escaped and nested
+repr/JSON secret values. Request codecs preserve the original JSON key order.
+Session resource lists resolve all repository token references for the same
+request. Native environment creation retains explicit null descriptions through
+its closed environment config schema.
 
 The import name is the top-level `mux`, not `daimon.mux`, so it can be split
 into its own repository without a rename. `mux` never imports `daimon`, and

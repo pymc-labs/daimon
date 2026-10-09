@@ -408,3 +408,60 @@ checks in Discord and Teams retain their existing refusal copy before upload.
 
 Discord memory list/retrieve and scheduler session retrieve/archive calls retain
 their current SDK path pending the memory, lifecycle and archive ports.
+Vault credentials use closed native schemas with opaque host secret references.
+The driver resolves those references only for the existing SDK write. Credential
+snapshots retain public SDK fields and exclude write-only values, including
+nested OAuth refresh and client authentication values. Credential and secret
+file upload failures preserve SDK error classes and status while dropping request
+bodies and authorization headers and redacting echoed secret values.
+This includes escaped multiline values in SDK error messages. Helpers that
+discarded credential-create responses continue to discard them; vault creation
+preserves the original native response fields when the caller uses only its ID.
+
+Files preserve the existing multipart filename, media type and bytes. The
+`anthropic.session_resources@1` driver lists, adds and removes mounts and rotates
+repository tokens by reference. Session archive is a separate administration
+operation; it never archives or deletes shared vaults or memory stores. Workspace
+vault janitor and credential sweep retain their explicit operator scopes and host
+policy; GitHub session provisioning and token rotation use their tenant context.
+
+The vault administration branch adds two explicit platform call sites: the
+workspace orphan-vault janitor and stale-admin-credential operator sweep. Their
+existing inventories span accounts; tenant provisioning and rotation use tenant
+scopes. The construction inventory test includes both operator paths.
+
+Vault bootstrap, external-token writes, OAuth replacement, credential mirroring
+and `.env` uploads also use these ports. Public helpers accept an explicit host
+scope; established callers without tenant context use a named
+`Scope.legacy_host_authorized` capability. Owned callers with tenant context
+forward it through credential writes, retries, rollback and file upload. Vault
+name discovery retains its workspace inventory and exact account/agent name
+predicate before the host knows a vault ID. Its named legacy capability and
+remaining caller seams are recorded in the sprint follow-up inventory.
+
+The SDK's DEBUG request-options logs are redacted within credential I/O, including
+escaped values and exception text. The logging filter holds no credential values;
+request-local material is cleared and its context reset after I/O. Operation keys
+remain pass-through, including repeated keys, with no driver journal or deduplication.
+
+Session creation resolves repository token references inside resource lists at
+the SDK write. All resolved tokens share the same request-local error and log
+redaction, including a failure attributed to the first repository. Free-text
+metadata is outside reference resolution.
+
+Native environment creation preserves an explicit null description through the
+closed `anthropic.environment_config@1` `create_nulls` field. Its only accepted
+field name is `description`; the marker is removed before the SDK request.
+Neutral description omission remains unchanged, including when configuration
+is absent or explicitly null.
+
+The factory advertises the session lane's closed configuration namespaces
+`anthropic.session_create@1`, `anthropic.session_resource_create@1` and
+`anthropic.session_update@1` for admission. The session lifecycle driver owns
+their payload validation and execution.
+
+Credential request codecs retain the established JSON key order, including
+header/body injection flags and OAuth scope/resource fields. Error redaction
+covers both quote-escaping styles and their nested SDK repr/JSON forms. The
+`.env` upload retains its `.env` filename, `text/plain` media type and exact
+assembled bytes.

@@ -52,6 +52,13 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
 from daimon.core.mcp_auth import mint_jwt
 from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, same_server_url
+from daimon.core.mux_backend import platform_scope
+from daimon.core.mux_compat import (
+    create_credential,
+    delete_credential,
+    list_credentials,
+    list_vaults,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -125,7 +132,8 @@ async def sweep_stale_admin_credentials(
     ``anthropic.APIError`` propagates — callers at the CLI boundary decide how
     to surface failures.
     """
-    all_vaults = [v async for v in client.beta.vaults.list()]
+    scope = platform_scope("mcp_credential_sweep.sweep_stale_admin_credentials")
+    all_vaults = [v async for v in list_vaults(client, scope=scope)]
     daimon_mcp_ids = partition_daimon_mcp_vault_ids(all_vaults)
 
     # Build a lookup from vault_id → BetaManagedAgentsVault for display_name access.
@@ -152,7 +160,7 @@ async def sweep_stale_admin_credentials(
 
         # Find the static_bearer credential at public_url (skip all others).
         target_cred_id: str | None = None
-        async for cred in client.beta.vaults.credentials.list(vault_id=vault_id):
+        async for cred in list_credentials(client, vault_id, scope=scope):
             if cred.auth.type != "static_bearer":
                 continue
             if same_server_url(cred.auth.mcp_server_url, GITHUB_COPILOT_MCP_URL):
@@ -183,10 +191,7 @@ async def sweep_stale_admin_credentials(
             cred_id=target_cred_id,
             account_id=str(account_id),
         )
-        await client.beta.vaults.credentials.delete(
-            target_cred_id,
-            vault_id=vault_id,
-        )
+        await delete_credential(client, vault_id, target_cred_id, scope=scope)
 
         token = mint_jwt(
             account_id=account_id,
@@ -194,13 +199,17 @@ async def sweep_stale_admin_credentials(
             now=now,
             # No is_admin — this is the invariant: Discord vault creds carry no is_admin.
         )
-        new_cred = await client.beta.vaults.credentials.create(
-            vault_id=vault_id,
-            auth={
-                "type": "static_bearer",
-                "mcp_server_url": public_url,
-                "token": token,
+        new_cred = await create_credential(
+            client,
+            vault_id,
+            {
+                "auth": {
+                    "type": "static_bearer",
+                    "mcp_server_url": public_url,
+                    "token": token,
+                }
             },
+            scope=scope,
         )
         _log.info(
             "mcp_credential_sweep.recreated",
