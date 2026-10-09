@@ -253,6 +253,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Teams Ask a person posts to its own `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`, as Slack has its own. It no longer shares `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` with Discord, so one deployment can run Ask a human on both.
 - Tool approval cards on Discord, Slack and Teams now name the action and consequence, show plain labelled inputs in Details, and collapse after a decision. Each blocked call gets its own card and confirmation event.
 - If a turn stops after an approval click but before its confirmation is sent, the answered card now shows Stopped.
 
@@ -446,6 +447,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Teams Ask a person: a deployment that put a Teams channel (`19:…`) in `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` moves it to `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`; until then Teams offers no Ask a person, and Discord would try to post there.
 - Building the image needs Docker 23 or later: the Dockerfile uses BuildKit instructions the legacy builder rejects.
 - Run migrations `0046_account_external` and `0047_turn_origin_external` before deploying. The new code leaves an empty member guest list out of the stored access policy, so older processes still read it; once one is listed, upgrade every process.
 - Isolated channels' agents no longer read other channels, nor sessions with no channel stamp: setups that relied on it stop working.

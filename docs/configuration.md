@@ -998,34 +998,31 @@ Human-support escalation: where requests land, and how many each user gets.
 request eat the tenant's ability to run turns, and would give a paid-up tenant unlimited
 support. Different unit, different table.
 
-Discord and Teams requests go to `escalation_channel_id` (a Teams `19:…` channel is
-posted by the Teams bot, any other id is a Discord channel); Slack requests go only to
-`slack_escalation_channel_id`, never to that channel. An unset channel disables the
-affordance it serves entirely rather than recording requests nobody will ever see.
-Failing closed is the honest behaviour: an escalate button that reaches no one is worse
-than no button, because the person believes they have asked for help. Every platform
-spends the same per-user, per-tenant allowance from one ledger.
+Each platform's requests go only to its own channel: Discord's to
+`escalation_channel_id`, Slack's to `slack_escalation_channel_id`, Teams' to
+`teams_escalation_channel_id`. An unset channel disables the affordance it serves
+entirely rather than recording requests nobody will ever see. Failing closed is the
+honest behaviour: an escalate button that reaches no one is worse than no button,
+because the person believes they have asked for help. Every platform spends the same
+per-user, per-tenant allowance from one ledger.
 
 ### `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`
 
 `str | None` · optional · default unset
 
-Channel id where human-support requests from Discord and Teams are posted: a Discord
-channel id, or a Teams channel id (`19:…`) that the Teams bot posts in. Teams requests
-reach a Discord channel only when the Discord bot token is also set; a Teams channel
-turns Ask a human off on Discord, which cannot post there. Unset (the default) disables
-the escalate affordance on Discord and Teams — a request that reaches nobody is worse
-than no button at all. A channel rather than operator DMs: it survives one person's DMs
-being closed, and it leaves a shared record anyone on the rota can pick up. The bot must
-be able to post there.
+Discord channel id where human-support requests from Discord are posted. Unset (the
+default) disables the escalate affordance on Discord — a request that reaches nobody is
+worse than no button at all. A channel rather than operator DMs: it survives one
+person's DMs being closed, and it leaves a shared record anyone on the rota can pick up.
+The bot must be able to post there.
 
 ### `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID`
 
 `str | None` · optional · default unset
 
 Slack channel id where human-support requests from Slack are posted. Unset (the default)
-disables the Ask the team button on Slack. Slack requests never go to the Discord
-channel, nor Discord requests here. The bot must be a member of the channel.
+disables the Ask the team button on Slack. Slack requests never go to another platform's
+channel, nor theirs here. The bot must be a member of the channel.
 
 ### `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID`
 
@@ -1035,6 +1032,15 @@ Slack workspace id (T…) that owns DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID,
 deployment installed in several workspaces: every workspace's requests are posted with
 that workspace's bot token. Unset posts with the requesting workspace's own token, which
 suits a single-workspace install. Daimon must be installed in the named workspace.
+
+### `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`
+
+`str | None` · optional · default unset
+
+Teams channel id (`19:…`) where human-support requests from Teams are posted. Unset (the
+default) disables Ask a person on Teams. Teams requests never go to the Discord or Slack
+channel, nor theirs here. The Teams bot must be a member of the channel's team (and of
+the channel, if it is private).
 
 ### `DAIMON_SUPPORT__CREDITS_PER_USER`
 
@@ -1051,10 +1057,11 @@ ledgers. 0 disables escalation.
 Per-tenant switch, keyed by tenant UUID: true also posts every submitted 👎 "What went
 wrong?" form (the reasons, the text, the person, the agent and a link to the answer) to
 the channel Ask a human posts to: DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID for Slack,
-DAIMON_SUPPORT__ESCALATION_CHANNEL_ID for Discord (a Discord channel) and Teams (a Teams
-or Discord channel). Missing/false (the default) keeps the form in the database only.
-The form tells the person their answers are shared when it is on. Spends no support
-credit. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a JSON object.
+DAIMON_SUPPORT__ESCALATION_CHANNEL_ID for Discord and
+DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID for Teams. Missing/false (the default) keeps
+the form in the database only. The form tells the person their answers are shared when
+it is on. Spends no support credit. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a
+JSON object.
 
 ## Thread Naming
 
