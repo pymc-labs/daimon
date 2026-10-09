@@ -20,7 +20,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import anthropic
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.errors import TurnError
 from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.errors import AdmissionDenialReason
 from daimon.core.turn.state import ToolUseBlock, TurnState
@@ -47,6 +49,25 @@ _SHARE_RID = "If it keeps happening, share the request id with an admin."
 _SPEND_LIMIT_MESSAGE = (
     "Daimon has reached its model usage limit for now. The operators have been notified."
 )
+#: MA's refusal while a session waits on confirmations no turn will answer.
+_STUCK_SESSION_MARK = "waiting on responses to events"
+_STUCK_SESSION = (
+    "Conversation stuck",
+    "This conversation is waiting on an earlier request that can no longer be answered.",
+    "Start a new thread to carry on.",
+)
+
+
+def _stuck_session(reason: TerminationReason, error: BaseException | None) -> bool:
+    """Whether an upstream end came from MA still refusing a stuck session.
+
+    Typed, not a text match on any error: only an upstream `TurnError` whose
+    cause is MA's `BadRequestError` for pending confirmations qualifies.
+    """
+    if reason is not TerminationReason.UPSTREAM or not isinstance(error, TurnError):
+        return False
+    cause = error.cause
+    return isinstance(cause, anthropic.BadRequestError) and _STUCK_SESSION_MARK in str(cause)
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +384,9 @@ def render_termination_notice(
     copy = _COPY.get(reason, _FALLBACK)
     if spend_limit_error(error or (state.error if state is not None else None)) is not None:
         copy = _Copy("Model usage limit reached", _SPEND_LIMIT_MESSAGE, _KEPT, "")
+    elif _stuck_session(reason, error or (state.error if state is not None else None)):
+        headline, cause, next_step = _STUCK_SESSION
+        copy = _Copy(headline, cause, "", next_step)
     cause = copy.cause
     next_step = copy.next_step
     in_flight: tuple[str, ...] = ()
