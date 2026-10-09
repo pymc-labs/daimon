@@ -18,7 +18,11 @@ from daimon.adapters.cli.run.events import (
 )
 from daimon.adapters.cli.run.lifecycle import NdjsonLifecycle
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
-from daimon.core.config import load_settings
+from daimon.adapters.cli.tenant import discover_tenant
+from daimon.core.config import load_settings, load_turn_settings
+from daimon.core.mux_backend import resource_scope
+from daimon.core.stores.accounts import get_account
+from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.tool_safety import trusted_servers_for
 from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.ceiling import turn_deadline
@@ -26,6 +30,7 @@ from daimon.core.turn.driver import run_turn
 from daimon.core.turn.outcomes import current_outcome, observe_turn
 from daimon.core.turn.posture import BillingExempt, RequireApproval, ToolConfirmation
 from daimon.core.turn.state import TurnState
+from mux.errors import ScopeViolation
 
 
 def run_command(
@@ -127,6 +132,30 @@ async def run_conversation_observed(
     # without the core ceiling.
     effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
 
+    path = load_turn_settings().path
+    scope = None
+    if path == "mux":
+        # The operator's existing CLI identity supplies the opt-in turn scope.
+        # Legacy raw-session runs keep their current database/provider work.
+        async with rt.sessionmaker() as db:
+            tenant_id = await discover_tenant(db)
+            principal = await get_or_create_cli_principal(
+                db, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+            )
+            account = await get_account(db, principal.account_id)
+            if (
+                principal.tenant_id != tenant_id
+                or account is None
+                or account.tenant_id != tenant_id
+            ):
+                raise ScopeViolation(session_id, "CLI turn identity does not belong to the tenant")
+            await db.commit()
+        scope = resource_scope(
+            tenant_id=str(tenant_id),
+            account_id=str(account.id),
+            authorization_id="cli-operator-run",
+        )
+
     try:
         state = await run_turn(
             anthropic=rt.anthropic,
@@ -137,6 +166,8 @@ async def run_conversation_observed(
             billing=BillingExempt(reason="cli-operator-run"),
             tool_confirmation=tool_confirmation,
             deadline=effective_deadline,
+            path=path,
+            scope=scope,
         )
     except anthropic.APIError as err:
         if (observation := current_outcome.get()) is not None:

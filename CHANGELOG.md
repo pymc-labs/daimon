@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Route remaining CLI, Discord memory and scheduler session operations through scoped backend ports; preserve raw operator session inspection and authorize opt-in CLI mux turns.
+
 ### Changed
 
 - Refresh the shared legacy/mux oracle for main's Discord agent-name fallback, preserving exact requests, accounting and continuation facts.

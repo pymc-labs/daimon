@@ -15,6 +15,8 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import list_memory_entries, read_memory
 from daimon.core.rule_views import is_memory_hidden
 from daimon.core.scope import ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
@@ -135,13 +137,17 @@ class MemoryCog(commands.Cog):
                 await interaction.followup.send(_EMPTY, ephemeral=True)
                 return
             agent_name, store_id = resolved
+            scope = resource_scope(
+                tenant_id=str(
+                    derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
+                )
+            )
 
             if path is None:
                 paths: list[str] = []
-                page = await runtime.anthropic.beta.memory_stores.memories.list(
-                    store_id, path_prefix="/"
-                )
-                async for item in page:
+                async for item in list_memory_entries(
+                    runtime.anthropic, store_id, path_prefix="/", scope=scope
+                ):
                     if item.type == "memory":
                         paths.append(item.path)
                 if not paths:
@@ -156,10 +162,9 @@ class MemoryCog(commands.Cog):
                 return
 
             mem_id: str | None = None
-            page = await runtime.anthropic.beta.memory_stores.memories.list(
-                store_id, path_prefix="/"
-            )
-            async for item in page:
+            async for item in list_memory_entries(
+                runtime.anthropic, store_id, path_prefix="/", scope=scope
+            ):
                 if item.type == "memory" and item.path == path:
                     mem_id = item.id
                     break
@@ -169,9 +174,7 @@ class MemoryCog(commands.Cog):
                     ephemeral=True,
                 )
                 return
-            mem = await runtime.anthropic.beta.memory_stores.memories.retrieve(
-                mem_id, memory_store_id=store_id, view="full"
-            )
+            mem = await read_memory(runtime.anthropic, store_id, mem_id, scope=scope)
             content = mem.content or ""
             await interaction.followup.send(
                 _fenced(f"**`{path}`**", content, _DISCORD_LIMIT),

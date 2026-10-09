@@ -54,6 +54,10 @@ def environment_payload(spec: EnvironmentSpec | EnvironmentPatch) -> dict[str, o
             result.update(
                 config.model_dump(mode="json", exclude_unset=True, exclude={"create_nulls"})
             )
+            # Validation keeps the closed schema; the original JSON retains
+            # the caller's SDK serialization order at the M0 boundary.
+            if "config" in native.value:
+                result["config"] = native.value["config"]
             for name in config.create_nulls:
                 if isinstance(spec, EnvironmentPatch) or getattr(spec, name) is not None:
                     raise ValueError(

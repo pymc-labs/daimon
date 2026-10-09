@@ -1,64 +1,7 @@
 {
-  "files_scanned": 2115,
+  "files_scanned": 2109,
   "parse_errors": [],
   "calls": [
-    {
-      "file": "packages/adapters/cli/daimon/adapters/cli/commands/environments.py",
-      "line": 337,
-      "end": 342,
-      "scope": "environments_fork",
-      "category": "production",
-      "resource": "environments.create",
-      "call": "rt.anthropic.beta.environments.create(name=dst, config=cast(BetaCloudConfigParams, fork_cfg), description=source_ma.description, metadata=build_metadata(tenant_id=tenant_id, name=dst))",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/cli/daimon/adapters/cli/commands/memory.py",
-      "line": 73,
-      "end": 73,
-      "scope": "memory_list_impl",
-      "category": "production",
-      "resource": "memory_stores.memories.list",
-      "call": "rt.anthropic.beta.memory_stores.memories.list(store_id, path_prefix='/')",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/cli/daimon/adapters/cli/commands/memory.py",
-      "line": 101,
-      "end": 101,
-      "scope": "memory_show_impl",
-      "category": "production",
-      "resource": "memory_stores.memories.list",
-      "call": "rt.anthropic.beta.memory_stores.memories.list(store_id, path_prefix='/')",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/cli/daimon/adapters/cli/commands/memory.py",
-      "line": 104,
-      "end": 106,
-      "scope": "memory_show_impl",
-      "category": "production",
-      "resource": "memory_stores.memories.retrieve",
-      "call": "rt.anthropic.beta.memory_stores.memories.retrieve(item.id, memory_store_id=store_id, view='full')",
-      "request_keys": [],
-      "response_access": [
-        "mem.content"
-      ]
-    },
-    {
-      "file": "packages/adapters/cli/daimon/adapters/cli/commands/sessions.py",
-      "line": 142,
-      "end": 142,
-      "scope": "sessions_get",
-      "category": "production",
-      "resource": "sessions.retrieve",
-      "call": "rt.anthropic.beta.sessions.retrieve(session_id)",
-      "request_keys": [],
-      "response_access": []
-    },
     {
       "file": "packages/adapters/cli/tests/commands/test_github_mux_parity.py",
       "line": 218,
@@ -232,6 +175,67 @@
       "response_access": []
     },
     {
+      "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
+      "line": 121,
+      "end": 121,
+      "scope": "sdk_memory",
+      "category": "test",
+      "resource": "memory_stores.memories.list",
+      "call": "client.beta.memory_stores.memories.list('store1', path_prefix='/')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
+      "line": 268,
+      "end": 268,
+      "scope": "test_environment_fork_callsite_null_description_and_error_bytes",
+      "category": "test",
+      "resource": "environments.retrieve",
+      "call": "old.beta.environments.retrieve('env1')",
+      "request_keys": [],
+      "response_access": [
+        "source.config",
+        "source.config.model_dump"
+      ]
+    },
+    {
+      "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
+      "line": 272,
+      "end": 284,
+      "scope": "test_environment_fork_callsite_null_description_and_error_bytes",
+      "category": "test",
+      "resource": "environments.create",
+      "call": "old.beta.environments.create(name='copy', config=cast(BetaCloudConfigParams, {k: source.config.model_dump(mode='json')[k] for k in ('type', 'networking', 'packages') if k in source.config.model_dump(mode='json')}), description=description, metadata={'daimon_tenant': str(TENANT), 'daimon_name': 'copy'})",
+      "request_keys": [
+        "daimon_name",
+        "daimon_tenant"
+      ],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
+      "line": 359,
+      "end": 359,
+      "scope": "test_raw_session_inspection_keeps_operator_authority_output_and_no_db",
+      "category": "test",
+      "resource": "sessions.retrieve",
+      "call": "old.beta.sessions.retrieve('session1')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
+      "line": 128,
+      "end": 130,
+      "scope": "sdk_memory",
+      "category": "test",
+      "resource": "memory_stores.memories.retrieve",
+      "call": "client.beta.memory_stores.memories.retrieve(item.id, memory_store_id='store1', view='full')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
       "file": "packages/adapters/cli/tests/contract_flows/test_defaults_flow.py",
       "line": 41,
       "end": 41,
@@ -290,41 +294,6 @@
       "category": "test",
       "resource": "memory_stores.memories.create",
       "call": "client.beta.memory_stores.memories.create(store.id, path='/a.md', content=content)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/discord/daimon/adapters/discord/commands/memory.py",
-      "line": 159,
-      "end": 161,
-      "scope": "memory",
-      "category": "production",
-      "resource": "memory_stores.memories.list",
-      "call": "runtime.anthropic.beta.memory_stores.memories.list(store_id, path_prefix='/')",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/discord/daimon/adapters/discord/commands/memory.py",
-      "line": 172,
-      "end": 174,
-      "scope": "memory",
-      "category": "production",
-      "resource": "memory_stores.memories.retrieve",
-      "call": "runtime.anthropic.beta.memory_stores.memories.retrieve(mem_id, memory_store_id=store_id, view='full')",
-      "request_keys": [],
-      "response_access": [
-        "mem.content"
-      ]
-    },
-    {
-      "file": "packages/adapters/discord/daimon/adapters/discord/commands/memory.py",
-      "line": 141,
-      "end": 143,
-      "scope": "memory",
-      "category": "production",
-      "resource": "memory_stores.memories.list",
-      "call": "runtime.anthropic.beta.memory_stores.memories.list(store_id, path_prefix='/')",
       "request_keys": [],
       "response_access": []
     },
@@ -428,6 +397,28 @@
       "category": "test",
       "resource": "memory_stores.memories.create",
       "call": "client.beta.memory_stores.memories.create(store.id, path=path, content=content)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_memory_mux_parity.py",
+      "line": 123,
+      "end": 123,
+      "scope": "test_memory_handler_bytes_pagination_early_break_and_errors",
+      "category": "test",
+      "resource": "memory_stores.memories.list",
+      "call": "old.beta.memory_stores.memories.list('store1', path_prefix='/')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_memory_mux_parity.py",
+      "line": 130,
+      "end": 132,
+      "scope": "test_memory_handler_bytes_pagination_early_break_and_errors",
+      "category": "test",
+      "resource": "memory_stores.memories.retrieve",
+      "call": "old.beta.memory_stores.memories.retrieve(item.id, memory_store_id='store1', view='full')",
       "request_keys": [],
       "response_access": []
     },
@@ -927,52 +918,37 @@
       "response_access": []
     },
     {
-      "file": "packages/adapters/scheduler/daimon/adapters/scheduler/main.py",
-      "line": 710,
-      "end": 710,
-      "scope": "_retire_mcp_app_session",
-      "category": "production",
-      "resource": "sessions.archive",
-      "call": "anthropic_client.beta.sessions.archive(item.session_id)",
+      "file": "packages/adapters/scheduler/tests/test_remaining_mux_parity.py",
+      "line": 254,
+      "end": 254,
+      "scope": "test_scheduler_actual_callsite_requests_scopes_and_cleanup_order",
+      "category": "test",
+      "resource": "vaults.archive",
+      "call": "old.beta.vaults.archive('vault1')",
       "request_keys": [],
       "response_access": []
     },
     {
-      "file": "packages/adapters/scheduler/daimon/adapters/scheduler/main.py",
-      "line": 769,
-      "end": 769,
-      "scope": "_refresh_github_app_sessions",
-      "category": "production",
-      "resource": "sessions.archive",
-      "call": "anthropic_client.beta.sessions.archive(session_id)",
+      "file": "packages/adapters/scheduler/tests/test_remaining_mux_parity.py",
+      "line": 248,
+      "end": 248,
+      "scope": "test_scheduler_actual_callsite_requests_scopes_and_cleanup_order",
+      "category": "test",
+      "resource": "sessions.retrieve",
+      "call": "old.beta.sessions.retrieve('session1')",
       "request_keys": [],
       "response_access": []
     },
     {
-      "file": "packages/adapters/scheduler/daimon/adapters/scheduler/main.py",
-      "line": 837,
-      "end": 837,
-      "scope": "_refresh_github_app_sessions",
-      "category": "production",
-      "resource": "sessions.retrieve",
-      "call": "anthropic_client.beta.sessions.retrieve(current.session_id)",
+      "file": "packages/adapters/scheduler/tests/test_remaining_mux_parity.py",
+      "line": 250,
+      "end": 250,
+      "scope": "test_scheduler_actual_callsite_requests_scopes_and_cleanup_order",
+      "category": "test",
+      "resource": "sessions.archive",
+      "call": "old.beta.sessions.archive('session1')",
       "request_keys": [],
-      "response_access": [
-        "observed.status"
-      ]
-    },
-    {
-      "file": "packages/adapters/scheduler/daimon/adapters/scheduler/main.py",
-      "line": 953,
-      "end": 955,
-      "scope": "_close_github_app_sessions",
-      "category": "production",
-      "resource": "sessions.retrieve",
-      "call": "anthropic_client.beta.sessions.retrieve(item.session_id)",
-      "request_keys": [],
-      "response_access": [
-        "observed.status"
-      ]
+      "response_access": []
     },
     {
       "file": "packages/adapters/slack/tests/agent_setup/test_agent_setup_write.py",
@@ -1287,9 +1263,20 @@
       "response_access": []
     },
     {
+      "file": "packages/core/daimon/core/direct_messages.py",
+      "line": 111,
+      "end": 111,
+      "scope": "_quarantine",
+      "category": "production",
+      "resource": "sessions.archive",
+      "call": "deps.anthropic.beta.sessions.archive(session_id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 342,
-      "end": 342,
+      "line": 350,
+      "end": 350,
       "scope": "find_workspace_disposable_sentinel",
       "category": "production",
       "resource": "agents.list",
@@ -1302,8 +1289,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 396,
-      "end": 396,
+      "line": 404,
+      "end": 404,
       "scope": "delete_entire_workspace_for_testing",
       "category": "production",
       "resource": "environments.list",
@@ -1315,8 +1302,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 412,
-      "end": 412,
+      "line": 420,
+      "end": 420,
       "scope": "delete_entire_workspace_for_testing",
       "category": "production",
       "resource": "agents.list",
@@ -1328,8 +1315,32 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 451,
-      "end": 451,
+      "line": 95,
+      "end": 95,
+      "scope": "_walk",
+      "category": "production",
+      "resource": "sessions.events.list",
+      "call": "anthropic.beta.sessions.events.list(session_id=session_id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/daimon/core/ma.py",
+      "line": 163,
+      "end": 166,
+      "scope": "send_interrupt_and_wait",
+      "category": "production",
+      "resource": "sessions.events.send",
+      "call": "anthropic.beta.sessions.events.send(session_id, events=[{'type': 'user.interrupt'}])",
+      "request_keys": [
+        "type"
+      ],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/daimon/core/ma.py",
+      "line": 459,
+      "end": 459,
       "scope": "delete_sessions_for_account",
       "category": "production",
       "resource": "sessions.list",
@@ -1343,8 +1354,32 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 398,
-      "end": 398,
+      "line": 169,
+      "end": 169,
+      "scope": "_wait_for_terminal_idle",
+      "category": "production",
+      "resource": "sessions.events.stream",
+      "call": "anthropic.beta.sessions.events.stream(session_id=session_id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/daimon/core/ma.py",
+      "line": 236,
+      "end": 239,
+      "scope": "interrupt_orphaned_session",
+      "category": "production",
+      "resource": "sessions.events.send",
+      "call": "anthropic.beta.sessions.events.send(session_id, events=[{'type': 'user.interrupt'}])",
+      "request_keys": [
+        "type"
+      ],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/daimon/core/ma.py",
+      "line": 406,
+      "end": 406,
       "scope": "delete_entire_workspace_for_testing",
       "category": "production",
       "resource": "environments.delete",
@@ -1354,8 +1389,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 416,
-      "end": 416,
+      "line": 424,
+      "end": 424,
       "scope": "delete_entire_workspace_for_testing",
       "category": "production",
       "resource": "agents.archive",
@@ -1365,8 +1400,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 459,
-      "end": 459,
+      "line": 467,
+      "end": 467,
       "scope": "delete_sessions_for_account",
       "category": "production",
       "resource": "sessions.delete",
@@ -1376,8 +1411,8 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 402,
-      "end": 402,
+      "line": 410,
+      "end": 410,
       "scope": "delete_entire_workspace_for_testing",
       "category": "production",
       "resource": "environments.archive",
@@ -1406,6 +1441,17 @@
       "category": "production",
       "resource": "sessions.update",
       "call": "deps.anthropic.beta.sessions.update(ma_session_id, metadata=dict(origin_stamp(channel_id=admission.origin_channel_id, thread_id=admission.origin_thread_id, seal=recorded | admission.origin_seal_ids)))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/daimon/core/turn/run.py",
+      "line": 348,
+      "end": 348,
+      "scope": "_archive_orphaned_session",
+      "category": "production",
+      "resource": "sessions.archive",
+      "call": "anthropic.beta.sessions.archive(session_id)",
       "request_keys": [],
       "response_access": []
     },
@@ -5589,28 +5635,6 @@
       "response_access": []
     },
     {
-      "file": "packages/core/tests/turn/test_driver_unwedge.py",
-      "line": 280,
-      "end": 280,
-      "scope": "test_an_idle_with_no_idle_history_is_not_settled",
-      "category": "test",
-      "resource": "sessions.events.replay_events.clear",
-      "call": "fa.beta.sessions.events.replay_events.clear()",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/tests/turn/test_mux_cleanup.py",
-      "line": 105,
-      "end": 105,
-      "scope": "test_sealed_dm_retirement_uses_conversation_owner_scope_only_on_mux",
-      "category": "test",
-      "resource": "sessions.archive",
-      "call": "unchanged_client.beta.sessions.archive(SESSION.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
       "file": "packages/mux/mux/drivers/anthropic/outputs.py",
       "line": 62,
       "end": 62,
@@ -5777,8 +5801,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 237,
-      "end": 237,
+      "line": 241,
+      "end": 241,
       "scope": "walk",
       "category": "production",
       "resource": "environments.list",
@@ -5788,8 +5812,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 140,
-      "end": 142,
+      "line": 144,
+      "end": 146,
       "scope": "create",
       "category": "production",
       "resource": "environments.create",
@@ -5799,8 +5823,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 150,
-      "end": 150,
+      "line": 154,
+      "end": 154,
       "scope": "_retrieve_sdk",
       "category": "production",
       "resource": "environments.retrieve",
@@ -5810,8 +5834,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 176,
-      "end": 176,
+      "line": 180,
+      "end": 180,
       "scope": "list",
       "category": "production",
       "resource": "environments.list",
@@ -5821,8 +5845,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 202,
-      "end": 204,
+      "line": 206,
+      "end": 208,
       "scope": "update",
       "category": "production",
       "resource": "environments.update",
@@ -5832,8 +5856,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 212,
-      "end": 212,
+      "line": 216,
+      "end": 216,
       "scope": "archive",
       "category": "production",
       "resource": "environments.archive",
@@ -5843,8 +5867,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 230,
-      "end": 230,
+      "line": 234,
+      "end": 234,
       "scope": "delete",
       "category": "production",
       "resource": "environments.delete",
@@ -6443,30 +6467,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 42,
-      "end": 47,
-      "scope": "latest_idle_is_settled",
-      "category": "production",
-      "resource": "sessions.events.list",
-      "call": "self._client.beta.sessions.events.list(session_id=self._session_id, types=['session.status_idle'], order='desc', limit=1)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 54,
-      "end": 54,
-      "scope": "replay",
-      "category": "production",
-      "resource": "sessions.events.list",
-      "call": "self._client.beta.sessions.events.list(session_id=self._session_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 27,
-      "end": 27,
+      "line": 26,
+      "end": 26,
       "scope": "send",
       "category": "production",
       "resource": "sessions.events.send",
@@ -6476,8 +6478,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 35,
-      "end": 38,
+      "line": 34,
+      "end": 37,
       "scope": "open_stream",
       "category": "production",
       "resource": "sessions.events.stream",
@@ -6487,30 +6489,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 61,
-      "end": 61,
-      "scope": "open_interrupt_stream",
-      "category": "production",
-      "resource": "sessions.events.stream",
-      "call": "self._client.beta.sessions.events.stream(session_id=self._session_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 64,
-      "end": 64,
-      "scope": "archive",
-      "category": "production",
-      "resource": "sessions.archive",
-      "call": "self._client.beta.sessions.archive(self._session_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 30,
-      "end": 30,
+      "line": 29,
+      "end": 29,
       "scope": "status",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -6520,19 +6500,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 63,
-      "end": 63,
-      "scope": "walk",
-      "category": "production",
-      "resource": "sessions.events.list",
-      "call": "self._client.beta.sessions.events.list(session_id=session.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 189,
-      "end": 195,
+      "line": 148,
+      "end": 154,
       "scope": "open_stream",
       "category": "production",
       "resource": "sessions.events.stream",
@@ -6542,8 +6511,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 219,
-      "end": 224,
+      "line": 178,
+      "end": 183,
       "scope": "list",
       "category": "production",
       "resource": "sessions.events.list",
@@ -6553,8 +6522,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 165,
-      "end": 165,
+      "line": 124,
+      "end": 124,
       "scope": "send",
       "category": "production",
       "resource": "sessions.events.send",
@@ -6564,8 +6533,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 256,
-      "end": 258,
+      "line": 215,
+      "end": 217,
       "scope": "cancel",
       "category": "production",
       "resource": "sessions.events.send",
@@ -6573,17 +6542,6 @@
       "request_keys": [
         "type"
       ],
-      "response_access": []
-    },
-    {
-      "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 290,
-      "end": 290,
-      "scope": "wait_stopped",
-      "category": "production",
-      "resource": "sessions.events.stream",
-      "call": "self._client.beta.sessions.events.stream(session_id=receipt.session.id)",
-      "request_keys": [],
       "response_access": []
     },
     {
@@ -9108,15 +9066,6 @@
       "category": "production"
     },
     {
-      "file": "packages/adapters/cli/daimon/adapters/cli/commands/environments.py",
-      "line": 11,
-      "module": "anthropic.types.beta.beta_cloud_config_params",
-      "names": [
-        "BetaCloudConfigParams"
-      ],
-      "category": "production"
-    },
-    {
       "file": "packages/adapters/cli/daimon/adapters/cli/commands/github.py",
       "line": 12,
       "module": "anthropic",
@@ -9426,6 +9375,42 @@
       "module": "anthropic",
       "names": [
         "APIStatusError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
+      "line": 12,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
+      "line": 13,
+      "module": "anthropic.types.beta.memory_stores.beta_managed_agents_memory_list_item",
+      "names": [
+        "BetaManagedAgentsMemoryListItem"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
+      "line": 315,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsSession"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
+      "line": 270,
+      "module": "anthropic.types.beta.beta_cloud_config_params",
+      "names": [
+        "BetaCloudConfigParams"
       ],
       "category": "test"
     },
@@ -9822,7 +9807,7 @@
     },
     {
       "file": "packages/adapters/discord/daimon/adapters/discord/output_delivery.py",
-      "line": 17,
+      "line": 10,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -9986,7 +9971,7 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_lifecycle.py",
-      "line": 23,
+      "line": 24,
       "module": "anthropic",
       "names": [
         "BadRequestError",
@@ -9996,7 +9981,7 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_lifecycle.py",
-      "line": 24,
+      "line": 25,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"
@@ -10005,10 +9990,37 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_lifecycle.py",
-      "line": 27,
+      "line": 28,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_usage",
       "names": [
         "BetaManagedAgentsSpanModelUsage"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_memory_mux_parity.py",
+      "line": 10,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_memory_mux_parity.py",
+      "line": 11,
+      "module": "anthropic.types.beta.memory_stores.beta_managed_agents_memory",
+      "names": [
+        "BetaManagedAgentsMemory"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_memory_mux_parity.py",
+      "line": 12,
+      "module": "anthropic.types.beta.memory_stores.beta_managed_agents_memory_list_item",
+      "names": [
+        "BetaManagedAgentsMemoryListItem"
       ],
       "category": "test"
     },
@@ -10086,7 +10098,7 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_output_delivery.py",
-      "line": 16,
+      "line": 15,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -10095,7 +10107,7 @@
     },
     {
       "file": "packages/adapters/discord/tests/test_output_delivery.py",
-      "line": 17,
+      "line": 16,
       "module": "anthropic.types.beta",
       "names": [
         "FileMetadata"
@@ -11168,6 +11180,15 @@
       "category": "test"
     },
     {
+      "file": "packages/adapters/scheduler/tests/test_remaining_mux_parity.py",
+      "line": 12,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/adapters/slack/daimon/adapters/slack/agent_policy.py",
       "line": 39,
       "module": "anthropic.types.beta",
@@ -11580,19 +11601,10 @@
     },
     {
       "file": "packages/adapters/teams/daimon/adapters/teams/lifecycle.py",
-      "line": 28,
+      "line": 26,
       "module": "anthropic.types",
       "names": [
         "RawMessageStreamEvent"
-      ],
-      "category": "production"
-    },
-    {
-      "file": "packages/adapters/teams/daimon/adapters/teams/lifecycle.py",
-      "line": 29,
-      "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_usage",
-      "names": [
-        "BetaManagedAgentsSpanModelUsage"
       ],
       "category": "production"
     },
@@ -11643,7 +11655,7 @@
     },
     {
       "file": "packages/adapters/teams/tests/test_lifecycle.py",
-      "line": 18,
+      "line": 16,
       "module": "anthropic",
       "names": [
         "RateLimitError"
@@ -11652,7 +11664,7 @@
     },
     {
       "file": "packages/adapters/teams/tests/test_lifecycle.py",
-      "line": 19,
+      "line": 17,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsAgentMessageEvent",
@@ -11759,7 +11771,7 @@
     },
     {
       "file": "packages/core/daimon/core/agent_fork.py",
-      "line": 23,
+      "line": 22,
       "module": "anthropic",
       "names": [
         "APIError",
@@ -11769,7 +11781,7 @@
     },
     {
       "file": "packages/core/daimon/core/agent_fork.py",
-      "line": 24,
+      "line": 23,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsAgent"
@@ -11778,7 +11790,7 @@
     },
     {
       "file": "packages/core/daimon/core/agent_fork.py",
-      "line": 25,
+      "line": 24,
       "module": "anthropic.types.beta.agent_create_params",
       "names": [
         "Tool"
@@ -11787,7 +11799,7 @@
     },
     {
       "file": "packages/core/daimon/core/agent_fork.py",
-      "line": 26,
+      "line": 25,
       "module": "anthropic.types.beta.beta_managed_agents_url_mcp_server_params",
       "names": [
         "BetaManagedAgentsURLMCPServerParams"
@@ -12830,15 +12842,6 @@
       "category": "production"
     },
     {
-      "file": "packages/core/daimon/core/routine_delivery.py",
-      "line": 37,
-      "module": "anthropic",
-      "names": [
-        "AsyncAnthropic"
-      ],
-      "category": "production"
-    },
-    {
       "file": "packages/core/daimon/core/rule_views.py",
       "line": 20,
       "module": "anthropic",
@@ -13343,7 +13346,7 @@
     },
     {
       "file": "packages/core/daimon/core/thread_naming.py",
-      "line": 21,
+      "line": 20,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -13352,7 +13355,7 @@
     },
     {
       "file": "packages/core/daimon/core/thread_naming.py",
-      "line": 22,
+      "line": 21,
       "module": "anthropic.types",
       "names": [
         "TextBlock"
@@ -13454,7 +13457,7 @@
     },
     {
       "file": "packages/core/daimon/core/turn/io.py",
-      "line": 19,
+      "line": 17,
       "module": "anthropic._models",
       "names": [
         "construct_type"
@@ -13463,11 +13466,10 @@
     },
     {
       "file": "packages/core/daimon/core/turn/io.py",
-      "line": 20,
+      "line": 18,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsEventParams",
-        "BetaManagedAgentsSessionEvent",
         "BetaManagedAgentsStreamSessionEvents"
       ],
       "category": "production"
@@ -16238,15 +16240,6 @@
       "category": "test"
     },
     {
-      "file": "packages/core/tests/turn/test_driver_unwedge.py",
-      "line": 17,
-      "module": "anthropic",
-      "names": [
-        "AsyncAnthropic"
-      ],
-      "category": "test"
-    },
-    {
       "file": "packages/core/tests/turn/test_driver_usage_record.py",
       "line": 13,
       "module": "anthropic",
@@ -16275,16 +16268,7 @@
     },
     {
       "file": "packages/core/tests/turn/test_mux_bridge.py",
-      "line": 10,
-      "module": "anthropic.types.beta.sessions",
-      "names": [
-        "BetaManagedAgentsEventParams"
-      ],
-      "category": "test"
-    },
-    {
-      "file": "packages/core/tests/turn/test_mux_bridge.py",
-      "line": 114,
+      "line": 110,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -16292,17 +16276,8 @@
       "category": "test"
     },
     {
-      "file": "packages/core/tests/turn/test_mux_io.py",
-      "line": 9,
-      "module": "anthropic.types.beta.sessions",
-      "names": [
-        "BetaManagedAgentsEventParams"
-      ],
-      "category": "test"
-    },
-    {
       "file": "packages/core/tests/turn/test_mux_usage.py",
-      "line": 7,
+      "line": 6,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"
@@ -17057,14 +17032,13 @@
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsEventParams",
-        "BetaManagedAgentsSessionEvent",
         "BetaManagedAgentsStreamSessionEvents"
       ],
       "category": "production"
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 11,
+      "line": 9,
       "module": "anthropic",
       "names": [
         "NOT_GIVEN",
@@ -17078,7 +17052,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 19,
+      "line": 17,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsStreamSessionEvents"
@@ -17113,15 +17087,6 @@
       "category": "test"
     },
     {
-      "file": "packages/mux/tests/drivers/anthropic/test_cancel.py",
-      "line": 10,
-      "module": "anthropic",
-      "names": [
-        "AsyncAnthropic"
-      ],
-      "category": "test"
-    },
-    {
       "file": "packages/mux/tests/drivers/anthropic/test_errors.py",
       "line": 5,
       "module": "anthropic",
@@ -17135,15 +17100,6 @@
     {
       "file": "packages/mux/tests/drivers/anthropic/test_factory.py",
       "line": 3,
-      "module": "anthropic",
-      "names": [
-        "AsyncAnthropic"
-      ],
-      "category": "test"
-    },
-    {
-      "file": "packages/mux/tests/drivers/anthropic/test_history_walk.py",
-      "line": 7,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
