@@ -9,7 +9,7 @@ settle floor produces.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -847,3 +847,62 @@ async def test_sweep_posts_handoff_bundle_when_exclusions_are_cleared() -> None:
     assert count == 1, "with no exclusions the bundle is an ordinary output"
     assert posted == ["daimon-handoff-0f9d1c4e.tar.gz"]
     assert deleted == {"file_bundle"}
+
+
+async def test_sweep_leaves_a_later_turns_files_listed() -> None:
+    """The listing is session-wide and the next turn may be writing while this
+    sweep settles. With ``created_before`` the sweep takes only files made
+    before its turn ended and leaves the rest, untouched, for the next sweep,
+    including an empty or oversize one it would otherwise clear."""
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    deleted: set[str] = set()
+    later = NOW + timedelta(seconds=1)
+
+    def row(file_id: str, created_at: datetime, size_bytes: int) -> FileMetadata:
+        return FileMetadata(
+            id=file_id,
+            created_at=created_at,
+            filename=f"{file_id}.csv",
+            mime_type="text/csv",
+            size_bytes=size_bytes,
+            type="file",
+            downloadable=True,
+        )
+
+    def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        rows = [
+            row("mine", NOW - timedelta(seconds=1), 3),
+            row("at_the_end", NOW, 3),
+            row("next_turn", later, 3),
+            row("next_turn_empty", later, 0),
+        ]
+        return list_response([r.model_dump(mode="json") for r in rows if r.id not in deleted])
+
+    def on_delete(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        deleted.add(match.group(1))
+        return httpx.Response(200, json={"id": match.group(1), "type": "file_deleted"})
+
+    router = MARouter()
+    router.add("GET", r"/v1/files", on_list)
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)/content",
+        lambda request, match: httpx.Response(200, content=b"csv"),
+    )
+    router.add("DELETE", r"/v1/files/([^/]+)", on_delete)
+    client = build_fake_anthropic(router.dispatch)
+
+    posted: list[str] = []
+
+    async def post(file: DeliverableFile) -> None:
+        posted.append(file.file_id)
+
+    count = await sweep_session_outputs(
+        client, session_id="sesn_1", post=post, sleep=sleep, created_before=NOW
+    )
+
+    assert count == 1 and posted == ["mine"], "only this turn's file is delivered"
+    assert deleted == {"mine"}, "a later turn's entries are neither posted nor deleted"

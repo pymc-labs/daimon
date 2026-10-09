@@ -617,7 +617,6 @@ class DaimonBot(commands.Bot):
         if previous is not None:
             with contextlib.suppress(Exception):
                 await previous
-        posted: list[int] = []
         try:
             await deliver_session_outputs(
                 self.runtime.turn_deps.anthropic,
@@ -626,7 +625,7 @@ class DaimonBot(commands.Bot):
                 may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
                 notice_thread_ids=self._delivery_notice_thread_ids,
                 turn_window=lifecycle.turn_window if lifecycle is not None else None,
-                posted=posted,
+                answer=lifecycle.answer_message if lifecycle is not None else None,
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
             log.warning(
@@ -635,8 +634,6 @@ class DaimonBot(commands.Bot):
                 thread_id=thread.id,
                 error=str(exc)[:300],
             )
-        if lifecycle is not None:
-            await lifecycle.move_summary_last(thread, swept=posted)
 
     async def _archive_requested(self, origin_id: uuid.UUID) -> bool:
         """Whether the agent asked, during this turn, to archive its own thread.
@@ -703,10 +700,8 @@ class DaimonBot(commands.Bot):
         tenant_id: uuid.UUID,
         lifecycle: DiscordTurnLifecycle | None = None,
     ) -> None:
-        """Sweep the session's files, then seat the summary under the turn's last post."""
+        """Sweep the session's files onto the turn's answer, detached from the turn."""
         if not any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
-            if lifecycle is not None:
-                self._spawn(lifecycle.move_summary_last(thread))
             return
         session_id = outcome.ma_session_id
         previous = self._output_sweeps.get(session_id)

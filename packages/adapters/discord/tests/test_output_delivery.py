@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,13 +15,20 @@ import httpx
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import FileMetadata
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.output_delivery import deliver_session_outputs
+from daimon.adapters.discord.output_delivery import (
+    MAX_ATTACHMENTS_PER_MESSAGE,
+    AnswerMessage,
+    deliver_session_outputs,
+)
+from daimon.adapters.discord.post_transport import DiscordPostTransport, _webhooks
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 
 NOW = datetime(2026, 8, 25, 12, tzinfo=UTC)
+# The turn's card is message 777; the turn ended a minute after the files were written.
+_WINDOW = (777, discord.utils.time_snowflake(NOW + timedelta(minutes=1), high=True))
 _MIB = 1024 * 1024
 
 
@@ -107,7 +114,7 @@ async def test_delivers_file_and_deletes_only_after_discord_post() -> None:
 def _history(*messages: object) -> MagicMock:
     async def history(**kwargs: object):
         assert kwargs["after"].id == 777, "only posts after the turn's card count"
-        assert kwargs["before"].id == 999, "a later turn's posts never count"
+        assert kwargs["before"].id == _WINDOW[1], "a later turn's posts never count"
         assert kwargs["limit"] is None, "the whole turn is read"
         for message in messages:
             yield message
@@ -147,7 +154,7 @@ async def test_a_file_the_agent_already_posted_is_cleared_without_a_second_post(
         session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
-        turn_window=(777, 999),
+        turn_window=_WINDOW,
         sleep=_no_sleep,
     )
 
@@ -169,7 +176,7 @@ async def test_a_revised_file_with_the_same_name_and_size_still_posts() -> None:
         session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
-        turn_window=(777, 999),
+        turn_window=_WINDOW,
         sleep=_no_sleep,
     )
 
@@ -186,7 +193,6 @@ async def test_a_same_named_file_from_someone_else_or_another_size_still_posts()
         _posted(author_id=42, filename="chart.png", size=10),
     )
     thread.send = AsyncMock(return_value=SimpleNamespace(id=555))
-    posted: list[int] = []
 
     await deliver_session_outputs(
         client,
@@ -194,14 +200,12 @@ async def test_a_same_named_file_from_someone_else_or_another_size_still_posts()
         session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
-        turn_window=(777, 999),
-        posted=posted,
+        turn_window=_WINDOW,
         sleep=_no_sleep,
     )
 
     assert thread.send.await_count == 1
     assert deleted == ["file_chart"]
-    assert posted == [555], "the sweep reports what it posted, for the summary move"
 
 
 async def test_oversize_uses_guild_limit_and_posts_skip_notice() -> None:
@@ -312,3 +316,303 @@ async def test_tool_turn_sweeps_detached_and_same_session_sweeps_chain() -> None
         await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
         await asyncio.sleep(0)
         assert bot._output_sweeps == {}  # pyright: ignore[reportPrivateUsage]
+
+
+# --- Files go onto the turn's answer -----------------------------------------
+
+_ANSWER_ID = 888
+
+
+def _client_with_files(
+    *files: tuple[str, str, bytes, datetime],
+) -> tuple[AsyncAnthropic, list[str]]:
+    """A session listing of ``(file id, filename, bytes, created_at)`` entries."""
+    deleted: list[str] = []
+    contents = {file_id: content for file_id, _name, content, _at in files}
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/files",
+        lambda request, match: list_response(
+            [
+                FileMetadata(
+                    id=file_id,
+                    created_at=created_at,
+                    filename=filename,
+                    mime_type="application/pdf",
+                    size_bytes=len(content),
+                    type="file",
+                    downloadable=True,
+                ).model_dump(mode="json")
+                for file_id, filename, content, created_at in files
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)/content",
+        lambda request, match: httpx.Response(200, content=contents[match.group(1)]),
+    )
+
+    def on_delete(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        deleted.append(match.group(1))
+        return httpx.Response(200, json={"id": match.group(1), "type": "file_deleted"})
+
+    router.add("DELETE", r"/v1/files/([^/]+)", on_delete)
+    return build_fake_anthropic(router.dispatch), deleted
+
+
+def _attachment(filename: str) -> MagicMock:
+    attachment = MagicMock(spec=discord.Attachment)
+    attachment.filename = filename
+    return attachment
+
+
+def _answer_message(attachments: list[object]) -> MagicMock:
+    message = MagicMock(spec=discord.Message)
+    message.id = _ANSWER_ID
+    message.attachments = attachments
+    return message
+
+
+def _window_after(created_at: datetime) -> tuple[int, int]:
+    """A turn window that closed a minute after ``created_at``."""
+    end = discord.utils.time_snowflake(created_at + timedelta(minutes=1), high=True)
+    return (777, end)
+
+
+def _answer_thread(fetched: MagicMock) -> discord.Thread:
+    thread = _thread()
+    thread.guild.me.id = 42
+    thread.fetch_message = AsyncMock(return_value=fetched)
+
+    async def history(**kwargs: object):
+        return
+        yield
+
+    thread.history = MagicMock(side_effect=history)
+    return thread
+
+
+def _recording_edit(
+    deleted: list[str],
+) -> tuple[AnswerMessage, list[tuple[object, dict[str, object]]]]:
+    """An answer edit that records each call and returns the message as it now stands."""
+    calls: list[tuple[object, dict[str, object]]] = []
+
+    async def edit(message: object, **kwargs: object) -> discord.Message:
+        calls.append((message, {**kwargs, "_deleted_at_edit": list(deleted)}))
+        attachments = cast(list[object], kwargs["attachments"])
+        kept = [a for a in attachments if not isinstance(a, discord.File)]
+        added = [_attachment(f.filename) for f in attachments if isinstance(f, discord.File)]
+        return cast(discord.Message, _answer_message([*kept, *added]))
+
+    return AnswerMessage(message_id=_ANSWER_ID, edit=edit), calls
+
+
+async def test_files_are_added_to_the_answer_keeping_what_is_already_there() -> None:
+    client, deleted = _client_with_files(
+        ("file_a", "brief_short.pdf", b"pdf-a", NOW),
+        ("file_b", "chart.pdf", b"pdf-b", NOW),
+    )
+    table = _attachment("table.png")
+    thread = _answer_thread(_answer_message([table]))
+    answer, calls = _recording_edit(deleted)
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=_window_after(NOW),
+        answer=answer,
+        sleep=_no_sleep,
+    )
+
+    thread.send.assert_not_awaited()
+    cast(AsyncMock, thread.fetch_message).assert_awaited_once_with(_ANSWER_ID)
+    assert len(calls) == 2, "one edit per file"
+    first, second = (kwargs for _message, kwargs in calls)
+    assert first["_allow_replacement"] is False, "an uneditable answer is never reposted"
+    first_kept = cast(list[object], first["attachments"])
+    assert first_kept[0] is table, "the table image stays on the answer"
+    assert first["_deleted_at_edit"] == [], "the listing entry outlives the edit"
+    second_list = cast(list[object], second["attachments"])
+    assert [getattr(a, "filename", None) for a in second_list] == [
+        "table.png",
+        "brief_short.pdf",
+        "chart.pdf",
+    ], "each edit starts from the message the previous edit returned"
+    assert sorted(deleted) == ["file_a", "file_b"]
+
+
+async def test_a_failed_answer_edit_posts_the_file_and_never_reposts_the_answer() -> None:
+    """Identity on: the answer is a webhook message, and its webhook token is gone."""
+    _webhooks.clear()
+    client, deleted = _client_with_files(("file_a", "brief_short.pdf", b"pdf-a", NOW))
+    fetched = _answer_message([])
+    fetched.webhook_id = 30
+    fetched.application_id = 10
+    thread = _answer_thread(fetched)
+    thread.parent = MagicMock(spec=discord.TextChannel)
+    thread.parent.id = 20
+    thread.locked = False
+    bot = MagicMock()
+    bot.application_id = 10
+    bot.http.channel_webhooks = AsyncMock(return_value=[])
+    transport = DiscordPostTransport(
+        bot, thread, name="Research", avatar_url=None, builtin=False, identity_enabled=True
+    )
+    transport_send = AsyncMock()
+    transport.send = transport_send
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=_window_after(NOW),
+        answer=AnswerMessage(message_id=_ANSWER_ID, edit=transport.edit),
+        sleep=_no_sleep,
+    )
+
+    transport_send.assert_not_awaited()
+    thread.send.assert_awaited_once()
+    sent = thread.send.await_args.kwargs
+    assert set(sent) == {"file"}, "the fallback is the file alone, not the answer's text"
+    assert sent["file"].filename == "brief_short.pdf"
+    assert deleted == ["file_a"]
+
+
+async def test_after_one_failed_edit_the_rest_post_on_their_own() -> None:
+    client, deleted = _client_with_files(
+        ("file_a", "a.pdf", b"pdf-a", NOW), ("file_b", "b.pdf", b"pdf-b", NOW)
+    )
+    thread = _answer_thread(_answer_message([]))
+    edit = AsyncMock(side_effect=discord.ClientException("own webhook token unavailable"))
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=_window_after(NOW),
+        answer=AnswerMessage(message_id=_ANSWER_ID, edit=edit),
+        sleep=_no_sleep,
+    )
+
+    assert edit.await_count == 1, "a broken answer is not retried for every file"
+    assert thread.send.await_count == 2
+    assert sorted(deleted) == ["file_a", "file_b"]
+
+
+async def test_files_past_the_ten_attachment_limit_post_on_their_own() -> None:
+    client, deleted = _client_with_files(
+        ("file_a", "a.pdf", b"pdf-a", NOW), ("file_b", "b.pdf", b"pdf-b", NOW)
+    )
+    existing = [_attachment(f"table{i}.png") for i in range(MAX_ATTACHMENTS_PER_MESSAGE - 1)]
+    thread = _answer_thread(_answer_message(list(existing)))
+    answer, calls = _recording_edit(deleted)
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=_window_after(NOW),
+        answer=answer,
+        sleep=_no_sleep,
+    )
+
+    assert len(calls) == 1, "the first file fills the answer's last slot"
+    assert len(cast(list[object], calls[0][1]["attachments"])) == MAX_ATTACHMENTS_PER_MESSAGE
+    thread.send.assert_awaited_once()
+    assert thread.send.await_args.kwargs["file"].filename == "b.pdf"
+    assert sorted(deleted) == ["file_a", "file_b"]
+
+
+async def test_a_file_listed_after_the_turn_ended_is_left_for_the_next_sweep() -> None:
+    later = NOW + timedelta(minutes=5)
+    client, deleted = _client_with_files(
+        ("file_mine", "brief.pdf", b"pdf-a", NOW),
+        ("file_next", "next_turn.pdf", b"pdf-b", later),
+    )
+    thread = _answer_thread(_answer_message([]))
+    answer, calls = _recording_edit(deleted)
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=_window_after(NOW),
+        answer=answer,
+        sleep=_no_sleep,
+    )
+
+    names = [
+        getattr(a, "filename", None)
+        for _m, kwargs in calls
+        for a in cast(list[object], kwargs["attachments"])
+    ]
+    assert names == ["brief.pdf"], "the next turn's file is not this answer's"
+    thread.send.assert_not_awaited()
+    assert deleted == ["file_mine"], "the next turn's file stays listed for its own sweep"
+
+
+async def test_a_file_the_agent_already_sent_is_not_added_to_the_answer() -> None:
+    client, deleted = _client_with_files(("file_chart", "chart.pdf", b"png-bytes", NOW))
+    thread = _answer_thread(_answer_message([]))
+    window = _window_after(NOW)
+    agent_post = _posted(author_id=42, filename="chart.pdf", size=9)
+
+    async def history(**kwargs: object):
+        assert kwargs["after"].id == window[0]
+        yield agent_post
+
+    thread.history = MagicMock(side_effect=history)
+    edit = AsyncMock()
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=window,
+        answer=AnswerMessage(message_id=_ANSWER_ID, edit=edit),
+        sleep=_no_sleep,
+    )
+
+    edit.assert_not_awaited()
+    thread.send.assert_not_awaited()
+    assert deleted == ["file_chart"], "the agent's own post delivered it"
+
+
+async def test_an_answer_that_cannot_be_fetched_falls_back_to_a_post() -> None:
+    client, deleted = _client_with_files(("file_a", "a.pdf", b"pdf-a", NOW))
+    thread = _answer_thread(_answer_message([]))
+    thread.fetch_message = AsyncMock(
+        side_effect=discord.NotFound(MagicMock(status=404), "Unknown Message")
+    )
+    edit = AsyncMock()
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=_window_after(NOW),
+        answer=AnswerMessage(message_id=_ANSWER_ID, edit=edit),
+        sleep=_no_sleep,
+    )
+
+    edit.assert_not_awaited()
+    thread.send.assert_awaited_once()
+    assert deleted == ["file_a"]

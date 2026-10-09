@@ -17,7 +17,7 @@ from __future__ import annotations
 import dataclasses
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -38,10 +38,7 @@ from daimon.adapters.discord.embed import (
     update_activity,
 )
 from daimon.adapters.discord.errors import bound_request_id
-from daimon.adapters.discord.feedback_seed import (
-    seed_feedback_reactions,
-    unseed_feedback_reactions,
-)
+from daimon.adapters.discord.output_delivery import AnswerMessage
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.agent_post_identity import fallback_name_prefix
@@ -208,11 +205,9 @@ class DiscordTurnLifecycle:
         self._message_ref: discord.Message | None = adopt_message_ref
         self._card_message_ref: discord.Message | None = adopt_message_ref
         self._terminal_embed: discord.Embed | None = None
-        # The answer message that carries the summary, once there is one.
+        # The answer message that carries the summary, once there is one. The
+        # vote emoji and the turn's files go on it too.
         self._summary_ref: discord.Message | None = None
-        # What the summary's holder keeps when the summary leaves: nothing, or a
-        # tool-only card's "Done." without its footer.
-        self._holder_rest: list[discord.Embed] = []
         # A snowflake just past the turn's end: posts before it belong to the turn.
         self._ended_before: int | None = None
         # The newest Discord-side moment this turn's own sends and edits carried.
@@ -493,14 +488,8 @@ class DiscordTurnLifecycle:
                 await self._edit_message(
                     self._message_ref, embed=build_discord_embed(done_data), view=None
                 )
-                # The card stays as "Done."; only its summary footer may move under the files.
-                self._terminal_embed = build_discord_embed(
-                    dataclasses.replace(done_data, description="")
-                )
+                # The "Done." card carries the summary, so the turn's files go on it.
                 self._summary_ref = self._message_ref
-                self._holder_rest = [
-                    build_discord_embed(dataclasses.replace(done_data, footer=None))
-                ]
                 # #79: a tool-only turn has no reply to hang the notice under,
                 # so a dropped server is named on its own line.
                 tool_only_notice = render_degraded_notice(state.mcp_failures)
@@ -620,45 +609,23 @@ class DiscordTurnLifecycle:
         return self.final_message_id
 
     @property
+    def answer_message(self) -> AnswerMessage | None:
+        """Where the output sweep attaches the turn's files: the message with the summary.
+
+        None when the turn left no answer to hang files on (stopped, failed),
+        so the sweep posts them on their own.
+        """
+        if self._summary_ref is None:
+            return None
+        return AnswerMessage(message_id=self._summary_ref.id, edit=self._edit)
+
+    @property
     def turn_window(self) -> tuple[int, int] | None:
         """Message ids bounding the turn's own posts: after its card, before its end."""
         card = self._card_message_ref
         if card is None or self._ended_before is None:
             return None
         return card.id, self._ended_before
-
-    async def move_summary_last(
-        self, thread: discord.Thread, *, swept: Collection[int] = ()
-    ) -> None:
-        """Re-seat the summary under the turn's last post, once nothing more will come.
-
-        Files and the agent's own posts land below the answer, so the summary
-        would otherwise sit mid-turn. It moves only onto a plain message the bot
-        itself posted for this turn: inside the turn's window, or one of
-        ``swept``, the files its output sweep posted. Anything else (a person's
-        reply, a newer turn's post, a webhook post) leaves it where it is.
-        """
-        holder, embed, window = self._summary_ref, self._terminal_embed, self.turn_window
-        if holder is None or embed is None or window is None:
-            return
-        try:
-            latest = [message async for message in thread.history(limit=1)]
-            if not latest:
-                return
-            last = latest[0]
-            ours = last.id in swept or holder.id < last.id < window[1]
-            if not ours or last.author.id != thread.guild.me.id or last.embeds:
-                return
-            await last.edit(embeds=[embed])
-            await self._edit_message(holder, embeds=self._holder_rest)
-            if self._was_answered:
-                # The vote emoji sit with the summary, under the turn's last post.
-                await unseed_feedback_reactions(holder, me=thread.guild.me)
-                await seed_feedback_reactions(thread, message_id=str(last.id))
-        except discord.HTTPException as exc:
-            log.warning("turn.summary_move_failed", error_type=type(exc).__name__)
-            return
-        self._summary_ref = last
 
     async def prepend_revealed_answer(self, notice: str) -> bool:
         """Edit `notice` in above an answer already on screen; False if it cannot go there.

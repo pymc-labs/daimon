@@ -846,16 +846,24 @@ awaited inline in the consume loop and must stay a cheap local tap.
 
 After a tool-using Discord or Slack turn, the adapter starts a detached,
 per-MA-session-chained sweep of downloadable session files through
-`daimon.core.output_delivery`. It posts each file into the conversation thread
-before deleting its MA listing entry. Failed posts stay listed for a later
-sweep. Discord uses the guild's upload limit, skips oversize files with an
-in-thread notice, and checks the channel's writers before posting. A file
-Daimon already attached in the thread after the turn's card (the agent sent it
-itself), with the same name and size, is cleared from the listing without a
-second post. Once the sweep ends, the answer's summary line moves onto the
-turn's last post if that is a plain message the bot posted after the answer,
-so it always closes the turn; the 👍 👎 🙋 emoji move with it. A long answer carries it on its last chunk on
-both platforms.
+`daimon.core.output_delivery`. It delivers each file before deleting its MA
+listing entry. Failed deliveries stay listed for a later sweep. Slack posts
+each file into the conversation thread. Discord attaches each file to the
+turn's answer: the message carrying the summary line and the 👍 👎 🙋 emoji
+(the last chunk of a long answer, or the "Done." card of a tool-only turn).
+It edits that message once per file through the turn's post transport,
+passing the attachments already on it back, and never reposts the answer when
+a webhook message cannot be edited. A file the answer cannot take (Discord's
+10-attachment limit, or a failed edit) is posted on its own below it, and a
+turn that ended without an answer (stopped or failed) gets its files as
+separate posts. Discord uses the guild's upload limit, skips oversize files
+with an in-thread notice, and checks the channel's writers before posting. A
+file Daimon already attached in the thread after the turn's card (the agent
+sent it itself), with the same name and bytes, is cleared from the listing
+without a second copy. The session listing is shared by every turn, so the
+Discord sweep takes only files created before its turn ended and leaves later
+ones listed for the next turn's sweep. A long answer carries the summary on its
+last chunk on both platforms.
 
 Reconnection is two loops for two failure modes. The outer loop handles
 eventless cycles — the server closes cleanly roughly every ten minutes by
