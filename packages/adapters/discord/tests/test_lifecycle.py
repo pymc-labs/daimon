@@ -1205,6 +1205,24 @@ async def test_a_tool_only_turn_still_closes_its_window() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_tool_only_card_keeps_done_and_its_summary_moves_under_the_files() -> None:
+    file_post = _bot_post(2**62)
+    lc, edits, thread = _move_fixture(file_post)
+    await lc.on_sse_event(_thinking_event())
+    tool = ToolUseBlock(
+        kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}, status="complete"
+    )
+    await lc.on_terminal_success(TurnState(content=[tool]))
+
+    await lc.move_summary_last(thread, swept=[2**62])
+
+    moved = file_post.edit.await_args.kwargs["embeds"][0]
+    assert moved.footer.text.startswith("test-agent") and moved.description is None
+    kept = edits[-1][1]["embeds"][0]
+    assert kept.description == "Done." and kept.footer.text is None, "the card stays as Done."
+
+
+@pytest.mark.asyncio
 async def test_summary_moves_under_a_file_its_own_sweep_posted_after_the_turn() -> None:
     file_post = _bot_post(2**62)
     lc, edits, thread = _move_fixture(file_post)

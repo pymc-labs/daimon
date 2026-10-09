@@ -41,12 +41,12 @@ async def deliver_session_outputs(
     """Post session outputs into a thread; leave failed uploads listed for retry.
 
     A file the agent already attached itself during the turn (a post between
-    the message ids in ``turn_window``), same name and size, counts as
+    the message ids in ``turn_window``), same name and bytes, counts as
     delivered: it is cleared from the listing without a second post. The ids of
     the messages this sweep posts are appended to ``posted``.
     """
     max_bytes = min(MAX_BYTES_PER_FILE, thread.guild.filesize_limit)
-    already_posted: set[tuple[str, int]] | None = None
+    already_posted: dict[tuple[str, int], list[discord.Attachment]] | None = None
 
     async def check_protection() -> None:
         if not await may_post():
@@ -58,7 +58,9 @@ async def deliver_session_outputs(
         nonlocal already_posted
         if already_posted is None:
             already_posted = await _own_attachments(thread, window=turn_window)
-        if (_attachment_key(name), file.size_bytes) in already_posted:
+        if await _same_bytes(
+            already_posted.get((_attachment_key(name), file.size_bytes), []), file
+        ):
             log.info(
                 "discord.output_delivery.already_posted",
                 session_id=session_id,
@@ -116,14 +118,25 @@ def _attachment_key(filename: str) -> str:
     return filename.replace(" ", "_").lower()
 
 
+async def _same_bytes(candidates: list[discord.Attachment], file: DeliverableFile) -> bool:
+    """Whether one of the attachments holds exactly this file's bytes."""
+    for attachment in candidates:
+        try:
+            if await attachment.read() == file.content:
+                return True
+        except discord.HTTPException as exc:
+            log.warning("discord.output_delivery.compare_failed", error_type=type(exc).__name__)
+    return False
+
+
 async def _own_attachments(
     thread: discord.Thread, *, window: tuple[int, int] | None
-) -> set[tuple[str, int]]:
-    """Name and size of each file Daimon attached in the thread inside ``window``."""
+) -> dict[tuple[str, int], list[discord.Attachment]]:
+    """Each file Daimon attached in the thread inside ``window``, by name and size."""
     if window is None:
-        return set()
+        return {}
     me = thread.guild.me.id
-    found: set[tuple[str, int]] = set()
+    found: dict[tuple[str, int], list[discord.Attachment]] = {}
     after, before = window
     try:
         async for message in thread.history(
@@ -133,7 +146,9 @@ async def _own_attachments(
                 message.webhook_id is not None and message.application_id == me
             )
             if own:
-                found.update((_attachment_key(a.filename), a.size) for a in message.attachments)
+                for attachment in message.attachments:
+                    key = (_attachment_key(attachment.filename), attachment.size)
+                    found.setdefault(key, []).append(attachment)
     except discord.HTTPException as exc:
         # Unreadable history: post anyway; a duplicate beats a lost file.
         log.warning("discord.output_delivery.history_failed", error_type=type(exc).__name__)

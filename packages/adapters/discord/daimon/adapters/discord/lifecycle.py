@@ -202,6 +202,9 @@ class DiscordTurnLifecycle:
         self._terminal_embed: discord.Embed | None = None
         # The answer message that carries the summary, once there is one.
         self._summary_ref: discord.Message | None = None
+        # What the summary's holder keeps when the summary leaves: nothing, or a
+        # tool-only card's "Done." without its footer.
+        self._holder_rest: list[discord.Embed] = []
         # A snowflake just past the turn's end: posts before it belong to the turn.
         self._ended_before: int | None = None
         # The newest Discord-side moment this turn's own sends and edits carried.
@@ -479,6 +482,14 @@ class DiscordTurnLifecycle:
                 await self._edit_message(
                     self._message_ref, embed=build_discord_embed(done_data), view=None
                 )
+                # The card stays as "Done."; only its summary footer may move under the files.
+                self._terminal_embed = build_discord_embed(
+                    dataclasses.replace(done_data, description="")
+                )
+                self._summary_ref = self._message_ref
+                self._holder_rest = [
+                    build_discord_embed(dataclasses.replace(done_data, footer=None))
+                ]
                 # #79: a tool-only turn has no reply to hang the notice under,
                 # so a dropped server is named on its own line.
                 tool_only_notice = render_degraded_notice(state.mcp_failures)
@@ -621,7 +632,7 @@ class DiscordTurnLifecycle:
             if not ours or last.author.id != thread.guild.me.id or last.embeds:
                 return
             await last.edit(embeds=[embed])
-            await self._edit_message(holder, embeds=[])
+            await self._edit_message(holder, embeds=self._holder_rest)
         except discord.HTTPException as exc:
             log.warning("turn.summary_move_failed", error_type=type(exc).__name__)
             return
