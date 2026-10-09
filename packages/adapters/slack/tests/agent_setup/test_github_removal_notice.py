@@ -26,9 +26,8 @@ async def test_removal_notice_uses_ephemeral_button_without_dm(
     finish = AsyncMock()
     monkeypatch.setattr(github_removal, "finish_notice", finish)
     monkeypatch.setattr(github_removal, "sync_connect_admin", AsyncMock())
-    monkeypatch.setattr(
-        github_removal, "connect_link", AsyncMock(return_value="https://mcp.test/connect")
-    )
+    connect_link = AsyncMock(return_value="https://mcp.test/connect")
+    monkeypatch.setattr(github_removal, "connect_link", connect_link)
     send_link = AsyncMock()
     monkeypatch.setattr(github_removal, "send_link", send_link)
     client = SimpleNamespace(conversations_open=AsyncMock(), chat_postMessage=AsyncMock())
@@ -39,6 +38,11 @@ async def test_removal_notice_uses_ephemeral_button_without_dm(
         team_id="T1",
         channel_id="C1",
         user_id="U1",
+        response_url="https://hooks.slack.test/response",
+    )
+    assert connect_link.await_args is not None
+    assert connect_link.await_args.kwargs["origin_followup_token"] == (
+        "https://hooks.slack.test/response"
     )
     assert send_link.await_args is not None
     assert send_link.await_args.kwargs["channel_id"] == "C1"

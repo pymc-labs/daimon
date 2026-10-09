@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from daimon.adapters.slack.agent_setup.github_link import send_link
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -19,6 +19,7 @@ async def send_pending_notice(
     team_id: str,
     channel_id: str,
     user_id: str,
+    response_url: str | None = None,
 ) -> None:
     """Deliver one queued removal notice ephemerally in the setup channel."""
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
@@ -43,6 +44,10 @@ async def send_pending_notice(
                 platform_user_id=user_id,
                 verified_tenant_admin=True,
                 origin_parent_channel_id=channel_id,
+                origin_followup_token=response_url,
+                origin_followup_expires_at=(
+                    datetime.now(UTC) + timedelta(minutes=30) if response_url else None
+                ),
             )
     except ValueError:
         async with runtime.sessionmaker.begin() as session:

@@ -391,7 +391,12 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
                 runtime, client, team_id=team_id, channel_id=channel_id, user_id=user_id
             )
             await send_pending_removal_notice(
-                runtime, client, team_id=team_id, channel_id=channel_id, user_id=user_id
+                runtime,
+                client,
+                team_id=team_id,
+                channel_id=channel_id,
+                user_id=user_id,
+                response_url=str(payload.get("response_url") or "") or None,
             )
 
     except (
