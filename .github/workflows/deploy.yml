@@ -110,6 +110,8 @@ jobs:
       # image index, and every consumer (VMs, Cloud Run, promote.yml's image
       # check) has only ever seen the plain manifest `docker push` produces.
       - uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Build + push daimon image
         uses: docker/build-push-action@v6
