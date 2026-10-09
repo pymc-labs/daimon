@@ -7,7 +7,7 @@ existing SDK return/exception types for unchanged downstream consumers.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from secrets import token_hex
 from typing import cast
 
@@ -19,11 +19,14 @@ from anthropic.types.beta.beta_managed_agents_session_agent_update_param import 
 )
 from anthropic.types.beta.session_create_params import Agent, Resource
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
-from daimon.core.mux_compat import legacy_call
+from daimon.core.mux_compat import legacy_call, legacy_iter
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import Revision, Scope
 from mux.contracts.ports import SessionResources
 from mux.contracts.resources import ResourceBinding, Session, SessionSpec
+from mux.drivers.anthropic.resources.sessions_admin import (
+    SessionResources as NativeSessionResources,
+)
 from pydantic import JsonValue
 
 
@@ -217,6 +220,45 @@ async def remove_session_resource_record(
             scope,
             resource_ref(backend, "session", session_id, scope=scope),
             resource_id,
+            key=token_hex(16),
+        )
+    )
+
+
+async def walk_session_resource_records(
+    client: AsyncAnthropic, session_id: str, *, scope: Scope
+) -> AsyncIterator[ResourceBinding]:
+    backend = managed_agents(client, scope=scope, resources=frozenset({("session", session_id)}))
+    port = backend.extension(
+        NativeSessionResources, namespace="anthropic.session_resources", version=1
+    )
+    async for resource in legacy_iter(
+        port.walk(scope, resource_ref(backend, "session", session_id, scope=scope))
+    ):
+        yield resource
+
+
+async def add_session_file_record(
+    client: AsyncAnthropic, session_id: str, *, file_id: str, mount_path: str, scope: Scope
+) -> ResourceBinding:
+    backend = managed_agents(
+        client,
+        scope=scope,
+        resources=frozenset({("session", session_id), ("file", file_id)}),
+    )
+    port = backend.extension(
+        NativeSessionResources, namespace="anthropic.session_resources", version=1
+    )
+    return await legacy_call(
+        port.add_file(
+            scope,
+            resource_ref(backend, "session", session_id, scope=scope),
+            ResourceBinding(
+                id="new-file-mount",
+                kind="artifact",
+                resource=resource_ref(backend, "file", file_id, scope=scope),
+                target_path=mount_path,
+            ),
             key=token_hex(16),
         )
     )

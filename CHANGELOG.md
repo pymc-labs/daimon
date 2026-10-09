@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the OpenAI hosted profile non-core until its skills and artifact ports land; refuse required unimplemented vault, multiagent and whole-workspace export/import capabilities.
 - Resolve OpenAI required-action turn identity from the documented nested session payload and suppress stale actions after root completion.
 - Route CLI GitHub grant cleanup through tenant-scoped session and vault archive ports while preserving revocation order, operator output and cleanup errors.
+- Discover the first mounted `.env` lazily and retain the added mount identity
+  through scoped session-resource ports, preserving pagination and request order.
 
 - Route CLI agent, environment and skill operations through tenant-scoped neutral resource ports, preserving requests, output and SDK error handling.
 - MCP agent, environment and skill operations now consume tenant-scoped neutral resource ports.

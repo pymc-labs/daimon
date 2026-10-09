@@ -615,3 +615,8 @@ buffered download and deletion retain the managed-agents beta. Standalone bundle
 uploads and the workspace-wide TTL queue retain the default Files API headers.
 The host keeps settle timing, exclusions, size limits, consent deferral and
 post-before-delete ordering. No additional provider requests are introduced.
+
+The native session-resources extension adds lazy `walk` and identity-returning
+`add_file` methods. Existing methods retain their behavior. The host stops at
+the first `.env` mount without fetching later pages and records the one add
+response identity without a retrieve. Session and file grants are checked before I/O.

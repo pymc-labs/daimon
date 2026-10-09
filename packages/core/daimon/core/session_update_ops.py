@@ -41,9 +41,6 @@ from anthropic.types.beta.beta_managed_agents_session_agent_update_param import 
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
-from anthropic.types.beta.sessions.beta_managed_agents_file_resource import (
-    BetaManagedAgentsFileResource,
-)
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import (
     resolve_hidden_mcp_server_names,
@@ -66,9 +63,11 @@ from daimon.core.session_compat import (
     UpdateOp,
 )
 from daimon.core.session_ports_compat import (
+    add_session_file_record,
     remove_session_resource_record,
     session_scope,
     update_session_record,
+    walk_session_resource_records,
 )
 from daimon.core.session_snapshot import (
     MaTool,
@@ -151,10 +150,12 @@ def _agent_update(
     }
 
 
-async def _find_env_resource_id(anthropic: AsyncAnthropic, session_id: str) -> str | None:
+async def _find_env_resource_id(
+    anthropic: AsyncAnthropic, session_id: str, *, scope: Scope
+) -> str | None:
     """The mounted `.env`'s resource id, for a snapshot that never recorded one."""
-    async for resource in anthropic.beta.sessions.resources.list(session_id):
-        if isinstance(resource, BetaManagedAgentsFileResource) and resource.mount_path.endswith(
+    async for resource in walk_session_resource_records(anthropic, session_id, scope=scope):
+        if resource.kind == "artifact" and cast(str, resource.target_path).endswith(
             _ENV_MOUNT_PATH
         ):
             return resource.id
@@ -193,7 +194,7 @@ async def _replace_env_file(
 
     resource_id = op.old_resource_id
     if resource_id is None:
-        resource_id = await _find_env_resource_id(anthropic, session_id)
+        resource_id = await _find_env_resource_id(anthropic, session_id, scope=scope)
     if resource_id is not None:
         try:
             await remove_session_resource_record(anthropic, session_id, resource_id, scope=scope)
@@ -206,8 +207,8 @@ async def _replace_env_file(
         return cleared
 
     try:
-        added = await anthropic.beta.sessions.resources.add(
-            session_id, file_id=file_id, type="file", mount_path=op.mount_path
+        added = await add_session_file_record(
+            anthropic, session_id, file_id=file_id, mount_path=op.mount_path, scope=scope
         )
     except APIStatusError as error:
         log.warning("session_update.env_mount_lost", session_id=session_id, error=str(error))

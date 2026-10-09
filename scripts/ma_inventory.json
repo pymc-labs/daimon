@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2035,
+  "files_scanned": 2037,
   "parse_errors": [],
   "calls": [
     {
@@ -1631,34 +1631,6 @@
       "call": "anthropic.beta.agents.update(fresh.id, version=fresh.version, **dump_agent_spec(reader_spec), skills=resolved_skills, metadata=cast('dict[str, str | None]', metadata))",
       "request_keys": [],
       "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/session_update_ops.py",
-      "line": 156,
-      "end": 156,
-      "scope": "_find_env_resource_id",
-      "category": "production",
-      "resource": "sessions.resources.list",
-      "call": "anthropic.beta.sessions.resources.list(session_id)",
-      "request_keys": [],
-      "response_access": [
-        "resource.id",
-        "resource.mount_path",
-        "resource.mount_path.endswith"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/session_update_ops.py",
-      "line": 209,
-      "end": 211,
-      "scope": "_replace_env_file",
-      "category": "production",
-      "resource": "sessions.resources.add",
-      "call": "anthropic.beta.sessions.resources.add(session_id, file_id=file_id, type='file', mount_path=op.mount_path)",
-      "request_keys": [],
-      "response_access": [
-        "added.id"
-      ]
     },
     {
       "file": "packages/core/daimon/core/setup_conversations.py",
@@ -5281,6 +5253,46 @@
       "response_access": []
     },
     {
+      "file": "packages/core/tests/test_session_resource_port_requests.py",
+      "line": 82,
+      "end": 82,
+      "scope": "test_find_first_env_matches_the_original_lazy_paginator",
+      "category": "test",
+      "resource": "sessions.resources.list",
+      "call": "legacy.beta.sessions.resources.list('sess_1')",
+      "request_keys": [],
+      "response_access": [
+        "resource.id",
+        "resource.mount_path",
+        "resource.mount_path.endswith"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_session_resource_port_requests.py",
+      "line": 112,
+      "end": 114,
+      "scope": "test_add_file_preserves_wire_errors_and_the_returned_resource_identity",
+      "category": "test",
+      "resource": "sessions.resources.add",
+      "call": "legacy.beta.sessions.resources.add('sess_1', file_id='file_env', type='file', mount_path='.env')",
+      "request_keys": [],
+      "response_access": [
+        "expected.id",
+        "expected.value"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_session_resource_port_requests.py",
+      "line": 123,
+      "end": 125,
+      "scope": "test_add_file_preserves_wire_errors_and_the_returned_resource_identity",
+      "category": "test",
+      "resource": "sessions.resources.add",
+      "call": "legacy.beta.sessions.resources.add('sess_1', file_id='file_env', type='file', mount_path='.env')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
       "file": "packages/core/tests/test_session_update_ops.py",
       "line": 118,
       "end": 118,
@@ -5799,8 +5811,30 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
-      "line": 117,
-      "end": 117,
+      "line": 114,
+      "end": 114,
+      "scope": "walk",
+      "category": "production",
+      "resource": "sessions.resources.list",
+      "call": "self._client.beta.sessions.resources.list(session.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
+      "line": 131,
+      "end": 131,
+      "scope": "add_file",
+      "category": "production",
+      "resource": "sessions.resources.add",
+      "call": "self._client.beta.sessions.resources.add(session.id, **kwargs)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
+      "line": 157,
+      "end": 157,
       "scope": "add",
       "category": "production",
       "resource": "sessions.resources.add",
@@ -5810,8 +5844,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
-      "line": 125,
-      "end": 125,
+      "line": 165,
+      "end": 165,
       "scope": "remove",
       "category": "production",
       "resource": "sessions.resources.delete",
@@ -5821,8 +5855,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
-      "line": 135,
-      "end": 139,
+      "line": 175,
+      "end": 179,
       "scope": "send",
       "category": "production",
       "resource": "sessions.resources.update",
@@ -5832,8 +5866,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
-      "line": 148,
-      "end": 148,
+      "line": 188,
+      "end": 188,
       "scope": "archive",
       "category": "production",
       "resource": "sessions.archive",
@@ -5843,8 +5877,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
-      "line": 99,
-      "end": 99,
+      "line": 106,
+      "end": 106,
       "scope": "list",
       "category": "production",
       "resource": "sessions.resources.list",
@@ -12575,15 +12609,6 @@
       "category": "production"
     },
     {
-      "file": "packages/core/daimon/core/session_update_ops.py",
-      "line": 44,
-      "module": "anthropic.types.beta.sessions.beta_managed_agents_file_resource",
-      "names": [
-        "BetaManagedAgentsFileResource"
-      ],
-      "category": "production"
-    },
-    {
       "file": "packages/core/daimon/core/sessions.py",
       "line": 19,
       "module": "anthropic",
@@ -14780,6 +14805,24 @@
       "category": "test"
     },
     {
+      "file": "packages/core/tests/test_session_resource_port_requests.py",
+      "line": 7,
+      "module": "anthropic",
+      "names": [
+        "APIStatusError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/test_session_resource_port_requests.py",
+      "line": 8,
+      "module": "anthropic.types.beta.sessions.beta_managed_agents_file_resource",
+      "names": [
+        "BetaManagedAgentsFileResource"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/core/tests/test_session_snapshot.py",
       "line": 14,
       "module": "anthropic.types.beta",
@@ -16096,7 +16139,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
-      "line": 5,
+      "line": 6,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -16105,7 +16148,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
-      "line": 6,
+      "line": 7,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "ResourceUpdateResponse"
@@ -16114,7 +16157,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
-      "line": 7,
+      "line": 8,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_session_resource",
       "names": [
         "BetaManagedAgentsSessionResource"
@@ -16123,7 +16166,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/sessions_admin.py",
-      "line": 10,
+      "line": 11,
       "module": "anthropic.types.beta.sessions.resource_add_params",
       "names": [
         "ResourceAddParams"
