@@ -513,7 +513,8 @@ async def test_connection_happy_path_and_rechecks(
             )
         ).status_code == 307
         client_form = await browser.get("/oauth/github/confirm", params={"state": client_state})
-        assert "Clients use this server." in client_form.text
+        assert "Clients can see what connected agents share." in client_form.text
+        assert 'class="web-icon web-icon--triangle-alert"' in client_form.text
         assert "Pick only the repos" not in client_form.text
         assert 'id="select-all-repos"' in client_form.text
         assert 'name="repo" value="101" checked' not in client_form.text

@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
-from daimon.adapters.mcp.oauth_mcp import build_oauth_mcp_routes
+from daimon.adapters.mcp.oauth_mcp import _success_page, build_oauth_mcp_routes
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.discord._credential_button import (
     edit_card_state,  # pyright: ignore[reportPrivateUsage]
@@ -55,6 +55,22 @@ _AS = {
     "registration_endpoint": "https://mcp.notion.com/register",
     "token_endpoint_auth_methods_supported": ["none"],
 }
+
+
+@pytest.mark.parametrize(
+    ("platform", "name", "url"),
+    [
+        ("discord", "Discord", "https://discord.com/app"),
+        ("slack", "Slack", "https://app.slack.com/client/"),
+        ("teams", "Teams", "https://teams.microsoft.com/"),
+    ],
+)
+def test_oauth_success_returns_to_platform(platform: str, name: str, url: str) -> None:
+    page = _success_page(server_name="Research API", agent_name="ResearchBot", platform=platform)
+    body = page.body.decode()
+    assert f'href="{url}"' in body
+    assert f"Back to {name}" in body
+    assert body.count('class="gh-primary"') == 1
 
 
 def _settings() -> Settings:

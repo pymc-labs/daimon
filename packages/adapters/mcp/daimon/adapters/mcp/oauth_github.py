@@ -453,8 +453,7 @@ def _confirmation_page(
                 '<label class="gh-choice repo-choice">'
                 f'<input type="checkbox" name="repo" value="{repo.id}"{selected}>'
                 f'<span><span class="gh-repo-prefix">{html.escape(prefix)}/</span>'
-                f'<span class="gh-repo-name">{html.escape(name)}</span></span>'
-                f'<span class="gh-row-check">{icon("check")}</span></label>'
+                f'<span class="gh-repo-name">{html.escape(name)}</span></span></label>'
             )
         parts.append("</div>")
     parts.extend(
@@ -468,7 +467,13 @@ def _confirmation_page(
             '<button class="gh-link-button" id="change-access" type="button" hidden>'
             "Change</button>"
             + (
-                f'<p class="gh-client-note">{icon("info")}Clients use this server.</p>'
+                f'<p class="gh-client-note">{icon("triangle-alert")}'
+                + (
+                    f"Clients can see what {html.escape(agent_name)} shares."
+                    if agent_name
+                    else "Clients can see what connected agents share."
+                )
+                + "</p>"
                 if clients_present
                 else ""
             )

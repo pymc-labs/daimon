@@ -124,16 +124,23 @@ def _error_page(kind: _ErrorKind) -> HTMLResponse:
 def _success_page(
     *, server_name: str, agent_name: str, platform: str | None = None
 ) -> HTMLResponse:
-    destination = (
-        f"Return to {platform.title()}."
-        if platform in {"discord", "slack", "teams"}
-        else "Return to chat."
+    destinations = {
+        "discord": ("Discord", "https://discord.com/app"),
+        "slack": ("Slack", "https://app.slack.com/client/"),
+        "teams": ("Teams", "https://teams.microsoft.com/"),
+    }
+    destination = destinations.get(platform or "")
+    back = (
+        '<div class="gh-actions"><a class="gh-primary" '
+        f'href="{destination[1]}">{icon("chevron-left")}Back to {destination[0]}</a></div>'
+        if destination
+        else "<p>Return to chat.</p>"
     )
     body = (
         f'<div class="gh-status-icon">{icon("circle-check")}</div>'
         f"<h1>Connected {html.escape(server_name, quote=False)}</h1>"
         f"<p>{html.escape(agent_name, quote=False)} can use your connection from your next "
-        f"message. {destination}</p>"
+        f"message.</p>{back}"
     )
     return render_page(title=f"Connected {server_name}", context="Connection", body_html=body)
 
