@@ -1,5 +1,5 @@
 {
-  "files_scanned": 1922,
+  "files_scanned": 1923,
   "parse_errors": [],
   "calls": [
     {
@@ -5533,6 +5533,28 @@
     },
     {
       "file": "packages/core/tests/test_mux_resources_parity.py",
+      "line": 427,
+      "end": 427,
+      "scope": "test_missing_page_data_keeps_sdks_empty_iterator_behavior",
+      "category": "test",
+      "resource": "agents.list",
+      "call": "before.beta.agents.list(include_archived=False)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_resources_parity.py",
+      "line": 430,
+      "end": 430,
+      "scope": "test_missing_page_data_keeps_sdks_empty_iterator_behavior",
+      "category": "test",
+      "resource": "environments.list",
+      "call": "before.beta.environments.list(include_archived=False)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_resources_parity.py",
       "line": 248,
       "end": 248,
       "scope": "test_remaining_defaults_requests_match",
@@ -5867,8 +5889,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 173,
-      "end": 173,
+      "line": 239,
+      "end": 239,
+      "scope": "walk",
+      "category": "production",
+      "resource": "agents.list",
+      "call": "self._client.beta.agents.list(include_archived=filters.include_archived)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
+      "line": 174,
+      "end": 174,
       "scope": "create",
       "category": "production",
       "resource": "agents.create",
@@ -5878,8 +5911,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 193,
-      "end": 193,
+      "line": 194,
+      "end": 194,
       "scope": "list",
       "category": "production",
       "resource": "agents.list",
@@ -5889,8 +5922,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 211,
-      "end": 211,
+      "line": 212,
+      "end": 212,
       "scope": "update",
       "category": "production",
       "resource": "agents.update",
@@ -5900,8 +5933,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 217,
-      "end": 217,
+      "line": 218,
+      "end": 218,
       "scope": "archive",
       "category": "production",
       "resource": "agents.archive",
@@ -5911,8 +5944,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 180,
-      "end": 180,
+      "line": 181,
+      "end": 181,
       "scope": "retrieve",
       "category": "production",
       "resource": "agents.retrieve",
@@ -5922,8 +5955,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 102,
-      "end": 104,
+      "line": 181,
+      "end": 181,
+      "scope": "walk",
+      "category": "production",
+      "resource": "environments.list",
+      "call": "self._client.beta.environments.list(include_archived=filters.include_archived)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
+      "line": 103,
+      "end": 105,
       "scope": "create",
       "category": "production",
       "resource": "environments.create",
@@ -5933,8 +5977,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 126,
-      "end": 126,
+      "line": 127,
+      "end": 127,
       "scope": "list",
       "category": "production",
       "resource": "environments.list",
@@ -5944,8 +5988,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 149,
-      "end": 151,
+      "line": 150,
+      "end": 152,
       "scope": "update",
       "category": "production",
       "resource": "environments.update",
@@ -5955,8 +5999,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 157,
-      "end": 157,
+      "line": 158,
+      "end": 158,
       "scope": "archive",
       "category": "production",
       "resource": "environments.archive",
@@ -5966,8 +6010,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 174,
-      "end": 174,
+      "line": 175,
+      "end": 175,
       "scope": "delete",
       "category": "production",
       "resource": "environments.delete",
@@ -5977,8 +6021,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 111,
-      "end": 111,
+      "line": 112,
+      "end": 112,
       "scope": "retrieve",
       "category": "production",
       "resource": "environments.retrieve",
@@ -6010,8 +6054,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 92,
-      "end": 92,
+      "line": 93,
+      "end": 93,
       "scope": "skill_versions",
       "category": "production",
       "resource": "skills.versions.list",
@@ -6021,8 +6065,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 107,
-      "end": 107,
+      "line": 108,
+      "end": 108,
       "scope": "memory_stores",
       "category": "production",
       "resource": "memory_stores.list",
@@ -6032,8 +6076,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 113,
-      "end": 113,
+      "line": 114,
+      "end": 114,
       "scope": "memories",
       "category": "production",
       "resource": "memory_stores.memories.list",
@@ -6076,8 +6120,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 98,
-      "end": 98,
+      "line": 99,
+      "end": 99,
       "scope": "download_skill_version",
       "category": "production",
       "resource": "skills.versions.download",
@@ -6087,8 +6131,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/platform_export.py",
-      "line": 120,
-      "end": 122,
+      "line": 121,
+      "end": 123,
       "scope": "memory",
       "category": "production",
       "resource": "memory_stores.memories.retrieve",
@@ -15467,7 +15511,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 8,
+      "line": 9,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -15476,7 +15520,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 9,
+      "line": 10,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsAgent"
@@ -15485,7 +15529,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 10,
+      "line": 11,
       "module": "anthropic.types.beta.agent_create_params",
       "names": [
         "AgentCreateParams"
@@ -15494,7 +15538,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 11,
+      "line": 12,
       "module": "anthropic.types.beta.agent_update_params",
       "names": [
         "AgentUpdateParams"
@@ -15503,7 +15547,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/agents.py",
-      "line": 191,
+      "line": 192,
       "module": "anthropic.types.beta.agent_list_params",
       "names": [
         "AgentListParams"
@@ -15512,7 +15556,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 8,
+      "line": 9,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -15521,7 +15565,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 9,
+      "line": 10,
       "module": "anthropic.types.beta",
       "names": [
         "BetaEnvironment"
@@ -15530,7 +15574,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 10,
+      "line": 11,
       "module": "anthropic.types.beta.environment_create_params",
       "names": [
         "EnvironmentCreateParams"
@@ -15539,7 +15583,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 11,
+      "line": 12,
       "module": "anthropic.types.beta.environment_list_params",
       "names": [
         "EnvironmentListParams"
@@ -15548,7 +15592,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 12,
+      "line": 13,
       "module": "anthropic.types.beta.environment_update_params",
       "names": [
         "EnvironmentUpdateParams"

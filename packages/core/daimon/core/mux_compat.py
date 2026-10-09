@@ -33,6 +33,7 @@ from mux.contracts.resources import (
     SkillUpload,
     SkillUploadFile,
 )
+from mux.drivers.anthropic.resources.walk import ResourceWalk
 from mux.errors import ProviderError
 
 if TYPE_CHECKING:
@@ -197,42 +198,24 @@ async def list_agents(
     client: AsyncAnthropic, *, include_archived: bool = False
 ) -> AsyncIterator[BetaManagedAgentsAgent]:
     backend = managed_agents(client)
-    scope = resource_scope()
-    cursor: str | None = None
-    while True:
-        page = await legacy_call(
-            backend.agents.list(
-                scope,
-                filters=AgentFilter(include_archived=include_archived),
-                page=PageRequest(cursor=cursor),
-            )
-        )
-        for record in page.data:
-            yield sdk_agent(record)
-        if page.next_cursor is None:
-            break
-        cursor = page.next_cursor
+    port = backend.extension(ResourceWalk, namespace="anthropic.resource_walk", version=1)
+    async for record in legacy_iter(
+        port.agents(resource_scope(), filters=AgentFilter(include_archived=include_archived))
+    ):
+        yield sdk_agent(record)
 
 
 async def list_environments(
     client: AsyncAnthropic, *, include_archived: bool = False
 ) -> AsyncIterator[BetaEnvironment]:
     backend = managed_agents(client)
-    scope = resource_scope()
-    cursor: str | None = None
-    while True:
-        page = await legacy_call(
-            backend.environments.list(
-                scope,
-                filters=EnvironmentFilter(include_archived=include_archived),
-                page=PageRequest(cursor=cursor),
-            )
+    port = backend.extension(ResourceWalk, namespace="anthropic.resource_walk", version=1)
+    async for record in legacy_iter(
+        port.environments(
+            resource_scope(), filters=EnvironmentFilter(include_archived=include_archived)
         )
-        for record in page.data:
-            yield sdk_environment(record)
-        if page.next_cursor is None:
-            break
-        cursor = page.next_cursor
+    ):
+        yield sdk_environment(record)
 
 
 async def retrieve_agent(client: AsyncAnthropic, agent_id: str) -> BetaManagedAgentsAgent:

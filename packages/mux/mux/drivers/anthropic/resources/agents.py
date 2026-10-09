@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import cast
 
@@ -15,7 +16,7 @@ from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.receipts import DeletionReceipt, Operation
 from mux.contracts.resources import Agent, AgentFilter, AgentPatch, AgentSpec
-from mux.drivers.anthropic.resources._errors import provider_call
+from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.schemas import AgentModelConfig, agent_tools, multiagent
 from mux.errors import ScopeViolation, UnsupportedCapability
 
@@ -194,7 +195,7 @@ class AnthropicAgents:
         return Page(
             data=tuple(
                 agent_record(item, self._account_scope_id)
-                for item in result.data
+                for item in (result.data or ())
                 if filters.name is None or item.name == filters.name
             ),
             next_cursor=result.next_page,
@@ -231,3 +232,11 @@ class AnthropicAgents:
     async def delete(self, scope: Scope, ref: ResourceRef, *, key: str) -> DeletionReceipt:
         check_ref(ref, self._account_scope_id, "agent")
         raise UnsupportedCapability(("agent_hard_delete",), "anthropic.managed_agents")
+
+    async def walk(self, scope: Scope, *, filters: AgentFilter) -> AsyncIterator[Agent]:
+        """Preserve the SDK's full async iterator for legacy host walks."""
+        async for item in provider_iter(
+            self._client.beta.agents.list(include_archived=filters.include_archived)
+        ):
+            if filters.name is None or item.name == filters.name:
+                yield agent_record(item, self._account_scope_id)

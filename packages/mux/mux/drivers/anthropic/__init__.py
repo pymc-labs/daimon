@@ -15,6 +15,7 @@ from mux.drivers.anthropic.resources.agents import AnthropicAgents
 from mux.drivers.anthropic.resources.environments import AnthropicEnvironments
 from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport, PlatformExport
 from mux.drivers.anthropic.resources.skills import AnthropicSkills, AnthropicSkillVersions
+from mux.drivers.anthropic.resources.walk import AnthropicResourceWalk, ResourceWalk
 from mux.errors import ExtensionVersionError, UnsupportedCapability
 from mux.profiles.anthropic import MANAGED_AGENTS
 
@@ -55,6 +56,9 @@ class AnthropicManagedAgents:
         self._usage = usage
         native_export = AnthropicPlatformExport(client)
         self._extensions: dict[tuple[type[object], str, int], object] = {
+            (ResourceWalk, "anthropic.resource_walk", 1): AnthropicResourceWalk(
+                self.agents, self.environments
+            ),
             (PlatformExport, "anthropic.platform_export", 1): native_export,
             (CorePlatformExport, "anthropic.platform_export", 1): native_export,
             (SkillVersions, "anthropic.skills_versions", 1): AnthropicSkillVersions(client),

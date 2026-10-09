@@ -410,3 +410,26 @@ async def test_skills_listing_keeps_pagination_and_truncation_signal(terminal_fu
     assert [s.model_dump(mode="json") for s in rows] == expected
     assert actual_truncated == truncated
     assert_transport_equal(old, new)
+
+
+@pytest.mark.parametrize("resource", ["agent", "environment"])
+@pytest.mark.parametrize("payload", [{}, {"data": None, "next_page": None}])
+async def test_missing_page_data_keeps_sdks_empty_iterator_behavior(resource, payload):
+    from collections import deque
+
+    from daimon.testing.ma_transport import ScriptedReply
+
+    path = "/v1/agents" if resource == "agent" else "/v1/environments"
+    old = ScriptedTransport(deque([ScriptedReply("GET", path, httpx.Response(200, json=payload))]))
+    new = ScriptedTransport(deque([ScriptedReply("GET", path, httpx.Response(200, json=payload))]))
+    async with old.client() as before, new.client() as after:
+        if resource == "agent":
+            expected = [row async for row in before.beta.agents.list(include_archived=False)]
+            actual = [row async for row in list_agents(after, include_archived=False)]
+        else:
+            expected = [row async for row in before.beta.environments.list(include_archived=False)]
+            actual = [row async for row in list_environments(after, include_archived=False)]
+    assert actual == expected == []
+    assert new.requests == old.requests
+    old.assert_consumed()
+    new.assert_consumed()

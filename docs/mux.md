@@ -277,6 +277,9 @@ close that client; constructing the backend makes no requests and introduces
 no settings or defaults. Agent, environment and skill requests retain omitted
 fields, explicit empty lists, metadata patches and provider version checks.
 The defaults pipeline keeps its current reconcile, duplicate and sweep policy.
+Its full agent/environment list walks use the typed `anthropic.resource_walk@1`
+port, returning neutral records while preserving SDK async iteration. The core
+page APIs remain available for callers that request one page at a time.
 
 Anthropic toolsets and coordinator rosters use closed, versioned schemas in
 `mux.drivers.anthropic.schemas`. Native tool configuration is carried by

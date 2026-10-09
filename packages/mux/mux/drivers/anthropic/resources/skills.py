@@ -89,7 +89,7 @@ class AnthropicSkills:
             raise UnsupportedCapability(("skill_list_order",), "anthropic.managed_agents")
         result = await provider_call(self._client.beta.skills.list(**cast(SkillListParams, kwargs)))
         return Page(
-            data=tuple(skill_record(item) for item in result.data),
+            data=tuple(skill_record(item) for item in (result.data or ())),
             next_cursor=result.next_page,
             has_more=bool(result.next_page),
         )
@@ -117,7 +117,7 @@ class AnthropicSkillVersions:
             self._client.beta.skills.versions.list(skill_id, **cast(VersionListParams, kwargs))
         )
         return Page(
-            data=tuple(version_record(item) for item in result.data),
+            data=tuple(version_record(item) for item in (result.data or ())),
             next_cursor=result.next_page,
             has_more=bool(result.next_page),
         )

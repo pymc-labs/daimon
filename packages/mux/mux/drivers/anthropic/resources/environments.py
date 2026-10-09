@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import cast
 
@@ -19,7 +20,7 @@ from mux.contracts.resources import (
     EnvironmentPatch,
     EnvironmentSpec,
 )
-from mux.drivers.anthropic.resources._errors import provider_call
+from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.resources.agents import check_ref
 from mux.drivers.anthropic.schemas import EnvironmentConfig
 from mux.errors import UnsupportedCapability
@@ -128,7 +129,7 @@ class AnthropicEnvironments:
         return Page(
             data=tuple(
                 environment_record(item, self._account_scope_id)
-                for item in result.data
+                for item in (result.data or ())
                 if filters.name is None or item.name == filters.name
             ),
             next_cursor=result.next_page,
@@ -173,3 +174,11 @@ class AnthropicEnvironments:
         check_ref(ref, self._account_scope_id, "environment")
         await provider_call(self._client.beta.environments.delete(ref.id))
         return DeletionReceipt(operation_id=key, deleted=(ref,))
+
+    async def walk(self, scope: Scope, *, filters: EnvironmentFilter) -> AsyncIterator[Environment]:
+        """Preserve the SDK's full async iterator for legacy host walks."""
+        async for item in provider_iter(
+            self._client.beta.environments.list(include_archived=filters.include_archived)
+        ):
+            if filters.name is None or item.name == filters.name:
+                yield environment_record(item, self._account_scope_id)

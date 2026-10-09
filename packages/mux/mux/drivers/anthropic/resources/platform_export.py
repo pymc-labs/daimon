@@ -79,7 +79,8 @@ class AnthropicPlatformExport:
         result = await provider_call(self._client.beta.skills.list(**cast(SkillListParams, kwargs)))
         return Page(
             data=tuple(
-                cast(dict[str, JsonValue], item.model_dump(mode="json")) for item in result.data
+                cast(dict[str, JsonValue], item.model_dump(mode="json"))
+                for item in (result.data or ())
             ),
             next_cursor=result.next_page,
             has_more=bool(result.next_page),
