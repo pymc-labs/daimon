@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - An offline Managed Agents call inventory and production call ratchet protect
   the neutral-core extraction boundary without changing runtime behavior.
+- Scripted offline MA transport and platform/DB effect recorders support
+  deterministic neutral-core parity checks with exact billing values and
+  jitter-safe DB timestamps that preserve scheduled durations.
 - Agent identity can be disabled for selected Discord guilds or Slack workspaces
   while remaining enabled elsewhere in the deployment.
 - Discord and Slack GitHub setup panels now manage connected repos, agent grants,
