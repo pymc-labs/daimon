@@ -2802,7 +2802,7 @@ class TestOverCapQueue:
             for call in card.edit.await_args_list
             if call.kwargs.get("embed") is not None
         ]
-        assert "Stopped: Daimon restarted." in titles
+        assert "Daimon restarted before this request finished." in titles
         turn.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await turn

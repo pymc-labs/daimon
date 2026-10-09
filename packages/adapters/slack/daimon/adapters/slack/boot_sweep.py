@@ -85,7 +85,9 @@ _CARD_RECOVERY_RETRY_DELAY_SECONDS = 60.0
 _CARD_RECOVERY_MAX_ATTEMPTS = 3
 
 # Slack's notification-fallback requirement (blocks= always ships with text=).
-_INTERRUPTED_FALLBACK_TEXT = "Stopped: Daimon restarted. Mention me to try again."
+_INTERRUPTED_FALLBACK_TEXT = (
+    "Daimon restarted before this request finished. @mention Daimon with your request to try again."
+)
 
 # Everything a chat.update can raise. Mirrors lifecycle.py's _SLACK_SEND_ERRORS
 # exactly -- no error-code branching, the same posture the rest of the Slack

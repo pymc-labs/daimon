@@ -1132,8 +1132,8 @@ class DaimonBot(commands.Bot):
                     )
                     embed = discord.Embed(
                         color=theme.COLOR_RED,
-                        title="Stopped: Daimon restarted.",
-                        description="Mention me to try again.",
+                        title="Daimon restarted before this request finished.",
+                        description="@mention Daimon with your request to try again.",
                     )
                     if transport._destination() is not None:  # pyright: ignore[reportPrivateUsage]
                         await transport.edit(
