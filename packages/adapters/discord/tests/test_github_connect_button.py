@@ -54,7 +54,14 @@ async def test_requester_gets_ephemeral_link_and_click_sets_followup(
     interaction.application_id = 1234
     interaction.token = "interaction-token"
     interaction.client.runtime = runtime
-    interaction.guild = SimpleNamespace(owner_id=456, fetch_member=AsyncMock(return_value=object()))
+
+    async def fetch_member(_user_id: int) -> object:
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        return object()
+
+    interaction.guild = SimpleNamespace(
+        owner_id=456, fetch_member=AsyncMock(side_effect=fetch_member)
+    )
     button = button_module.GitHubConnectButton(requester_id="456", intent_id=uuid.UUID(int=1))
     assert button.item.emoji.name == "🔗"
     assert len(button.item.custom_id or "") <= 100

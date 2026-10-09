@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.discord.agent_setup import github_requests as module
+from daimon.core.github_connect_cards import build_connect_card
 
 
 class _Sessions:
@@ -202,3 +203,71 @@ async def test_uncached_member_decision_edits_requester_thread_card(
     interaction.response.defer.assert_awaited_once_with(thinking=False)
     interaction.response.edit_message.assert_not_awaited()
     assert interaction.edit_original_response.await_args.kwargs["embed"] is not None
+
+
+@pytest.mark.asyncio
+async def test_requester_link_defers_before_mint_and_card_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_id, tenant_id, account_id = (uuid.uuid4() for _ in range(3))
+    request = SimpleNamespace(
+        tenant_id=tenant_id,
+        thread_id="200",
+        requester_account_id=account_id,
+        agent_name="ResearchBot",
+    )
+    monkeypatch.setattr(module, "lookup_request", AsyncMock(return_value=request))
+    monkeypatch.setattr(
+        module, "get_tenant", AsyncMock(return_value=SimpleNamespace(external_id="123"))
+    )
+    monkeypatch.setattr(
+        module,
+        "find_platform_principal",
+        AsyncMock(return_value=SimpleNamespace(account_id=account_id)),
+    )
+    monkeypatch.setattr(
+        module,
+        "get_delivery",
+        AsyncMock(return_value=SimpleNamespace(message_id="42", dismissed_at=None)),
+    )
+    events: list[str] = []
+
+    async def defer(**kwargs: object) -> None:
+        assert kwargs == {"ephemeral": True, "thinking": True}
+        events.append("defer")
+
+    async def mint(*_args: object, **_kwargs: object) -> str:
+        events.append("mint")
+        return "https://mcp.test/connect"
+
+    async def resolve(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+        events.append("resolve")
+        return build_connect_card(
+            agent_name="ResearchBot",
+            identity_enabled=True,
+            avatar_url=None,
+            public_base_url="https://mcp.test",
+        )
+
+    async def followup(**kwargs: object) -> None:
+        assert kwargs["ephemeral"] is True
+        events.append("followup")
+
+    monkeypatch.setattr(module, "mint_link", mint)
+    monkeypatch.setattr(module, "resolve_connect_card", resolve)
+    interaction = MagicMock()
+    interaction.data = {"custom_id": f"github_request:{request_id}:link"}
+    interaction.message.id = 42
+    interaction.channel_id = 200
+    interaction.guild_id = 123
+    interaction.user.id = 99
+    interaction.response.defer = AsyncMock(side_effect=defer)
+    interaction.response.send_message = AsyncMock()
+    interaction.followup.send = AsyncMock(side_effect=followup)
+    runtime = SimpleNamespace(
+        sessionmaker=_Sessions(),
+        settings=SimpleNamespace(mcp=SimpleNamespace(app_root_url="https://mcp.test")),
+    )
+    assert await module.handle_request_card(interaction, runtime)  # type: ignore[arg-type]
+    assert events == ["defer", "mint", "resolve", "followup"]
+    interaction.response.send_message.assert_not_awaited()

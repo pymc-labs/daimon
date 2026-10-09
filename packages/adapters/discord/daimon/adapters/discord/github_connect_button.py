@@ -83,19 +83,19 @@ class GitHubConnectButton(
                 "This connection is no longer available.", ephemeral=True
             )
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             member = await guild.fetch_member(interaction.user.id)
         except discord.HTTPException:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "This connection is no longer available.", ephemeral=True
             )
             return
         if not is_member_guild_admin(member, guild_owner_id=guild.owner_id):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Only a server admin can connect GitHub.", ephemeral=True
             )
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
         bot = cast(DaimonBot, interaction.client)
         settings = bot.runtime.settings
         root = settings.mcp.app_root_url
