@@ -861,8 +861,10 @@ with an in-thread notice, and checks the channel's writers before posting. A
 file Daimon already attached in the thread after the turn's card (the agent
 sent it itself), with the same name and bytes, is cleared from the listing
 without a second copy. The session listing is shared by every turn, so the
-Discord sweep takes only files created before its turn ended and leaves later
-ones listed for the next turn's sweep. A long answer carries the summary on its
+Discord sweep takes only files listed within 10 seconds of its turn's end and
+leaves later ones for the next turn's sweep. A listing entry is stamped when
+it is indexed, about 5 seconds after the write, so a file written just before
+the turn ended is still this turn's. A long answer carries the summary on its
 last chunk on both platforms.
 
 Reconnection is two loops for two failure modes. The outer loop handles

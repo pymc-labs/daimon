@@ -12,6 +12,7 @@ import asyncio
 import io
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import timedelta
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -30,6 +31,15 @@ log = structlog.get_logger(__name__)
 _MIB = 1024 * 1024
 # Discord's limit on attachments per message, counting the ones already there.
 MAX_ATTACHMENTS_PER_MESSAGE = 10
+# How long after the turn ended a file still counts as the turn's. A listing
+# entry's created_at is when Managed Agents indexed the file, about 5 s after
+# the write (core output_delivery's module doc), so a file written in a turn's
+# last seconds is stamped after the turn ended. Measured on staging over 154
+# files: indexed a median 5.0 s after the writing tool returned, and up to
+# 4.2 s after the session went idle (9.6 s for a 103 MiB archive, over the
+# delivery cap anyway). A file left listed with no next turn is never
+# delivered, which is worse than one landing on the previous answer.
+TURN_END_GRACE = timedelta(seconds=10)
 _ATTACH_NOTICE = (
     "I couldn't attach the generated file. This bot needs the Attach Files "
     "permission in this thread."
@@ -64,7 +74,8 @@ async def deliver_session_outputs(
     ``turn_window`` bounds the turn by message id: after its card, before its
     end. A file the agent already attached itself inside it, same name and
     bytes, counts as delivered and is cleared without a second copy. Files the
-    session listed after the turn ended are left for the next turn's sweep.
+    session listed more than ``TURN_END_GRACE`` after the turn ended are left
+    for the next turn's sweep.
     Without ``answer``, or when a file cannot be added to it, the file is
     posted on its own.
     """
@@ -118,7 +129,9 @@ async def deliver_session_outputs(
             sleep=sleep,
             max_bytes=max_bytes,
             created_before=(
-                discord.utils.snowflake_time(turn_window[1]) if turn_window is not None else None
+                discord.utils.snowflake_time(turn_window[1]) + TURN_END_GRACE
+                if turn_window is not None
+                else None
             ),
         )
     except OutputPostingUnavailable as exc:

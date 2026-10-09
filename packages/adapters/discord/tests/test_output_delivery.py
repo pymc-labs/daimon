@@ -17,6 +17,7 @@ from anthropic.types.beta import FileMetadata
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.output_delivery import (
     MAX_ATTACHMENTS_PER_MESSAGE,
+    TURN_END_GRACE,
     AnswerMessage,
     deliver_session_outputs,
 )
@@ -616,3 +617,34 @@ async def test_an_answer_that_cannot_be_fetched_falls_back_to_a_post() -> None:
     edit.assert_not_awaited()
     thread.send.assert_awaited_once()
     assert deleted == ["file_a"]
+
+
+async def test_a_file_indexed_seconds_after_the_turn_ended_is_still_attached() -> None:
+    """created_at is the index time, about 5 s after the write, so a file written
+    in the turn's last seconds is stamped after it ended and must still go out."""
+    turn_end = NOW
+    client, deleted = _client_with_files(
+        ("file_last", "brief.pdf", b"pdf-a", turn_end + timedelta(seconds=5)),
+        ("file_next", "next_turn.pdf", b"pdf-b", turn_end + TURN_END_GRACE),
+    )
+    thread = _answer_thread(_answer_message([]))
+    answer, calls = _recording_edit(deleted)
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=(777, discord.utils.time_snowflake(turn_end, high=True)),
+        answer=answer,
+        sleep=_no_sleep,
+    )
+
+    names = [
+        getattr(a, "filename", None)
+        for _m, kwargs in calls
+        for a in cast(list[object], kwargs["attachments"])
+    ]
+    assert names == ["brief.pdf"], "a file indexed inside the grace is this turn's"
+    assert deleted == ["file_last"], "one indexed past the grace waits for the next sweep"
