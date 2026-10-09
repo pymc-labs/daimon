@@ -1,3 +1,7 @@
+# Frozen baseline, deliberately updated 2026-10-09 (#504): an answered card is
+# now sent through the card's edit queue and the click returns a brief toast,
+# instead of returning the answered card as the invoke response. Every other
+# path is the pre-refactor handler unchanged.
 class TeamsConfirmationCards:
     """Posted confirmation cards awaiting a click, keyed by token."""
 

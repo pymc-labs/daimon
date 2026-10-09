@@ -230,3 +230,32 @@ async def test_a_stop_after_approve_lands_after_the_approved_card() -> None:
     approved, stopped = _json(sender, 1), _json(sender, 2)
     assert "Approved" in approved
     assert "Stopped" in stopped, "Stopped is the last state the card shows"
+
+
+async def test_a_transient_send_failure_on_the_answered_card_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final review of #504: the token is claimed once the click is answered,
+    so a failed card edit could never be repaired; it is retried instead."""
+    from daimon.adapters.teams import tool_confirmation
+
+    monkeypatch.setattr(tool_confirmation, "_CARD_SEND_RETRY_DELAYS_S", (0.0, 0.0, 0.0))
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    waiting, token = await _post(cards, sender)
+    real_send = sender.send
+    failures = [ValueError("transient")]
+
+    async def flaky_send(*args: object, **kwargs: object) -> object:
+        if failures:
+            raise failures.pop()
+        return await real_send(*args, **kwargs)
+
+    monkeypatch.setattr(sender, "send", flaky_send)
+    await cards.on_action(_click(token, "deny", AAD_OBJECT_ID.upper()))
+    assert await asyncio.wait_for(waiting, timeout=1) == "denied"
+    for _ in range(50):
+        if len(sender.sent) >= 2:
+            break
+        await asyncio.sleep(0)
+    assert "Denied" in _json(sender, len(sender.sent) - 1), "the retry landed the answer"

@@ -61,6 +61,8 @@ log = structlog.get_logger(__name__)
 
 VERB = "tool_confirm"
 _ANSWERS: dict[str, ConfirmationAnswer] = {"approve": "approved", "deny": "denied"}
+#: Waits between attempts to send a card edit; the last value is unused.
+_CARD_SEND_RETRY_DELAYS_S: tuple[float, ...] = (1.0, 3.0, 0.0)
 #: The click's brief acknowledgement; the card itself updates through its queue.
 _ANSWER_TOASTS: dict[ConfirmationAnswer, str] = {
     "approved": "Approved",
@@ -240,7 +242,23 @@ class TeamsConfirmationCards:
         edit = MessageActivityInput(id=posted.message_id).add_card(
             confirmation_adaptive_card(card, posted.prompt, answered_by=answered_by)
         )
-        return self._sender.send(posted.conversation_id, edit, service_url=posted.service_url)
+
+        async def _send_with_retry() -> object:
+            # The click was acknowledged and its token claimed, so a failed
+            # card edit could never be repaired by another click: retry a
+            # transient failure a few times before giving up (and logging).
+            for attempt, delay in enumerate(_CARD_SEND_RETRY_DELAYS_S):
+                try:
+                    return await self._sender.send(
+                        posted.conversation_id, edit, service_url=posted.service_url
+                    )
+                except TEAMS_SEND_ERRORS:
+                    if attempt == len(_CARD_SEND_RETRY_DELAYS_S) - 1:
+                        raise
+                    await asyncio.sleep(delay)
+            raise AssertionError("unreachable")
+
+        return _send_with_retry()
 
     async def _edit(self, posted: _PostedCard, state: ConfirmationCardState) -> None:
         card = build_confirmation_card(posted.prompt, state=state)
