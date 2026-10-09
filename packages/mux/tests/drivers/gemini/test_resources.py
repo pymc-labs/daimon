@@ -513,3 +513,32 @@ def test_snapshot_refuses_directory_payload_before_skipping_it() -> None:
         archive.addfile(info, io.BytesIO(b"1234567890"))
     with pytest.raises(ProviderError, match="invalid_snapshot"):
         parse_snapshot(out.getvalue())
+
+
+@pytest.mark.asyncio
+async def test_relative_workspace_directory_is_distinct_from_workspace_root(
+    resources: Resources,
+) -> None:
+    ma, transport, _, _ = resources
+    artifact = await ma.artifacts.upload(
+        SCOPE, chunks(b"input"), filename="file", media_type="text/plain", key="input"
+    )
+    s = await session(
+        ma,
+        AgentSpec(name="a", model=ModelRef(provider="gemini", id="gemini-3.8-flash")),
+        EnvironmentSpec(
+            name="e",
+            sources=(
+                WorkspaceSource(kind="file", target_path="workspace/file", artifact=artifact.ref),
+                WorkspaceSource(kind="file", target_path="/workspace/file", artifact=artifact.ref),
+            ),
+        ),
+    )
+    await send(ma, transport, s)
+    assert transport.requests[0]["environment"] == {
+        "type": "remote",
+        "sources": [
+            {"type": "inline", "target": "workspace/file", "content": "input"},
+            {"type": "inline", "target": "/workspace/file", "content": "input"},
+        ],
+    }

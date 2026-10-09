@@ -124,15 +124,10 @@ def validate_targets(sources: list[JsonValue]) -> None:
         path = source.get("target")
         if not isinstance(path, str):
             raise ValueError("expected a workspace source target")
-        target = target_path(path).lstrip("/").removeprefix("workspace/")
-        if target == "workspace":
-            target = ""
+        canonical = target_path(path)
+        target = canonical if canonical.startswith("/") else f"/workspace/{canonical}"
         if any(
-            not target
-            or not prior
-            or target == prior
-            or target.startswith(prior + "/")
-            or prior.startswith(target + "/")
+            target == prior or target.startswith(prior + "/") or prior.startswith(target + "/")
             for prior in targets
         ):
             raise ValueError("workspace source targets overlap")
