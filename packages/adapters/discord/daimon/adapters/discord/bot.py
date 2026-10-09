@@ -3380,6 +3380,11 @@ class DaimonBot(commands.Bot):
                 )
             else:
                 await turn_send(text)
+            shown_on = current.message_ref
+            if shown_on is not None and str(shown_on.id) != current.card_message_id:
+                # An earlier edit replaced the card; the original may still show
+                # its Stop button, so its intent stays for recovery.
+                return
             try:
                 await retire_terminal_turn_card(
                     self.runtime.sessionmaker,

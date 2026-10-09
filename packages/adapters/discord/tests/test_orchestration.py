@@ -938,6 +938,62 @@ class TestNewThreadCreation:
         error_text: str = mock_thread.send.call_args.args[0]
         assert db_error in error_text
 
+    @patch("daimon.adapters.discord.bot.retire_terminal_turn_card", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_failure_after_the_card_was_replaced_keeps_its_intent(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        retire: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """When an earlier edit replaced the card, the error goes on the replacement
+        and the original card's intent is kept for recovery, not retired."""
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_create_session.return_value = ma_session(id="sess-abc")
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+
+        runtime = _make_runtime(tenant.id, db_session_factory)
+        runtime.settings.completion_pings = {}
+        bot = make_bot(runtime)
+        message = _make_channel_message()
+        replacement = MagicMock(spec=discord.Message)
+        replacement.id = 5000
+        replacement.webhook_id = None
+        replacement.edit = AsyncMock(return_value=replacement)
+        card = MagicMock(spec=discord.Message)
+        card.id = 4242
+        card.webhook_id = None
+        card.edit = AsyncMock(return_value=replacement)
+        mock_thread = MagicMock(spec=discord.Thread)
+        mock_thread.id = 9999
+        mock_thread.send = AsyncMock(return_value=card)
+        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
+
+        async def replace_then_fail(*, lifecycle, **kwargs):
+            inner = getattr(lifecycle, "inner", lifecycle)  # run.py's first-attempt wrapper
+            await inner._edit_message(inner.message_ref, content="working")
+            raise _anthropic.APIConnectionError(request=MagicMock())
+
+        mock_run_turn.side_effect = replace_then_fail
+        await bot.on_message(message)
+
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        assert "rid:" in replacement.edit.call_args.kwargs["content"]
+        retire.assert_not_awaited()
+
 
 class TestThreadMention:
     """Thread mentions respond in-place with XML history context."""
