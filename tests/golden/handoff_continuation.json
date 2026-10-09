@@ -662,7 +662,7 @@
           "allowed_mentions": {
             "parse": []
           },
-          "content": "**test-agent**\n\nHello from the agent!",
+          "content": "-# test-agent\nHello from the agent!",
           "view": null
         },
         "receiver": {
@@ -1030,7 +1030,7 @@
           "allowed_mentions": {
             "parse": []
           },
-          "content": "**test-agent**\n\nHello from the agent!",
+          "content": "-# test-agent\nHello from the agent!",
           "view": null
         },
         "receiver": {
@@ -1326,7 +1326,7 @@
           "allowed_mentions": {
             "parse": []
           },
-          "content": "**test-agent**\n\nHello from the agent!",
+          "content": "-# test-agent\nHello from the agent!",
           "view": null
         },
         "receiver": {
