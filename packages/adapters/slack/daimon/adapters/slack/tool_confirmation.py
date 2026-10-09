@@ -76,6 +76,7 @@ class _PostedCard:
     client: AsyncWebClient
     channel: str
     ts: str
+    thread_ts: str | None
     answered_edit_done: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -114,7 +115,18 @@ class SlackConfirmationCards:
                 ts = str(response.get("ts") or "")  # pyright: ignore[reportUnknownMemberType]
                 if record_post is not None and ts:
                     await record_post(ts)
-                posted = _PostedCard(prompt=prompt, client=client, channel=channel, ts=ts)
+                parent_thread_ts = (
+                    thread_ts
+                    if thread_ts and thread_ts != ts and not channel.startswith("D")
+                    else None
+                )
+                posted = _PostedCard(
+                    prompt=prompt,
+                    client=client,
+                    channel=channel,
+                    ts=ts,
+                    thread_ts=parent_thread_ts,
+                )
                 posted_cards.append(posted)
                 return posted
 
@@ -199,7 +211,12 @@ async def _edit(
 async def _ephemeral(posted: _PostedCard, user: str, text: str) -> None:
     try:
         await posted.client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=posted.channel, user=user, text=text, mrkdwn=False, parse="none"
+            channel=posted.channel,
+            user=user,
+            thread_ts=posted.thread_ts,
+            text=text,
+            mrkdwn=False,
+            parse="none",
         )
     except SlackApiError as err:
         log.warning("slack.tool_confirmation.ephemeral_failed", error=str(err))

@@ -40,14 +40,16 @@ async def _post(
     cards: SlackConfirmationCards,
     client: MagicMock,
     prompt: ConfirmationPrompt | None = None,
+    *,
+    channel: str = "C1",
 ) -> tuple[asyncio.Task[Any], str]:
-    hook = cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9")
+    hook = cards.hook(cast(AsyncWebClient, client), channel=channel, thread_ts="1699.9")
     waiting = asyncio.create_task(hook(prompt or _prompt()))
     while not client.chat_postMessage.await_count:
         await asyncio.sleep(0)
     await asyncio.sleep(0)
     kwargs = client.chat_postMessage.await_args.kwargs
-    assert kwargs["channel"] == "C1"
+    assert kwargs["channel"] == channel
     assert kwargs["thread_ts"] == "1699.9"
     (actions,) = [b for b in kwargs["attachments"][0]["blocks"] if b["type"] == "actions"]
     approve_id = actions["elements"][0]["action_id"]
@@ -63,6 +65,7 @@ async def test_the_requesters_approve_answers_approved_and_edits_the_card() -> N
     client.chat_postEphemeral.assert_awaited_once_with(
         channel="C1",
         user="U2",
+        thread_ts="1699.9",
         text=NOT_YOURS_MESSAGE.format(requester="<@U1>"),
         mrkdwn=False,
         parse="none",
@@ -77,6 +80,17 @@ async def test_the_requesters_approve_answers_approved_and_edits_the_card() -> N
     assert update["ts"] == "1700.1"
     assert update["text"].startswith("Approved")
     assert not [b for b in update["attachments"][0]["blocks"] if b["type"] == "actions"]
+
+    for channel, posted_ts in (("C1", "1699.9"), ("D1", "1700.1")):
+        other_cards = SlackConfirmationCards()
+        other_client = _client()
+        other_client.chat_postMessage.return_value = {"ts": posted_ts}
+        other_waiting, other_approve_id = await _post(other_cards, other_client, channel=channel)
+        await other_cards.handle_click(_click(other_approve_id, "U2"))
+        assert other_client.chat_postEphemeral.await_args.kwargs.get("thread_ts") is None
+        other_waiting.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await other_waiting
 
 
 async def test_the_requesters_deny_answers_denied() -> None:
@@ -127,6 +141,7 @@ async def test_tool_words_are_literal_in_card_fallback_and_private_details(
 
     await cards.handle_click(_click(approve_id.replace(":approve", ":details"), "U2"))
     details = client.chat_postEphemeral.await_args.kwargs
+    assert details["thread_ts"] == "1699.9"
     assert details["text"] == f"File: {safe}"
     assert details["mrkdwn"] is False and details["parse"] == "none"
     waiting.cancel()
