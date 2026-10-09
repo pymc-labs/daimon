@@ -197,6 +197,9 @@ Host durability, batching, attribution, pricing, wake generations and registry
 selection still require their shared fixture adapters. The guarded Luna smoke
 above verifies a narrow live lifecycle path; it does not certify these host
 guarantees or resource workflows. No recorder fixtures were made.
+selection still require their shared fixture adapters. A guarded smoke on
+2026-10-09 returned `invalid_request`, with unknown billing and a retained $0.45
+reservation; it did not establish live correctness. No recorder fixtures were made.
 
 ## Offline conformance
 
