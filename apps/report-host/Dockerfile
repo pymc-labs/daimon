@@ -3,7 +3,7 @@
 # are the admin bearer and, in its own SQLite file, one seam token per
 # published report — both supplied at runtime, never baked in.
 
-FROM python:3.12-slim
+FROM mirror.gcr.io/library/python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
