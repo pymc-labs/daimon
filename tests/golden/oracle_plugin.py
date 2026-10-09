@@ -47,7 +47,7 @@ from daimon.testing import effect_recorder, turn_fakes
 from daimon.testing.effect_recorder import EffectRecorder, json_value
 from daimon.testing.ma import not_found_response
 from daimon.testing.ma_transport import Json, ScriptedReply, ScriptedTransport
-from http_turn import HttpTurnFixtures
+from http_turn import HttpTurnFixtures, synchronize_approval_poll, synchronize_cancel_timer
 from mutations import apply as apply_mutation
 from sqlalchemy import ColumnDefault, DateTime
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -141,8 +141,8 @@ class RenderClock:
     """Freeze periodic render time; finalizer renders still execute normally.
 
     Existing fixtures finish their events without advancing this clock. They
-    assert the driver's forced terminal render. Real sleeps outside that timer
-    (cancel, retry, approval and deadlines) keep their existing fixture behavior.
+    assert the driver's forced terminal render. Other driver sleeps are delegated normally. Short fixture cancellation/
+    approval waits and ceiling use explicit barriers to avoid SDK setup races.
     """
 
     def __getattr__(self, name: str) -> Any:
@@ -437,6 +437,10 @@ def pytest_runtest_setup(item: Any) -> None:
         PATCH.setattr(cls, "_make_message", make_message)
 
     HTTP_TURNS.append(HttpTurnFixtures(PATCH))
+    if item.name == "test_interrupt_mid_consume_posts_user_interrupt_and_ends_clean_on_ack":
+        synchronize_cancel_timer(PATCH, item.module)
+    if item.name == "test_chat_write_shows_a_card_and_runs_only_after_confirm":
+        synchronize_approval_poll(PATCH, item.module)
     for name in (
         "on_render",
         "on_terminal_success",

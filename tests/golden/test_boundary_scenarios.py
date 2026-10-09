@@ -2,22 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
+import sys
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import httpx
 import pytest
 from aioresponses import aioresponses as AioResponsesMock
+from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
@@ -25,12 +28,101 @@ from daimon.adapters.slack.app import SlackApp
 from daimon.core.config import McpSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
+from daimon.core.turn import driver as turn_driver
+from daimon.core.turn.ceiling import CEILING_MESSAGE
+from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.termination import TerminationReason
+from daimon.testing.effect_recorder import FakeClock
 from daimon.testing.factories import make_ledger_entry, make_tenant
 from daimon.testing.ma import combine_handlers, make_fake_memory_store_handler
 from daimon.testing.ma_models import ma_session
+from daimon.testing.turn_fakes import BlockForever, FakeAnthropic, RecordingLifecycle
 from daimon.testing.turn_router import build_turn_router
+from http_turn import EventBytes, HttpTurnFixtures
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
+
+
+async def test_ceiling_after_http_setup_closes_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A virtual deadline expires only after actual SDK setup and first body read.
+
+    The timeout provider cancels and drains the awaited coroutine exactly as
+    wait_for does. The production driver owns ceiling classification/delivery.
+    No race against SDK import latency or machine wall-clock scheduling exists.
+    """
+    if "oracle_plugin" not in sys.modules:
+        HttpTurnFixtures(monkeypatch)
+    fake = FakeAnthropic()
+    fake.beta.sessions.events.stream_scripts = [[BlockForever()]]
+    lifecycle = RecordingLifecycle()
+    clock = FakeClock(NOW)
+    reading = asyncio.Event()
+    original_iteration = EventBytes.__aiter__
+
+    async def read_started(self: EventBytes) -> AsyncIterator[bytes]:
+        reading.set()
+        async for chunk in original_iteration(self):
+            yield chunk
+
+    monkeypatch.setattr(EventBytes, "__aiter__", read_started)
+    original_asyncio = cast(Any, turn_driver).asyncio
+    timeout_calls: list[float] = []
+
+    class DeadlineClock:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(original_asyncio, name)
+
+        async def wait_for(self, coroutine: Any, *, timeout: float) -> Any:
+            timeout_calls.append(timeout)
+            task = asyncio.create_task(coroutine)
+            ready = asyncio.create_task(reading.wait())
+            try:
+                done, _ = await asyncio.wait({task, ready}, return_when=asyncio.FIRST_COMPLETED)
+                if task in done:
+                    return task.result()
+                clock.advance(timeout)
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+                raise TimeoutError
+            finally:
+                ready.cancel()
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await ready
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    monkeypatch.setattr(turn_driver, "asyncio", DeadlineClock())
+    final = await asyncio.wait_for(
+        turn_driver.run_turn(
+            anthropic=cast(AsyncAnthropic, fake),
+            session_id="sess_ceiling",
+            user_message="hi",
+            lifecycle=lifecycle,
+            cancel=asyncio.Event(),
+            billing=BillingExempt(reason="cli-operator-run"),
+            now=clock.now,
+            deadline=NOW + timedelta(seconds=60),
+        ),
+        timeout=30,
+    )
+    assert timeout_calls == [60]
+    assert clock.current == NOW + timedelta(seconds=60)
+    assert final.error is not None and final.error.kind == "ceiling"
+    assert final.error.message == CEILING_MESSAGE
+    assert final.termination == TerminationReason.CEILING
+    assert len(lifecycle.terminal_failures) == 1
+    assert lifecycle.terminal_success == []
+    assert fake.beta.sessions.events.stream_calls == 1
+    assert fake.beta.sessions.events.streams[0].closed
+    assert len(fake.beta.sessions.events.sent_events) == 1
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() in {"turn.stream_open", "turn.send_initial", "turn.stream_next"}
+        and not task.done()
+    ]
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack"])

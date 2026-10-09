@@ -24,7 +24,7 @@ SCENARIOS = {
     "reconnect": "packages/core/tests/turn/test_driver_hooks.py::test_driver_calls_on_reconnect_on_connection_drop",
     "rate_limit": "packages/core/tests/turn/test_driver_hooks.py::test_driver_calls_on_rate_limited_with_until_before_sleep",
     "mcp_degraded": "packages/core/tests/turn/test_driver.py::test_mcp_failure_then_reply_finalizes_as_success_carrying_the_failure",
-    "ceiling": "packages/core/tests/turn/test_driver_ceiling.py::test_ceiling_breach_closes_the_opened_stream",
+    "ceiling": "tests/golden/test_boundary_scenarios.py::test_ceiling_after_http_setup_closes_stream",
     "billing_replay": "packages/core/tests/turn/test_driver_replay_billing.py::test_replayed_call_is_debited_with_the_turns_attribution",
     "cold_discord": "tests/golden/test_boundary_scenarios.py::test_cold_thread_feedback_before_session_create[discord]",
     "cold_slack": "tests/golden/test_boundary_scenarios.py::test_cold_thread_feedback_before_session_create[slack]",

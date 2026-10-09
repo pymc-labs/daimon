@@ -53,7 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the neutral-core extraction boundary without changing runtime behavior.
 - Thirty-three offline current-path golden transcripts protect neutral-core turn,
   adapter, billing and continuity behavior, including HTTP request payloads,
-  early feedback ordering, ledger dating and DM delivery; a fixed call ceiling prevents
+  early feedback ordering, ledger dating and DM delivery. A controlled deadline
+  and stream-read barrier make ceiling/cancel HTTP replay deterministic under load; a fixed call ceiling prevents
   inventory regeneration from raising the MA ratchet.
 - Scripted offline MA transport and platform/DB effect recorders support
   deterministic neutral-core parity checks with exact billing values and
