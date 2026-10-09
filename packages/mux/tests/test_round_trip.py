@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 import inspect
 import json
+import pickle
 import pkgutil
 
 import mux.contracts
@@ -47,3 +49,9 @@ def test_contracts_are_frozen(sample: BaseModel) -> None:
     field = next(iter(type(sample).model_fields))
     with pytest.raises(ValueError, match="frozen"):
         setattr(sample, field, None)
+
+
+def test_pickle_and_deep_copy(sample: BaseModel) -> None:
+    assert pickle.loads(pickle.dumps(sample)) == sample
+    assert copy.deepcopy(sample) == sample
+    assert sample.model_copy(deep=True) == sample

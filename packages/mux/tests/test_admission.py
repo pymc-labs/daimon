@@ -134,7 +134,7 @@ def test_requirements_cannot_be_mutated_after_admission_was_refused() -> None:
     config = _revision(backend="openai", model="gpt-6", requires={"memory_stores": REQUIRED})
     digest = config.digest
     with pytest.raises((TypeError, AttributeError)):
-        config.requires.clear()  # pyright: ignore[reportAttributeAccessIssue]
+        getattr(config.requires, "clear")()  # noqa: B009 -- deliberate mutation probe
     with pytest.raises(TypeError):
         config.requires["memory_stores"] = CapabilityRequirement(level="optional", fallback="x")  # pyright: ignore[reportIndexIssue]
     assert config.digest == digest == config.content_digest()
@@ -152,5 +152,15 @@ def test_non_default_backend_without_a_model_is_refused_at_admission() -> None:
     config = ConfigRevision.create(CHANNEL, 1, resolved)
     for model in (None, "", "  "):
         forged = config.model_copy(update={"model": model})
-        with pytest.raises(InvalidConfig):
+        # Re-digest, so the selection check, not the digest check, is what refuses it.
+        forged = forged.model_copy(update={"digest": forged.content_digest()})
+        with pytest.raises(InvalidConfig, match="model"):
             admit(forged, PERSISTENT_WORKSPACE)
+
+
+def test_admission_refuses_a_re_digested_backend_profile_mismatch() -> None:
+    config = _revision()
+    forged = config.model_copy(update={"backend": "openai", "model": "gpt-6"})
+    forged = forged.model_copy(update={"digest": forged.content_digest()})
+    with pytest.raises(InvalidConfig, match="selects"):
+        admit(forged, MANAGED_AGENTS)

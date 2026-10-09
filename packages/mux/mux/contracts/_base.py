@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from types import MappingProxyType
+import copy
+from collections.abc import Callable, Iterator, Mapping
 from typing import Annotated
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, WrapSerializer
@@ -34,8 +34,47 @@ class Tagged(Contract):
         self.__pydantic_fields_set__.add("type")
 
 
+class _ReadOnlyMap[K, V](Mapping[K, V]):
+    """An immutable mapping: no mutators, and it pickles and copies.
+
+    `MappingProxyType` cannot be pickled or deep-copied, which a state store
+    or cache needs; this keeps a private dict and exposes only reads.
+    """
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: Mapping[K, V]) -> None:
+        self._data = dict(data)
+
+    def __getitem__(self, key: K) -> V:
+        return self._data[key]
+
+    def __iter__(self) -> Iterator[K]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __eq__(self, other: object) -> bool:
+        return self._data == other if isinstance(other, Mapping) else NotImplemented
+
+    __hash__ = None  # pyright: ignore[reportAssignmentType]
+
+    def __repr__(self) -> str:
+        return repr(self._data)
+
+    def __reduce__(self) -> tuple[type[_ReadOnlyMap[K, V]], tuple[dict[K, V]]]:
+        return (type(self), (self._data,))
+
+    def __copy__(self) -> _ReadOnlyMap[K, V]:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, object]) -> _ReadOnlyMap[K, V]:
+        return type(self)(copy.deepcopy(self._data, memo))
+
+
 def _freeze[K, V](value: Mapping[K, V]) -> Mapping[K, V]:
-    return MappingProxyType(dict(value))
+    return value if isinstance(value, _ReadOnlyMap) else _ReadOnlyMap(value)
 
 
 def _thaw[K, V](value: Mapping[K, V], handler: Callable[[dict[K, V]], object]) -> object:
@@ -45,7 +84,7 @@ def _thaw[K, V](value: Mapping[K, V], handler: Callable[[dict[K, V]], object]) -
 type FrozenMap[K, V] = Annotated[Mapping[K, V], AfterValidator(_freeze), WrapSerializer(_thaw)]
 """A mapping field that cannot be changed after validation.
 
-Validated into a read-only view, so `revision.requires.clear()` raises
+Validated into a read-only mapping, so `revision.requires.clear()` raises
 instead of quietly invalidating a digest. JSON values nested inside stay
 plain lists and dicts.
 """
