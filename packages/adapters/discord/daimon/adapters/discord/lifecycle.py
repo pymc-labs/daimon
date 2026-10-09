@@ -422,13 +422,18 @@ class DiscordTurnLifecycle:
             self._discord_mark = snowflake
 
     def _mark_ended(self) -> None:
-        """Close the turn's window on Discord's clock; the host's only if Discord gave none."""
+        """Close the turn's window on Discord's clock; the host's only if Discord gave none.
+
+        The host clock is the fallback for a terminal path that neither sends
+        nor edits (an unprompted turn whose card is deleted).
+        """
         if self._discord_mark is not None:
             self._ended_before = self._discord_mark + 1
         else:
             self._ended_before = discord.utils.time_snowflake(datetime.now(UTC), high=True)
 
     async def on_terminal_success(self, state: TurnState) -> None:
+        self._discord_mark = None  # only the terminal sends and edits close the window
         try:
             await self._deliver_success(state)
         finally:
@@ -661,6 +666,7 @@ class DiscordTurnLifecycle:
         return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
+        self._discord_mark = None  # only the terminal sends and edits close the window
         try:
             await self._deliver_failure(state, err)
         finally:

@@ -445,8 +445,8 @@ class DiscordPostTransport:
                 if not allow_replacement:
                     raise discord.ClientException("own webhook no longer exists") from exc
                 return await self.send(_prefix_if_fallback=True, **_replacement_send_kwargs(kwargs))
-        await message.edit(**kwargs)
-        return None
+        # Same id, so callers read it as no replacement; its edited_at is Discord's clock.
+        return await message.edit(**kwargs)
 
     async def delete(self, message: discord.Message) -> None:
         if self._ours(message):

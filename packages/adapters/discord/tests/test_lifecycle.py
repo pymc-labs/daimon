@@ -1169,6 +1169,29 @@ async def test_the_turn_window_closes_on_discords_clock() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_unstamped_terminal_falls_back_to_the_host_clock() -> None:
+    """With no Discord stamp at the end (edits that return nothing), the host clock
+    closes the window, so a file the agent posted mid-turn still counts as the turn's."""
+    card = types.SimpleNamespace(id=100)
+
+    async def send(**kwargs: Any) -> object:
+        return card
+
+    async def edit(ref: Any, **kwargs: Any) -> None:
+        pass
+
+    lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_render(TurnState())
+    mid_turn_post = discord.utils.time_snowflake(datetime.now(UTC))
+    await lc.on_terminal_success(_make_success_state())
+
+    window = lc.turn_window
+    assert window is not None
+    assert window[0] < mid_turn_post < window[1], "the stale card id must not close it"
+
+
+@pytest.mark.asyncio
 async def test_a_tool_only_turn_still_closes_its_window() -> None:
     """A tool-only turn posts files too; its sweep needs the window for the dedup."""
     lc, _edits, _thread = _move_fixture(None)
