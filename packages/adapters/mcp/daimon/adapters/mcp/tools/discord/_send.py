@@ -27,9 +27,13 @@ from daimon.adapters.mcp.tools.discord._models import (
     MessageRow,
     _to_message_row,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.discord._post_transport import send_agent_message
+from daimon.adapters.mcp.tools.discord._post_transport import (
+    send_agent_message,
+    split_message_content,
+)
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
+    _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
@@ -117,7 +121,7 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
     file_handles: list[str] | None = None,
     session: aiohttp.ClientSession | None = None,
 ) -> MessageRow:
-    _require_discord_identity(auth)
+    user_id = _require_discord_identity(auth)
     guild_id = _require_guild_id(auth)
     token = _require_bot_token(runtime)
 
@@ -144,13 +148,14 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
         )
 
     async with rest_client(token) as c:
-        _, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
+        _, member = await _resolve_member(c, guild_id, user_id)
         raw_channel = await _resolve_channel(c, channel_id)
         channel = _require_guild_channel(raw_channel, guild_id)
         if isinstance(channel, discord.Thread):
             # Thread.permissions_for needs the parent in the guild cache;
             # the per-call REST client starts with an empty one.
             await _ensure_thread_parent_cached(channel)
+            await _check_thread_view(c, channel, member, user_id)
         _check_send_permission(channel, member)
         await _require_discord_channel_writable(runtime, auth, channel)
         parent_id = str(channel.parent_id) if isinstance(channel, discord.Thread) else None
@@ -189,7 +194,10 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                 )
         extra_messages: list[discord.Message] = []
         if identity is None:
-            sent = await channel.send(content=content, files=files)
+            chunks = split_message_content(content)
+            sent = await channel.send(content=chunks[0], files=files)
+            for chunk in chunks[1:]:
+                extra_messages.append(await channel.send(content=chunk, files=[]))
         else:
             sent = await send_agent_message(
                 c,

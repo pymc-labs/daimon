@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Discord agent tools now check a caller's thread access and posting rights before sending, and split long messages when agent identity is unavailable.
 - A Discord thread that can't be opened gets one plain reply under the mention: "Couldn't open a thread. @mention Daimon again." It used to be the generic error with a request id. A failed typing indicator no longer stops the thread from opening.
 - **Teams answers arrive again when support is set up.** The answer's last message carried the Ask a person button in a card beside its text, and Teams refuses an edit carrying both, so every answer was replaced by "Something went wrong. Mention me to try again." The button now follows the answer in a message of its own.
 - A conversation is no longer stuck after Daimon restarts while an approval card is up. The next message used to fail every time. Daimon now clears the unanswered request and carries on, and if that ever fails the thread says to start a new thread.
