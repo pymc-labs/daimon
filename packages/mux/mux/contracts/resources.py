@@ -9,13 +9,12 @@ that distinction.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import datetime
 from typing import Literal
 
 from pydantic import Field, JsonValue
 
-from mux.contracts._base import Contract
+from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.actions import RequiredAction
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Provider, ResourceRef, Revision, SkillRef, ThreadRef
@@ -29,7 +28,7 @@ class ToolSpec(Contract):
     name: str
     kind: Literal["builtin", "custom", "mcp_toolset"]
     description: str | None = None
-    input_schema: Mapping[str, JsonValue] | None = None
+    input_schema: FrozenMap[str, JsonValue] | None = None
     permission: Literal["auto", "ask"] = "auto"
 
 
@@ -40,7 +39,7 @@ class MCPConnection(Contract):
     url: str
     transport: Literal["streamable_http", "sse"] = "streamable_http"
     credential_ref: str | None = None
-    tool_policy: Mapping[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
+    tool_policy: FrozenMap[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
 
 
 class AgentSpec(Contract):
@@ -52,7 +51,7 @@ class AgentSpec(Contract):
     mcp_servers: tuple[MCPConnection, ...] = ()
     skills: tuple[SkillRef, ...] = ()
     extensions: tuple[ExtensionConfig, ...] = ()
-    metadata: Mapping[str, str] = Field(default_factory=dict[str, str])
+    metadata: FrozenMap[str, str] = Field(default_factory=dict[str, str])
 
 
 class AgentPatch(Contract):
@@ -63,7 +62,7 @@ class AgentPatch(Contract):
     tools: tuple[ToolSpec, ...] | None = None
     mcp_servers: tuple[MCPConnection, ...] | None = None
     skills: tuple[SkillRef, ...] | None = None
-    metadata: Mapping[str, str] | None = None
+    metadata: FrozenMap[str, str] | None = None
 
 
 class Agent(Contract):
@@ -100,7 +99,7 @@ class EnvironmentSpec(Contract):
     execution: Literal["hosted", "self_hosted", "none"] = "hosted"
     sources: tuple[WorkspaceSource, ...] = ()
     network: NetworkPolicy = NetworkPolicy()
-    packages: Mapping[str, tuple[str, ...]] = Field(default_factory=dict[str, tuple[str, ...]])
+    packages: FrozenMap[str, tuple[str, ...]] = Field(default_factory=dict[str, tuple[str, ...]])
     native_config: ExtensionConfig | None = None
 
 
@@ -108,7 +107,7 @@ class EnvironmentPatch(Contract):
     name: str | None = None
     sources: tuple[WorkspaceSource, ...] | None = None
     network: NetworkPolicy | None = None
-    packages: Mapping[str, tuple[str, ...]] | None = None
+    packages: FrozenMap[str, tuple[str, ...]] | None = None
 
 
 class Environment(Contract):
@@ -139,7 +138,7 @@ class SessionSpec(Contract):
     agent_revision: Revision
     environment: ResourceRef | None = None
     config_revision: int = Field(ge=0)
-    metadata: Mapping[str, str] = Field(default_factory=dict[str, str])
+    metadata: FrozenMap[str, str] = Field(default_factory=dict[str, str])
     resources: tuple[ResourceBinding, ...] = ()
     state_mode: Literal["continue", "fresh"] = "continue"
 
@@ -160,14 +159,17 @@ class ProviderBinding(Contract):
 
     Stored apart from the channel's desired config: changing the config
     affects new threads only, so an existing binding is never rewritten by
-    it. `legacy_account_id` is set for a caller-private binding that predates
+    it. `id` is the binding's identity, the one `ContinuityLost.binding_id`
+    and the usage adjustment keys name; it is stable across generations.
+    `legacy_account_id` is set for a caller-private binding that predates
     shared threads.
     """
 
+    id: str
     thread: ThreadRef
     provider: Provider
     profile: str
-    native_refs: Mapping[str, str]
+    native_refs: FrozenMap[str, str]
     generation: int = Field(ge=0)
     config_revision: int = Field(ge=0)
     legacy_account_id: str | None = None
@@ -192,7 +194,7 @@ class SessionFilter(Contract):
 
 class UpdateOperation(Contract):
     kind: Literal["tools", "resources", "agent_revision", "metadata", "native"]
-    detail: Mapping[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
+    detail: FrozenMap[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
 
 
 class UpdatePlan(Contract):

@@ -1,14 +1,13 @@
-"""Input sent into a session, and the actions a paused session waits on."""
+"""Input sent into a session. `RequiredAction` lives in `events` and is re-exported here."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Annotated, Literal
 
-from pydantic import Field, JsonValue
+from pydantic import Field
 
-from mux.contracts._base import Contract, Tagged
-from mux.contracts.events import ContentPart
+from mux.contracts._base import Tagged
+from mux.contracts.events import ContentPart, RequiredAction
 from mux.contracts.extensions import ExtensionConfig
 
 
@@ -47,11 +46,11 @@ InputEvent = Annotated[
 ]
 
 
-class RequiredAction(Contract):
-    """Something the session waits on before the turn can continue."""
-
-    id: str
-    kind: Literal["tool_confirmation", "function_result", "environment_connection", "native"]
-    call_id: str | None = None
-    payload: Mapping[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
-    native_type: str | None = None
+__all__ = [
+    "InputEvent",
+    "NativeInput",
+    "RequiredAction",
+    "UserMessage",
+    "UserToolConfirmation",
+    "UserToolResult",
+]

@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Literal
 
 from pydantic import Field, JsonValue
 
-from mux.contracts._base import Contract
+from mux.contracts._base import Contract, FrozenMap
 
 Provider = Literal["anthropic", "openai", "gemini"]
 """A backend family. One provider can offer several profiles."""
@@ -47,13 +46,15 @@ class ResourceRef(Contract):
     """A provider resource the library tracks: agent, session, file, vault.
 
     `id` is the library identity (existing native IDs may be adopted as is);
-    `binding_id` is the routing boundary the resource lives behind.
+    `account_scope_id` is the provider account or workspace the resource
+    lives in, the routing boundary for API keys. It is not a thread binding:
+    that is `ProviderBinding.id`.
     """
 
     id: str
     kind: str
     provider: Provider
-    binding_id: str
+    account_scope_id: str
 
 
 class Revision(Contract):
@@ -77,7 +78,7 @@ class Page[T](Contract):
 class ModelRef(Contract):
     provider: Provider
     id: str
-    options: Mapping[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
+    options: FrozenMap[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
 
 
 class SkillRef(Contract):

@@ -14,7 +14,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue, model_validator
 
-from mux.contracts._base import Contract, Tagged
+from mux.contracts._base import Contract, FrozenMap, Tagged
 from mux.contracts.errors import ProviderErrorCategory
 from mux.contracts.ids import Provider, ResourceRef
 
@@ -50,7 +50,7 @@ class NativePart(Tagged):
     type: Literal["native"] = "native"
     namespace: str
     version: int = Field(ge=1)
-    payload: Mapping[str, JsonValue]
+    payload: FrozenMap[str, JsonValue]
 
 
 ContentPart = Annotated[
@@ -107,7 +107,7 @@ class AgentMessageDeltaPayload(Contract):
 class ToolUsePayload(Contract):
     call_id: str
     tool_name: str
-    input: Mapping[str, JsonValue]
+    input: FrozenMap[str, JsonValue]
     executor: Literal["agent", "host", "mcp"]
     permission: Literal["auto", "ask"] = "auto"
     mcp_server: str | None = None
@@ -124,7 +124,12 @@ class StatusRunningPayload(Contract):
 
 
 class TurnEndedPayload(Contract):
-    """The one authoritative outcome of a root turn."""
+    """The one authoritative outcome of a root turn.
+
+    It carries no revision: a corrected outcome is a new `session.turn_ended`
+    event with `authority="reconciled"` for the same `root_turn_id`, and the
+    latest reconciled event wins.
+    """
 
     root_turn_id: str
     outcome: TurnOutcome
@@ -153,7 +158,7 @@ class ToolServerDegradedPayload(Contract):
 
 class UsageObservedPayload(Contract):
     observation_id: str
-    revision: str
+    revision: int = Field(ge=1)
 
 
 class ReconciledPayload(Contract):
@@ -169,8 +174,20 @@ class HistoryGapPayload(Contract):
     recoverable: bool
 
 
+class RequiredAction(Contract):
+    """Something the session waits on before the turn can continue."""
+
+    id: str
+    kind: Literal["tool_confirmation", "function_result", "environment_connection", "native"]
+    call_id: str | None = None
+    payload: FrozenMap[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
+    native_type: str | None = None
+
+
 class RequiresActionPayload(Contract):
-    action_ids: tuple[str, ...]
+    """The session paused for these actions. Pausing is not completing the turn."""
+
+    actions: tuple[RequiredAction, ...]
 
 
 PAYLOAD_MODELS: Mapping[str, type[Contract]] = {
@@ -209,7 +226,7 @@ class Event(Contract):
     observed_at: datetime
     occurred_at: datetime | None = None
     authority: Authority
-    payload: Mapping[str, JsonValue]
+    payload: FrozenMap[str, JsonValue]
     native: NativeProvenance
 
     @model_validator(mode="after")

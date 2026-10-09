@@ -89,6 +89,7 @@ class ContinuityLost(MuxError):
     """The thread's conversation or workspace is gone and cannot be continued.
 
     Raised instead of starting fresh: a silent fresh start is a bug.
+    `binding_id` is the `ProviderBinding.id` of the thread.
     """
 
     def __init__(self, binding_id: str, evidence: tuple[str, ...]) -> None:

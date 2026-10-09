@@ -10,10 +10,13 @@ goes without, so the host can surface each of them.
 from __future__ import annotations
 
 from mux.contracts._base import Contract
-from mux.contracts.config import DEFAULT_BACKEND, ConfigRevision, ThreadMode
+from mux.contracts.config import ConfigRevision, ThreadMode, check_selection
 from mux.contracts.errors import InvalidConfig, UnsupportedCapability
 from mux.contracts.ids import Provider
 from mux.contracts.profile import CORE_CAPABILITIES, SUPPORTED, Capability, Profile, Support
+
+UNWAIVABLE: frozenset[Capability] = frozenset({"usage_observations"})
+"""Required on every profile, core or not: a turn that cannot be metered is refused."""
 
 
 class FallbackApplied(Contract):
@@ -40,17 +43,22 @@ def admit(config: ConfigRevision, profile: Profile) -> Admission:
 
     Core capabilities are mandatory on a core profile. A non-core profile is
     only ever selected by naming it in the config, which waives the core
-    capabilities it lacks; any the config lists as required still refuse.
+    capabilities it lacks, except `usage_observations`, which no profile may
+    go without; any the config lists as required still refuse.
     `unknown` support counts as unsupported.
     """
-    if profile.profile_id != config.profile:
-        raise InvalidConfig(f"config selects {config.profile!r}, not {profile.profile_id!r}")
-    if config.model is None and profile.provider != DEFAULT_BACKEND:
-        raise InvalidConfig(f"backend {profile.provider!r} needs an explicit model")
+    if profile.profile_id != config.profile or profile.provider != config.backend:
+        raise InvalidConfig(
+            f"config selects {config.backend}/{config.profile}, not {profile.profile_id!r}"
+        )
+    check_selection(config.backend, config.profile, config.model)
+    if config.digest != config.content_digest():
+        raise InvalidConfig("config revision digest does not match its content")
 
     required: set[Capability] = {
         cap for cap, req in config.requires.items() if req.level == "required"
     }
+    required |= UNWAIVABLE
     waived: tuple[Capability, ...] = ()
     if profile.core:
         required |= CORE_CAPABILITIES

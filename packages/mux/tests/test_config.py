@@ -90,3 +90,46 @@ def test_config_revision_digest_tracks_content(
     tampered = revision.model_dump() | {"model": "other"}
     with pytest.raises(ValidationError, match="digest"):
         ConfigRevision.model_validate(tampered)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"backend": "gemini", "profile": "anthropic.managed_agents", "model": None},
+        {"backend": "openai", "profile": "openai.persistent_workspace", "model": ""},
+        {"backend": "openai", "profile": "openai.persistent_workspace", "model": None},
+        {"backend": "anthropic", "profile": "anthropic.managed_agents", "model": " "},
+    ],
+)
+def test_contradictory_selection_is_rejected_on_direct_construction(
+    fields: dict[str, object], channel: ChannelRef
+) -> None:
+    with pytest.raises(InvalidConfig):
+        ResolvedBackend.model_validate(fields)
+    legacy = ConfigRevision.create(channel, 1, LEGACY).model_dump(mode="json")
+    with pytest.raises(InvalidConfig):
+        ConfigRevision.model_validate(legacy | fields)
+
+
+def test_blank_model_is_rejected_by_resolution() -> None:
+    with pytest.raises(InvalidConfig, match="blank"):
+        resolve_default(BackendConfig(backend="openai", model="  "))
+
+
+def test_unknown_profile_is_rejected_by_resolution() -> None:
+    with pytest.raises(InvalidConfig, match="unknown profile"):
+        resolve_default(BackendConfig(profile="anthropic.typo"))
+
+
+def test_create_accepts_an_existing_revision(
+    channel: ChannelRef, resolved: ResolvedBackend
+) -> None:
+    first = ConfigRevision.create(channel, 1, resolved)
+    second = ConfigRevision.create(channel, 2, first)
+    assert (second.local, second.digest) == (2, first.digest)
+
+
+def test_mapping_fields_are_read_only(resolved: ResolvedBackend) -> None:
+    with pytest.raises(TypeError):
+        resolved.requires["steer"] = CapabilityRequirement(level="required")  # pyright: ignore[reportIndexIssue]
+    assert type(BackendConfig().requires) is not dict

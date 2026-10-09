@@ -29,7 +29,8 @@ are written against.
 | `mux.drivers` | one subpackage per provider (empty so far) |
 
 Every contract type is a frozen pydantic model that rejects unknown fields,
-and survives a JSON round trip unchanged. Provider SDK types, exceptions,
+and survives a JSON round trip unchanged. Mapping fields are read-only views,
+so a value cannot be edited in place after validation either. Provider SDK types, exceptions,
 URLs and tokens never cross the contract.
 
 ## Configuration and the default
@@ -44,13 +45,16 @@ and `thread_mode`, all optional. `resolve_default` fills in the rest:
   `openai.persistent_workspace` for `openai`. Gemini has no core profile, so a
   Gemini channel has to name `gemini.inline_reuse`.
 - Any backend other than Anthropic must name its model; there is no default.
+  A blank model is refused, and so is a profile id no declared profile has.
 - `thread_mode="shared"` is opt-in. Unconfigured channels keep one thread per
   caller.
 
 A `ConfigRevision` is one immutable resolved configuration for a channel,
 numbered by `local` and carrying a SHA-256 `digest` of its content. The
-digest is checked when a revision is loaded, so a stored revision that was
-edited by hand fails to parse.
+digest is checked when a revision is loaded and again at admission, so a
+stored revision that was edited by hand is refused. A resolved configuration
+whose profile belongs to another backend, or whose non-default backend has no
+model, fails validation however it was built.
 
 ## Profiles and admission
 
@@ -68,7 +72,7 @@ when it supports all nine.
 | `anthropic.managed_agents` | yes | Every capability native. |
 | `openai.persistent_workspace` | yes | `reconcile` is emulated from saved items; missed events cannot be replayed. |
 | `openai.conversation_only` | no | No workspace. Admitted only when the channel names it. |
-| `gemini.inline_reuse` | no | The inline environment expires after inactivity, so workspace persistence is not guaranteed. Admitted only when the channel names it. |
+| `gemini.inline_reuse` | no | The inline environment expires after inactivity, so workspace persistence is not guaranteed. Its usage reporting is undeclared, so admission refuses it until a driver shows usage observations. |
 
 `admit(config, profile)` is pure and runs before any provider call:
 
@@ -82,6 +86,9 @@ when it supports all nine.
 - A non-core profile named by the config goes without the core capabilities
   it lacks; those are listed in `Admission.waived_core`. A core capability
   the config explicitly requires is still refused.
+- `usage_observations` is required on every profile, core or not: a turn
+  that cannot be metered is never admitted.
+- The profile must be the one the config selects, for the same backend.
 
 ## Ports
 
@@ -92,6 +99,11 @@ built from the host's own authorization decision. Every mutating call takes
 an operation `key`, and `expected` (a revision or binding generation) where
 two writers could race. `Sessions.migrate` always raises
 `MigrationUnsupported`: a backend change applies to new threads only.
+
+A `ResourceRef` names the provider account or workspace a resource lives in
+as `account_scope_id`. That is not a thread binding: a `ProviderBinding`
+(which provider session backs a thread, at which generation) has its own
+`id`, stable across generations.
 
 Native features are typed extension ports addressed by
 `(port type, namespace, version)`. Anthropic offers `memory_stores`,
@@ -111,20 +123,28 @@ Asking for a namespace the profile does not offer raises
 `cancel_receipt`, for example). `agent.thread.*` and `native.*` events carry a
 provider-shaped payload that is not checked. `agent.message.delta` is valid
 only with `authority="preview"`: previews never bill or complete a turn.
+`session.requires_action` carries the full `RequiredAction` records, so the
+host knows each action's kind and call id without looking back.
+`session.turn_ended` has no revision of its own; a corrected outcome is a new
+`session.turn_ended` with `authority="reconciled"` for the same root turn.
 
 ## Errors
 
 `MuxError` is the root. `InvalidConfig`, `UnsupportedCapability`,
 `ExtensionVersionError`, `ScopeViolation`, `ContinuityLost`,
 `BindingConflict`, `OperationConflict`, `MigrationUnsupported` and
-`ProviderError` derive from it. `ProviderError.category` is one of `auth`,
+`ProviderError` derive from it. `ContinuityLost.binding_id` is the
+`ProviderBinding.id` of the thread. `ProviderError.category` is one of `auth`,
 `permission`, `not_found`, `conflict`, `invalid_request`, `rate_limited`,
 `overloaded`, `upstream` or `transient_network`. A delivery the driver cannot
 confirm is not an error: its receipt reports `outcome_unknown`.
 
 ## Usage
 
-`UsageObservation` is one measurement with an `id` and a `revision`. Token
+`UsageObservation` is one measurement with an `id` and an integer
+`revision`. A higher revision of the same `id` supersedes a lower one, and an
+observation never overwrites a higher revision already applied;
+`native_revision` keeps the provider's own version string for audit. Token
 counts are nullable, because a count the provider did not report is unknown,
 not zero. `input_tokens` includes the cached and cache-write counts, and
 `output_reasoning_tokens` is part of `output_tokens`. `native_meter` keeps the

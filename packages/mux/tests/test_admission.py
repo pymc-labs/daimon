@@ -98,7 +98,48 @@ def test_non_core_profile_still_refuses_an_explicitly_required_core_capability()
     )
     with pytest.raises(UnsupportedCapability) as caught:
         admit(config, INLINE_REUSE)
-    assert caught.value.missing == ("thread_workspace_persistence",)
+    assert caught.value.missing == ("thread_workspace_persistence", "usage_observations")
+
+
+def test_usage_observations_cannot_be_waived_even_by_a_named_non_core_profile() -> None:
+    assert not INLINE_REUSE.core
+    config = _revision(backend="gemini", profile="gemini.inline_reuse", model="gemini-3")
+    with pytest.raises(UnsupportedCapability) as caught:
+        admit(config, INLINE_REUSE)
+    assert caught.value.missing == ("usage_observations",)
+    unmetered = CONVERSATION_ONLY.model_copy(
+        update={"support": {**CONVERSATION_ONLY.support, "usage_observations": "unknown"}}
+    )
+    named = _revision(backend="openai", profile="openai.conversation_only", model="gpt-6")
+    with pytest.raises(UnsupportedCapability):
+        admit(named, unmetered)
+
+
+def test_admission_rejects_a_backend_that_disagrees_with_the_profile() -> None:
+    legacy = _revision()
+    with pytest.raises(InvalidConfig):
+        admit(legacy, MANAGED_AGENTS.model_copy(update={"provider": "openai"}))
+
+
+def test_admission_rejects_a_stale_digest() -> None:
+    config = _revision(backend="openai", model="gpt-6", requires={"memory_stores": REQUIRED})
+    forged = ConfigRevision.model_construct(
+        **{name: getattr(config, name) for name in ConfigRevision.model_fields} | {"requires": {}}
+    )
+    with pytest.raises(InvalidConfig, match="digest"):
+        admit(forged, PERSISTENT_WORKSPACE)
+
+
+def test_requirements_cannot_be_mutated_after_admission_was_refused() -> None:
+    config = _revision(backend="openai", model="gpt-6", requires={"memory_stores": REQUIRED})
+    digest = config.digest
+    with pytest.raises((TypeError, AttributeError)):
+        config.requires.clear()  # pyright: ignore[reportAttributeAccessIssue]
+    with pytest.raises(TypeError):
+        config.requires["memory_stores"] = CapabilityRequirement(level="optional", fallback="x")  # pyright: ignore[reportIndexIssue]
+    assert config.digest == digest == config.content_digest()
+    with pytest.raises(UnsupportedCapability):
+        admit(config, PERSISTENT_WORKSPACE)
 
 
 def test_profile_must_match_the_config() -> None:
@@ -108,6 +149,8 @@ def test_profile_must_match_the_config() -> None:
 
 def test_non_default_backend_without_a_model_is_refused_at_admission() -> None:
     resolved = resolve_default(BackendConfig(backend="openai", model="gpt-6"))
-    config = ConfigRevision.create(CHANNEL, 1, resolved.model_copy(update={"model": None}))
-    with pytest.raises(InvalidConfig, match="explicit model"):
-        admit(config, PERSISTENT_WORKSPACE)
+    config = ConfigRevision.create(CHANNEL, 1, resolved)
+    for model in (None, "", "  "):
+        forged = config.model_copy(update={"model": model})
+        with pytest.raises(InvalidConfig):
+            admit(forged, PERSISTENT_WORKSPACE)

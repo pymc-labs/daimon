@@ -8,12 +8,11 @@ capability. Anything it does not declare is `unknown`, and admission treats
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Literal
 
 from pydantic import model_validator
 
-from mux.contracts._base import Contract
+from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.errors import ExtensionVersionError, UnsupportedCapability
 from mux.contracts.extensions import ExtensionRef
 from mux.contracts.ids import Provider
@@ -78,7 +77,7 @@ class Profile(Contract):
     schema_version: str
     sdk_pin: str
     core: bool
-    support: Mapping[Capability, Support]
+    support: FrozenMap[Capability, Support]
     extensions: tuple[ExtensionRef, ...] = ()
 
     @model_validator(mode="after")

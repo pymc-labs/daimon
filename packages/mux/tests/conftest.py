@@ -107,8 +107,8 @@ from mux.profiles import MANAGED_AGENTS
 from pydantic import BaseModel
 
 NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
-REF = ResourceRef(id="sesn_1", kind="session", provider="anthropic", binding_id="ws_1")
-ART = ResourceRef(id="file_1", kind="file", provider="anthropic", binding_id="ws_1")
+REF = ResourceRef(id="sesn_1", kind="session", provider="anthropic", account_scope_id="ws_1")
+ART = ResourceRef(id="file_1", kind="file", provider="anthropic", account_scope_id="ws_1")
 REV = Revision(local=3, native="7")
 MODEL = ModelRef(provider="anthropic", id="claude-opus-5-5", options={"effort": "high"})
 CHANNEL = ChannelRef(tenant_id="t1", platform="discord", channel_id="c1")
@@ -125,6 +125,7 @@ RESOLVED = ResolvedBackend(
     thread_mode="shared",
 )
 BINDING = ProviderBinding(
+    id="bind_1",
     thread=THREAD,
     provider="anthropic",
     profile="anthropic.managed_agents",
@@ -209,10 +210,10 @@ SAMPLES: tuple[BaseModel, ...] = (
     SessionErrorPayload(category="rate_limited", retry_status="retrying", native_code="429"),
     StatusTerminatedPayload(reason="deleted"),
     ToolServerDegradedPayload(server="daimon", error_type="timeout", retry_status="exhausted"),
-    UsageObservedPayload(observation_id="evt_9", revision="1"),
+    UsageObservedPayload(observation_id="evt_9", revision=1),
     ReconciledPayload(snapshot_ref="snap_1", coverage="full", gaps=("x",)),
     HistoryGapPayload(domain="events", after="evt_1", recoverable=False),
-    RequiresActionPayload(action_ids=("a1",)),
+    RequiresActionPayload(actions=(ACTION,)),
     _event("agent.message", AgentMessagePayload(item_id="i1", content=(TEXT,))),
     _event("native.anthropic.span", StatusRunningPayload(root_turn_id="x")),
     UserMessage(content=(TEXT,)),
@@ -241,7 +242,8 @@ SAMPLES: tuple[BaseModel, ...] = (
     RestoreReceipt(operation_id="op_5", session=REF, accepted_losses=("processes",)),
     UsageObservation(
         id="evt_9",
-        revision="1",
+        revision=2,
+        native_revision="v2",
         session=REF,
         turn_id="turn_1",
         model=MODEL,

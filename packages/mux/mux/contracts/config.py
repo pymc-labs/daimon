@@ -14,7 +14,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from mux.contracts._base import Contract
+from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.errors import InvalidConfig
 from mux.contracts.ids import ChannelRef, Provider
 from mux.contracts.profile import Capability
@@ -60,7 +60,7 @@ class BackendConfig(Contract):
     backend: Provider | None = None
     profile: str | None = None
     model: str | None = None
-    requires: Mapping[Capability, CapabilityRequirement] = Field(
+    requires: FrozenMap[Capability, CapabilityRequirement] = Field(
         default_factory=dict[Capability, CapabilityRequirement]
     )
     thread_mode: ThreadMode = "per_caller"
@@ -76,10 +76,15 @@ class ResolvedBackend(Contract):
     backend: Provider
     profile: str
     model: str | None
-    requires: Mapping[Capability, CapabilityRequirement] = Field(
+    requires: FrozenMap[Capability, CapabilityRequirement] = Field(
         default_factory=dict[Capability, CapabilityRequirement]
     )
     thread_mode: ThreadMode = "per_caller"
+
+    @model_validator(mode="after")
+    def _consistent(self) -> ResolvedBackend:
+        check_selection(self.backend, self.profile, self.model)
+        return self
 
     def content_digest(self) -> str:
         """A content digest: equal configurations hash equal."""
@@ -107,8 +112,22 @@ class ConfigRevision(ResolvedBackend):
             channel=channel,
             local=local,
             digest=resolved.content_digest(),
-            **resolved.model_dump(),
+            **resolved.model_dump(include=set(ResolvedBackend.model_fields)),
         )
+
+
+def check_selection(backend: Provider, profile: str, model: str | None) -> None:
+    """Raise `InvalidConfig` unless backend, profile and model agree.
+
+    The profile must belong to the backend, and a model, when named, must
+    not be blank. Only the default backend may leave the model unset.
+    """
+    if not profile.startswith(f"{backend}."):
+        raise InvalidConfig(f"profile {profile!r} does not belong to backend {backend!r}")
+    if model is not None and not model.strip():
+        raise InvalidConfig("model must not be blank")
+    if backend != DEFAULT_BACKEND and model is None:
+        raise InvalidConfig(f"backend {backend!r} needs an explicit model")
 
 
 def resolve_default(config: BackendConfig | None) -> ResolvedBackend:
@@ -126,10 +145,11 @@ def resolve_default(config: BackendConfig | None) -> ResolvedBackend:
     profile = config.profile or DEFAULT_PROFILES.get(backend)
     if profile is None:
         raise InvalidConfig(f"backend {backend!r} has no default profile; name one explicitly")
-    if not profile.startswith(f"{backend}."):
-        raise InvalidConfig(f"profile {profile!r} does not belong to backend {backend!r}")
-    if backend != DEFAULT_BACKEND and not config.model:
-        raise InvalidConfig(f"backend {backend!r} needs an explicit model")
+    check_selection(backend, profile, config.model)
+    from mux.profiles import PROFILES  # deferred: profiles are built from these contracts
+
+    if profile not in PROFILES:
+        raise InvalidConfig(f"unknown profile {profile!r}")
     return ResolvedBackend(
         backend=backend,
         profile=profile,

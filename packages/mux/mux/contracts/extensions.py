@@ -9,11 +9,9 @@ check, operation store, journal and usage path as a core call.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 from pydantic import Field, JsonValue, field_validator
 
-from mux.contracts._base import Contract
+from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.ids import PROVIDERS
 
 
@@ -45,7 +43,7 @@ class ExtensionConfig(Contract):
 
     namespace: str
     version: int = Field(ge=1)
-    value: Mapping[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
+    value: FrozenMap[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
 
     _namespace = field_validator("namespace")(_check_namespace)
 
