@@ -43,7 +43,7 @@
           "archived_at": null,
           "created_at": "<time:epoch+0s>",
           "description": null,
-          "id": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
+          "id": "<id:1>",
           "mcp_servers": [],
           "metadata": {},
           "model": {
@@ -66,8 +66,8 @@
       "operation": "request",
       "payload": {
         "body": {
-          "agent": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
-          "environment_id": "<id:1>"
+          "agent": "<id:1>",
+          "environment_id": "<id:2>"
         },
         "method": "POST",
         "path": "/v1/sessions",
@@ -97,7 +97,7 @@
         "body": {
           "agent": {
             "description": null,
-            "id": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
+            "id": "<id:1>",
             "mcp_servers": [],
             "model": {
               "id": "claude-sonnet-5",
@@ -114,8 +114,8 @@
           "archived_at": null,
           "created_at": "<time:epoch+0s>",
           "deployment_id": null,
-          "environment_id": "<id:1>",
-          "id": "session_jRwAW92TRBN4t1j30cJgPhf",
+          "environment_id": "<id:2>",
+          "id": "<id:3>",
           "metadata": {},
           "outcome_evaluations": [],
           "resources": [],
@@ -143,7 +143,7 @@
       "payload": {
         "body": null,
         "method": "POST",
-        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/archive",
+        "path": "/v1/sessions/<id:3>/archive",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -170,7 +170,7 @@
         "body": {
           "agent": {
             "description": null,
-            "id": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
+            "id": "<id:1>",
             "mcp_servers": [],
             "model": {
               "id": "claude-sonnet-5",
@@ -187,8 +187,8 @@
           "archived_at": "<time:epoch+0s>",
           "created_at": "<time:epoch+0s>",
           "deployment_id": null,
-          "environment_id": "<id:1>",
-          "id": "session_jRwAW92TRBN4t1j30cJgPhf",
+          "environment_id": "<id:2>",
+          "id": "<id:3>",
           "metadata": {},
           "outcome_evaluations": [],
           "resources": [],
@@ -216,7 +216,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/events",
+        "path": "/v1/sessions/<id:3>/events",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -245,7 +245,7 @@
                   "type": "text"
                 }
               ],
-              "id": "sevt_user_1",
+              "id": "<id:4>",
               "processed_at": null,
               "type": "user.message"
             },
@@ -256,7 +256,7 @@
                   "type": "text"
                 }
               ],
-              "id": "sevt_agent_1",
+              "id": "<id:5>",
               "processed_at": "<time:epoch-2214000s>",
               "type": "agent.message"
             }
@@ -271,7 +271,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/events/stream",
+        "path": "/v1/sessions/<id:3>/events/stream",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -291,7 +291,7 @@
       },
       "platform": "ma_http",
       "result": {
-        "body": "event: session.status_idle\ndata: {\"id\": \"evt_OCqS44qSzS4etL1p82X8Pu\", \"processed_at\": \"2026-10-09T00:00:00Z\", \"stop_reason\": {\"type\": \"end_turn\"}, \"type\": \"session.status_idle\"}\n\n",
+        "body": "event: session.status_idle\ndata: {\"id\": \"<id:6>\", \"processed_at\": \"2026-10-09T00:00:00Z\", \"stop_reason\": {\"type\": \"end_turn\"}, \"type\": \"session.status_idle\"}\n\n",
         "status": 200
       }
     },
@@ -321,7 +321,7 @@
           ]
         },
         "method": "POST",
-        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/events",
+        "path": "/v1/sessions/<id:3>/events",
         "protocol_headers": [
           [
             "anthropic-beta",

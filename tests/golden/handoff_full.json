@@ -43,7 +43,7 @@
           "archived_at": null,
           "created_at": "<time:epoch+0s>",
           "description": null,
-          "id": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
+          "id": "<id:1>",
           "mcp_servers": [],
           "metadata": {},
           "model": {
@@ -66,8 +66,8 @@
       "operation": "request",
       "payload": {
         "body": {
-          "agent": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
-          "environment_id": "<id:1>"
+          "agent": "<id:1>",
+          "environment_id": "<id:2>"
         },
         "method": "POST",
         "path": "/v1/sessions",
@@ -97,7 +97,7 @@
         "body": {
           "agent": {
             "description": null,
-            "id": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
+            "id": "<id:1>",
             "mcp_servers": [],
             "model": {
               "id": "claude-sonnet-5",
@@ -114,8 +114,8 @@
           "archived_at": null,
           "created_at": "<time:epoch+0s>",
           "deployment_id": null,
-          "environment_id": "<id:1>",
-          "id": "session_jRwAW92TRBN4t1j30cJgPhf",
+          "environment_id": "<id:2>",
+          "id": "<id:3>",
           "metadata": {},
           "outcome_evaluations": [],
           "resources": [],
@@ -143,7 +143,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/events",
+        "path": "/v1/sessions/<id:3>/events",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -172,7 +172,7 @@
                   "type": "text"
                 }
               ],
-              "id": "sevt_user_1",
+              "id": "<id:4>",
               "processed_at": null,
               "type": "user.message"
             },
@@ -183,7 +183,7 @@
                   "type": "text"
                 }
               ],
-              "id": "sevt_agent_1",
+              "id": "<id:5>",
               "processed_at": "<time:epoch-2214000s>",
               "type": "agent.message"
             }
@@ -198,7 +198,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/events/stream",
+        "path": "/v1/sessions/<id:3>/events/stream",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -218,7 +218,7 @@
       },
       "platform": "ma_http",
       "result": {
-        "body": "event: agent.message\ndata: {\"id\": \"sevt_checkpoint\", \"content\": [{\"text\": \"-rw-r--r-- 1 root root 42 handoff.tar.gz\", \"type\": \"text\"}], \"processed_at\": \"2026-09-13T09:00:00Z\", \"type\": \"agent.message\"}\n\nevent: session.status_idle\ndata: {\"id\": \"sevt_idle\", \"processed_at\": \"2026-09-13T09:00:00Z\", \"stop_reason\": {\"type\": \"end_turn\"}, \"type\": \"session.status_idle\"}\n\n",
+        "body": "event: agent.message\ndata: {\"id\": \"<id:6>\", \"content\": [{\"text\": \"-rw-r--r-- 1 root root 42 handoff.tar.gz\", \"type\": \"text\"}], \"processed_at\": \"2026-09-13T09:00:00Z\", \"type\": \"agent.message\"}\n\nevent: session.status_idle\ndata: {\"id\": \"<id:7>\", \"processed_at\": \"2026-09-13T09:00:00Z\", \"stop_reason\": {\"type\": \"end_turn\"}, \"type\": \"session.status_idle\"}\n\n",
         "status": 200
       }
     },
@@ -248,7 +248,7 @@
           ]
         },
         "method": "POST",
-        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/events",
+        "path": "/v1/sessions/<id:3>/events",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -281,7 +281,7 @@
                   "type": "text"
                 }
               ],
-              "id": "evt_YPTfwwDTnAqowa4HG6S37AWe",
+              "id": "<id:8>",
               "processed_at": null,
               "type": "user.message"
             },
@@ -292,7 +292,7 @@
                   "type": "text"
                 }
               ],
-              "id": "evt_WVzVHacoo7UP9lezPtlwgp3w",
+              "id": "<id:9>",
               "processed_at": null,
               "type": "system.message"
             }
@@ -328,7 +328,7 @@
           ],
           [
             "scope_id",
-            "session_jRwAW92TRBN4t1j30cJgPhf"
+            "<id:3>"
           ]
         ]
       },
@@ -340,19 +340,19 @@
               "created_at": "<time:epoch+0s>",
               "downloadable": true,
               "filename": "daimon-handoff-0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60.tar.gz",
-              "id": "file_OCqS44qSzS4etL1p82X8Pu",
+              "id": "<id:10>",
               "mime_type": "application/octet-stream",
               "scope": {
-                "id": "session_jRwAW92TRBN4t1j30cJgPhf",
+                "id": "<id:3>",
                 "type": "session"
               },
               "size_bytes": 41,
               "type": "file"
             }
           ],
-          "first_id": "file_OCqS44qSzS4etL1p82X8Pu",
+          "first_id": "<id:10>",
           "has_more": false,
-          "last_id": "file_OCqS44qSzS4etL1p82X8Pu"
+          "last_id": "<id:10>"
         },
         "status": 200
       }
@@ -384,7 +384,7 @@
           ],
           [
             "scope_id",
-            "session_jRwAW92TRBN4t1j30cJgPhf"
+            "<id:3>"
           ]
         ]
       },
@@ -396,19 +396,19 @@
               "created_at": "<time:epoch+0s>",
               "downloadable": true,
               "filename": "daimon-handoff-0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60.tar.gz",
-              "id": "file_OCqS44qSzS4etL1p82X8Pu",
+              "id": "<id:10>",
               "mime_type": "application/octet-stream",
               "scope": {
-                "id": "session_jRwAW92TRBN4t1j30cJgPhf",
+                "id": "<id:3>",
                 "type": "session"
               },
               "size_bytes": 41,
               "type": "file"
             }
           ],
-          "first_id": "file_OCqS44qSzS4etL1p82X8Pu",
+          "first_id": "<id:10>",
           "has_more": false,
-          "last_id": "file_OCqS44qSzS4etL1p82X8Pu"
+          "last_id": "<id:10>"
         },
         "status": 200
       }
@@ -440,7 +440,7 @@
           ],
           [
             "scope_id",
-            "session_jRwAW92TRBN4t1j30cJgPhf"
+            "<id:3>"
           ]
         ]
       },
@@ -452,19 +452,19 @@
               "created_at": "<time:epoch+0s>",
               "downloadable": true,
               "filename": "daimon-handoff-0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60.tar.gz",
-              "id": "file_OCqS44qSzS4etL1p82X8Pu",
+              "id": "<id:10>",
               "mime_type": "application/octet-stream",
               "scope": {
-                "id": "session_jRwAW92TRBN4t1j30cJgPhf",
+                "id": "<id:3>",
                 "type": "session"
               },
               "size_bytes": 41,
               "type": "file"
             }
           ],
-          "first_id": "file_OCqS44qSzS4etL1p82X8Pu",
+          "first_id": "<id:10>",
           "has_more": false,
-          "last_id": "file_OCqS44qSzS4etL1p82X8Pu"
+          "last_id": "<id:10>"
         },
         "status": 200
       }
@@ -474,7 +474,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/files/file_OCqS44qSzS4etL1p82X8Pu/content",
+        "path": "/v1/files/<id:10>/content",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -503,7 +503,7 @@
       "payload": {
         "body": null,
         "method": "DELETE",
-        "path": "/v1/files/file_OCqS44qSzS4etL1p82X8Pu",
+        "path": "/v1/files/<id:10>",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -528,7 +528,7 @@
       "platform": "ma_http",
       "result": {
         "body": {
-          "id": "file_OCqS44qSzS4etL1p82X8Pu",
+          "id": "<id:10>",
           "type": "file_deleted"
         },
         "status": 200
@@ -577,7 +577,7 @@
           "created_at": "<time:epoch+0s>",
           "downloadable": false,
           "filename": "daimon-handoff-0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60.tar.gz",
-          "id": "file_HWz8uAPzjCqsfhC2d9S1okt1",
+          "id": "<id:11>",
           "mime_type": "application/gzip",
           "scope": null,
           "size_bytes": 41,
@@ -613,7 +613,7 @@
           ],
           [
             "scope_id",
-            "session_jRwAW92TRBN4t1j30cJgPhf"
+            "<id:3>"
           ]
         ]
       },

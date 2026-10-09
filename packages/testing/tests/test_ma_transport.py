@@ -17,10 +17,14 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from daimon.testing.effect_recorder import (
+    DATABASE_EXTENSIONS,
+    DB_TABLES,
+    LEGACY_DB_COLUMNS,
     EffectRecorder,
     FakeClock,
     Normalizer,
     RecordingPlatformClient,
+    database_metadata,
 )
 from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_session
@@ -193,13 +197,44 @@ async def test_database_recorder_captures_all_five_tables(db_session: AsyncSessi
     )
     await db_session.commit()
     snapshot = await EffectRecorder().database(db_session)
-    assert set(snapshot) == {
+    assert set(snapshot) - {DATABASE_EXTENSIONS} == {
         "usage_events",
         "tenant_ledger",
         "turn_outcomes",
         "thread_sessions",
         "task_continuations",
     }
+    added_columns = {
+        name: added
+        for name in DB_TABLES
+        if (
+            added := [
+                column.name
+                for column in database_metadata().tables[name].columns
+                if column.name not in LEGACY_DB_COLUMNS[name]
+            ]
+        )
+    }
+    if not added_columns:
+        assert DATABASE_EXTENSIONS not in snapshot
+    else:
+        extensions = snapshot[DATABASE_EXTENSIONS]
+        assert isinstance(extensions, dict) and set(extensions) == set(added_columns)
+        for name, columns in added_columns.items():
+            section = extensions[name]
+            assert isinstance(section, dict) and set(section) == {"columns", "rows"}
+            assert section["columns"] == columns
+            legacy_rows = snapshot[name]
+            extra_rows = section["rows"]
+            assert isinstance(legacy_rows, list) and isinstance(extra_rows, list)
+            assert len(extra_rows) == len(legacy_rows)
+            if not legacy_rows:
+                assert extra_rows == [], "empty tables still declare their additive columns"
+            for index, extra in enumerate(extra_rows):
+                assert isinstance(extra, dict) and set(extra) == {"legacy_row_index", "values"}
+                assert extra["legacy_row_index"] == index
+                values = extra["values"]
+                assert isinstance(values, dict) and set(values) == set(columns)
     ledger = snapshot["tenant_ledger"]
     assert isinstance(ledger, list) and len(ledger) == 1
     row = ledger[0]
@@ -351,7 +386,8 @@ async def test_real_db_clock_is_stable_across_three_commits_in_all_five_tables(
                     await asyncio.sleep(delay)
                 recorder = EffectRecorder()
                 snapshot = await recorder.database(session)
-                for rows in snapshot.values():
+                for name in DB_TABLES:
+                    rows = snapshot[name]
                     assert isinstance(rows, list) and len(rows) == 3
                 ledger = cast(list[dict[str, Any]], snapshot["tenant_ledger"])
                 observed.append([row["occurred_at"] for row in ledger])

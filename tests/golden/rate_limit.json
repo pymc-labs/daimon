@@ -6,7 +6,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/sess_1/events/stream",
+        "path": "/v1/sessions/<id:1>/events/stream",
         "protocol_headers": [
           [
             "anthropic-beta",

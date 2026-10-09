@@ -5,7 +5,7 @@
       {
         "channel_id": null,
         "delta_usd": "100.000000",
-        "id": "<id:4>",
+        "id": "<id:6>",
         "idempotency_key": "trial:c37ec648-e9bf-54b0-b578-173bc49f5c9b",
         "occurred_at": "<time:epoch+0s>",
         "payment_event_id": null,
@@ -18,7 +18,7 @@
     "turn_outcomes": [
       {
         "account_id": "00000000-0000-0000-0000-000000000007",
-        "agent_id": "<id:6>",
+        "agent_id": "<id:1>",
         "billing_posture": "none",
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
@@ -27,7 +27,7 @@
         "duration_ms": 0,
         "ended_at": "<time:epoch+0s>",
         "error_class": "AdmissionDenied",
-        "id": "<id:5>",
+        "id": "<id:7>",
         "input_tokens": 0,
         "model_calls": 0,
         "model_ids": [],
@@ -50,10 +50,10 @@
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "channel_id": null,
-        "event_id": "<id:3>",
-        "id": "<id:1>",
+        "event_id": "<id:5>",
+        "id": "<id:3>",
         "input_tokens": 2000000,
-        "managed_session_id": "<id:2>",
+        "managed_session_id": "<id:4>",
         "model": "claude-sonnet-4-6",
         "occurred_at": "<time:epoch+0s>",
         "output_tokens": 0,
@@ -155,7 +155,7 @@
               "archived_at": null,
               "created_at": "<time:epoch-24278400s>",
               "description": null,
-              "id": "ag_parity_test",
+              "id": "<id:1>",
               "mcp_servers": [],
               "metadata": {
                 "daimon_name": "test-agent",
@@ -230,7 +230,7 @@
               },
               "created_at": "<time:epoch-24278400s>",
               "description": "",
-              "id": "env_parity_test",
+              "id": "<id:2>",
               "metadata": {
                 "daimon_name": "test-env",
                 "daimon_tenant": "c37ec648-e9bf-54b0-b578-173bc49f5c9b"
@@ -251,7 +251,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/agents/ag_parity_test",
+        "path": "/v1/agents/<id:1>",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -275,7 +275,7 @@
           "archived_at": null,
           "created_at": "<time:epoch-24278400s>",
           "description": null,
-          "id": "ag_parity_test",
+          "id": "<id:1>",
           "mcp_servers": [],
           "metadata": {
             "daimon_name": "test-agent",
@@ -302,7 +302,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/environments/env_parity_test",
+        "path": "/v1/environments/<id:2>",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -341,7 +341,7 @@
           },
           "created_at": "<time:epoch-24278400s>",
           "description": "",
-          "id": "env_parity_test",
+          "id": "<id:2>",
           "metadata": {
             "daimon_name": "test-env",
             "daimon_tenant": "c37ec648-e9bf-54b0-b578-173bc49f5c9b"

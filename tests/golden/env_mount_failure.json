@@ -50,7 +50,7 @@
           "created_at": "<time:epoch+0s>",
           "downloadable": false,
           "filename": ".env",
-          "id": "file_PvrJGuPK6AZ6sxv7WuqDlzwy",
+          "id": "<id:1>",
           "mime_type": "text/plain",
           "scope": null,
           "size_bytes": 6,
@@ -63,11 +63,11 @@
       "operation": "request",
       "payload": {
         "body": {
-          "agent": "ag_update_ops",
-          "environment_id": "<id:1>",
+          "agent": "<id:2>",
+          "environment_id": "<id:3>",
           "resources": [
             {
-              "file_id": "<id:2>",
+              "file_id": "<id:1>",
               "mount_path": ".env",
               "type": "file"
             }
@@ -101,7 +101,7 @@
         "body": {
           "agent": {
             "description": null,
-            "id": "ag_update_ops",
+            "id": "<id:2>",
             "mcp_servers": [],
             "model": {
               "id": "claude-sonnet-4-6",
@@ -118,15 +118,15 @@
           "archived_at": null,
           "created_at": "<time:epoch+0s>",
           "deployment_id": null,
-          "environment_id": "<id:1>",
-          "id": "session_jRwAW92TRBN4t1j30cJgPhf",
+          "environment_id": "<id:3>",
+          "id": "<id:4>",
           "metadata": {},
           "outcome_evaluations": [],
           "resources": [
             {
               "created_at": "<time:epoch+0s>",
-              "file_id": "<id:2>",
-              "id": "res_OCqS44qSzS4etL1p82X8Pu",
+              "file_id": "<id:1>",
+              "id": "<id:5>",
               "mount_path": "/mnt/session/uploads/.env",
               "type": "file",
               "updated_at": "<time:epoch+0s>"
@@ -194,7 +194,7 @@
           "created_at": "<time:epoch+0s>",
           "downloadable": false,
           "filename": ".env",
-          "id": "file_YPTfwwDTnAqowa4HG6S37AWe",
+          "id": "<id:6>",
           "mime_type": "text/plain",
           "scope": null,
           "size_bytes": 6,
@@ -208,7 +208,7 @@
       "payload": {
         "body": null,
         "method": "DELETE",
-        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/resources/res_OCqS44qSzS4etL1p82X8Pu",
+        "path": "/v1/sessions/<id:4>/resources/<id:5>",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -233,7 +233,7 @@
       "platform": "ma_http",
       "result": {
         "body": {
-          "id": "res_OCqS44qSzS4etL1p82X8Pu",
+          "id": "<id:5>",
           "type": "session_resource_deleted"
         },
         "status": 200
@@ -243,12 +243,12 @@
       "operation": "request",
       "payload": {
         "body": {
-          "file_id": "<id:3>",
+          "file_id": "<id:6>",
           "mount_path": ".env",
           "type": "file"
         },
         "method": "POST",
-        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/resources",
+        "path": "/v1/sessions/<id:4>/resources",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -286,12 +286,12 @@
       "operation": "request",
       "payload": {
         "body": {
-          "file_id": "<id:3>",
+          "file_id": "<id:6>",
           "mount_path": ".env",
           "type": "file"
         },
         "method": "POST",
-        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/resources",
+        "path": "/v1/sessions/<id:4>/resources",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -329,12 +329,12 @@
       "operation": "request",
       "payload": {
         "body": {
-          "file_id": "<id:3>",
+          "file_id": "<id:6>",
           "mount_path": ".env",
           "type": "file"
         },
         "method": "POST",
-        "path": "/v1/sessions/session_jRwAW92TRBN4t1j30cJgPhf/resources",
+        "path": "/v1/sessions/<id:4>/resources",
         "protocol_headers": [
           [
             "anthropic-beta",

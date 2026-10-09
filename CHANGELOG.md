@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Normalize offline oracle provider handles by first capture appearance, including SDK responses, transport paths/query, deduplication keys and encoded SSE/control JSON; preserve literal filesystem paths and configured URLs even when they contain provider handles. Verify stored session fingerprints and hash their normalized inputs so unrelated ID generation cannot change goldens.
 - Discord agent posts and MCP tools now wait at most two seconds for a new channel webhook, then post through the bot with the agent name while creation continues in the background. Creation is deduplicated per channel, 429 retries respect a cooldown, and new channels create one webhook.
 - **The scheduler's usage sweep no longer re-replays every model call it has
   already metered.** It asks the API for `span.model_request_end` events only
@@ -83,6 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and stream-read barrier make ceiling/cancel HTTP replay deterministic under load; a fixed call ceiling prevents
   inventory regeneration from raising the MA ratchet. Golden fixture defaults
   use public testing metadata access, preserving the private-core import boundary.
+  Database goldens pin all legacy columns at integration 4d61c73 and retain
+  additive schema fields in a separate capture, preventing new binding columns
+  from changing the existing behavior oracle.
+  Transport recorder regressions also validate additive and empty-table captures
+  when combined with the new binding columns.
 - Scripted offline MA transport and platform/DB effect recorders support
   deterministic neutral-core parity checks with exact billing values and
   jitter-safe DB timestamps that preserve scheduled durations.
