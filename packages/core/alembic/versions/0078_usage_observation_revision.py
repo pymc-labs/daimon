@@ -9,8 +9,8 @@ downgrade: destructive
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0076_usage_observation_revision"
-down_revision: str | None = "0075_neutral_state"
+revision: str = "0078_usage_observation_revision"
+down_revision: str | None = "0077_neutral_state"
 branch_labels: str | None = None
 depends_on: str | None = None
 

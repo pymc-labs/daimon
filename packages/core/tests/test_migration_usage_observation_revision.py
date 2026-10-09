@@ -35,7 +35,7 @@ async def test_usage_revision_roundtrip_preserves_old_rows_and_old_writers(
     )
     assert await db_session.scalar(text("SELECT observation_revision FROM usage_events")) is None
     await db_session.execute(text("UPDATE usage_events SET observation_revision = 3"))
-    path = Path(__file__).parents[1] / "alembic/versions/0076_usage_observation_revision.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0078_usage_observation_revision.py"
     spec = importlib.util.spec_from_file_location("usage_revision_migration", path)
     assert spec is not None and spec.loader is not None
     migration = importlib.util.module_from_spec(spec)
