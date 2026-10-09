@@ -74,6 +74,16 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
             allowed_mentions=discord.AllowedMentions.none(),
         )
         home.attach_message(message)
+        if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+            from daimon.adapters.discord.agent_setup.github_new_repo import (
+                send_pending_notice as send_pending_new_repo_notice,
+            )
+            from daimon.adapters.discord.agent_setup.github_removal import (
+                send_pending_notice as send_pending_removal_notice,
+            )
+
+            await send_pending_new_repo_notice(runtime, interaction, tenant_id=tenant_id)
+            await send_pending_removal_notice(runtime, interaction, tenant_id=tenant_id)
 
     @app_commands.command(name="connect", description="Connect repos to one agent")
     @app_commands.describe(agent="Agent to connect")
