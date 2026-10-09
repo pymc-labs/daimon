@@ -32,6 +32,7 @@ from .conftest import (
     make_requires_action,
     make_status_idle,
     make_tool_confirmation,
+    make_tool_result,
 )
 
 _FROZEN_NOW = datetime(2026, 4, 21, 12, 0, 0, tzinfo=UTC)
@@ -153,8 +154,10 @@ async def test_auto_approve_ends_turn_when_all_requested_ids_already_confirmed()
                     stop_reason=make_requires_action(event_ids=["tu_1"]),
                 )
             ),
-            # MA took the allow, then asked for the same id again.
+            # MA acted on the allow (the call's result), then asked for the
+            # same id again.
             YieldEvent(make_tool_confirmation(event_id="sevt_c1", tool_use_id="tu_1")),
+            YieldEvent(make_tool_result(event_id="sevt_r1", tool_use_id="tu_1", text="ok")),
             YieldEvent(
                 make_status_idle(
                     event_id="sevt_2",
@@ -493,11 +496,13 @@ async def test_auto_approve_replay_echo_followed_by_reask_stops() -> None:
         event_id="sevt_pause", stop_reason=make_requires_action(event_ids=["tu_1"])
     )
     echo = make_tool_confirmation(event_id="sevt_echo", tool_use_id="tu_1")
+    # MA acted on the allow (the call's result), then asked for it again.
+    acted = make_tool_result(event_id="sevt_result", tool_use_id="tu_1", text="ok")
     reask = make_status_idle(
         event_id="sevt_reask", stop_reason=make_requires_action(event_ids=["tu_1"])
     )
     fa.beta.sessions.events.stream_scripts = [[YieldEvent(pause), RaiseReadTimeout()]]
-    fa.beta.sessions.events.replay_events = [pause, echo, reask]
+    fa.beta.sessions.events.replay_events = [pause, echo, acted, reask]
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
     final = await run_turn(
@@ -816,3 +821,63 @@ async def test_require_approval_treats_a_prior_turns_requires_action_idle_as_a_b
     assert final.content == [TextBlock(kind="text", text="current turn ")], (
         "the re-fold must still cut at a prior turn that ENDED on requires_action"
     )
+
+
+async def test_queued_confirmations_in_a_replay_are_not_taken_until_ma_acts() -> None:
+    """Staging, 2026-10-09: six cards expired together and six denies were sent.
+    The stream closed before MA took any; the replay listed all six queued
+    confirmations, and the driver counted them as taken. MA then paused once
+    per remaining call, and the first such pause ended the turn as a re-ask.
+    A queued confirmation is not taken until the call's result appears."""
+    fa = FakeAnthropic()
+    first = make_status_idle(
+        event_id="sevt_p1", stop_reason=make_requires_action(event_ids=["tu_1", "tu_2", "tu_3"])
+    )
+    queued = [
+        make_tool_confirmation(event_id=f"sevt_q{i}", tool_use_id=f"tu_{i}") for i in (1, 2, 3)
+    ]
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(first)],  # confirms all three, then the stream closes cleanly
+        [
+            YieldEvent(
+                make_status_idle(
+                    event_id="sevt_p2", stop_reason=make_requires_action(event_ids=["tu_2", "tu_3"])
+                )
+            ),
+            YieldEvent(
+                make_status_idle(
+                    event_id="sevt_p3", stop_reason=make_requires_action(event_ids=["tu_3"])
+                )
+            ),
+            *(
+                YieldEvent(
+                    make_tool_result(event_id=f"sevt_r{i}", tool_use_id=f"tu_{i}", text="no")
+                )
+                for i in (1, 2, 3)
+            ),
+            YieldEvent(make_agent_message(event_id="sevt_msg", text="nothing was published")),
+            YieldEvent(make_status_idle(event_id="sevt_end", stop_reason=make_end_turn())),
+        ],
+    ]
+    # The replay after the close shows the pause and all three confirmations,
+    # still queued: MA has not acted on any of them yet.
+    fa.beta.sessions.events.replay_events = [first, *queued]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="publish",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=AutoApprove(),
+    )
+
+    assert final.error is None, final.error
+    assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
+    assert final.content == [TextBlock(kind="text", text="nothing was published")]
+    sent = [batch for _sid, batch in fa.beta.sessions.events.sent_events]
+    assert len(sent) == 2, "one user.message and one batch of three confirmations, never resent"

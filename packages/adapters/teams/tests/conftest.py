@@ -545,3 +545,13 @@ def stub_bot_token(monkeypatch: pytest.MonkeyPatch) -> None:
         return "test-bot-token"
 
     monkeypatch.setattr(TokenManager, "get_app_token", _fake_token)
+
+
+@pytest.fixture(autouse=True)
+def isolate_card_edits() -> Iterator[None]:
+    """Card edits finish in the background; one test's stalled edit must not
+    hold the next test's edit to a card with the same id."""
+    from daimon.core.posted_controls.lifecycle import cancel_pending_card_edits
+
+    yield
+    cancel_pending_card_edits()
