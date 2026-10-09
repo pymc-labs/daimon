@@ -9,6 +9,9 @@ Turn and event ports remain independently injectable in the driver factory.
 Resource drivers include vault credentials, files and session administration;
 credential specifications carry opaque references resolved for one request.
 Credential errors and SDK request logs redact raw and escaped secret values.
+Session resource lists resolve all repository token references for the same
+request. Native environment creation retains explicit null descriptions through
+its closed environment config schema.
 
 The import name is the top-level `mux`, not `daimon.mux`, so it can be split
 into its own repository without a rename. `mux` never imports `daimon`, and

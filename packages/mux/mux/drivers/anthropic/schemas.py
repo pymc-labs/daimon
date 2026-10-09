@@ -133,7 +133,8 @@ class SelfHostedConfig(NativeConfig):
 class EnvironmentConfig(NativeConfig):
     """Payload for the EnvironmentSpec native_config field, version 1."""
 
-    config: Annotated[CloudConfig | SelfHostedConfig, Field(discriminator="type")] | None
+    config: Annotated[CloudConfig | SelfHostedConfig, Field(discriminator="type")] | None = None
+    create_nulls: list[Literal["description"]] = []
 
 
 class ModelConfig(NativeConfig):

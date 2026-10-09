@@ -1,5 +1,5 @@
 {
-  "files_scanned": 1981,
+  "files_scanned": 1982,
   "parse_errors": [],
   "calls": [
     {
@@ -4429,6 +4429,30 @@
       ]
     },
     {
+      "file": "packages/core/tests/test_mux_credential_security.py",
+      "line": 347,
+      "end": 349,
+      "scope": "send",
+      "category": "test",
+      "resource": "sessions.create",
+      "call": "client.beta.sessions.create(agent='agent', environment_id='environment', **kwargs)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_mux_environment_nulls.py",
+      "line": 38,
+      "end": 38,
+      "scope": "test_environment_create_keeps_explicit_description_null_and_configuration",
+      "category": "test",
+      "resource": "environments.create",
+      "call": "before.beta.environments.create(**payload)",
+      "request_keys": [],
+      "response_access": [
+        "expected.id"
+      ]
+    },
+    {
       "file": "packages/core/tests/test_mux_resources_parity.py",
       "line": 183,
       "end": 183,
@@ -5465,8 +5489,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 202,
-      "end": 202,
+      "line": 207,
+      "end": 207,
       "scope": "walk",
       "category": "production",
       "resource": "environments.list",
@@ -5476,8 +5500,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 115,
-      "end": 117,
+      "line": 120,
+      "end": 122,
       "scope": "create",
       "category": "production",
       "resource": "environments.create",
@@ -5487,8 +5511,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 125,
-      "end": 125,
+      "line": 130,
+      "end": 130,
       "scope": "retrieve",
       "category": "production",
       "resource": "environments.retrieve",
@@ -5498,8 +5522,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 141,
-      "end": 141,
+      "line": 146,
+      "end": 146,
       "scope": "list",
       "category": "production",
       "resource": "environments.list",
@@ -5509,8 +5533,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 167,
-      "end": 169,
+      "line": 172,
+      "end": 174,
       "scope": "update",
       "category": "production",
       "resource": "environments.update",
@@ -5520,8 +5544,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 177,
-      "end": 177,
+      "line": 182,
+      "end": 182,
       "scope": "archive",
       "category": "production",
       "resource": "environments.archive",
@@ -5531,8 +5555,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 195,
-      "end": 195,
+      "line": 200,
+      "end": 200,
       "scope": "delete",
       "category": "production",
       "resource": "environments.delete",
@@ -5830,8 +5854,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 154,
-      "end": 154,
+      "line": 155,
+      "end": 155,
       "scope": "walk",
       "category": "production",
       "resource": "vaults.list",
@@ -5841,8 +5865,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 203,
-      "end": 203,
+      "line": 207,
+      "end": 207,
       "scope": "credential_walk",
       "category": "production",
       "resource": "vaults.credentials.list",
@@ -5852,8 +5876,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 186,
-      "end": 186,
+      "line": 189,
+      "end": 189,
       "scope": "list",
       "category": "production",
       "resource": "vaults.list",
@@ -5863,8 +5887,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 294,
-      "end": 294,
+      "line": 298,
+      "end": 298,
       "scope": "remove",
       "category": "production",
       "resource": "vaults.credentials.delete",
@@ -5874,8 +5898,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 301,
-      "end": 301,
+      "line": 305,
+      "end": 305,
       "scope": "archive",
       "category": "production",
       "resource": "vaults.archive",
@@ -5885,8 +5909,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 162,
-      "end": 162,
+      "line": 165,
+      "end": 165,
       "scope": "create",
       "category": "production",
       "resource": "vaults.create",
@@ -5896,8 +5920,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 231,
-      "end": 233,
+      "line": 235,
+      "end": 237,
       "scope": "_send_credential",
       "category": "production",
       "resource": "vaults.credentials.create",
@@ -5907,8 +5931,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 251,
-      "end": 253,
+      "line": 255,
+      "end": 257,
       "scope": "update_credential",
       "category": "production",
       "resource": "vaults.credentials.update",
@@ -11881,15 +11905,6 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 523,
-      "module": "anthropic.types.beta",
-      "names": [
-        "BetaManagedAgentsVault"
-      ],
-      "category": "production"
-    },
-    {
-      "file": "packages/core/daimon/core/mux_compat.py",
       "line": 533,
       "module": "anthropic.types.beta",
       "names": [
@@ -11899,7 +11914,16 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 550,
+      "line": 543,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsVault"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/mux_compat.py",
+      "line": 560,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -11908,7 +11932,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 566,
+      "line": 576,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"
@@ -11917,7 +11941,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_compat.py",
-      "line": 618,
+      "line": 628,
       "module": "anthropic.types.beta.vaults.beta_managed_agents_credential",
       "names": [
         "BetaManagedAgentsCredential"

@@ -144,10 +144,10 @@ async def test_tenant_vault_lists_expose_only_host_granted_ids_without_extra_req
             "id": native_id,
             "type": "vault",
             "display_name": native_id,
-            "metadata": {},
+            "metadata": {"daimon_tenant": "another-tenant"} if native_id == "retagged" else {},
             "created_at": "2026-01-01T00:00:00Z",
         }
-        for native_id in ("owned", "foreign")
+        for native_id in ("owned", "foreign", "retagged")
     ]
     sdk = ScriptedTransport(
         deque(
@@ -161,7 +161,10 @@ async def test_tenant_vault_lists_expose_only_host_granted_ids_without_extra_req
     )
     async with sdk.client() as client:
         backend = AnthropicManagedAgents(
-            client, authorization=ResourceAuthorization(tenant, frozenset({("vault", "owned")}))
+            client,
+            authorization=ResourceAuthorization(
+                tenant, frozenset({("vault", "owned"), ("vault", "retagged")})
+            ),
         )
         port = backend.extension(Vaults, namespace="anthropic.vaults", version=1)
         page = await port.list(tenant, page=PageRequest())
@@ -169,7 +172,7 @@ async def test_tenant_vault_lists_expose_only_host_granted_ids_without_extra_req
         privileged = await port.list(SCOPE, page=PageRequest())
         assert [vault.ref.id for vault in page.data] == ["owned"]
         assert [vault.ref.id for vault in walked] == ["owned"]
-        assert [vault.ref.id for vault in privileged.data] == ["owned", "foreign"]
+        assert [vault.ref.id for vault in privileged.data] == ["owned", "foreign", "retagged"]
     assert len(sdk.requests) == 3
     sdk.assert_consumed()
 
@@ -282,4 +285,108 @@ async def test_sdk_error_repr_redacts_escaped_multiline_credential():
     )
     assert "dummy-escaped-secret" not in displayed
     assert "[redacted]" in displayed
+    sdk.assert_consumed()
+
+
+async def test_two_repo_resource_tokens_are_resolved_and_redacted_together_on_first_failure(caplog):
+    from typing import Literal
+
+    from mux.drivers.anthropic.resources._secrets import _active_materials, credential_request
+    from mux.drivers.anthropic.schemas import NativeConfig
+
+    class Repo(NativeConfig):
+        type: Literal["github_repository"]
+        url: str
+        authorization_token_ref: str
+
+    class Create(NativeConfig):
+        resources: list[Repo]
+        metadata: dict[str, str]
+
+    materials = {
+        "opaque-first": "dummy-first-repo\nsecond-line",
+        "opaque-second": "dummy-second-repo",
+    }
+    config = Create(
+        resources=[
+            Repo(
+                type="github_repository",
+                url="https://github.com/org/first",
+                authorization_token_ref="opaque-first",
+            ),
+            Repo(
+                type="github_repository",
+                url="https://github.com/org/second",
+                authorization_token_ref="opaque-second",
+            ),
+        ],
+        metadata={"authorization_token_ref": "metadata-is-not-a-reference"},
+    )
+    lookups = []
+
+    def resolve(scope, ref):
+        assert scope == SCOPE
+        lookups.append(ref)
+        return materials[ref]
+
+    body = {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "first repository failed: " + materials["opaque-first"],
+        },
+        "second_repository_token": materials["opaque-second"],
+    }
+    sdk = ScriptedTransport(
+        deque([ScriptedReply("POST", "/v1/sessions", httpx.Response(400, json=body))])
+    )
+    caplog.set_level(logging.DEBUG, logger="anthropic._base_client")
+    async with sdk.client() as client:
+
+        async def send(kwargs):
+            return await client.beta.sessions.create(
+                agent="agent", environment_id="environment", **kwargs
+            )
+
+        with pytest.raises(APIStatusError) as failure:
+            await compat.legacy_call(credential_request(SCOPE, config, resolve, send))
+    assert lookups == ["opaque-first", "opaque-second"]
+    expected_resources = [
+        {
+            "type": "github_repository",
+            "url": "https://github.com/org/first",
+            "authorization_token": materials["opaque-first"],
+        },
+        {
+            "type": "github_repository",
+            "url": "https://github.com/org/second",
+            "authorization_token": materials["opaque-second"],
+        },
+    ]
+    assert sdk.requests[0].json() == {
+        "agent": "agent",
+        "environment_id": "environment",
+        "resources": expected_resources,
+        "metadata": {"authorization_token_ref": "metadata-is-not-a-reference"},
+    }
+    assert failure.value.request.content == b""
+    displayed = "\n".join(
+        [
+            str(failure.value),
+            repr(failure.value),
+            repr(failure.value.body),
+            "".join(traceback.format_exception(failure.value)),
+            caplog.text,
+            repr(caplog.records),
+            repr(config),
+            config.model_dump_json(),
+        ]
+    )
+    assert "Request options:" in caplog.text
+    assert "[redacted]" in caplog.text
+    for material in materials.values():
+        assert material not in displayed
+        assert repr(material)[1:-1] not in displayed
+    assert _active_materials.get() is None
+    assert len(sdk.requests) == 1
     sdk.assert_consumed()

@@ -443,3 +443,14 @@ The SDK's DEBUG request-options logs are redacted within credential I/O, includi
 escaped values and exception text. The logging filter holds no credential values;
 request-local material is cleared and its context reset after I/O. Operation keys
 remain pass-through, including repeated keys, with no driver journal or deduplication.
+
+Session creation resolves repository token references inside resource lists at
+the SDK write. All resolved tokens share the same request-local error and log
+redaction, including a failure attributed to the first repository. Free-text
+metadata is outside reference resolution.
+
+Native environment creation preserves an explicit null description through the
+closed `anthropic.environment_config@1` `create_nulls` field. Its only accepted
+field name is `description`; the marker is removed before the SDK request.
+Neutral description omission remains unchanged, including when configuration
+is absent or explicitly null.

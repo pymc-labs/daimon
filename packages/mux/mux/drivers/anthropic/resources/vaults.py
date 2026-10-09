@@ -24,6 +24,7 @@ from mux.drivers.anthropic.resources._authorization import (
     authorize,
     check_record,
     check_ref,
+    visible,
     visible_grant,
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
@@ -152,7 +153,9 @@ class AnthropicVaults:
     async def walk(self, scope: Scope) -> AsyncIterator[VaultRecord]:
         authorize(self._authorization, scope, "vault")
         async for item in provider_iter(self._client.beta.vaults.list()):
-            if visible_grant(self._authorization, scope, "vault", item.id):
+            if visible(scope, item.metadata) and visible_grant(
+                self._authorization, scope, "vault", item.id
+            ):
                 yield self._vault(scope, item)
 
     async def create(self, scope: Scope, display_name: str, *, key: str) -> VaultRecord:
@@ -188,7 +191,8 @@ class AnthropicVaults:
             data=tuple(
                 self._vault(scope, item)
                 for item in (result.data or ())
-                if visible_grant(self._authorization, scope, "vault", item.id)
+                if visible(scope, item.metadata)
+                and visible_grant(self._authorization, scope, "vault", item.id)
             ),
             next_cursor=result.next_page or None,
             has_more=bool(result.next_page),

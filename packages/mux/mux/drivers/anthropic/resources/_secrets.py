@@ -124,6 +124,8 @@ async def credential_request[T](
     error: ProviderError | None = None
 
     def resolve(node: object) -> object:
+        if isinstance(node, (list, tuple)):
+            return [resolve(item) for item in cast(list[object] | tuple[object, ...], node)]
         if isinstance(node, Mapping):
             result: dict[str, object] = {}
             for name, value in cast(Mapping[str, object], node).items():
@@ -153,6 +155,8 @@ async def credential_request[T](
             kwargs["auth"] = resolve(kwargs["auth"])
         elif "authorization_token_ref" in kwargs:
             kwargs = cast(dict[str, object], resolve(kwargs))
+        elif "resources" in kwargs:
+            kwargs["resources"] = resolve(kwargs["resources"])
         elif "content_ref" in kwargs:
             content = resolver(scope, cast(str, kwargs.pop("content_ref")))
             values.append(content)

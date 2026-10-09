@@ -166,7 +166,17 @@ def _environment_values(payload: Mapping[str, object]) -> dict[str, object]:
 
 
 def environment_spec(payload: Mapping[str, object]) -> EnvironmentSpec:
-    return EnvironmentSpec.model_validate(_environment_values(payload))
+    values = _environment_values(payload)
+    if "description" in payload and payload["description"] is None:
+        native = _mapping(values.get("native_config", {}))
+        native_values = dict(_mapping(native.get("value", {})))
+        native_values["create_nulls"] = ["description"]
+        values["native_config"] = {
+            "namespace": "anthropic.environment_config",
+            "version": 1,
+            "value": native_values,
+        }
+    return EnvironmentSpec.model_validate(values)
 
 
 def environment_patch(payload: Mapping[str, object]) -> EnvironmentPatch:
