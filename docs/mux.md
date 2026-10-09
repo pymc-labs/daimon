@@ -654,9 +654,9 @@ nullable and corrections retain one observation identity with higher revisions.
 The host supplies authorization and durable snapshot/revision state. This package
 does not enable OpenAI in Daimon or change Anthropic defaults. The driver README
 lists the implemented surface and refused operations.
-The persistent profile remains non-core until the skills and artifacts resource
-slice is proved. Required vault and multiagent capabilities refuse admission;
-complete workspace export/import has no verified mapping and is unknown.
+The persistent profile is core with offline evidence for all nine mandatory
+capabilities, including skills and artifacts. Vault ports are implemented;
+multiagent refuses admission and complete workspace export/import remains unknown.
 ## CLI GitHub grant cleanup
 
 GitHub grant changes archive live sessions and their App vaults through
@@ -717,10 +717,9 @@ response identity without a retrieve. Session and file grants are checked before
 
 Explicit registration through `mux.drivers.openai.conformance.register` runs the
 actual OpenAI driver and pinned SDK against synthetic HTTP/SSE records. Each
-shared fixture gets a fresh driver and independent request log. C05, C06, C10,
-C15 and C16 pass; the other thirteen entries declare typed pending reasons for
-resource ports, unsupported conditional updates or missing host certification
-adapters. Pending entries prevent a complete certificate. Broken variants cover
+shared fixture gets a fresh driver and independent request log. C05, C06, C09, C10,
+C15 and C16 pass; the other twelve entries declare typed pending reasons for
+unsupported conditional updates or missing host certification adapters. Pending entries prevent a complete certificate. Broken variants cover
 content corruption, premature root release/stop, admission/scope bypass,
 successful unsupported migration, public handles and undeclared extensions.
 The registration context closes streams and SDK clients. This adds no provider
@@ -829,3 +828,14 @@ The request helper is shared with the generic Artifacts port; beta headers,
 multipart bytes and download/delete/upload ordering stay unchanged. Successful
 partial upload replies do not require a filename, media type or timestamp before
 the uploaded file is mounted and queued for cleanup.
+
+### OpenAI resource ports
+
+The OpenAI persistent profile now has actual-driver offline evidence for all nine
+core capabilities: inline skills with immutable session pins, exact binary artifact
+transfer and shared-vault retention join its existing turn/cancel/action/usage and
+recovery ports. Explicit backend `openai` may omit its profile but still requires
+a model. No configuration continues to choose Anthropic and per-caller threads.
+C09 passes offline; host certification and twelve fixture dependencies remain
+pending. The guarded live smoke returned `invalid_request`; it establishes no live
+certificate. See the driver README for the evidence table and operation refusals.

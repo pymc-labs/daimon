@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Refresh the shared legacy/mux oracle for main's Discord agent-name fallback, preserving exact requests, accounting and continuation facts.
+- Bound OpenAI session cleanup with idle polling and HTTP 409 recovery, preserving deletion keys, shared vaults and unknown-outcome failures.
 
 - Add an experimental neutral turn bridge behind `DAIMON_TURN__PATH=mux`; legacy remains the default, with unchanged input order, lifecycle effects and host accounting.
 
@@ -22,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and replay through an offline event fake with a fixed input-omission sentinel.
 - Expose standalone manual probe budgets and durable spend receipts independently
   of recorders, retaining reset/rollback protection and conservative accounting.
+
+- Add OpenAI default skills/artifact/vault ports with immutable hosted skill pins, exact binary downloads and scoped credential handling; restore its explicitly selected core profile with offline evidence.
+- Document observed OpenAI Agents model eligibility and the guarded Luna lifecycle smoke without changing production model defaults or claiming a live conformance certificate.
 
 - Report adapter-declared conformance gaps as typed PENDING results, retaining
   their reasons and blocking certification without hiding other probe failures.

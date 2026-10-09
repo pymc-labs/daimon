@@ -9,8 +9,19 @@ from mux.contracts.resources import (
     EnvironmentFilter,
     EnvironmentPatch,
     EnvironmentSpec,
+    WorkspaceSource,
 )
-from mux.drivers.openai._common import Context, owned, page_of, query, revision, text, timestamp
+from mux.drivers.openai._common import (
+    Context,
+    objects,
+    owned,
+    page_of,
+    query,
+    revision,
+    text,
+    timestamp,
+)
+from mux.drivers.openai.mounts import path, workspace_sources
 from mux.drivers.openai.transport import Object, object_json, segment
 
 
@@ -24,6 +35,19 @@ class OpenAIEnvironments:
         mode = {"enabled": "unrestricted", "disabled": "none", "restricted": "limited"}.get(
             text(native_mode) if native_mode is not None else ""
         )
+        sources: list[WorkspaceSource] | None = None
+        if "files" in raw:
+            sources = []
+            for file in objects(raw["files"]):
+                if file.get("type") != "file_id":
+                    raise self._c.unsupported("confidential_environment_sources")
+                sources.append(
+                    WorkspaceSource(
+                        kind="file",
+                        target_path=path(text(file["path"])),
+                        artifact=self._c.ref(scope, "artifact", "file:" + text(file["file_id"])),
+                    )
+                )
         spec = EnvironmentSpec.model_validate(
             {
                 "name": raw.get("name") or "",
@@ -31,6 +55,7 @@ class OpenAIEnvironments:
                 if mode is not None
                 else None,
                 "packages": raw.get("packages"),
+                "sources": sources,
             }
         )
         return Environment(
@@ -47,14 +72,13 @@ class OpenAIEnvironments:
             spec.execution != "hosted"
             or spec.description is not None
             or spec.scope is not None
-            or spec.sources
             or spec.metadata
             or spec.native_config is not None
         ):
             raise self._c.unsupported("environment_configuration")
         body: Object = {"name": spec.name}
         if spec.sources is not None:
-            body["files"] = []
+            body["files"] = [value for value in workspace_sources(scope, spec.sources, self._c)]
         if spec.packages is not None:
             if set(spec.packages) - {"python", "npm", "system"}:
                 raise self._c.unsupported("environment_packages")

@@ -50,10 +50,10 @@ def config(**values: object) -> ConfigRevision:
 def test_profiles_admission_default_and_private_ports(driver: OpenAIDriver) -> None:
     protocol: ManagedAgents = driver
     assert protocol.capabilities().profile_id == "openai.persistent_workspace"
-    assert not protocol.capabilities().core
+    assert protocol.capabilities().core
     admission = protocol.admit(config())
     assert admission.provider == "openai"
-    assert admission.waived_core == ("artifacts", "skills_bundle")
+    assert admission.waived_core == ()
     with pytest.raises(UnsupportedCapability, match="memory_stores"):
         driver.admit(config(requires={"memory_stores": CapabilityRequirement(level="required")}))
     assert resolve_default(BackendConfig()).backend == "anthropic"
@@ -83,7 +83,7 @@ async def test_caller_validation_is_invalid_request_before_provider_io(
 
 
 @pytest.mark.parametrize(
-    "capability", ["multiagent", "workspace_export_import", "vaults", "skills_bundle", "artifacts"]
+    "capability", ["multiagent", "workspace_export_import", "session_resources"]
 )
 @pytest.mark.parametrize("profile_id", ["openai.persistent_workspace", "openai.conversation_only"])
 def test_unimplemented_features_refuse_required_admission(

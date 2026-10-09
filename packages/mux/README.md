@@ -146,11 +146,11 @@ It uses the pinned OpenAI SDK's public HTTP primitives, normalizes root outcomes
 and previews, reconciles paginated saved work while buffering the stream, and
 reports nullable revisioned turn usage. Host authorization, recovery checkpoints
 and revision allocation are injected. Unsupported native preconditions and
-unfinished resource ports refuse explicitly. See the driver's README for verified
+unsupported resource updates refuse explicitly. See the driver's README for verified
 endpoints, state ownership and offline validation. Existing defaults stay Anthropic.
-The persistent profile is temporarily non-core until skills and artifacts land;
-its missing mandatory capabilities are surfaced by admission. Vault and multiagent
-support are unsupported, and complete workspace export/import is unknown.
+The persistent profile is core with evidence for all nine mandatory capabilities.
+An explicitly selected OpenAI backend defaults to that profile and requires a model.
+Multiagent remains unsupported and complete workspace export/import is unknown.
 
 The native `anthropic.session_walk@1` extension exposes `SessionWalk.walk(scope)`
 as an async iterator of neutral sessions with opaque native snapshots. It sends
@@ -176,8 +176,8 @@ the first `.env` mount without fetching later pages and records the one add
 response identity without a retrieve. Session and file grants are checked before I/O.
 OpenAI's opt-in offline conformance registration lives in
 `mux.drivers.openai.conformance`. It exercises the actual pinned SDK and driver
-over synthetic HTTP/SSE replies, with fresh state per shared fixture. Five probes
-pass; thirteen declare typed pending dependencies or unsupported capabilities.
+over synthetic HTTP/SSE replies, with fresh state per shared fixture. Six probes
+pass; twelve declare typed pending dependencies or unsupported capabilities.
 Broken driver variants must fail shared fixture checks. Registration adds no
 provider discovery, host wiring or live certification; see the driver README
 for the complete matrix and cleanup context.
@@ -216,3 +216,10 @@ No manifest upload, provider lookup, second session create or first send is adde
 The host retains the one billed checkpoint, its access fence, fallback notices,
 quoted transcript and system-message policy. Generic lifecycle export/restore
 stay unsupported; this explicit native extension handles the existing MA ladder.
+
+OpenAI's resource slice supplies default inline skills, exact binary artifacts and
+scoped vault ports. Its persistent profile is core with nine-capability offline
+evidence and is the profile for an explicitly selected OpenAI backend; a model is
+still required. Existing unconfigured channels resolve to Anthropic as before.
+C09 joins the five earlier offline passes; twelve typed dependencies remain pending.
+The guarded live smoke failed and provides no live certificate.
