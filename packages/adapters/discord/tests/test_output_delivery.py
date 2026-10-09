@@ -6,6 +6,7 @@ import asyncio
 import re
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -106,6 +107,8 @@ async def test_delivers_file_and_deletes_only_after_discord_post() -> None:
 def _history(*messages: object) -> MagicMock:
     async def history(**kwargs: object):
         assert kwargs["after"].id == 777, "only posts after the turn's card count"
+        assert kwargs["before"].id == 999, "a later turn's posts never count"
+        assert kwargs["limit"] is None, "the whole turn is read"
         for message in messages:
             yield message
 
@@ -136,7 +139,7 @@ async def test_a_file_the_agent_already_posted_is_cleared_without_a_second_post(
         session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
-        posted_after=777,
+        turn_window=(777, 999),
         sleep=_no_sleep,
     )
 
@@ -152,6 +155,8 @@ async def test_a_same_named_file_from_someone_else_or_another_size_still_posts()
         _posted(author_id=7, filename="chart.png", size=9),
         _posted(author_id=42, filename="chart.png", size=10),
     )
+    thread.send = AsyncMock(return_value=SimpleNamespace(id=555))
+    posted: list[int] = []
 
     await deliver_session_outputs(
         client,
@@ -159,12 +164,14 @@ async def test_a_same_named_file_from_someone_else_or_another_size_still_posts()
         session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
-        posted_after=777,
+        turn_window=(777, 999),
+        posted=posted,
         sleep=_no_sleep,
     )
 
     assert thread.send.await_count == 1
     assert deleted == ["file_chart"]
+    assert posted == [555], "the sweep reports what it posted, for the summary move"
 
 
 async def test_oversize_uses_guild_limit_and_posts_skip_notice() -> None:

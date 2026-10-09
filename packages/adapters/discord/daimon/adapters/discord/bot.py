@@ -375,12 +375,6 @@ def _compose_queued_content(messages: list[discord.Message]) -> str:
     return "\n\n".join(f"[{m.author.display_name}]: {m.content}" for m in messages)
 
 
-def _card_id(lifecycle: DiscordTurnLifecycle | None) -> int | None:
-    """The turn card's message id: the sweep looks for the agent's own posts after it."""
-    card = lifecycle.card_message_id if lifecycle is not None else None
-    return int(card) if card is not None else None
-
-
 def _log_bg_task_exception(task: asyncio.Task[None]) -> None:
     """Done-callback: surface escaped background-task exceptions immediately
     instead of asyncio's GC-time 'Task exception was never retrieved'."""
@@ -584,6 +578,7 @@ class DaimonBot(commands.Bot):
         if previous is not None:
             with contextlib.suppress(Exception):
                 await previous
+        posted: list[int] = []
         try:
             await deliver_session_outputs(
                 self.runtime.turn_deps.anthropic,
@@ -591,7 +586,8 @@ class DaimonBot(commands.Bot):
                 session_id=session_id,
                 may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
                 notice_thread_ids=self._delivery_notice_thread_ids,
-                posted_after=_card_id(lifecycle),
+                turn_window=lifecycle.turn_window if lifecycle is not None else None,
+                posted=posted,
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
             log.warning(
@@ -601,7 +597,7 @@ class DaimonBot(commands.Bot):
                 error=str(exc)[:300],
             )
         if lifecycle is not None:
-            await lifecycle.move_summary_last(thread)
+            await lifecycle.move_summary_last(thread, swept=posted)
 
     async def _archive_requested(self, origin_id: uuid.UUID) -> bool:
         """Whether the agent asked, during this turn, to archive its own thread.

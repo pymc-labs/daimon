@@ -364,6 +364,38 @@ class TestCleanReplace:
 
         assert "embeds" not in edits[-1][1], "a one-message answer keeps the card's summary"
 
+    async def test_completion_ping_answer_carries_the_summary_and_the_card_goes(self) -> None:
+        deleted: list[object] = []
+        card, answer = types.SimpleNamespace(id=1), types.SimpleNamespace(id=2)
+        sends: list[dict[str, Any]] = []
+
+        async def send(**kwargs: Any) -> object:
+            sends.append(kwargs)
+            return card if len(sends) == 1 else answer
+
+        async def edit(ref: Any, **kwargs: Any) -> None:
+            pass
+
+        async def delete(ref: Any) -> None:
+            deleted.append(ref)
+
+        lc = DiscordTurnLifecycle(
+            send=send,
+            edit=edit,
+            delete=delete,
+            agent_name="test-agent",
+            model_id="m",
+            requester_id=123,
+            notify_on_completion=True,
+        )
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+        await lc.on_terminal_success(_make_success_state())
+
+        footer = sends[-1]["embeds"][0].footer.text
+        assert footer is not None and footer.startswith("test-agent"), "the answer has it"
+        assert deleted == [card], "the card above the answer is removed"
+
     async def test_final_answer_with_everyone_disables_all_mention_channels(self) -> None:
         """T-22-01: a final answer containing ``@everyone`` (reachable via prompt
         injection through tool output) must not ping the guild. The clean-replace
@@ -1121,6 +1153,19 @@ async def test_summary_moves_under_a_file_posted_after_the_answer() -> None:
     assert edits[-1][1] == {"embeds": []}, "the answer gives it up"
 
 
+@pytest.mark.asyncio
+async def test_summary_moves_under_a_file_its_own_sweep_posted_after_the_turn() -> None:
+    file_post = _bot_post(2**62)
+    lc, edits, thread = _move_fixture(file_post)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(_make_success_state())
+
+    await lc.move_summary_last(thread, swept=[2**62])
+
+    assert file_post.edit.await_count == 1
+    assert edits[-1][1] == {"embeds": []}
+
+
 @pytest.mark.parametrize(
     "last",
     [
@@ -1128,8 +1173,9 @@ async def test_summary_moves_under_a_file_posted_after_the_answer() -> None:
         _bot_post(200, author_id=7),
         _bot_post(200, embeds=[object()]),
         _bot_post(50),
+        _bot_post(2**62),
     ],
-    ids=["empty", "a-person", "a-newer-card", "older"],
+    ids=["empty", "a-person", "a-newer-card", "older", "a-later-turns-post"],
 )
 @pytest.mark.asyncio
 async def test_summary_stays_put_unless_the_bot_posted_plainly_after_it(last: Any) -> None:
