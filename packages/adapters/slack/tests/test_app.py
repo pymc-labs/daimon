@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
 import json
 import pathlib
 import re
@@ -69,6 +70,143 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
 
 from .harness import make_orchestrate_app
+
+
+@pytest.mark.parametrize("other_team,other_channel", [("T_A", "C_B"), ("T_B", "C_A")])
+async def test_same_thread_timestamp_in_two_channels_keeps_turns_separate(
+    fake_slack_web_client: Any,
+    other_team: str,
+    other_channel: str,
+) -> None:
+    """Slack message timestamps identify messages only within a conversation."""
+    app = _make_app()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    calls: list[tuple[str, str, str]] = []
+    shared_ts = "1900000000.000001"
+
+    async def run_turn(event: dict[str, Any], **kwargs: Any) -> None:
+        calls.append((event["user"], kwargs["channel"], kwargs["team_id"]))
+        if event["user"] == "U_A":
+            first_started.set()
+            await release_first.wait()
+
+    async def allowed(*args: Any, **kwargs: Any) -> bool:
+        return False
+
+    async def cap(*args: Any, **kwargs: Any) -> int:
+        return 3
+
+    with (
+        patch("daimon.adapters.slack.app.get_turn_cap", side_effect=cap),
+        patch("daimon.adapters.slack.app.turn_target_protected", side_effect=allowed),
+        patch.object(app, "_maybe_post_connect_nudge", new_callable=AsyncMock),
+        patch.object(app, "_run_thread_turn", side_effect=run_turn),
+    ):
+        first = asyncio.create_task(
+            app._orchestrate(
+                {"ts": shared_ts, "user": "U_A", "text": "A"},
+                team_id="T_A",
+                channel="C_A",
+                event_ts=shared_ts,
+                web_client=fake_slack_web_client.client,
+                tenant_id=derive_tenant_uuid(platform="slack", workspace_id="T_A"),
+            )
+        )
+        await asyncio.wait_for(first_started.wait(), 2)
+        await app._orchestrate(
+            {"ts": shared_ts, "user": "U_B", "text": "B", "channel": other_channel},
+            team_id=other_team,
+            channel=other_channel,
+            event_ts=shared_ts,
+            web_client=fake_slack_web_client.client,
+            tenant_id=derive_tenant_uuid(platform="slack", workspace_id=other_team),
+        )
+        release_first.set()
+        await asyncio.wait_for(first, 2)
+
+    assert calls == [("U_A", "C_A", "T_A"), ("U_B", other_channel, other_team)]
+
+
+async def test_cancel_status_timestamp_is_scoped_to_its_conversation() -> None:
+    app = _make_app()
+    first, second = asyncio.Event(), asyncio.Event()
+    status_ts = "1900000000.000001"
+    app._register_cancel(status_ts, first, "U_A", team_id="T_A", channel="C_A")
+    app._register_cancel(status_ts, second, "U_B", team_id="T_B", channel="C_B")
+
+    await app._handle_block_action(
+        _make_block_actions_payload(
+            message_ts=status_ts, user_id="U_A", team_id="T_A", channel_id="C_A"
+        )
+    )
+    assert first.is_set() and not second.is_set()
+    app._deregister_cancel(status_ts, team_id="T_A", channel="C_A")
+    await app._handle_block_action(
+        _make_block_actions_payload(
+            message_ts=status_ts, user_id="U_B", team_id="T_B", channel_id="C_B"
+        )
+    )
+    assert second.is_set()
+
+
+async def test_continuation_defers_and_releases_only_its_conversation() -> None:
+    app = _make_app()
+    thread_ts = "1900000000.000001"
+    held = ("T_A", "C_A", thread_ts)
+    other = ("T_B", "C_B", thread_ts)
+    app._processing.add(held)
+    resumed: list[Any] = []
+    with (
+        patch.object(app, "_wait_for_orphan_recovery", new_callable=AsyncMock),
+        patch.object(app, "_dispatch_continuations", new_callable=AsyncMock),
+        patch.object(app, "_drain_pending_mentions", new_callable=AsyncMock),
+        patch.object(app, "_spawn", side_effect=resumed.append),
+    ):
+        await app.dispatch_continuations_in_thread(
+            web_client=MagicMock(),
+            tenant_id=derive_tenant_uuid(platform="slack", workspace_id="T_A"),
+            channel="C_A",
+            thread_id=thread_ts,
+            account_id=uuid.uuid4(),
+            team_id="T_A",
+        )
+        assert held in app._deferred_dispatch
+        app._processing.add(other)
+        app._release_thread(held)
+        assert held not in app._processing and other in app._processing
+        assert held not in app._deferred_dispatch
+        assert len(resumed) == 1
+        await resumed[0]
+    assert other in app._processing
+
+
+async def test_failed_continuation_releases_only_its_conversation() -> None:
+    app = _make_app()
+    thread_ts = "1900000000.000001"
+    other = ("T_B", "C_B", thread_ts)
+    app._processing.add(other)
+
+    async def fail_dispatch(**kwargs: Any) -> None:
+        assert ("T_A", "C_A", thread_ts) in app._processing
+        assert other in app._processing
+        raise RuntimeError("boom")
+
+    with (
+        patch.object(app, "_wait_for_orphan_recovery", new_callable=AsyncMock),
+        patch.object(app, "_dispatch_continuations", side_effect=fail_dispatch),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        await app.dispatch_continuations_in_thread(
+            web_client=MagicMock(),
+            tenant_id=derive_tenant_uuid(platform="slack", workspace_id="T_A"),
+            channel="C_A",
+            thread_id=thread_ts,
+            account_id=uuid.uuid4(),
+            team_id="T_A",
+        )
+    assert app._processing == {other}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1753,7 +1891,9 @@ async def test_second_event_during_cap_read_queues_on_one_thread(
             await asyncio.wait_for(turn_started.wait(), timeout=2)
             release_cap.set()
             await asyncio.wait_for(first, timeout=2)
-            assert app._pending[thread_id] == [event("9000000010.000001")]  # pyright: ignore[reportPrivateUsage]
+            assert app._pending[("T_CAP_READ_RACE", "C_TEST", thread_id)] == [
+                event("9000000010.000001")
+            ]  # pyright: ignore[reportPrivateUsage]
         finally:
             release_cap.set()
             release_turn.set()
@@ -3148,7 +3288,7 @@ async def test_orchestrate_eyes_reaction_transport_error_does_not_leak_thread_sl
     assert mock_run_turn.await_count == 1, (
         "the turn must still run despite the eyes reaction transport error"
     )
-    assert thread_ts not in app._processing, (  # pyright: ignore[reportPrivateUsage]
+    assert (team_id, channel, thread_ts) not in app._processing, (  # pyright: ignore[reportPrivateUsage]
         "thread slot must be released even when the eyes reaction raises a transport error"
     )
     assert app.turn_queue.in_flight(tenant_id) == 0, (
@@ -4966,10 +5106,11 @@ async def test_a_recovered_turn_keeps_editing_the_card_the_marker_points_at(
 
     # 4. Cancel is rebound.
     registry = observed["registry"]
-    assert observed["status_ts"] in registry, (
+    registry_key = (team_id, channel, observed["status_ts"])
+    assert registry_key in registry, (
         "the adopted card's ts must have a cancel registry entry during recovery"
     )
-    rebound_event, rebound_author = registry[observed["status_ts"]]
+    rebound_event, rebound_author = registry[registry_key]
     assert rebound_event is observed["second_cancel"], (
         "a Cancel click during a recovered turn must stop the turn that is "
         "actually running -- the registry entry must be the SECOND call's Event"
@@ -5041,7 +5182,7 @@ async def test_handle_block_action_when_author_clicks_cancel_sets_event() -> Non
     """cancel click from the turn author sets the cancel Event."""
     app = _make_app()
     cancel = asyncio.Event()
-    app._cancel_registry["1000000000.000001"] = (cancel, "U_AUTHOR")  # pyright: ignore[reportPrivateUsage]
+    app._cancel_registry[("T_TEST", "C_TEST", "1000000000.000001")] = (cancel, "U_AUTHOR")  # pyright: ignore[reportPrivateUsage]
 
     payload = _make_block_actions_payload(
         action_id="cancel_turn",
@@ -5096,10 +5237,14 @@ async def test_cancel_is_registered_while_visible_card_post_response_is_pending(
         author_id="U_AUTHOR",
         agent_name="test-agent",
         model_id="claude-sonnet-4-6",
-        register=app._register_cancel,  # pyright: ignore[reportPrivateUsage]
-        deregister=app._deregister_cancel,  # pyright: ignore[reportPrivateUsage]
-        register_pending=app._register_cancel,  # pyright: ignore[reportPrivateUsage]
-        deregister_pending=app._deregister_cancel,  # pyright: ignore[reportPrivateUsage]
+        register=functools.partial(app._register_cancel, team_id="T_TEST", channel="C_TEST"),  # pyright: ignore[reportPrivateUsage]
+        deregister=functools.partial(app._deregister_cancel, team_id="T_TEST", channel="C_TEST"),  # pyright: ignore[reportPrivateUsage]
+        register_pending=functools.partial(
+            app._register_cancel, team_id="T_TEST", channel="C_TEST"
+        ),  # pyright: ignore[reportPrivateUsage]
+        deregister_pending=functools.partial(
+            app._deregister_cancel, team_id="T_TEST", channel="C_TEST"
+        ),  # pyright: ignore[reportPrivateUsage]
     )
 
     await lifecycle.post_initial()
@@ -5109,7 +5254,9 @@ async def test_cancel_is_registered_while_visible_card_post_response_is_pending(
     assert observed_cancel_keys[0] not in app._cancel_registry, (  # pyright: ignore[reportPrivateUsage]
         "once Slack returns the message ts, clicks must route through its current registry entry"
     )
-    assert status_ts in app._cancel_registry, "the returned status ts must remain registered"
+    assert ("T_TEST", "C_TEST", status_ts) in app._cancel_registry, (
+        "the returned status ts must remain registered"
+    )
     await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
     assert app._cancel_registry == {}, (  # pyright: ignore[reportPrivateUsage]
         "terminal cleanup must remove the status ts so a stale action cannot cancel later work"
@@ -5157,10 +5304,14 @@ async def test_durable_intent_cancel_value_survives_updates_and_routes_by_status
         author_id="U_AUTHOR",
         agent_name="test-agent",
         model_id="claude-sonnet-4-6",
-        register=app._register_cancel,  # pyright: ignore[reportPrivateUsage]
-        deregister=app._deregister_cancel,  # pyright: ignore[reportPrivateUsage]
-        register_pending=app._register_cancel,  # pyright: ignore[reportPrivateUsage]
-        deregister_pending=app._deregister_cancel,  # pyright: ignore[reportPrivateUsage]
+        register=functools.partial(app._register_cancel, team_id="T_TEST", channel="C_TEST"),  # pyright: ignore[reportPrivateUsage]
+        deregister=functools.partial(app._deregister_cancel, team_id="T_TEST", channel="C_TEST"),  # pyright: ignore[reportPrivateUsage]
+        register_pending=functools.partial(
+            app._register_cancel, team_id="T_TEST", channel="C_TEST"
+        ),  # pyright: ignore[reportPrivateUsage]
+        deregister_pending=functools.partial(
+            app._deregister_cancel, team_id="T_TEST", channel="C_TEST"
+        ),  # pyright: ignore[reportPrivateUsage]
         intent_id=intent_id,
         clock=lambda: clock_now[0],
     )
@@ -5168,7 +5319,7 @@ async def test_durable_intent_cancel_value_survives_updates_and_routes_by_status
     await lifecycle.post_initial()
     assert cancel.is_set(), "the pre-response UUID value must route to its pending turn"
     assert intent_id.hex not in app._cancel_registry  # pyright: ignore[reportPrivateUsage]
-    assert status_ts in app._cancel_registry  # pyright: ignore[reportPrivateUsage]
+    assert ("T_TEST", "C_TEST", status_ts) in app._cancel_registry  # pyright: ignore[reportPrivateUsage]
 
     cancel.clear()
     clock_now[0] += 6.0
@@ -5228,10 +5379,14 @@ async def test_failed_initial_post_cleans_pending_cancel_registration(
         author_id="U_AUTHOR",
         agent_name="test-agent",
         model_id="claude-sonnet-4-6",
-        register=app._register_cancel,  # pyright: ignore[reportPrivateUsage]
-        deregister=app._deregister_cancel,  # pyright: ignore[reportPrivateUsage]
-        register_pending=app._register_cancel,  # pyright: ignore[reportPrivateUsage]
-        deregister_pending=app._deregister_cancel,  # pyright: ignore[reportPrivateUsage]
+        register=functools.partial(app._register_cancel, team_id="T_TEST", channel="C_TEST"),  # pyright: ignore[reportPrivateUsage]
+        deregister=functools.partial(app._deregister_cancel, team_id="T_TEST", channel="C_TEST"),  # pyright: ignore[reportPrivateUsage]
+        register_pending=functools.partial(
+            app._register_cancel, team_id="T_TEST", channel="C_TEST"
+        ),  # pyright: ignore[reportPrivateUsage]
+        deregister_pending=functools.partial(
+            app._deregister_cancel, team_id="T_TEST", channel="C_TEST"
+        ),  # pyright: ignore[reportPrivateUsage]
     )
 
     with pytest.raises(SlackApiError):
@@ -5249,7 +5404,7 @@ async def test_handle_block_action_when_non_author_clicks_cancel_event_unset(
     the clicker why nothing happened."""
     app = _make_app()
     cancel = asyncio.Event()
-    app._cancel_registry["1000000000.000001"] = (cancel, "U_AUTHOR")  # pyright: ignore[reportPrivateUsage]
+    app._cancel_registry[("T_TEST", "C_TEST", "1000000000.000001")] = (cancel, "U_AUTHOR")  # pyright: ignore[reportPrivateUsage]
 
     payload = _make_block_actions_payload(
         action_id="cancel_turn",
@@ -5330,7 +5485,7 @@ async def test_handle_block_action_when_wrong_action_id_is_ignored() -> None:
     """block_actions with action_id != 'cancel_turn' is silently ignored."""
     app = _make_app()
     cancel = asyncio.Event()
-    app._cancel_registry["1000000000.000001"] = (cancel, "U_AUTHOR")  # pyright: ignore[reportPrivateUsage]
+    app._cancel_registry[("T_TEST", "C_TEST", "1000000000.000001")] = (cancel, "U_AUTHOR")  # pyright: ignore[reportPrivateUsage]
 
     payload = _make_block_actions_payload(
         action_id="some_other_action",  # not cancel_turn
@@ -5811,7 +5966,7 @@ async def test_ceiling_breach_releases_tenant_slot_and_thread_flag(
         assert app.turn_queue.in_flight(tenant_id) == 0, (
             "a ceiling breach must return the tenant's slot"
         )
-        assert thread_ts_1 not in app._processing, (  # pyright: ignore[reportPrivateUsage]
+        assert (team_id, channel, thread_ts_1) not in app._processing, (  # pyright: ignore[reportPrivateUsage]
             "a ceiling breach must discard the per-thread processing flag"
         )
 
@@ -5838,7 +5993,7 @@ async def test_ceiling_breach_releases_tenant_slot_and_thread_flag(
         "the second mention must not receive the concurrency-shed ephemeral notice"
     )
     assert app.turn_queue.in_flight(tenant_id) == 0
-    assert thread_ts_2 not in app._processing  # pyright: ignore[reportPrivateUsage]
+    assert (team_id, channel, thread_ts_2) not in app._processing  # pyright: ignore[reportPrivateUsage]
 
 
 # ---------------------------------------------------------------------------
