@@ -30,8 +30,15 @@ fails its replacement, then supplies successful reconciliation. Fixture source
 contains the complete assertions and named faults.
 
 C11 submits `SKILL.md` with bytes `fixture` inline through `Skills.create`,
-then checks the returned full `Skill` record, explicit version, seeded content
-digest, deployed agent binding and `Skills.retrieve(scope, skill_id)` record.
+then checks the returned full `Skill` record, explicit version,
+deployed agent binding and `Skills.retrieve(scope, skill_id)` record.
+Pin identity is the skill ID and explicit version; provided sources must agree.
+Source and digest metadata may be missing or become enriched between records;
+conflicting provided values fail. Digests are opaque and never required.
+Transport `skill_uploads` logs the inline bundle actually received upstream,
+decoded from the native request, independently of the returned metadata. The
+probe requires that log to contain the exact submitted files and bytes, so
+correct version pins cannot hide a missing or corrupted upload.
 The adapter seeds a matching native skill record and agent binding; missing
 versions, bindings or records fail. This uses the core upload/record API,
 without inventing a downloadable bundle or archive field on `Skill`.

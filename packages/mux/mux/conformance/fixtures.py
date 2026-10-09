@@ -399,34 +399,47 @@ async def c10(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
 
 async def c11(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
     s = await t.arrange("C11")
-    deployed = await ma.skills.create(
-        s.scope,
-        SkillUpload(
-            display_title="fixture",
-            files=(
-                SkillUploadFile(path="SKILL.md", content=b"fixture", media_type="text/markdown"),
-            ),
-        ),
-        key="skill-deploy",
+    bundle = SkillUpload(
+        display_title="fixture",
+        files=(SkillUploadFile(path="SKILL.md", content=b"fixture", media_type="text/markdown"),),
+    )
+    uploads_before = len(t.skill_uploads)
+    deployed = await ma.skills.create(s.scope, bundle, key="skill-deploy")
+    require(
+        t.skill_uploads[uploads_before:] == (bundle,),
+        "C11: upstream must receive the exact inline skill bundle bytes",
     )
     pinned = deployed.latest_version
     if pinned is None or pinned.version is None:
         raise ConformanceFailure("C11: uploaded bundle must return a pinned skill version")
     require(
-        pinned.id == deployed.id
-        and pinned.digest == f"sha256:{hashlib.sha256(b'fixture').hexdigest()}",
-        "C11: uploaded bundle must preserve the seeded content digest",
+        pinned.id == deployed.id,
+        "C11: uploaded skill record and version must identify the same skill",
     )
     agent = await ma.agents.retrieve(s.scope, s.desired.agent)
     skills = agent.spec.skills
-    require(
-        skills is not None and len(skills) == 1 and skills[0] == pinned,
-        "C11: deployed agent must bind the uploaded pinned skill version",
-    )
+    if skills is None or len(skills) != 1:
+        raise ConformanceFailure("C11: deployed agent must bind exactly one pinned skill")
     skill = await ma.skills.retrieve(s.scope, pinned.id)
     require(
-        skill.id == pinned.id and skill.latest_version == pinned,
+        skill.id == pinned.id and skill.latest_version is not None,
         "C11: retrieved skill record must preserve the deployed pin",
+    )
+    retrieved = skill.latest_version
+    if retrieved is None:
+        raise ConformanceFailure("C11: retrieved skill must contain a version")
+    pins = (pinned, skills[0], retrieved)
+    require(
+        all((ref.id, ref.version) == (pinned.id, pinned.version) for ref in pins),
+        "C11: deployed agent and retrieved record must preserve skill identity and version",
+    )
+    require(
+        len({ref.source for ref in pins if ref.source is not None}) <= 1,
+        "C11: provided skill sources must agree",
+    )
+    require(
+        len({ref.digest for ref in pins if ref.digest is not None}) <= 1,
+        "C11: provided skill digests must agree",
     )
     if not (agent.spec.mcp_servers and s.desired.environment is not None):
         raise ConformanceFailure("C11: deployed MCP and environment bindings are required")

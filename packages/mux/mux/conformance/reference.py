@@ -81,6 +81,7 @@ class Transport:
         self.reconciled = False
         self.history: list[Event] = []
         self.deletions: list[ResourceRef] = []
+        self.uploads: list[SkillUpload] = []
         self.scope = Scope(
             tenant_id="tenant", account_id="account", principal_id="human", authorization_id="auth"
         )
@@ -149,6 +150,10 @@ class Transport:
     @property
     def deleted_resources(self) -> tuple[ResourceRef, ...]:
         return tuple(self.deletions)
+
+    @property
+    def skill_uploads(self) -> tuple[SkillUpload, ...]:
+        return tuple(self.uploads)
 
     def check(self, scope: Scope, ref: ResourceRef) -> None:
         if (
@@ -469,6 +474,7 @@ class ReferenceSkills(UnsupportedPort):
         ):
             raise UnsupportedCapability(("unseeded_skill_upload",), "test.reference")
         self.t.mutations += 1
+        self.t.uploads.append(bundle)
         return await self.retrieve(scope, "skill")
 
     async def retrieve(self, scope: Scope, skill_id: str) -> Skill:

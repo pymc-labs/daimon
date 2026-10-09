@@ -8,7 +8,7 @@ from typing import Literal, Protocol
 
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
-from mux.contracts.resources import Session, SessionSpec
+from mux.contracts.resources import Session, SessionSpec, SkillUpload
 
 
 class ConformanceFailure(Exception):
@@ -45,6 +45,8 @@ class ScriptedTransport(Protocol):
     `fault` changes upstream responses without editing driver projections.
     `mutation_count` counts upstream writes (not reads or fixture seeding).
     `deleted_resources` records actual upstream deletes, independently of receipts.
+    `skill_uploads` records decoded inline bundles actually received upstream,
+    independently of driver inputs and returned skill metadata.
     """
 
     async def arrange(self, fixture_id: str) -> Scenario: ...
@@ -53,6 +55,8 @@ class ScriptedTransport(Protocol):
     def mutation_count(self) -> int: ...
     @property
     def deleted_resources(self) -> tuple[ResourceRef, ...]: ...
+    @property
+    def skill_uploads(self) -> tuple[SkillUpload, ...]: ...
 
 
 @dataclass(frozen=True)

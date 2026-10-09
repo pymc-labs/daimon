@@ -28,7 +28,7 @@ from mux.contracts.ids import Page, PageRequest, ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.profile import Profile
 from mux.contracts.receipts import CancelReceipt, DeletionReceipt, StopObservation
-from mux.contracts.resources import Agent, Environment, Session, Skill
+from mux.contracts.resources import Agent, Environment, Session, Skill, SkillUpload
 
 
 @pytest.mark.parametrize("fixture_id", FIXTURES)
@@ -370,5 +370,129 @@ async def test_c11_rejects_resource_records_without_deployment_evidence(fault: s
     registry.register("broken-resource-reference", broken)
     result = next(
         r for r in await run(registry, "broken-resource-reference") if r.fixture_id == "C11"
+    )
+    assert result.status == "fail" and result.evidence[0].startswith("check failed: C11:")
+
+
+@pytest.mark.parametrize("metadata", ["no_digest", "enrichment", "opaque_digest"])
+async def test_c11_accepts_explicit_version_with_optional_metadata(metadata: str) -> None:
+    class ValidSkills(ReferenceSkills):
+        reads = 0
+
+        async def retrieve(self, scope: Scope, skill_id: str) -> Skill:
+            skill = await super().retrieve(scope, skill_id)
+            self.reads += 1
+            assert skill.latest_version is not None
+            values = (
+                {"digest": None, "source": None}
+                if metadata == "no_digest" or (metadata == "enrichment" and self.reads == 1)
+                else {"digest": "provider:opaque-bundle-digest", "source": "custom"}
+            )
+            return skill.model_copy(
+                update={"latest_version": skill.latest_version.model_copy(update=values)}
+            )
+
+    class ValidAgents(ReferenceAgents):
+        async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
+            agent = await super().retrieve(scope, ref)
+            assert agent.spec.skills is not None
+            values = (
+                {"digest": None, "source": None}
+                if metadata == "no_digest"
+                else {"digest": "provider:opaque-bundle-digest", "source": "custom"}
+            )
+            return agent.model_copy(
+                update={
+                    "spec": agent.spec.model_copy(
+                        update={"skills": (agent.spec.skills[0].model_copy(update=values),)}
+                    )
+                }
+            )
+
+    t = Transport()
+    driver = ReferenceDriver(t)
+    driver.skills = ValidSkills(t)
+    driver.agents = ValidAgents(t)
+    result = await FIXTURES["C11"](cast(ManagedAgents, driver), None, t)
+    assert result.status == "pass"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "wrong_id",
+        "wrong_version",
+        "missing_version",
+        "wrong_source",
+        "wrong_digest",
+        "conflicting_enriched_source",
+        "conflicting_enriched_digest",
+        "corrupt_upload",
+        "missing_upload",
+    ],
+)
+async def test_c11_rejects_conflicting_pins_and_invalid_uploaded_bytes(fault: str) -> None:
+    class BrokenSkills(ReferenceSkills):
+        reads = 0
+
+        async def retrieve(self, scope: Scope, skill_id: str) -> Skill:
+            skill = await super().retrieve(scope, skill_id)
+            self.reads += 1
+            assert skill.latest_version is not None
+            if fault == "wrong_source":
+                pin = skill.latest_version.model_copy(update={"source": "custom"})
+            elif fault.startswith("conflicting_enriched_"):
+                field = "source" if fault.endswith("source") else "digest"
+                pin = skill.latest_version.model_copy(
+                    update={field: None if self.reads == 1 else "conflicting-metadata"}
+                )
+            else:
+                return skill
+            return skill.model_copy(update={"latest_version": pin})
+
+        async def create(self, scope: Scope, bundle: SkillUpload, *, key: str) -> Skill:
+            skill = await super().create(scope, bundle, key=key)
+            if fault == "corrupt_upload":
+                self.t.uploads[-1] = bundle.model_copy(
+                    update={
+                        "files": (bundle.files[0].model_copy(update={"content": b"corrupted"}),)
+                    }
+                )
+            elif fault == "missing_upload":
+                self.t.uploads.pop()
+            return skill
+
+    class BrokenAgents(ReferenceAgents):
+        async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
+            agent = await super().retrieve(scope, ref)
+            assert agent.spec.skills is not None
+            changes: dict[str, dict[str, str | None]] = {
+                "wrong_id": {"id": "other"},
+                "wrong_version": {"version": "v0"},
+                "missing_version": {"version": None},
+                "wrong_source": {"source": "other"},
+                "wrong_digest": {"digest": "other"},
+                "conflicting_enriched_source": {"source": "custom"},
+            }
+            values = changes.get(fault, {})
+            return agent.model_copy(
+                update={
+                    "spec": agent.spec.model_copy(
+                        update={"skills": (agent.spec.skills[0].model_copy(update=values),)}
+                    )
+                }
+            )
+
+    def broken() -> Adapter:
+        t = Transport()
+        driver = ReferenceDriver(t)
+        driver.skills = BrokenSkills(t)
+        driver.agents = BrokenAgents(t)
+        return Adapter(cast(ManagedAgents, driver), None, t)
+
+    registry = Registry()
+    registry.register("conflicting-skill-reference", broken)
+    result = next(
+        r for r in await run(registry, "conflicting-skill-reference") if r.fixture_id == "C11"
     )
     assert result.status == "fail" and result.evidence[0].startswith("check failed: C11:")
