@@ -267,8 +267,8 @@ with a `reason`. Discord DMs have no card and wait under the typing indicator;
 Slack DMs are not limited. Unprompted replies and Teams continuation wakes
 never queue: they take a free slot or keep their silent refusal or retry. The
 queue is in memory, so a restart drops it; queued turns' card intents are
-written before the wait, so the boot sweep retires their cards as "Stopped:
-Daimon restarted." like any orphan. `formal/turn_queue/` models it.
+written before the wait, so the boot sweep retires their cards as "Daimon
+restarted before this request finished." like any orphan. `formal/turn_queue/` models it.
 
 Queue events: `turn.queue.enqueued`, `turn.queue.started` (`waited_ms`),
 `turn.queue.cancelled`, `turn.queue.timed_out` (`waited_ms`),

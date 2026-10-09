@@ -231,9 +231,10 @@ async def test_sweep_marks_the_embed_failed_and_clears_the_row(
     thread.fetch_message.assert_awaited_once_with(777)
     edited = message.edit.await_args.kwargs["embed"]  # pyright: ignore[reportAny]
     assert edited.color.value == theme.COLOR_RED, "an interrupted turn must render as an error"
-    assert edited.title == "Stopped: Daimon restarted." and "try again" in edited.description, (
-        "the user must be told the turn is dead, not left on a frozen spinner"
-    )
+    assert (
+        edited.title == "Daimon restarted before this request finished."
+        and "try again" in edited.description
+    ), "the user must be told the turn is dead, not left on a frozen spinner"
     assert await list_orphaned_turns(db_session, platform="discord") == [], (
         "a retired turn must not be retired again on the next boot"
     )

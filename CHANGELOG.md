@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When a restart cuts an answer short, the card now reads "Daimon restarted before this request finished." and "@mention Daimon with your request to try again." in the same words on Discord, Slack and Teams. Teams used to say "Send a message to try again.", which does nothing in a channel.
 - Discord agent tools now check a caller's thread access and posting rights before sending, and split long messages when agent identity is unavailable.
 - A Discord thread that can't be opened gets one plain reply under the mention: "Couldn't open a thread. @mention Daimon again." It used to be the generic error with a request id. A failed typing indicator no longer stops the thread from opening.
 - Discord thread names are short and plain, like "Shorten the competitive brief" instead of "Simplify Text By Removing Jargon While Keeping Key Points": sentence case, at most 50 characters. Attached file names count, so a mention with only a file gets a name too.
