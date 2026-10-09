@@ -962,6 +962,158 @@ def test_put_notebook_failed_validation_leaves_existing_notebook_running(
     assert stub_spawner.call_count == 1, "the rejected update must not spawn a second subprocess"
 
 
+def test_failed_republish_preserves_source_for_cold_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejected update must not replace the source used after an idle stop."""
+    from notebook_host.lifecycle import ValidationResult
+
+    results = [ValidationResult(ok=True), ValidationResult(ok=False, errors=["bad cell"])]
+
+    def validator(slug: str, paths: SlugPaths, *, jail_uid: int | None = None) -> ValidationResult:
+        return results.pop(0)
+
+    client, state, _ = _make_test_app(tmp_path, monkeypatch, validator=validator)
+    first = client.put(
+        "/admin/notebooks/dash", json={"source": "good = 1"}, headers={"Authorization": AUTH}
+    )
+    assert first.status_code == 200
+    source_path = get_slug_paths(state.settings.data_dir, "dash").notebook
+    assert source_path.read_text() == "good = 1"
+
+    second = client.put(
+        "/admin/notebooks/dash", json={"source": "bad = 1"}, headers={"Authorization": AUTH}
+    )
+    assert second.status_code == 422
+    assert source_path.read_text() == "good = 1"
+
+
+def test_rejected_republish_cold_starts_original_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    import notebook_host.lazy_spawn as lazy_mod
+    from notebook_host.lazy_spawn import _stop, ensure_running
+    from notebook_host.lifecycle import ValidationResult
+
+    results = [ValidationResult(ok=True), ValidationResult(ok=False, errors=["bad cell"])]
+
+    def validator(slug: str, paths: SlugPaths, *, jail_uid: int | None = None) -> ValidationResult:
+        return results.pop(0)
+
+    client, state, spawner = _make_test_app(tmp_path, monkeypatch, validator=validator)
+    source_path = get_slug_paths(state.settings.data_dir, "dash").notebook
+    spawned_sources: list[str] = []
+    original_spawn = spawner.side_effect
+
+    def capture_spawn(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        spawned_sources.append(source_path.read_text())
+        return original_spawn(*args, **kwargs)
+
+    spawner.side_effect = capture_spawn
+    first = client.put(
+        "/admin/blogs/dash", json={"source": "good = 1"}, headers={"Authorization": AUTH}
+    )
+    assert first.status_code == 200
+    second = client.put(
+        "/admin/blogs/dash", json={"source": "bad = 1"}, headers={"Authorization": AUTH}
+    )
+    assert second.status_code == 422
+
+    async def ready(*args: Any, **kwargs: Any) -> bool:
+        return True
+
+    def stop_process(np: Any) -> None:
+        np.process.poll.return_value = 0
+
+    monkeypatch.setattr(lazy_mod, "wait_for_port", ready)
+    monkeypatch.setattr(lazy_mod, "kill", stop_process)
+    assert asyncio.run(_stop(state, state.processes["dash"]))
+    restarted = asyncio.run(ensure_running(state, "dash", now=time.time()))
+    assert restarted is not None
+    assert spawned_sources == ["good = 1", "good = 1"]
+
+
+def test_rejected_republish_does_not_copy_symlink_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_host.lifecycle import ValidationResult
+
+    results = [ValidationResult(ok=True), ValidationResult(ok=False, errors=["bad cell"])]
+
+    def validator(slug: str, paths: SlugPaths, *, jail_uid: int | None = None) -> ValidationResult:
+        return results.pop(0)
+
+    client, state, _ = _make_test_app(tmp_path, monkeypatch, validator=validator)
+    source_path = get_slug_paths(state.settings.data_dir, "dash").notebook
+    assert (
+        client.put(
+            "/admin/notebooks/dash", json={"source": "good = 1"}, headers={"Authorization": AUTH}
+        ).status_code
+        == 200
+    )
+    target = tmp_path / "secret.txt"
+    target.write_text("secret data")
+    source_path.unlink()
+    source_path.symlink_to(target)
+    rejected = client.put(
+        "/admin/notebooks/dash", json={"source": "bad = 1"}, headers={"Authorization": AUTH}
+    )
+    assert rejected.status_code == 422
+    assert not source_path.exists()
+    assert target.read_text() == "secret data"
+
+
+def test_mode_switch_rejection_restores_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import notebook_host.admin as admin_mod
+    from notebook_host.lifecycle import ValidationResult
+
+    results = [ValidationResult(ok=True), ValidationResult(ok=False, errors=["bad cell"])]
+
+    def validator(slug: str, paths: SlugPaths, *, jail_uid: int | None = None) -> ValidationResult:
+        return results.pop(0)
+
+    monkeypatch.setenv("DAIMON_NOTEBOOK__ALLOW_EDITABLE", "true")
+    client, state, _ = _make_test_app(tmp_path, monkeypatch, validator=validator)
+    source_path = get_slug_paths(state.settings.data_dir, "dash").notebook
+    assert (
+        client.put(
+            "/admin/notebooks/dash",
+            json={"source": "good = 1", "editable": True},
+            headers={"Authorization": AUTH},
+        ).status_code
+        == 200
+    )
+    killed: list[Any] = []
+    monkeypatch.setattr(admin_mod, "kill", killed.append)
+    rejected = client.put(
+        "/admin/blogs/dash", json={"source": "bad = 1"}, headers={"Authorization": AUTH}
+    )
+    assert rejected.status_code == 422
+    assert len(killed) == 1
+    assert "dash" not in state.processes
+    assert source_path.read_text() == "good = 1"
+
+
+def test_first_rejected_publish_leaves_no_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_host.lifecycle import ValidationResult
+
+    def validator(slug: str, paths: SlugPaths, *, jail_uid: int | None = None) -> ValidationResult:
+        return ValidationResult(ok=False, errors=["bad cell"])
+
+    client, state, _ = _make_test_app(tmp_path, monkeypatch, validator=validator)
+    rejected = client.put(
+        "/admin/notebooks/dash", json={"source": "bad = 1"}, headers={"Authorization": AUTH}
+    )
+    assert rejected.status_code == 422
+    assert not get_slug_paths(state.settings.data_dir, "dash").notebook.exists()
+
+
 def test_put_notebook_published_when_validation_passes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
