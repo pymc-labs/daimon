@@ -102,6 +102,12 @@ def _usage(revision: int, output: int | None) -> UsageObservation:
     )
 
 
+async def _own_session(store: StateStore) -> ProviderBinding:
+    """Bind caller a1's private slot to session s1, so s1's journal is a1's."""
+    owner = _binding(session=SESSION.id, id_="b_s1", account="a1")
+    return await store.put_binding(owner, expected_generation=0)
+
+
 async def _begin(store: StateStore, scope: Scope = SCOPE, slot: Slot | None = PRIVATE_A) -> None:
     await store.begin_operation(
         scope, key="k", request_digest="d", operation_id="op", now=NOW, slot=slot
@@ -311,6 +317,7 @@ async def test_lease_one_root_turn_and_monotonic_fence(store: StateStore) -> Non
 
 
 async def test_stale_fence_cannot_commit(store: StateStore) -> None:
+    await _own_session(store)
     old = await _lease(store)
     later = NOW + TTL + timedelta(seconds=1)
     new = await store.acquire_lease(PRIVATE_A, holder="w2", turn_id="t1", now=later, ttl=TTL)
@@ -327,6 +334,7 @@ async def test_stale_fence_cannot_commit(store: StateStore) -> None:
 
 
 async def test_a_session_journal_takes_only_its_slot_lease(store: StateStore) -> None:
+    await _own_session(store)
     mine = await _lease(store)
     await store.append_events(SESSION, [_message("e1")], fence=mine, cursor="c1", now=NOW)
     for slot in (
@@ -348,6 +356,7 @@ async def test_a_session_journal_takes_only_its_slot_lease(store: StateStore) ->
 
 
 async def test_c05_overlapping_pages_and_child_completion(store: StateStore) -> None:
+    await _own_session(store)
     fence = await _lease(store)
     running = _entry("e1", "session.status_running", {"root_turn_id": "root"}, turn_id="root")
     message = _message("e2")
@@ -380,6 +389,7 @@ async def test_c05_overlapping_pages_and_child_completion(store: StateStore) -> 
 
 
 async def test_previews_never_complete_a_turn_nor_block_the_record(store: StateStore) -> None:
+    await _own_session(store)
     fence = await _lease(store)
     running = _entry("e1", "session.status_running", {"root_turn_id": "root"}, turn_id="root")
     await store.append_events(SESSION, [running], fence=fence, cursor="c1", now=NOW)
@@ -395,6 +405,7 @@ async def test_previews_never_complete_a_turn_nor_block_the_record(store: StateS
 
 
 async def test_journal_revision_of_same_source_is_a_new_entry(store: StateStore) -> None:
+    await _own_session(store)
     fence = await _lease(store)
     end = {"root_turn_id": "turn_1", "outcome": "errored"}
     corrected = {"root_turn_id": "turn_1", "outcome": "completed"}
@@ -413,6 +424,7 @@ async def test_journal_revision_of_same_source_is_a_new_entry(store: StateStore)
 
 async def test_committed_state_cannot_be_changed_through_values() -> None:
     store = MemoryStateStore()
+    await _own_session(store)
     fence = await _lease(store)
     await _begin(store)
     await store.claim_send(SCOPE, "k", now=NOW, fence=fence)
@@ -467,3 +479,42 @@ async def test_usage_null_after_known_keeps_the_accounted_value(store: StateStor
     assert row is not None and row.is_noop
     later = await store.record_usage("b1", _usage(3, 130))
     assert later is not None and later.deltas["output_tokens"] == 30
+
+
+async def test_a_foreign_lease_cannot_claim_an_unwritten_journal(store: StateStore) -> None:
+    await _own_session(store)
+    for slot in (
+        Slot(thread=THREAD, account_id="a2"),
+        Slot(thread=ThreadRef(channel=CHANNEL, thread_id="th2"), account_id="a1"),
+        Slot(
+            thread=ThreadRef(
+                channel=CHANNEL.model_copy(update={"tenant_id": "t2"}), thread_id="th1"
+            ),
+            account_id="a1",
+        ),
+    ):
+        foreign = await _lease(store, slot)
+        with pytest.raises(ScopeViolation):
+            await store.append_events(
+                SESSION, [_message("e1")], fence=foreign, cursor="c1", now=NOW
+            )
+    assert await store.read_events(SESSION.id) == []
+    mine = await _lease(store)
+    await store.append_events(SESSION, [_message("e1")], fence=mine, cursor="c1", now=NOW)
+
+
+async def test_a_session_no_binding_names_takes_no_appends(store: StateStore) -> None:
+    fence = await _lease(store)
+    with pytest.raises(ScopeViolation):
+        await store.append_events(SESSION, [_message("e1")], fence=fence, cursor="c1", now=NOW)
+
+
+async def test_a_rebind_keeps_the_old_session_journal_with_its_slot(store: StateStore) -> None:
+    first = await _own_session(store)
+    rebound = first.model_copy(update={"generation": 2, "native_refs": {"session": "s2"}})
+    await store.put_binding(rebound, expected_generation=1)
+    mine = await _lease(store)
+    await store.append_events(SESSION, [_message("e1")], fence=mine, cursor="c1", now=NOW)
+    other = _binding(session=SESSION.id, id_="b_other", account="a2")
+    with pytest.raises(ValueError, match="another slot"):
+        await store.put_binding(other, expected_generation=0)

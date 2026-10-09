@@ -162,7 +162,10 @@ with no account. Leases are per slot.
 
 Fencing: `claim_send` and `advance_operation` on an operation begun with a
 slot, and every `append_events`, need the active lease of the record's own
-slot. A journal belongs to the slot of its first append. A missing or
+slot. A journal belongs to the slot of the binding whose
+`native_refs["session"]` names its session, registered when the binding is
+written and kept across rebinds; an append never claims a journal, and a
+session no binding names takes no appends. A missing or
 foreign lease raises `ScopeViolation`, and a superseded one raises
 `StaleFence`. The other writes are safe without a lease: beginning an
 operation is idempotent, `put_binding` is its own compare-and-swap,

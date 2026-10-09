@@ -9,7 +9,10 @@ copies: changing one never changes what was committed.
 Fencing. Writes that a superseded worker could get wrong take the slot's
 lease and are refused without the active one: `claim_send` and
 `advance_operation` on an operation begun with a slot, and every
-`append_events`. The others are safe without a lease: `begin_operation`
+`append_events`. A session's journal belongs to the slot of the binding
+whose `native_refs["session"]` names it, registered by `put_binding`; an
+append never establishes ownership, and a session no binding names takes
+no appends. The others are safe without a lease: `begin_operation`
 only records intent and is idempotent; `put_binding` is its own
 compare-and-swap on generation; `record_usage` is ordered by revision, so a
 stale writer can only report true usage or be ignored; `mark_outbox_applied`
@@ -39,6 +42,9 @@ from mux.state.journal import JournalAppend, JournalEntry
 from mux.state.lease import Lease, Slot
 from mux.state.operations import Begun, OperationRecord
 from mux.state.usage_ledger import OutboxRow
+
+SESSION_REF = "session"
+"""The `ProviderBinding.native_refs` key naming the session a journal is for."""
 
 
 class ConfigRevisionConflict(MuxError):
@@ -98,7 +104,12 @@ class StateStore(Protocol):
         self, binding: ProviderBinding, *, expected_generation: int
     ) -> ProviderBinding:
         """Write the next generation in `binding_slot(binding)` per
-        `check_binding_successor`; the loser of a race gets `BindingConflict`."""
+        `check_binding_successor`; the loser of a race gets `BindingConflict`.
+
+        Registers the binding's session as owned by its slot. A rebind keeps
+        the old sessions' ownership; a session already owned by another slot
+        is refused.
+        """
         ...
 
     # Operations: found by (tenant, account, key), owned by one principal.
@@ -147,7 +158,7 @@ class StateStore(Protocol):
     async def release_lease(self, lease: Lease) -> None: ...
 
     # Journal: unique on (session, sequence) and (session, source_key, revision,
-    # preview). A session belongs to the slot of its first append.
+    # preview). A session belongs to the slot of the binding that names it.
     async def append_events(
         self,
         session: ResourceRef,

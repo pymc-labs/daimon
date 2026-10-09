@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
+from mux.contracts.resources import ProviderBinding
 from mux.state.journal import JournalEntry
 from mux.state.lease import Lease, Slot, StaleFence
 from mux.state.memory import MemoryStateStore, SimulatedCrash
@@ -37,6 +38,17 @@ def _entry(source: str) -> JournalEntry:
 
 
 async def _start(store: MemoryStateStore) -> Lease:
+    binding = ProviderBinding(
+        id="b1",
+        thread=THREAD,
+        provider="anthropic",
+        profile="anthropic.managed_agents",
+        native_refs={"session": SESSION.id},
+        generation=1,
+        config_revision=1,
+        legacy_account_id="a",
+    )
+    await store.put_binding(binding, expected_generation=0)
     fence = await store.acquire_lease(SLOT, holder="w1", turn_id="t", now=NOW, ttl=TTL)
     await store.begin_operation(
         SCOPE, key="k", request_digest="d", operation_id="o", now=NOW, slot=SLOT

@@ -26,12 +26,14 @@ from mux.contracts.ids import ChannelRef, ResourceRef, Scope
 from mux.contracts.receipts import OperationStatus
 from mux.contracts.resources import ProjectionSnapshot, ProviderBinding
 from mux.contracts.usage import UsageObservation
+from mux.errors import ScopeViolation
 from mux.state import journal, operations, usage_ledger
 from mux.state import lease as leases
 from mux.state.journal import EntryIdentity, JournalAppend, JournalEntry
 from mux.state.lease import Lease, LeaseState, Slot
 from mux.state.operations import Begun, OperationRecord
 from mux.state.store import (
+    SESSION_REF,
     ConfigRevisionConflict,
     binding_slot,
     check_binding_successor,
@@ -169,6 +171,12 @@ class MemoryStateStore:
             )
             if staged.binding_ids.get(binding.id, key) != key:
                 raise ValueError(f"binding id {binding.id} already names another slot")
+            slot = binding_slot(binding)
+            session_id = binding.native_refs.get(SESSION_REF)
+            if session_id is not None:
+                if staged.session_slots.get(session_id, slot) != slot:
+                    raise ValueError(f"session {session_id} already belongs to another slot")
+                staged.session_slots[session_id] = slot
             staged.bindings[key] = (*history, _detach(binding))
             staged.binding_ids[binding.id] = key
             self._commit("put_binding", staged)
@@ -301,7 +309,9 @@ class MemoryStateStore:
     ) -> JournalAppend:
         async with self.data.lock:
             staged = self.data.snapshot()
-            owner = staged.session_slots.get(session.id, fence.slot)
+            owner = staged.session_slots.get(session.id)
+            if owner is None:
+                raise ScopeViolation(session.id, "no binding names this session")
             self._fenced(staged, owner, fence, now)
             existing = staged.events.get(session.id, ())
             planned, duplicates = journal.plan_append(
@@ -319,7 +329,6 @@ class MemoryStateStore:
                     now=now,
                 )
             )
-            staged.session_slots[session.id] = owner
             staged.events[session.id] = (*existing, *appended)
             staged.event_sources[session.id] = staged.event_sources.get(session.id, frozenset()) | {
                 entry.identity for entry, _ in planned
