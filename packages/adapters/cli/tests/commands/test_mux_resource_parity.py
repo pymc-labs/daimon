@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from email.parser import BytesParser
 from email.policy import default
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -12,6 +13,7 @@ import pytest
 from anthropic import APIStatusError
 from daimon.adapters.cli import mux_compat
 from daimon.adapters.cli.commands import environments, skills_backfill
+from daimon.core.defaults.metadata import build_metadata
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import (
     archive_agent,
@@ -22,6 +24,7 @@ from daimon.core.mux_compat import (
     update_agent,
     update_environment,
 )
+from daimon.core.specs import load_environment_spec
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from rich.console import Console
@@ -256,6 +259,35 @@ async def test_cli_environment_fork_callsite_preserves_null_description(monkeypa
     assert_equal(before, after)
 
 
+async def test_cli_environment_update_callsite_preserves_spec_and_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    authorize_environment_commands(monkeypatch)
+    path = tmp_path / "environment.yaml"
+    path.write_text("name: renamed\ndescription: ''\nconfig:\n  type: cloud\n")
+    spec = load_environment_spec(path)
+    assert spec.scope is None
+    record = ma_environment(id="env1", tenant_id=TENANT).model_dump(mode="json")
+
+    async def find(*args: object, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(id="env1")
+
+    monkeypatch.setattr(environments, "find_environment_by_daimon_tag", find)
+    before, after = scripts(
+        ScriptedReply("POST", "/v1/environments/env1", httpx.Response(200, json=record))
+    )
+    async with before.client() as old, after.client() as new:
+        await old.beta.environments.update(
+            "env1",
+            **spec.model_dump(exclude_none=True),
+            metadata=build_metadata(tenant_id=TENANT, name=spec.name),
+        )
+        await environments.environments_update(
+            rt=runtime(new), console=Console(file=StringIO()), name="original", path=path
+        )
+    assert_equal(before, after)
+
+
 def multipart(request):
     headers = dict(request.protocol_headers)
     message = BytesParser(policy=default).parsebytes(
@@ -320,3 +352,80 @@ async def test_cli_seeded_backfill_upload_callsite_preserves_multipart(monkeypat
     assert multipart(after.requests[0])[-1] == ("files[]", "SKILL.zip", "application/zip", data)
     assert actual == expected.id
     assert not archive.exists()
+
+
+async def test_cli_synced_backfill_upload_callsite_preserves_multipart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = b"PK\x03\x04the actual synced archive\x00\xff"
+    provenance = SimpleNamespace(
+        tenant_id=TENANT,
+        principal_id=TENANT,
+        agent_name="agent",
+        name="sample",
+        source_repo_url="https://github.com/example/sample",
+        source_repo_branch="main",
+        source_path="",
+        content_hash="hash",
+        anthropic_latest_version="1",
+    )
+
+    async def lookup(*args: object, **kwargs: object) -> list[SimpleNamespace]:
+        return [provenance]
+
+    class Fetcher:
+        def __init__(self, http_client: httpx.AsyncClient) -> None:
+            pass
+
+        async def fetch_tarball(self, *, credential: None, url: str, branch: str) -> bytes:
+            assert url == provenance.source_repo_url
+            assert branch == provenance.source_repo_branch
+            return b"source tarball"
+
+    async def bundle(
+        *, tarball_bytes: bytes, extract_root: Path, repo_name: str, split: bool
+    ) -> list[SimpleNamespace]:
+        assert tarball_bytes == b"source tarball"
+        assert extract_root.is_dir()
+        assert repo_name == "sample"
+        assert split is False
+        return [SimpleNamespace(prebuilt_zip=data)]
+
+    writes: list[dict[str, object]] = []
+
+    async def upsert(session: object, **kwargs: object) -> None:
+        writes.append(kwargs)
+
+    monkeypatch.setattr(skills_backfill, "list_user_skills_for_tenant", lookup)
+    monkeypatch.setattr(skills_backfill, "GitHubTarballFetcher", Fetcher)
+    monkeypatch.setattr(skills_backfill, "extract_and_bundle", bundle)
+    monkeypatch.setattr(skills_backfill, "upsert_user_skill", upsert)
+    row = skills_backfill._BackfillRow(
+        tenant_id=str(TENANT),
+        agent_names="agent",
+        skill_id="old",
+        display_title="agent/sample",
+        classification="RECREATE_SYNCED",
+        new_title=f"{TENANT}/agent/sample",
+        new_skill_id="",
+    )
+    before, after = scripts(ScriptedReply("POST", "/v1/skills", httpx.Response(200, json=SKILL)))
+    async with before.client() as old, after.client() as new, httpx.AsyncClient() as http:
+        expected = await old.beta.skills.create(
+            display_title=row.new_title, files=[("SKILL.zip", data, "application/zip")]
+        )
+        actual = await skills_backfill._create_new_skill(
+            client=new,
+            sessionmaker=db_context,
+            http_client=http,
+            console=Console(file=StringIO()),
+            row=row,
+            tenant_id=TENANT,
+        )
+    for transport in (before, after):
+        transport.assert_consumed()
+    assert multipart(after.requests[0]) == multipart(before.requests[0])
+    assert multipart(after.requests[0])[-1] == ("files[]", "SKILL.zip", "application/zip", data)
+    assert actual == expected.id
+    assert len(writes) == 1
+    assert writes[0]["anthropic_id"] == expected.id

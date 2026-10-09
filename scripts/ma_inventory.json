@@ -72,8 +72,8 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_mux_resource_parity.py",
-      "line": 130,
-      "end": 130,
+      "line": 133,
+      "end": 133,
       "scope": "test_cli_agent_backfill_and_rekey_payloads_are_identical",
       "category": "test",
       "resource": "agents.update",
@@ -85,8 +85,8 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_mux_resource_parity.py",
-      "line": 171,
-      "end": 171,
+      "line": 174,
+      "end": 174,
       "scope": "test_cli_environment_update_keeps_explicit_empties",
       "category": "test",
       "resource": "environments.update",
@@ -98,8 +98,8 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_mux_resource_parity.py",
-      "line": 246,
-      "end": 246,
+      "line": 249,
+      "end": 249,
       "scope": "test_cli_environment_fork_callsite_preserves_null_description",
       "category": "test",
       "resource": "environments.retrieve",
@@ -112,8 +112,8 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_mux_resource_parity.py",
-      "line": 247,
-      "end": 252,
+      "line": 250,
+      "end": 255,
       "scope": "test_cli_environment_fork_callsite_preserves_null_description",
       "category": "test",
       "resource": "environments.create",
@@ -126,8 +126,19 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_mux_resource_parity.py",
-      "line": 279,
-      "end": 281,
+      "line": 280,
+      "end": 284,
+      "scope": "test_cli_environment_update_callsite_preserves_spec_and_metadata",
+      "category": "test",
+      "resource": "environments.update",
+      "call": "old.beta.environments.update('env1', **spec.model_dump(exclude_none=True), metadata=build_metadata(tenant_id=TENANT, name=spec.name))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/cli/tests/commands/test_mux_resource_parity.py",
+      "line": 311,
+      "end": 313,
       "scope": "test_cli_skill_upload_helper_preserves_multipart_bytes",
       "category": "test",
       "resource": "skills.create",
@@ -139,8 +150,21 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_mux_resource_parity.py",
-      "line": 148,
-      "end": 148,
+      "line": 414,
+      "end": 416,
+      "scope": "test_cli_synced_backfill_upload_callsite_preserves_multipart",
+      "category": "test",
+      "resource": "skills.create",
+      "call": "old.beta.skills.create(display_title=row.new_title, files=[('SKILL.zip', data, 'application/zip')])",
+      "request_keys": [],
+      "response_access": [
+        "expected.id"
+      ]
+    },
+    {
+      "file": "packages/adapters/cli/tests/commands/test_mux_resource_parity.py",
+      "line": 151,
+      "end": 151,
       "scope": "test_cli_environment_delete_keeps_exception_type",
       "category": "test",
       "resource": "environments.delete",
@@ -150,8 +174,8 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_mux_resource_parity.py",
-      "line": 193,
-      "end": 193,
+      "line": 196,
+      "end": 196,
       "scope": "test_cli_skill_version_walk_preserves_pagination",
       "category": "test",
       "resource": "skills.versions.list",
@@ -163,8 +187,8 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_mux_resource_parity.py",
-      "line": 306,
-      "end": 308,
+      "line": 338,
+      "end": 340,
       "scope": "test_cli_seeded_backfill_upload_callsite_preserves_multipart",
       "category": "test",
       "resource": "skills.create",
@@ -176,8 +200,8 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_mux_resource_parity.py",
-      "line": 152,
-      "end": 152,
+      "line": 155,
+      "end": 155,
       "scope": "test_cli_environment_delete_keeps_exception_type",
       "category": "test",
       "resource": "environments.delete",
@@ -8617,7 +8641,7 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_mux_resource_parity.py",
-      "line": 12,
+      "line": 13,
       "module": "anthropic",
       "names": [
         "APIStatusError"
