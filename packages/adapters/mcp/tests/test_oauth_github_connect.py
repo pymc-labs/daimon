@@ -99,6 +99,28 @@ def test_picker_names_owner_type_for_screen_readers() -> None:
     )
     assert '<span class="web-sr-only">Organization</span>company' in page.body.decode()
     assert '<span class="web-sr-only">Personal account</span>person' in page.body.decode()
+    assert page.body.decode().count('class="web-icon web-icon--github"') >= 4
+    assert '<div class="gh-context"><svg class="web-icon web-icon--discord"' in page.body.decode()
+    assert (
+        '<button class="gh-primary" id="connect-repos" type="submit"><svg class="web-icon web-icon--github"'
+        in page.body.decode()
+    )
+
+
+def test_done_page_names_github_and_discord_with_marks() -> None:
+    page = oauth_github._done_page(
+        count=2,
+        platform="discord",
+        external_id="123",
+        requester_label="Alex",
+        same_person=True,
+        agent_name="ResearchBot",
+        update_pending=False,
+    )
+    body = page.body.decode()
+    assert '<h1 class="gh-title-marked"><svg class="web-icon web-icon--github"' in body
+    assert 'class="web-icon web-icon--discord"' in body
+    assert "Back to Discord" in body
 
 
 @pytest.mark.asyncio
@@ -302,7 +324,7 @@ async def test_connection_happy_path_and_rechecks(
         assert 'name="access" value="write" checked' in page.text
         assert 'class="web-icon web-icon--search"' in page.text
         assert 'class="web-icon web-icon--pencil"' in page.text
-        assert 'class="web-icon web-icon--link"' in page.text
+        assert 'class="web-icon web-icon--github"' in page.text
         assert page.text.index('id="search-repos"') < page.text.index('class="gh-repo-list"')
         assert page.text.count('class="gh-primary"') == 1
         assert 'action="https://mcp.test/oauth/github/confirm"' in page.text

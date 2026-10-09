@@ -71,6 +71,10 @@ def test_oauth_success_returns_to_platform(platform: str, name: str, url: str) -
     assert f'href="{url}"' in body
     assert f"Back to {name}" in body
     assert body.count('class="gh-primary"') == 1
+    if platform == "discord":
+        assert 'class="web-icon web-icon--discord"' in body
+    if platform == "teams":
+        assert 'class="web-icon web-icon--teams"' not in body
 
 
 def _settings() -> Settings:

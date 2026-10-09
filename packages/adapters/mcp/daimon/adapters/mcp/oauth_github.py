@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlencode
 import httpx
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.github_pages import github_page
-from daimon.adapters.mcp.web_icons import icon
+from daimon.adapters.mcp.web_icons import icon, platform_mark
 from daimon.core.config import Settings
 from daimon.core.github_app_auth import build_app_jwt, get_app_installation_details
 from daimon.core.github_credentials import decrypt_token, encrypt_token
@@ -120,7 +120,7 @@ def _error(
 def _back_to_chat(platform: str, workspace_id: str) -> str:
     if platform == "discord":
         target = f"https://discord.com/channels/{html.escape(workspace_id, quote=True)}"
-        return f'<a class="gh-primary" href="{target}">{icon("chevron-left")}Back to Discord</a>'
+        return f'<a class="gh-primary" href="{target}">{icon("discord")}Back to Discord</a>'
     return "In Slack, run <code>/github</code>."
 
 
@@ -149,6 +149,7 @@ def _already_connected_page(
     )
     return github_page(
         title=label,
+        heading_icon=True,
         body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div>'
         + detail
         + "<p>You can close this tab.</p>"
@@ -170,6 +171,7 @@ def _done_page(
     if update_pending and agent_name:
         return github_page(
             title=f"Repos connected. An operator will finish switching {agent_name}.",
+            heading_icon=True,
             body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div>'
             "<p>You can close this tab.</p>",
         )
@@ -192,6 +194,7 @@ def _done_page(
         )
         return github_page(
             title=f"Connected {_repo_count(count)}",
+            heading_icon=True,
             body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div>' + ready + body,
         )
     if same_person:
@@ -208,6 +211,7 @@ def _done_page(
         )
     return github_page(
         title=f"Connected {_repo_count(count)}",
+        heading_icon=True,
         body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div>' + body,
     )
 
@@ -215,12 +219,13 @@ def _done_page(
 def _install_page(install_url: str, cancel_url: str) -> Response:
     return github_page(
         title="Install Daimon on GitHub",
+        heading_icon=True,
         body_html=(
             "<p>Pick the account or organization with your repos. "
             "You'll choose which repos to connect after GitHub.</p>"
             '<div class="gh-actions">'
             f'<a class="gh-primary" href="{install_url}">'
-            f"Continue to GitHub{icon('chevron-right')}</a>"
+            f"{icon('github')}Continue to GitHub</a>"
             f'<a class="gh-link" href="{cancel_url}">Cancel</a></div>'
         ),
     )
@@ -234,6 +239,7 @@ def _pending_page(check_url: str, cancel_url: str, organization: str | None = No
     )
     return github_page(
         title="Waiting for GitHub approval",
+        heading_icon=True,
         body_html=(
             f'<div class="gh-status-icon">{icon("hourglass")}</div>'
             f"<p>{who} Check again after they approve.</p>"
@@ -410,7 +416,10 @@ def _confirmation_page(
 ) -> Response:
     """Render the same picker used by the live route and screenshot capture."""
     place = "Server" if platform == "discord" else "Workspace"
-    context = f'<div class="gh-context"><span>{place}: {html.escape(workspace)}</span></div>'
+    context = (
+        f'<div class="gh-context">{platform_mark(platform)}'
+        f"<span>{place}: {html.escape(workspace)}</span></div>"
+    )
     parts = [
         f'<form id="github-connect-form" method="post" '
         f'action="{html.escape(root, quote=True)}/oauth/github/confirm">',
@@ -441,10 +450,11 @@ def _confirmation_page(
         if not owned:
             continue
         parts.append('<div class="gh-repo-owner">')
-        owner_icon = "user" if installation.owner_type.lower() == "user" else "building"
-        owner_label = "Personal account" if owner_icon == "user" else "Organization"
+        owner_label = (
+            "Personal account" if installation.owner_type.lower() == "user" else "Organization"
+        )
         parts.append(
-            f'<div class="gh-repo-group">{icon(owner_icon)}'
+            f'<div class="gh-repo-group">{icon("github")}'
             f'<span class="web-sr-only">{owner_label}</span>'
             f"{html.escape(installation.owner_login)}</div>"
         )
@@ -486,7 +496,7 @@ def _confirmation_page(
             )
             + '</div><div class="gh-finish-actions">',
             '<button class="gh-primary" id="connect-repos" type="submit">'
-            f'{icon("link")}<span class="gh-button-label">Connect repos</span></button>'
+            f'{icon("github")}<span class="gh-button-label">Connect repos</span></button>'
             f'<a class="gh-link" href="{cancel_url}">Cancel</a></div></div>',
             "</form>",
             _PICKER_SCRIPT,

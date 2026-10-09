@@ -29,7 +29,7 @@ from daimon.adapters.mcp.tools.slack._credential_button import (
     edit_card_state_for_tenant as edit_slack_card_state,
 )
 from daimon.adapters.mcp.tools.teams._send import edit_teams_card_state
-from daimon.adapters.mcp.web_icons import icon
+from daimon.adapters.mcp.web_icons import icon, platform_mark
 from daimon.adapters.mcp.web_shell import render_page
 from daimon.core.agent_pins import request_pin_refusal
 from daimon.core.authz import (
@@ -132,7 +132,7 @@ def _success_page(
     destination = destinations.get(platform or "")
     back = (
         '<div class="gh-actions"><a class="gh-primary" '
-        f'href="{destination[1]}">{icon("chevron-left")}Back to {destination[0]}</a></div>'
+        f'href="{destination[1]}">{platform_mark(platform)}Back to {destination[0]}</a></div>'
         if destination
         else "<p>Return to chat.</p>"
     )

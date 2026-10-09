@@ -1,0 +1,9 @@
+GitHub and Discord marks are from Simple Icons at commit
+98820a4dc8c363ca72fa2c0d294ea4a0a9bba75d:
+https://github.com/simple-icons/simple-icons
+
+The Simple Icons project uses CC0 1.0 Universal. See SimpleIcons-LICENSE.txt.
+Brand owners retain their trademark rights. Brand guidance:
+https://github.com/logos
+https://discord.com/branding
+https://github.com/simple-icons/simple-icons/blob/98820a4dc8c363ca72fa2c0d294ea4a0a9bba75d/DISCLAIMER.md

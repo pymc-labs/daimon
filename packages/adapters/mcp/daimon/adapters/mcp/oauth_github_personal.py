@@ -17,6 +17,7 @@ from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.branded_pages import branded_page
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.github_request_delivery import deliver_private_request_card
+from daimon.adapters.mcp.web_icons import icon
 from daimon.core.config import Settings
 from daimon.core.github_app_session import effective_repo_state
 from daimon.core.github_credentials import decrypt_token, encrypt_token
@@ -68,8 +69,9 @@ def _page(
 def _back(platform: str, workspace_id: str) -> str:
     if platform == "discord":
         return (
-            f'<a href="https://discord.com/channels/{html.escape(workspace_id, quote=True)}">'
-            "Back to Discord</a>"
+            f'<a class="web-brand-link" '
+            f'href="https://discord.com/channels/{html.escape(workspace_id, quote=True)}">'
+            f"{icon('discord')}Back to Discord</a>"
         )
     return "In Slack, run <code>/github</code>."
 

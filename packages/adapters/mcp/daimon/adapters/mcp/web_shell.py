@@ -6,7 +6,7 @@ import hashlib
 import html
 from pathlib import Path
 
-from daimon.adapters.mcp.web_icons import icon
+from daimon.adapters.mcp.web_icons import icon, platform_mark
 from starlette.responses import HTMLResponse
 
 STATIC_DIR = Path(__file__).with_name("static")
@@ -27,7 +27,7 @@ def render_page(
     safe_title = html.escape(title)
     badge = (
         f'<span data-slot="badge" class="web-context">'
-        f"{icon('github') if context == 'GitHub' else ''}"
+        f"{icon('github') if context == 'GitHub' else platform_mark(context.lower())}"
         f"{html.escape(context)}</span>"
         if context
         else ""

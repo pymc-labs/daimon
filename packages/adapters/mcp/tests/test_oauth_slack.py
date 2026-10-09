@@ -84,6 +84,9 @@ def test_page_shell_contains_root_tokens() -> None:
 def test_inline_web_icon_accessibility_and_allowlist() -> None:
     assert 'aria-hidden="true"' in icon("search")
     assert 'aria-label="Find &lt;repos&gt;"' in icon("search", label="Find <repos>")
+    assert 'viewBox="0 0 24 24"' in icon("github")
+    assert 'viewBox="0 0 24 24"' in icon("discord")
+    assert 'aria-hidden="true"' in icon("github")
     with pytest.raises(ValueError):
         icon("../daimon-face")
 
@@ -827,6 +830,8 @@ async def test_shared_web_assets_are_served(
         font = await client.get("/web/Inter-Regular.ttf")
         icon = await client.get("/web/lucide/search.svg")
         license_file = await client.get("/web/Lucide-LICENSE.txt")
+        brand_icon = await client.get("/web/simple-icons/discord.svg")
+        brand_notice = await client.get("/web/SimpleIcons-NOTICE.txt")
         missing = await client.get("/web/missing.css")
     assert all(
         response.status_code == 200
@@ -839,6 +844,8 @@ async def test_shared_web_assets_are_served(
             font,
             icon,
             license_file,
+            brand_icon,
+            brand_notice,
         )
     )
     assert "text/css" in css.headers["content-type"]
@@ -850,7 +857,7 @@ async def test_shared_web_assets_are_served(
     assert versioned_css.headers["cache-control"] == "public, max-age=31536000, immutable"
     for response in (css, stale_css, duplicate_version):
         assert response.headers["cache-control"] == "no-cache"
-    for response in (face, font, icon, license_file):
+    for response in (face, font, icon, license_file, brand_icon, brand_notice):
         assert response.headers["cache-control"] == "public, max-age=86400"
     assert missing.status_code == 404
     assert missing.headers["cache-control"] == "no-cache"
@@ -863,6 +870,8 @@ async def test_shared_web_assets_are_served(
         font,
         icon,
         license_file,
+        brand_icon,
+        brand_notice,
         missing,
     ):
         assert response.headers["x-content-type-options"] == "nosniff"
