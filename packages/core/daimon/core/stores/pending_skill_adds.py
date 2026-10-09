@@ -17,7 +17,8 @@ from typing import Final
 
 from daimon.core._models import PendingSkillAdd
 from daimon.core.stores.domain import TurnOriginRow
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 PENDING_SKILL_ADD_TTL: Final = timedelta(minutes=15)
@@ -44,35 +45,39 @@ async def record_pending_skill_add(
     content_hash: str,
     now: datetime,
 ) -> None:
-    """Open a preview for ``origin``'s person, superseding their earlier ones for this agent.
+    """Open a preview for ``origin``'s person, replacing their open one for this agent.
 
-    Only the latest preview of an agent in a thread can be confirmed, so the
-    person's yes always answers the preview they were shown last.
+    One upsert on the open-preview unique index, so concurrent previews leave
+    exactly one open row and the person's yes answers only the one that won.
     """
     await session.execute(delete(PendingSkillAdd).where(PendingSkillAdd.expires_at <= now))
+    preview = {
+        "content_hash": content_hash,
+        "preview_origin_id": origin.id,
+        "created_at": now,
+        "expires_at": now + PENDING_SKILL_ADD_TTL,
+        "approved_origin_id": None,
+    }
     await session.execute(
-        update(PendingSkillAdd)
-        .where(
-            PendingSkillAdd.tenant_id == origin.tenant_id,
-            PendingSkillAdd.account_id == origin.account_id,
-            PendingSkillAdd.platform == origin.platform,
-            PendingSkillAdd.thread_id == origin.thread_id,
-            PendingSkillAdd.ma_agent_id == ma_agent_id,
-            PendingSkillAdd.consumed_at.is_(None),
-        )
-        .values(consumed_at=now)
-    )
-    session.add(
-        PendingSkillAdd(
+        insert(PendingSkillAdd)
+        .values(
             tenant_id=origin.tenant_id,
             account_id=origin.account_id,
             platform=origin.platform,
             thread_id=origin.thread_id,
             ma_agent_id=ma_agent_id,
-            content_hash=content_hash,
-            preview_origin_id=origin.id,
-            created_at=now,
-            expires_at=now + PENDING_SKILL_ADD_TTL,
+            **preview,
+        )
+        .on_conflict_do_update(
+            index_elements=[
+                PendingSkillAdd.tenant_id,
+                PendingSkillAdd.account_id,
+                PendingSkillAdd.platform,
+                PendingSkillAdd.thread_id,
+                PendingSkillAdd.ma_agent_id,
+            ],
+            index_where=PendingSkillAdd.consumed_at.is_(None),
+            set_=preview,
         )
     )
 
@@ -108,9 +113,12 @@ async def consume_pending_skill_add(
     content_hash: str,
     now: datetime,
 ) -> bool:
-    """Consume the preview ``origin``'s own message approved; False when there is none."""
-    pending = await session.scalar(
-        select(PendingSkillAdd)
+    """Consume the preview ``origin``'s own message approved; False when there is none.
+
+    One conditional update, so two calls in that turn can't both consume it.
+    """
+    consumed = await session.scalar(
+        update(PendingSkillAdd)
         .where(
             PendingSkillAdd.tenant_id == origin.tenant_id,
             PendingSkillAdd.account_id == origin.account_id,
@@ -122,10 +130,7 @@ async def consume_pending_skill_add(
             PendingSkillAdd.consumed_at.is_(None),
             PendingSkillAdd.expires_at > now,
         )
-        .limit(1)
-        .with_for_update()
+        .values(consumed_at=now)
+        .returning(PendingSkillAdd.id)
     )
-    if pending is None:
-        return False
-    pending.consumed_at = now
-    return True
+    return consumed is not None

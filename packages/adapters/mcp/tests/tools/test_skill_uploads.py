@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import io
 import json
@@ -40,11 +41,15 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_creation_channels import record_creation_channel
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
+from daimon.core.stores.pending_skill_adds import (
+    consume_pending_skill_add,
+    record_pending_skill_add,
+)
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.stores.thread_sessions import create_thread_session
-from daimon.core.stores.turn_origins import create_origin
+from daimon.core.stores.turn_origins import create_origin, get_active_origin
 from daimon.core.stores.user_skills import load_user_skill
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn_origin import turn_origin
@@ -1243,6 +1248,71 @@ async def test_with_cards_off_only_the_latest_preview_can_be_confirmed(
             world, auth, reply, skill_md=other_md, content_hash=second.preview.content_hash
         )
     assert added.status == "added" and len(world.created) == 1
+
+
+async def test_with_cards_off_concurrent_previews_leave_one_to_confirm(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Two previews racing for one person, thread and agent: one yes approves only one,
+    and confirms racing for it consume it once. Pooled connections, so they truly race."""
+    world = await _world(committing_sessionmaker)
+    auth, origin_id = await _cards_off_turn(world)
+    async with world.runtime.session_factory() as session:
+        origin = await get_active_origin(
+            session,
+            origin_id=uuid.UUID(origin_id),
+            tenant_id=world.tenant_id,
+            account_id=auth.account_id,
+            platform="discord",
+            now=datetime.now(UTC),
+        )
+    assert origin is not None
+
+    async def record(session: AsyncSession, content_hash: str) -> None:
+        await record_pending_skill_add(
+            session,
+            origin=origin,
+            ma_agent_id="agent_helper",
+            content_hash=content_hash,
+            now=datetime.now(UTC),
+        )
+
+    async def preview(content_hash: str) -> None:
+        async with world.runtime.session_factory.begin() as session:
+            await record(session, content_hash)
+
+    # B starts while A's transaction is still open, so B cannot see A to replace it.
+    async with world.runtime.session_factory.begin() as first:
+        await record(first, "hash-a")
+        second = asyncio.create_task(preview("hash-b"))
+        await asyncio.sleep(0.3)
+    await second
+
+    async with _reply(world, auth, "yes") as reply_id:
+        async with world.runtime.session_factory() as session:
+            reply = await get_active_origin(
+                session,
+                origin_id=uuid.UUID(reply_id),
+                tenant_id=world.tenant_id,
+                account_id=auth.account_id,
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+        assert reply is not None
+
+        async def consume(content_hash: str) -> bool:
+            async with world.runtime.session_factory.begin() as session:
+                return await consume_pending_skill_add(
+                    session,
+                    origin=reply,
+                    ma_agent_id="agent_helper",
+                    content_hash=content_hash,
+                    now=datetime.now(UTC),
+                )
+
+        assert await consume("hash-a") is False, "the replaced preview is not confirmable"
+        outcomes = await asyncio.gather(consume("hash-b"), consume("hash-b"))
+    assert sorted(outcomes) == [False, True], "the newer preview is consumed exactly once"
 
 
 async def test_with_cards_off_a_changed_skill_needs_a_fresh_preview(
