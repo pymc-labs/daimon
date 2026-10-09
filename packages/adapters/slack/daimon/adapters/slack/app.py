@@ -216,6 +216,8 @@ from daimon.core.github_removal_delivery import run_removal_notice_poller
 from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.slack_oauth import build_slack_connect_url
@@ -274,6 +276,7 @@ from daimon.core.turn_origin import (
     render_turn_origin,
     turn_origin,
 )
+from mux.errors import ScopeViolation
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
@@ -2318,11 +2321,13 @@ class SlackApp:
                 # failing the whole explanation.
                 owner_name = "the previous agent"
                 try:
-                    owner_agent = await self.runtime.anthropic.beta.agents.retrieve(
-                        error.source_agent_id
+                    owner_agent = await retrieve_agent(
+                        self.runtime.anthropic,
+                        error.source_agent_id,
+                        scope=resource_scope(tenant_id=str(tenant_id)),
                     )
                     owner_name = owner_agent.name
-                except anthropic.APIStatusError:
+                except (anthropic.APIStatusError, ScopeViolation):
                     pass
                 explanation = render_responder_changed_without_handoff(
                     new_responder=admission.agent.name,

@@ -7,7 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Route CLI agent, environment and skill operations through tenant-scoped neutral resource ports, preserving requests, output and SDK error handling.
+- MCP agent, environment and skill operations now consume tenant-scoped neutral resource ports.
+- Discord, Slack, Teams and scheduler agent operations now consume tenant-scoped neutral resource ports.
+- Preserve original credential JSON key order and redact alternate quote-escaped secret echoes; verify `.env` upload filename, media type and bytes at the host call site.
+
+- Advertise closed session create, resource-mount and update configuration namespaces for backend admission.
+- Route session creation and preparation through neutral lifecycle ports, preserving
+  native request bytes, response fields, recovery ordering and SDK exception types.
+
+- Preserve explicit null environment descriptions on native create requests and
+  resolve and redact all repository tokens in session resource lists together.
+
+- Route vault bootstrap, credential mirroring, MCP OAuth writes and secret file
+  upload through resource ports while preserving request order, locking, retries
+  and cleanup; keep credential material out of SDK errors and DEBUG logs.
+
 - Verify legacy skill upload filenames, media types and archive bytes at import and repository-sync call sites.
+
+- Route vault administration, credential writes, secret file uploads and session mount administration through resource ports with host-held secret references.
 
 - Limit tenant skill list results to authorized custom skills and shared provider catalog skills without changing provider pagination.
 
@@ -22,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The file-handling skill now tells agents to export only the current turn's finished deliverables, keeping working directories and already delivered files out of outputs to avoid duplicate attachments.
 - A copied agent keeps the skills its source added itself again. Copying (a channel's own agent made with `--copy-from`, or `fork_agent`) downloaded each skill with a header a workspace API key is refused for, so the copy silently left those skills off. The workspace recovery export downloads skills the same way and is fixed too.
 - A new agent's first Slack or Discord answer now shows its generated face. The first turn waits up to three seconds for the face to render instead of posting without a picture.
+
+- Normalize offline oracle provider handles by first capture appearance, including SDK responses, transport paths/query, deduplication keys and encoded SSE/control JSON; preserve literal filesystem paths and configured URLs even when they contain provider handles. Verify stored session fingerprints and hash their normalized inputs so unrelated ID generation cannot change goldens.
 - Discord agent posts and MCP tools now wait at most two seconds for a new channel webhook, then post through the bot with the agent name while creation continues in the background. Creation is deduplicated per channel, 429 retries respect a cooldown, and new channels create one webhook.
 - **The scheduler's usage sweep no longer re-replays every model call it has
   already metered.** It asks the API for `span.model_request_end` events only
@@ -39,6 +59,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discord picture upload retry expires cleanly, and a completed upload still succeeds if its setup panel was dismissed.
 - The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
+
+- Conformance now probes durable send replay, independent recovery evidence, lease ownership,
+  usage revision accounting, and binding races against the merged StateStore;
+  host-dependent fixtures remain explicitly pending.
+
+- An unwired Anthropic Events port translates recorded turn streams into neutral
+  events and usage observations, preserving record and preview authority,
+  nullable tool results and the SDK's pagination termination rule.
 
 - Content-free baseline SQL and a pinned JSON converter summarize 14-day token
   mix and total latency, with explicit first-token and turn-bridge dependencies.
@@ -64,6 +92,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and stream-read barrier make ceiling/cancel HTTP replay deterministic under load; a fixed call ceiling prevents
   inventory regeneration from raising the MA ratchet. Golden fixture defaults
   use public testing metadata access, preserving the private-core import boundary.
+  Database goldens pin all legacy columns at integration 4d61c73 and retain
+  additive schema fields in a separate capture, preventing new binding columns
+  from changing the existing behavior oracle.
+  Transport recorder regressions also validate additive and empty-table captures
+  when combined with the new binding columns.
 - Scripted offline MA transport and platform/DB effect recorders support
   deterministic neutral-core parity checks with exact billing values and
   jitter-safe DB timestamps that preserve scheduled durations.

@@ -94,6 +94,8 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.permissions import home_of
@@ -162,6 +164,7 @@ from microsoft_teams.api import (
 )
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import ExecuteAction
+from mux.errors import ScopeViolation
 from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
@@ -1000,6 +1003,7 @@ class TeamsApp:
         agent: BetaManagedAgentsAgent,
         *,
         direct_chat: bool,
+        tenant_id: uuid.UUID,
     ) -> tuple[str, tuple[ExecuteAction, ...]]:
         """The notice for a refused bind, and the Hand over button when the agent changed."""
         name = agent.name
@@ -1008,8 +1012,14 @@ class TeamsApp:
         if isinstance(error, SessionBusyError):
             return render_current_work_must_finish(name, handoff=True), ()
         owner = "the previous agent"
-        with contextlib.suppress(anthropic.APIStatusError):
-            owner = (await self.runtime.anthropic.beta.agents.retrieve(error.source_agent_id)).name
+        with contextlib.suppress(anthropic.APIStatusError, ScopeViolation):
+            owner = (
+                await retrieve_agent(
+                    self.runtime.anthropic,
+                    error.source_agent_id,
+                    scope=resource_scope(tenant_id=str(tenant_id)),
+                )
+            ).name
         text = render_responder_changed_without_handoff(
             new_responder=name,
             owner=owner,
@@ -1053,7 +1063,7 @@ class TeamsApp:
             )
         except _BIND_REFUSALS as error:
             text, actions = await self._refusal(
-                error, admission.agent, direct_chat=inbound.kind == "dm"
+                error, admission.agent, direct_chat=inbound.kind == "dm", tenant_id=tenant_id
             )
             await lifecycle.close_with_notice(text, actions=actions)
             if reraise:

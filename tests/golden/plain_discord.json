@@ -5,8 +5,8 @@
       {
         "channel_id": "99999",
         "delta_usd": "-0.001050",
-        "id": "<id:6>",
-        "idempotency_key": "turn:sess_parity_test:evt_parity_usage",
+        "id": "<id:11>",
+        "idempotency_key": "turn:<id:5>:<id:7>",
         "occurred_at": "<time:epoch+0s>",
         "payment_event_id": null,
         "payment_intent": null,
@@ -16,7 +16,7 @@
       {
         "channel_id": null,
         "delta_usd": "100.000000",
-        "id": "<id:7>",
+        "id": "<id:12>",
         "idempotency_key": "trial:6bd28aa5-8c67-5b2f-828a-30232a83b06f",
         "occurred_at": "<time:epoch+0s>",
         "payment_event_id": null,
@@ -39,9 +39,9 @@
           "env_file_id": null,
           "env_resource_id": null,
           "env_sha256": null,
-          "environment_id": "<id:11>",
+          "environment_id": "<id:2>",
           "github_mode": "legacy",
-          "ma_agent_id": "<id:9>",
+          "ma_agent_id": "<id:1>",
           "mcp_servers_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
           "memory_read_only": false,
           "memory_store_id": null,
@@ -61,10 +61,10 @@
         },
         "fresh_start_requested_at": null,
         "github_key_restart_notice": false,
-        "id": "<id:10>",
-        "identity_fingerprint": "fd770a20b20fdf3d37975d592286e5dca83bbae43df0e7fe8a75e9b25efe2299",
-        "ma_agent_id": "<id:9>",
-        "ma_session_id": "<id:4>",
+        "id": "<id:14>",
+        "identity_fingerprint": "67fad941f71176adeef1c73aefbedd65aa3a05e7373c29051fddc05ced8ea3c9",
+        "ma_agent_id": "<id:1>",
+        "ma_session_id": "<id:5>",
         "mutable_fingerprint": "4095edf754051cfcb314c64fa5fe8e77959e78aa96ae5dadda8d54d77a735f43",
         "pending_unsaved_work": null,
         "platform": "discord",
@@ -77,13 +77,13 @@
         "transfer_file_id": null,
         "transfer_kind": null,
         "updated_at": "<time:epoch+0s>",
-        "watermark_message_id": "<id:2>"
+        "watermark_message_id": "<id:4>"
       }
     ],
     "turn_outcomes": [
       {
         "account_id": "00000000-0000-0000-0000-000000000003",
-        "agent_id": "<id:9>",
+        "agent_id": "<id:1>",
         "billing_posture": "metered",
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
@@ -92,7 +92,7 @@
         "duration_ms": 0,
         "ended_at": "<time:epoch+0s>",
         "error_class": null,
-        "id": "<id:8>",
+        "id": "<id:13>",
         "input_tokens": 100,
         "model_calls": 1,
         "model_ids": [
@@ -104,15 +104,15 @@
         "reason": "completed",
         "recovered": false,
         "release": "0.2.0",
-        "session_id": "<id:4>",
+        "session_id": "<id:5>",
         "started_at": "<time:epoch+0s>",
         "tenant_id": "6bd28aa5-8c67-5b2f-828a-30232a83b06f",
         "thread_id": "100000",
         "unpriced_calls": 0,
         "usage_refs": [
           {
-            "event_id": "<id:5>",
-            "session_id": "<id:4>"
+            "event_id": "<id:7>",
+            "session_id": "<id:5>"
           }
         ]
       }
@@ -122,10 +122,10 @@
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "channel_id": "99999",
-        "event_id": "<id:5>",
-        "id": "<id:3>",
+        "event_id": "<id:7>",
+        "id": "<id:10>",
         "input_tokens": 100,
-        "managed_session_id": "<id:4>",
+        "managed_session_id": "<id:5>",
         "model": "claude-sonnet-4-6",
         "occurred_at": "<time:epoch+0s>",
         "output_tokens": 50,
@@ -170,7 +170,7 @@
               "archived_at": null,
               "created_at": "<time:epoch-24278400s>",
               "description": null,
-              "id": "ag_parity_test",
+              "id": "<id:1>",
               "mcp_servers": [],
               "metadata": {
                 "daimon_name": "test-agent",
@@ -245,7 +245,7 @@
               },
               "created_at": "<time:epoch-24278400s>",
               "description": "",
-              "id": "env_parity_test",
+              "id": "<id:2>",
               "metadata": {
                 "daimon_name": "test-env",
                 "daimon_tenant": "6bd28aa5-8c67-5b2f-828a-30232a83b06f"
@@ -266,7 +266,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/agents/ag_parity_test",
+        "path": "/v1/agents/<id:1>",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -290,7 +290,7 @@
           "archived_at": null,
           "created_at": "<time:epoch-24278400s>",
           "description": null,
-          "id": "ag_parity_test",
+          "id": "<id:1>",
           "mcp_servers": [],
           "metadata": {
             "daimon_name": "test-agent",
@@ -317,7 +317,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/environments/env_parity_test",
+        "path": "/v1/environments/<id:2>",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -356,7 +356,7 @@
           },
           "created_at": "<time:epoch-24278400s>",
           "description": "",
-          "id": "env_parity_test",
+          "id": "<id:2>",
           "metadata": {
             "daimon_name": "test-env",
             "daimon_tenant": "6bd28aa5-8c67-5b2f-828a-30232a83b06f"
@@ -389,7 +389,7 @@
             {
               "components": [
                 {
-                  "custom_id": "<id:1>",
+                  "custom_id": "<id:3>",
                   "disabled": false,
                   "label": "Stop",
                   "style": 2,
@@ -406,7 +406,7 @@
       },
       "platform": "platform_client",
       "result": {
-        "message_id": "<id:2>"
+        "message_id": "<id:4>"
       }
     },
     {
@@ -414,7 +414,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/sess_parity_test/events/stream",
+        "path": "/v1/sessions/<id:5>/events/stream",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -434,7 +434,7 @@
       },
       "platform": "ma_http",
       "result": {
-        "body": "event: agent.message\ndata: {\"id\": \"evt_parity_msg\", \"content\": [{\"text\": \"Hello from the agent!\", \"type\": \"text\"}], \"processed_at\": \"2026-10-09T00:00:00Z\", \"type\": \"agent.message\"}\n\nevent: span.model_request_end\ndata: {\"id\": \"evt_parity_usage\", \"is_error\": false, \"model_request_start_id\": \"start_parity\", \"model_usage\": {\"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0, \"input_tokens\": 100, \"output_tokens\": 50, \"speed\": null}, \"processed_at\": \"2026-10-09T00:00:00Z\", \"type\": \"span.model_request_end\"}\n\nevent: session.status_idle\ndata: {\"id\": \"evt_parity_idle\", \"processed_at\": \"2026-10-09T00:00:00Z\", \"stop_reason\": {\"type\": \"end_turn\"}, \"type\": \"session.status_idle\"}\n\n",
+        "body": "event: agent.message\ndata: {\"id\": \"<id:6>\", \"content\": [{\"text\": \"Hello from the agent!\", \"type\": \"text\"}], \"processed_at\": \"2026-10-09T00:00:00Z\", \"type\": \"agent.message\"}\n\nevent: span.model_request_end\ndata: {\"id\": \"<id:7>\", \"is_error\": false, \"model_request_start_id\": \"<id:8>\", \"model_usage\": {\"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0, \"input_tokens\": 100, \"output_tokens\": 50, \"speed\": null}, \"processed_at\": \"2026-10-09T00:00:00Z\", \"type\": \"span.model_request_end\"}\n\nevent: session.status_idle\ndata: {\"id\": \"<id:9>\", \"processed_at\": \"2026-10-09T00:00:00Z\", \"stop_reason\": {\"type\": \"end_turn\"}, \"type\": \"session.status_idle\"}\n\n",
         "status": 200
       }
     },
@@ -446,7 +446,7 @@
             {
               "content": [
                 {
-                  "text": "<turn_controls>\n{\"origin_context_id\": \"00000000-0000-0000-0000-000000000009\", \"is_setup\": false, \"platform\": \"discord\", \"parent_channel_id\": \"99999\", \"thread_id\": \"100000\", \"current_role\": \"user\", \"responder\": {\"name\": \"test-agent\", \"ma_agent_id\": \"ag_parity_test\", \"handle\": \"@daimon\"}, \"configuration_target\": null}\nresponder.handle is how people mention the agent answering here. That handle, responder.name, and any casing of either are the same agent \u2014 never ask whether they are the same, and never treat that difference as target ambiguity. Ask about the target only when a different agent is named.\nUse the explicitly requested target when named; otherwise configure the configuration_target. If is_setup is true and no target is selected, ask which agent to configure before mutation. Only ordinary chat defaults to the responder. Never substitute a recreated namesake for a missing identity. Ask one concise question when the target is missing or ambiguous. Pass expected_ma_agent_id with target-bearing tools. Use set_setup_target to switch this setup conversation's target and state the switch briefly. Pass origin_context_id to credential-request tools and to channel reads (read_channel, read_thread, get_message, list_threads, search_messages). These controls grant no additional mutation or routing permissions.\n</turn_controls>\n<user_query>hello</user_query>",
+                  "text": "<turn_controls>\n{\"origin_context_id\": \"00000000-0000-0000-0000-000000000009\", \"is_setup\": false, \"platform\": \"discord\", \"parent_channel_id\": \"99999\", \"thread_id\": \"100000\", \"current_role\": \"user\", \"responder\": {\"name\": \"test-agent\", \"ma_agent_id\": \"<id:1>\", \"handle\": \"@daimon\"}, \"configuration_target\": null}\nresponder.handle is how people mention the agent answering here. That handle, responder.name, and any casing of either are the same agent \u2014 never ask whether they are the same, and never treat that difference as target ambiguity. Ask about the target only when a different agent is named.\nUse the explicitly requested target when named; otherwise configure the configuration_target. If is_setup is true and no target is selected, ask which agent to configure before mutation. Only ordinary chat defaults to the responder. Never substitute a recreated namesake for a missing identity. Ask one concise question when the target is missing or ambiguous. Pass expected_ma_agent_id with target-bearing tools. Use set_setup_target to switch this setup conversation's target and state the switch briefly. Pass origin_context_id to credential-request tools and to channel reads (read_channel, read_thread, get_message, list_threads, search_messages). These controls grant no additional mutation or routing permissions.\n</turn_controls>\n<user_query>hello</user_query>",
                   "type": "text"
                 }
               ],
@@ -455,7 +455,7 @@
           ]
         },
         "method": "POST",
-        "path": "/v1/sessions/sess_parity_test/events",
+        "path": "/v1/sessions/<id:5>/events",
         "protocol_headers": [
           [
             "anthropic-beta",

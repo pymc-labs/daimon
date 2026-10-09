@@ -45,6 +45,8 @@ from daimon.core.mcp_auth import (
     mint_agent_mcp_token,
     token_jti,
 )
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.permissions import any_agent_rules
 from daimon.core.roster import RosterAgent
@@ -378,7 +380,9 @@ async def _authorize_mint(
         )
     agent = AgentRef.of(target.name)
     if channel_id is not None and any_agent_rules(policy):
-        ma_agent = await runtime.anthropic.beta.agents.retrieve(target.ma_agent_id)
+        ma_agent = await retrieve_agent(
+            runtime.anthropic, target.ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id))
+        )
         agent = build_agent_ref(ma_agent.name, ma_agent.metadata, target.name)
     return authorize_coding_token(policy, subject=subject, agent=agent, channel_id=channel_id)
 

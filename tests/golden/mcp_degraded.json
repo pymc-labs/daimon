@@ -6,7 +6,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/sess_1/events/stream",
+        "path": "/v1/sessions/<id:1>/events/stream",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -47,7 +47,7 @@
           ]
         },
         "method": "POST",
-        "path": "/v1/sessions/sess_1/events",
+        "path": "/v1/sessions/<id:1>/events",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -90,7 +90,7 @@
               },
               "type": "mcp_authentication_failed_error"
             },
-            "id": "e_1",
+            "id": "<id:2>",
             "processed_at": "<time:epoch-24278400s>",
             "type": "session.error"
           }
@@ -111,7 +111,7 @@
                 "type": "text"
               }
             ],
-            "id": "m_1",
+            "id": "<id:3>",
             "processed_at": "<time:epoch-24278400s>",
             "type": "agent.message"
           }
@@ -126,7 +126,7 @@
       "payload": {
         "args": [
           {
-            "id": "s_1",
+            "id": "<id:4>",
             "processed_at": "<time:epoch-24278400s>",
             "stop_reason": {
               "type": "end_turn"
@@ -163,9 +163,9 @@
             "rate_limit_until": null,
             "retrying_error": null,
             "seen_event_ids": [
-              "<id:1>",
               "<id:2>",
-              "<id:3>"
+              "<id:3>",
+              "<id:4>"
             ],
             "stop_reason": {
               "type": "end_turn"
@@ -209,9 +209,9 @@
             "rate_limit_until": null,
             "retrying_error": null,
             "seen_event_ids": [
-              "<id:1>",
               "<id:2>",
-              "<id:3>"
+              "<id:3>",
+              "<id:4>"
             ],
             "stop_reason": {
               "type": "end_turn"

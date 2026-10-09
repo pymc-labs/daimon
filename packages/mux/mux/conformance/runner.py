@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
+from mux.contracts.receipts import SendReceipt
 from mux.contracts.resources import Session, SessionSpec, SkillUpload
+from mux.state.memory import CrashPoint
+from mux.state.store import StateStore
 
 
 class ConformanceFailure(Exception):
@@ -21,13 +24,6 @@ def require(condition: object, message: str) -> None:
         raise ConformanceFailure(message)
 
 
-class StateStore(Protocol):
-    """Temporary opaque seam; replaced by mux.state.StateStore when N2 lands.
-
-    No store operations are invented here. Every probe requiring them is pending.
-    """
-
-
 @dataclass(frozen=True)
 class Scenario:
     scope: Scope
@@ -35,6 +31,12 @@ class Scenario:
     session: Session
     desired: SessionSpec
     shared_resources: tuple[ResourceRef, ...] = ()
+
+
+@dataclass(frozen=True)
+class SendEvidence:
+    key: str
+    receipt: SendReceipt
 
 
 class ScriptedTransport(Protocol):
@@ -57,6 +59,25 @@ class ScriptedTransport(Protocol):
     def deleted_resources(self) -> tuple[ResourceRef, ...]: ...
     @property
     def skill_uploads(self) -> tuple[SkillUpload, ...]: ...
+    @property
+    def upstream_sends(self) -> tuple[SendEvidence, ...]:
+        """Actual scripted acceptance responses, independent of local records."""
+        ...
+
+    @property
+    def reconciled_sends(self) -> tuple[SendEvidence, ...]:
+        """Native responses actually read by recovery, never invented from the store."""
+        ...
+
+    def restart_store(
+        self, store: StateStore, *, crash: Mapping[str, CrashPoint] | None = None
+    ) -> StateStore:
+        """Restart over committed data and reattach the driver to that store.
+
+        Crash plans simulate death immediately before/after a named store
+        transaction commits. Upstream effects survive independently.
+        """
+        ...
 
 
 @dataclass(frozen=True)

@@ -27,6 +27,7 @@ import typer
 from anthropic import AsyncAnthropic
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import YES_OPTION
+from daimon.adapters.cli.mux_compat import retrieve_skill
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
@@ -34,6 +35,8 @@ from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import list_agents_by_tenant, list_referenced_skill_ids
 from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_display_title
 from daimon.core.ma import delete_skill_and_versions
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import create_skill, retrieve_agent, update_agent
 from daimon.core.skill_sync.bundler import extract_and_bundle
 from daimon.core.skill_sync.fetcher import GitHubAuthError, GitHubTarballFetcher, GitHubUnreachable
 from daimon.core.skill_zip import build_skill_zip
@@ -288,7 +291,9 @@ async def _plan_phase(
 
         for skill_id, agent_names in pinned.items():
             # Retrieve by id (never skills.list)
-            skill = await client.beta.skills.retrieve(skill_id)
+            skill = await retrieve_skill(
+                client, skill_id, scope=resource_scope(tenant_id=str(tenant_id))
+            )
             title = skill.display_title or ""
             classification = classify_skill(
                 display_title=title,
@@ -343,6 +348,7 @@ async def _apply_phase(
 
     # Track: legacy_skill_id -> new_skill_id (for the post-repin delete pass)
     legacy_to_new: dict[str, str] = {}
+    legacy_tenants: dict[str, uuid.UUID] = {}
 
     # Pass 1: re-create + re-pin all RECREATE_* rows
     for row in rows:
@@ -376,6 +382,7 @@ async def _apply_phase(
             continue
 
         legacy_to_new[row.skill_id] = new_skill_id
+        legacy_tenants[row.skill_id] = tenant_id
 
         # Re-pin: for each pinning agent, swap legacy skill id for new id
         agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
@@ -391,12 +398,16 @@ async def _apply_phase(
                 else:
                     new_skills.append(s.model_dump(mode="json"))
             # Retrieve fresh version before update (Pitfall 3 / rekey pattern)
-            fresh = await client.beta.agents.retrieve(agent.id)
+            fresh = await retrieve_agent(
+                client, agent.id, scope=resource_scope(tenant_id=str(tenant_id))
+            )
             try:
-                await client.beta.agents.update(
+                await update_agent(
+                    client,
                     fresh.id,
                     version=fresh.version,
-                    skills=new_skills,  # type: ignore[arg-type]
+                    payload={"skills": new_skills},
+                    scope=resource_scope(tenant_id=str(tenant_id)),
                 )
             except Exception as exc:  # per-agent error; run continues
                 _log.warning(
@@ -427,7 +438,11 @@ async def _apply_phase(
         referenced_ids = await list_referenced_skill_ids(client)
         for legacy_id, new_id in legacy_to_new.items():
             if legacy_id not in referenced_ids:
-                await delete_skill_and_versions(client, legacy_id)
+                await delete_skill_and_versions(
+                    client,
+                    legacy_id,
+                    scope=resource_scope(tenant_id=str(legacy_tenants[legacy_id])),
+                )
                 _log.info("skills_backfill.deleted_legacy", skill_id=legacy_id, new_id=new_id)
             else:
                 _log.info(
@@ -468,11 +483,12 @@ async def _create_new_skill(
         skill_dir = _DEFAULTS_SKILLS_DIR / row.display_title
         pkg = build_skill_zip(skill_dir)
         try:
-            with pkg.path.open("rb") as fh:
-                created = await client.beta.skills.create(
-                    display_title=row.new_title,
-                    files=[("SKILL.zip", fh, "application/zip")],
-                )
+            created = await create_skill(
+                client,
+                display_title=row.new_title,
+                data=pkg.path.read_bytes(),
+                scope=resource_scope(tenant_id=str(tenant_id)),
+            )
         finally:
             pkg.path.unlink(missing_ok=True)
         return created.id
@@ -538,9 +554,11 @@ async def _create_new_skill(
             return None
 
         zip_bytes = entries[0].prebuilt_zip
-        created = await client.beta.skills.create(
+        created = await create_skill(
+            client,
             display_title=row.new_title,
-            files=[("SKILL.zip", zip_bytes, "application/zip")],
+            data=zip_bytes,
+            scope=resource_scope(tenant_id=str(tenant_id)),
         )
         new_skill_id = created.id
 

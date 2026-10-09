@@ -35,10 +35,13 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_TENANT,
 )
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.operation_policy import decide_operation
 from daimon.core.roster import RosterAgent
 from daimon.core.skills.add import SkillAddResult, add_agent_skill
 from daimon.core.skills.ingest import SkillBundle
+from mux.errors import ScopeViolation
 
 log = structlog.get_logger()
 
@@ -87,7 +90,11 @@ async def skill_change_refusal(
     async def target() -> BetaManagedAgentsAgent:
         if ma_agent is not None:
             return ma_agent
-        return await runtime.anthropic.beta.agents.retrieve(agent.ma_agent_id)
+        return await retrieve_agent(
+            runtime.anthropic,
+            agent.ma_agent_id,
+            scope=resource_scope(tenant_id=str(actor.tenant_id)),
+        )
 
     async with runtime.sessionmaker() as session:
 
@@ -155,7 +162,16 @@ async def add_previewed_skill(
         if refusal is not None:
             raise SkillAddRefused(refusal)
 
-    fresh = await runtime.anthropic.beta.agents.retrieve(agent.ma_agent_id)
+    try:
+        fresh = await retrieve_agent(
+            runtime.anthropic,
+            agent.ma_agent_id,
+            scope=resource_scope(tenant_id=str(actor.tenant_id)),
+        )
+    except ScopeViolation as exc:
+        if exc.reason != "provider record belongs to another tenant":
+            raise
+        raise SkillAddRefused(f"{agent.name} is not an agent of this organisation.") from None
     await recheck(fresh)
     result = await add_agent_skill(
         runtime.anthropic,

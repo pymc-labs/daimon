@@ -49,12 +49,67 @@ Reference pagination honors omitted limits and the `has_more`/cursor contract.
 The reference driver is an in-memory, partial, test-only oracle for the runner.
 It is not a provider and its passes certify no backend. `IS_TEST_ORACLE = True`
 marks the reference module; register it with a name containing `reference`. Unexercised ports refuse
-explicitly. Nine executable probes cover C02/05/06/08/09/10/11/15/16. C10 checks driver
-admission, extension version and cross-tenant rejection. The remaining
-nine probes have explicit dependency reasons: N2 store, N4 host outcomes, N5 wakes,
-N8 accounting, N10 selection.
+explicitly. Thirteen executable probes cover C02–C11, C13, C15 and C16.
+C10 checks driver admission, extension version and cross-tenant rejection. The remaining
+five probes have explicit dependency reasons: C01 needs the host's multi-human
+queue/attribution and workspace binding, C12 the historical billing bridge,
+C14 the driver registry and existing/new-thread selection, C17 the host wake
+generation adapter, and C18 the host outcome-row mapping.
 They must be implemented against those seams before any C01–C18 certificate.
 
-`runner.StateStore` is an opaque temporary protocol, with no invented store API.
-Replace it with N2's protocol when merged; providing a store alone does not
-activate the pending tests. Never interpret a skip as a pass or remove its reason.
+The runner uses `mux.state.store.StateStore`; the reference factory supplies a
+fresh `MemoryStateStore` per probe. A missing store leaves C03/C04/C07/C13 pending.
+Never interpret a skip as a pass or remove its reason. State-backed scenarios use
+the deterministic store clock `2026-10-09T00:00:00Z` and five-minute leases; a
+future database adapter must control its transaction clock for expiry probes.
+No Postgres implementation or host integration is certified by the memory oracle.
+
+- C03 races same-key sends, reconstructs a receipt after restart, rejects changed
+  content and another principal, and retains unknown delivery after a timeout
+  following upstream acceptance. Retries must not add upstream effects.
+  The memory store does not suspend inside its transactions, so its default
+  sends serialize. A checked-in yielding wrapper suspends between intent and
+  claim transactions, proves three claim contenders overlap, and rejects a
+  read/yield/write claim that omits the atomic compare-and-swap. Driver adapters
+  must provide such suspension to exercise their races.
+- C04 injects deaths before/after send-claim and acceptance commits, then before/
+  after the journal commit. Intent, event content, projection and cursor survive
+  together; replay deduplicates and a superseded worker cannot claim, advance or
+  append. A committed send claim requires reconciliation even when no I/O is seen.
+  Lease takeover preserves prior uncertain/accepted intents and never permits a
+  blind resend of them. Missing and foreign-slot leases are refused; an append
+  cannot establish ownership of a session no persisted binding names, even
+  after an earlier refused append. Same-thread leases from another account
+  are foreign too. Recovery accepts accepted-only acknowledgements, immediate
+  processed commits, and native reconciliation after takeover. Queued and
+  processed receipts require matching committed input identity, supported by
+  the pre-replay record or a native response read during that replay. A write
+  made by the replay cannot manufacture its own evidence. The never-sent claim
+  stays unknown; a queued receipt without acceptance evidence fails.
+- C07 takes normalized usage null → 100 → 120 → 110 through the actual store,
+  preserving signed deltas, binding ownership, prior revisions and outbox rows.
+  Replays add nothing. A higher same-count revision then requires zero delta
+  against revision 4, proving stale replay did not rewind the latest state.
+  Each outbox row applies once and final units are 110.
+  Host pricing and overlapping-grain billing stay outside this probe (C12 pending).
+- C13 races two distinct candidates for an unbound slot through `bind_new_slot`;
+  both must adopt the one persisted winner, which survives restart.
+
+The scripted transport's `restart_store(store, crash=...)` reopens the same committed
+data and reattaches the driver's ports. Crash plans name a StateStore transaction
+and `before_commit` or `after_commit`; the adapter raises `SimulatedCrash` at that
+boundary. Upstream records/effects survive separately from local state. C03/C04/C07
+seed the scenario's binding; C13 seeds an unbound slot. The reference routes only
+C03/C04 sends through durable intent and claiming; its other ports remain partial.
+Broken send/store variants and the valid/pending matrix run under normal and
+optimized Python. They must fail on fixture diagnostics, not incidental exceptions.
+
+`upstream_sends` records actual scripted acceptance responses by idempotency key,
+before local receipt persistence. `reconciled_sends` records native responses
+actually read during recovery. Both contain `SendEvidence` and remain independent
+of the driver's operation records and returned receipts. C04 snapshots the
+pre-replay operation and reconciliation log, then checks the post-replay record
+for consistency; only prior durable acknowledgement or a new matching native
+observation supports acknowledged recovery. Already-durable processed receipts
+remain valid. The reference's `reconcile_send` reads its retained upstream log,
+records that observation, and returns no receipt for a key never sent.

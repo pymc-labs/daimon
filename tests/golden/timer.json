@@ -7,8 +7,8 @@
         "claimed_at": null,
         "created_at": "<time:epoch+0s>",
         "delivered_at": null,
-        "id": "<id:1>",
-        "idempotency_key": "<id:2>",
+        "id": "<id:2>",
+        "idempotency_key": "<id:3>",
         "lease_expires_at": null,
         "lease_owner": null,
         "parent_channel_id": "channel-1",
@@ -20,7 +20,7 @@
         "skip_reason": null,
         "started_at": null,
         "status": "pending",
-        "target_ma_agent_id": "agent_stats",
+        "target_ma_agent_id": "<id:1>",
         "target_name": "stats-bot",
         "tenant_id": "8b369f43-5689-50e4-9636-670ae2d2e0ea",
         "thread_id": "thread-1"
@@ -37,7 +37,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/agents/agent_stats",
+        "path": "/v1/agents/<id:1>",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -61,7 +61,7 @@
           "archived_at": null,
           "created_at": "<time:epoch-24278400s>",
           "description": null,
-          "id": "agent_stats",
+          "id": "<id:1>",
           "mcp_servers": [],
           "metadata": {
             "daimon_name": "stats-bot",

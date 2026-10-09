@@ -42,7 +42,7 @@
               "archived_at": null,
               "created_at": "<time:epoch-24278400s>",
               "description": null,
-              "id": "ag_test001",
+              "id": "<id:1>",
               "mcp_servers": [],
               "metadata": {
                 "daimon_name": "test-agent",
@@ -116,7 +116,7 @@
               },
               "created_at": "<time:epoch-9331200s>",
               "description": "",
-              "id": "env_test001",
+              "id": "<id:2>",
               "metadata": {
                 "daimon_name": "production",
                 "daimon_tenant": "00000000-0000-0000-0000-000000100005"
@@ -148,7 +148,7 @@
           ]
         },
         "method": "POST",
-        "path": "/v1/sessions/ses_test001/events",
+        "path": "/v1/sessions/<id:3>/events",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -181,7 +181,7 @@
                   "type": "text"
                 }
               ],
-              "id": "sevt_boundary_001",
+              "id": "<id:4>",
               "processed_at": null,
               "type": "user.message"
             }

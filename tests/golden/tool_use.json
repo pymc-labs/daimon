@@ -6,7 +6,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/sess_1/events/stream",
+        "path": "/v1/sessions/<id:1>/events/stream",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -47,7 +47,7 @@
           ]
         },
         "method": "POST",
-        "path": "/v1/sessions/sess_1/events",
+        "path": "/v1/sessions/<id:1>/events",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -83,7 +83,7 @@
         "args": [
           {
             "evaluated_permission": null,
-            "id": "tu_read",
+            "id": "<id:2>",
             "input": {
               "title": "Bug"
             },
@@ -104,11 +104,11 @@
       "payload": {
         "args": [
           {
-            "id": "sevt_pause",
+            "id": "<id:3>",
             "processed_at": "<time:epoch-24278400s>",
             "stop_reason": {
               "event_ids": [
-                "<id:1>"
+                "<id:2>"
               ],
               "type": "requires_action"
             },
@@ -127,13 +127,13 @@
           "events": [
             {
               "result": "allow",
-              "tool_use_id": "<id:1>",
+              "tool_use_id": "<id:2>",
               "type": "user.tool_confirmation"
             }
           ]
         },
         "method": "POST",
-        "path": "/v1/sessions/sess_1/events",
+        "path": "/v1/sessions/<id:1>/events",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -174,7 +174,7 @@
                 "type": "text"
               }
             ],
-            "id": "sevt_msg",
+            "id": "<id:4>",
             "processed_at": "<time:epoch-24278400s>",
             "type": "agent.message"
           }
@@ -189,7 +189,7 @@
       "payload": {
         "args": [
           {
-            "id": "sevt_end",
+            "id": "<id:5>",
             "processed_at": "<time:epoch-24278400s>",
             "stop_reason": {
               "type": "end_turn"
@@ -210,7 +210,7 @@
             "content": [
               {
                 "evaluated_permission": null,
-                "id": "tu_read",
+                "id": "<id:2>",
                 "input": {
                   "title": "Bug"
                 },
@@ -233,10 +233,10 @@
             "rate_limit_until": null,
             "retrying_error": null,
             "seen_event_ids": [
-              "<id:2>",
-              "<id:3>",
+              "<id:5>",
               "<id:4>",
-              "<id:1>"
+              "<id:3>",
+              "<id:2>"
             ],
             "stop_reason": {
               "type": "end_turn"
@@ -264,7 +264,7 @@
             "content": [
               {
                 "evaluated_permission": null,
-                "id": "tu_read",
+                "id": "<id:2>",
                 "input": {
                   "title": "Bug"
                 },
@@ -287,10 +287,10 @@
             "rate_limit_until": null,
             "retrying_error": null,
             "seen_event_ids": [
-              "<id:2>",
-              "<id:3>",
+              "<id:5>",
               "<id:4>",
-              "<id:1>"
+              "<id:3>",
+              "<id:2>"
             ],
             "stop_reason": {
               "type": "end_turn"

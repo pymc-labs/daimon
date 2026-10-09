@@ -44,6 +44,8 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_K
 from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import update_agent
 from daimon.core.operation_policy import decide_operation
 from daimon.core.stores.agent_files import delete_agent_file, list_agent_files
 from daimon.core.stores.agent_mcp_credentials import (
@@ -147,15 +149,21 @@ async def _detach_mcp_server_impl(
             if t.type == "mcp_toolset" and t.mcp_server_name == server_name:
                 continue
             new_tools.append(_ma_tool_to_param(t))
-        return await runtime.client.beta.agents.update(
+        return await update_agent(
+            runtime.client,
             fresh.id,
             version=fresh.version,
-            mcp_servers=new_mcp_servers,
-            tools=new_tools,
+            payload={"mcp_servers": new_mcp_servers, "tools": new_tools},
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
         )
 
     try:
-        updated = await update_agent_with_version_retry(runtime.client, agent.id, _apply)
+        updated = await update_agent_with_version_retry(
+            runtime.client,
+            agent.id,
+            _apply,
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        )
     except anthropic.ConflictError as exc:
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc
     # The shared token the form stored for this URL is mirrored into every
@@ -225,12 +233,21 @@ async def _remove_skill_impl(
             for sk in fresh.skills
             if sk.skill_id != target_id
         ]
-        return await runtime.client.beta.agents.update(
-            fresh.id, version=fresh.version, skills=new_skills
+        return await update_agent(
+            runtime.client,
+            fresh.id,
+            version=fresh.version,
+            payload={"skills": new_skills},
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
         )
 
     try:
-        updated = await update_agent_with_version_retry(runtime.client, agent.id, _apply)
+        updated = await update_agent_with_version_retry(
+            runtime.client,
+            agent.id,
+            _apply,
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        )
     except anthropic.ConflictError as exc:
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc
     async with runtime.session_factory.begin() as session:

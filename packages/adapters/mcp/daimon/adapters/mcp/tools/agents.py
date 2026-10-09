@@ -76,6 +76,8 @@ from daimon.core.mcp_attach import (
     replaced_server_url,
 )
 from daimon.core.memory_resource import archive_memory_store_for_agent
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_agent, retrieve_agent, update_agent
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.skill_sync import SyncRepoFailure, sync_agent_skills, sync_report_failures
 from daimon.core.specs import (
@@ -490,7 +492,11 @@ async def _create_agent_impl(
     if outcome.anthropic_id is None:
         raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
     await _record_creation_channel(runtime, auth, outcome.anthropic_id, origin)
-    ma_agent = await runtime.client.beta.agents.retrieve(outcome.anthropic_id)
+    ma_agent = await retrieve_agent(
+        runtime.client,
+        outcome.anthropic_id,
+        scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+    )
     # agents.create succeeded — always return AgentInfo even if sync fails.
     # if agents.create itself raises, let it propagate as ToolError.
     warnings: list[SyncRepoFailure] | None = None
@@ -725,7 +731,13 @@ async def _update_agent_impl(
             )
             if not has_base_toolset:
                 patch["tools"] = merge_default_agent_toolset(effective_tools)
-        return await runtime.client.beta.agents.update(fresh.id, version=fresh.version, **patch)
+        return await update_agent(
+            runtime.client,
+            fresh.id,
+            version=fresh.version,
+            payload=patch,
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        )
 
     # An MCP server change is serialized with the token forms' attach-then-
     # publish for this agent; other fields need no lock.
@@ -740,7 +752,14 @@ async def _update_agent_impl(
     )
     try:
         async with mcp_lock:
-            updated = await update_agent_with_version_retry(runtime.client, agent.id, _apply)
+            updated = await update_agent_with_version_retry(
+                runtime.client,
+                agent.id,
+                _apply,
+                scope=resource_scope(
+                    tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)
+                ),
+            )
     except anthropic.ConflictError as exc:
         # Residual conflict after the one retry — surface as a clean ToolError.
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc
@@ -930,7 +949,11 @@ async def _archive_agent_impl(
         runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id
     )
     _reject_system_agent(agent)
-    await runtime.client.beta.agents.archive(agent.id)
+    await archive_agent(
+        runtime.client,
+        agent.id,
+        scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+    )
     try:
         await archive_memory_store_for_agent(
             runtime.client,

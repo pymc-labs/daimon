@@ -258,6 +258,20 @@ a test oracle, not a backend. See
 `packages/mux/mux/conformance/README.md` for adapter
 requirements and the dependency matrix. No default runtime behavior changes.
 
+The conformance runner uses `mux.state.store.StateStore`. The memory oracle
+executes C03 operation replay, C04 crash recovery/fencing, C07 usage revisions
+and C13 binding races against a fresh restartable store. Missing store adapters
+stay pending; host queue/attribution, historical billing, backend selection,
+wake generation and outcome-row probes remain pending until their adapters land.
+These offline oracle results certify no provider or host integration.
+Recovery requires the owning slot's active lease and independent acceptance
+evidence: prior durable acknowledgement or a native response read during replay.
+The replay's own writes cannot establish that evidence, and ambiguous intent
+cannot yield an unsupported queued or processed receipt. Unbound sessions cannot
+acquire journal ownership through an append, including a refused one. Yielding
+race tests exercise send claiming, and a later same-count usage revision checks
+that stale replay preserved the latest accounted state.
+
 The manual `tests/judge` harness grades recorded
 transcripts separately from conformance, using a fixed 12-task rubric and
 structured `codex exec` output. Replay repetitions default to three. API-key
@@ -360,3 +374,122 @@ stopping at the first match; operator exports already have the ID and download
 without another lookup. Forks use their authorized tenant scope; recovery exports
 retain the explicit operator scope. Other pinned-version downloads retain their
 existing SDK headers and arguments.
+
+
+## CLI resource consumers
+
+CLI agent archive, toolset backfill and ownership rekey, environment create,
+update, archive, delete and retrieval, skill version inspection and title
+backfill, routine agent-name backfill and session bootstrap use the resource
+ports. Each operation passes the tenant established by the existing host
+lookup; bootstrap also supplies the caller account. Skill deletion helpers
+receive explicit tenant scopes, including each legacy skill's backfill tenant.
+Request order, version checks, multipart filenames and bytes, output and SDK
+exception types are retained. The CLI's temporary `mux_compat` module decodes
+native records at the adapter edge without issuing SDK calls.
+### MCP resource consumers
+
+MCP agent create-result reads, updates, archives, skill attachment/removal and
+environment writes consume neutral resource ports through the temporary host
+SDK codecs. Callers pass the authenticated tenant and account scope, including
+version retries and skill deletion. Tool schemas, confirmation text and
+conflict retry boundaries remain the same.
+
+Session lifecycle, session events, hosted artifacts/bundles and vault callers
+retain their current SDK path until the lifecycle, events and remaining resource
+ports land. The existing agent_chat turn calls wait for the turn lane.
+
+The MCP version-count read also retains its SDK walk while the resource decoder
+requires fields that the existing SDK counting caller does not consume.
+### Chat platform and scheduler resource consumers
+
+Discord, Slack and Teams skill checks, imported-skill attachment and applicable
+agent writes consume neutral resource ports with the tenant from their existing
+platform context. Version retries use that same tenant scope. The scheduler
+passes the routine row's tenant when re-reading the selected agent for pin and
+channel-isolation checks.
+
+The adapters keep their current refusal and partial-attachment notices when an
+agent re-read fails scope validation. Best-effort previous-agent name lookups
+still fall back to the existing generic owner notice. Foreign-agent final skill
+checks in Discord and Teams retain their existing refusal copy before upload.
+
+Discord memory list/retrieve and scheduler session retrieve/archive calls retain
+their current SDK path pending the memory, lifecycle and archive ports.
+Vault credentials use closed native schemas with opaque host secret references.
+The driver resolves those references only for the existing SDK write. Credential
+snapshots retain public SDK fields and exclude write-only values, including
+nested OAuth refresh and client authentication values. Credential and secret
+file upload failures preserve SDK error classes and status while dropping request
+bodies and authorization headers and redacting echoed secret values.
+This includes escaped multiline values in SDK error messages. Helpers that
+discarded credential-create responses continue to discard them; vault creation
+preserves the original native response fields when the caller uses only its ID.
+
+Files preserve the existing multipart filename, media type and bytes. The
+`anthropic.session_resources@1` driver lists, adds and removes mounts and rotates
+repository tokens by reference. Session archive is a separate administration
+operation; it never archives or deletes shared vaults or memory stores. Workspace
+vault janitor and credential sweep retain their explicit operator scopes and host
+policy; GitHub session provisioning and token rotation use their tenant context.
+
+The vault administration branch adds two explicit platform call sites: the
+workspace orphan-vault janitor and stale-admin-credential operator sweep. Their
+existing inventories span accounts; tenant provisioning and rotation use tenant
+scopes. The construction inventory test includes both operator paths.
+
+Vault bootstrap, external-token writes, OAuth replacement, credential mirroring
+and `.env` uploads also use these ports. Public helpers accept an explicit host
+scope; established callers without tenant context use a named
+`Scope.legacy_host_authorized` capability. Owned callers with tenant context
+forward it through credential writes, retries, rollback and file upload. Vault
+name discovery retains its workspace inventory and exact account/agent name
+predicate before the host knows a vault ID. Its named legacy capability and
+remaining caller seams are recorded in the sprint follow-up inventory.
+
+The SDK's DEBUG request-options logs are redacted within credential I/O, including
+escaped values and exception text. The logging filter holds no credential values;
+request-local material is cleared and its context reset after I/O. Operation keys
+remain pass-through, including repeated keys, with no driver journal or deduplication.
+
+Session creation resolves repository token references inside resource lists at
+the SDK write. All resolved tokens share the same request-local error and log
+redaction, including a failure attributed to the first repository. Free-text
+metadata is outside reference resolution.
+
+Native environment creation preserves an explicit null description through the
+closed `anthropic.environment_config@1` `create_nulls` field. Its only accepted
+field name is `description`; the marker is removed before the SDK request.
+Neutral description omission remains unchanged, including when configuration
+is absent or explicitly null.
+
+The factory advertises the session lane's closed configuration namespaces
+`anthropic.session_create@1`, `anthropic.session_resource_create@1` and
+`anthropic.session_update@1` for admission. The session lifecycle driver owns
+their payload validation and execution.
+
+Credential request codecs retain the established JSON key order, including
+header/body injection flags and OAuth scope/resource fields. Error redaction
+covers both quote-escaping styles and their nested SDK repr/JSON forms. The
+`.env` upload retains its `.env` filename, `text/plain` media type and exact
+assembled bytes.
+### Session creation and preparation
+
+Daimon's session creation, isolated creation, preparation and recovery now call
+the neutral Sessions port. The Anthropic lifecycle driver accepts closed
+`anthropic.session_create@1` and `anthropic.session_resource_create@1` configs.
+It retains native agent overrides, tool ordering, omitted versus empty resources
+and vault IDs; repository tokens remain host secret references until the write.
+Tenant and resource authorization runs before I/O, and tenant tags on returned
+records are checked. Native list uses the SDK terminal-page rule. Archive delegates
+to the existing session administration driver.
+
+The optional Session native snapshot supports a temporary host codec that retains
+SDK response extras, fields-set semantics and exception types. Host preparation
+policy, billing checkpoints, recovery order and first feedback remain unchanged.
+Tenant-aware creation also forwards its scope through vault bootstrap, credential
+mirroring and rollback; vault discovery retains its existing exact-name inventory
+check. Tenantless established creation uses a named legacy host capability.
+Update planning and workspace export/restore are separate follow-on changes;
+unsupported lifecycle methods fail explicitly. The driver keeps no operation cache
+and makes no request during construction.

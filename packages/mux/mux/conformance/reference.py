@@ -6,12 +6,12 @@ No reference result may be used as a provider conformance certificate.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import cast
 
-from mux.conformance.runner import Adapter, Scenario
+from mux.conformance.runner import Adapter, Scenario, SendEvidence
 from mux.contracts.actions import InputEvent, NativeInput, UserMessage
 from mux.contracts.admission import Admission, admit
 from mux.contracts.config import ConfigRevision
@@ -61,7 +61,12 @@ from mux.contracts.resources import (
     UpdatePlan,
     WorkspaceSource,
 )
+from mux.contracts.usage import UsageObservation
 from mux.profiles import MANAGED_AGENTS
+from mux.state.lease import Lease
+from mux.state.memory import CrashPoint, MemoryStateStore
+from mux.state.operations import OperationRecord, SendClaimed, request_digest
+from mux.state.store import StateStore, binding_slot
 
 IS_TEST_ORACLE = True
 
@@ -82,6 +87,9 @@ class Transport:
         self.history: list[Event] = []
         self.deletions: list[ResourceRef] = []
         self.uploads: list[SkillUpload] = []
+        self.sends: list[SendEvidence] = []
+        self.reconciliations: list[SendEvidence] = []
+        self.store = MemoryStateStore()
         self.scope = Scope(
             tenant_id="tenant", account_id="account", principal_id="human", authorization_id="auth"
         )
@@ -112,6 +120,8 @@ class Transport:
 
     async def arrange(self, fixture_id: str) -> Scenario:
         self.fixture = fixture_id
+        if fixture_id in ("C03", "C04", "C07"):
+            await self.store.put_binding(self.session.binding, expected_generation=0)
         if fixture_id in ("C05", "C06"):
             self.session = self.session.model_copy(
                 update={"state": "running", "active_root_turn": "root"}
@@ -154,6 +164,29 @@ class Transport:
     @property
     def skill_uploads(self) -> tuple[SkillUpload, ...]:
         return tuple(self.uploads)
+
+    @property
+    def upstream_sends(self) -> tuple[SendEvidence, ...]:
+        return tuple(self.sends)
+
+    @property
+    def reconciled_sends(self) -> tuple[SendEvidence, ...]:
+        return tuple(self.reconciliations)
+
+    def reconcile_send(self, key: str) -> SendReceipt | None:
+        observed = next((send for send in self.sends if send.key == key), None)
+        if observed is None:
+            return None
+        self.reconciliations.append(observed)
+        return observed.receipt
+
+    def restart_store(
+        self, store: StateStore, *, crash: Mapping[str, CrashPoint] | None = None
+    ) -> StateStore:
+        if not isinstance(store, MemoryStateStore):
+            raise TypeError("reference adapter requires the restartable memory store")
+        self.store = store.restart(crash=crash)
+        return self.store
 
     def check(self, scope: Scope, ref: ResourceRef) -> None:
         if (
@@ -254,6 +287,13 @@ class ReferenceEvents(UnsupportedPort):
             if isinstance(event, NativeInput):
                 MANAGED_AGENTS.offered_extension(event.extension.namespace, event.extension.version)
                 raise UnsupportedCapability((event.extension.namespace,), "test.reference")
+        if self.t.fixture in ("C03", "C04"):
+            return await self._durable_send(
+                scope, session, events, key=key, expected_turn=expected_turn
+            )
+        return self._submit(events, key=key)
+
+    def _submit(self, events: Sequence[InputEvent], *, key: str) -> SendReceipt:
         self.t.mutations += 1
         for event in events:
             if isinstance(event, UserMessage):
@@ -267,7 +307,82 @@ class ReferenceEvents(UnsupportedPort):
                         },
                     )
                 )
-        return SendReceipt(operation_id=key, status="processed", input_ids=(key,), turn_id=key)
+        receipt = SendReceipt(operation_id=key, status="processed", input_ids=(key,), turn_id=key)
+        self.t.sends.append(SendEvidence(key, receipt))
+        return receipt
+
+    @staticmethod
+    def _receipt(record: OperationRecord) -> SendReceipt:
+        if record.operation.status == "processed":
+            return SendReceipt.model_validate(
+                {
+                    "operation_id": record.operation.id,
+                    "status": "processed",
+                    "input_ids": record.result.get("input_ids"),
+                    "turn_id": record.result.get("turn_id"),
+                }
+            )
+        return SendReceipt(operation_id=record.operation.id, status="outcome_unknown", input_ids=())
+
+    async def _durable_send(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        events: Sequence[InputEvent],
+        *,
+        key: str,
+        expected_turn: str | None,
+    ) -> SendReceipt:
+        store = self.t.store
+        slot = binding_slot(self.t.session.binding)
+        begun = await store.begin_operation(
+            scope,
+            key=key,
+            operation_id="send-" + key,
+            now=NOW,
+            slot=slot,
+            request_digest=request_digest(
+                {
+                    "session": session.model_dump(mode="json"),
+                    "events": [e.model_dump(mode="json") for e in events],
+                    "expected_turn": expected_turn,
+                }
+            ),
+        )
+        if begun.record.operation.status != "pending":
+            return self._receipt(begun.record)
+        fence = await store.acquire_lease(
+            slot, holder="reference", turn_id="root", now=NOW, ttl=timedelta(minutes=5)
+        )
+        try:
+            await store.claim_send(scope, key, now=NOW, fence=fence)
+        except SendClaimed:
+            record = await store.get_operation(scope, key)
+            if record is None:
+                raise RuntimeError("claimed operation missing") from None
+            return self._receipt(record)
+        self._submit(events, key=key)
+        if "timeout_after_accept" in self.t.faults:
+            record = await store.advance_operation(
+                scope, key, "outcome_unknown", now=NOW, fence=fence
+            )
+        else:
+            record = await self._record_acknowledgement(store, scope, key, session, fence)
+        return self._receipt(record)
+
+    async def _record_acknowledgement(
+        self, store: StateStore, scope: Scope, key: str, session: ResourceRef, fence: Lease
+    ) -> OperationRecord:
+        await store.advance_operation(
+            scope,
+            key,
+            "accepted",
+            now=NOW,
+            fence=fence,
+            resource=session,
+            result={"input_ids": [key], "turn_id": key},
+        )
+        return await store.advance_operation(scope, key, "processed", now=NOW, fence=fence)
 
     async def stream(
         self,
@@ -491,6 +606,29 @@ class ReferenceSkills(UnsupportedPort):
         )
 
 
+class ReferenceUsage(UnsupportedPort):
+    def __init__(self, t: Transport) -> None:
+        self.t = t
+
+    async def reconcile(self, scope: Scope, session: ResourceRef) -> tuple[UsageObservation, ...]:
+        self.t.check(scope, session)
+        if self.t.fixture != "C07":
+            raise UnsupportedCapability(("unseeded_usage",), "test.reference")
+        return tuple(
+            UsageObservation(
+                id="observation",
+                revision=index,
+                session=session,
+                grain="model_request",
+                basis="cumulative",
+                output_tokens=tokens,
+                completeness="unknown" if tokens is None else "measured",
+                observed_at=NOW,
+            )
+            for index, tokens in enumerate((None, 100, 120, 110), 1)
+        )
+
+
 class ReferenceDriver:
     def __init__(self, t: Transport) -> None:
         self._transport = t
@@ -501,7 +639,7 @@ class ReferenceDriver:
         self.environments = ReferenceEnvironments(t)
         self.skills = ReferenceSkills(t)
         self.models = UnsupportedPort()
-        self.usage = UnsupportedPort()
+        self.usage = ReferenceUsage(t)
 
     def capabilities(self) -> Profile:
         if "admission_unknown" in self._transport.faults:
@@ -528,4 +666,4 @@ class ReferenceDriver:
 def create() -> Adapter:
     t = Transport()
     # The oracle implements only exercised methods; all remaining access fails closed.
-    return Adapter(cast(ManagedAgents, ReferenceDriver(t)), None, t)
+    return Adapter(cast(ManagedAgents, ReferenceDriver(t)), t.store, t)

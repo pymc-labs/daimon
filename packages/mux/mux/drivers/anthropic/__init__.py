@@ -8,19 +8,39 @@ from anthropic import AsyncAnthropic
 from mux.contracts.admission import Admission, admit
 from mux.contracts.config import ConfigRevision
 from mux.contracts.extensions import ExtensionRef
-from mux.contracts.ports import Artifacts, Events, Models, Sessions, Skills, SkillVersions, Usage
+from mux.contracts.ports import (
+    Artifacts,
+    Events,
+    Models,
+    SessionResources,
+    Sessions,
+    Skills,
+    SkillVersions,
+    Usage,
+)
 from mux.contracts.ports import PlatformExport as CorePlatformExport
+from mux.contracts.ports import Vaults as CoreVaults
 from mux.contracts.profile import Profile
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
+from mux.drivers.anthropic.resources._secrets import SecretResolver
 from mux.drivers.anthropic.resources.agents import AnthropicAgents
+from mux.drivers.anthropic.resources.artifacts import AnthropicArtifacts
+from mux.drivers.anthropic.resources.artifacts import Artifacts as NativeArtifacts
 from mux.drivers.anthropic.resources.environments import AnthropicEnvironments
 from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport, PlatformExport
+from mux.drivers.anthropic.resources.sessions_admin import AnthropicSessionAdmin
+from mux.drivers.anthropic.resources.sessions_admin import (
+    SessionResources as NativeSessionResources,
+)
 from mux.drivers.anthropic.resources.skills import (
     AnthropicSkills,
     AnthropicSkillVersions,
     NativeSkillVersions,
 )
+from mux.drivers.anthropic.resources.vaults import AnthropicVaults, Vaults
 from mux.drivers.anthropic.resources.walk import AnthropicResourceWalk, ResourceWalk
+from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
+from mux.drivers.anthropic.turn import AnthropicEvents
 from mux.errors import ExtensionVersionError, UnsupportedCapability
 from mux.profiles.anthropic import MANAGED_AGENTS
 
@@ -44,6 +64,7 @@ class AnthropicManagedAgents:
         *,
         account_scope_id: str | None = None,
         authorization: ResourceAuthorization | None = None,
+        secrets: SecretResolver | None = None,
         sessions: Sessions | None = None,
         events: Events | None = None,
         artifacts: Artifacts | None = None,
@@ -55,15 +76,32 @@ class AnthropicManagedAgents:
         self.agents = AnthropicAgents(client, self.account_scope_id, authorization)
         self.environments = AnthropicEnvironments(client, self.account_scope_id, authorization)
         self._sessions = sessions
-        self._events = events
-        self._artifacts = artifacts
+        self._events = events or AnthropicEvents(client, self.account_scope_id, authorization)
+        native_artifacts = AnthropicArtifacts(client, self.account_scope_id, authorization, secrets)
+        self._artifacts = artifacts or native_artifacts
         native_skills = AnthropicSkills(client, authorization)
         native_versions = AnthropicSkillVersions(client, authorization)
         self._skills = skills or native_skills
         self._models = models
         self._usage = usage
+        native_vaults = AnthropicVaults(client, self.account_scope_id, secrets, authorization)
+        self.session_admin = AnthropicSessionAdmin(
+            client, self.account_scope_id, secrets, authorization
+        )
+        self._sessions = sessions or AnthropicSessions(
+            client,
+            self.account_scope_id,
+            authorization,
+            archive=self.session_admin,
+            secrets=secrets,
+        )
         native_export = AnthropicPlatformExport(client)
         self._extensions: dict[tuple[type[object], str, int], object] = {
+            (NativeArtifacts, "anthropic.artifacts", 1): native_artifacts,
+            (Vaults, "anthropic.vaults", 1): native_vaults,
+            (CoreVaults, "anthropic.vaults", 1): native_vaults,
+            (SessionResources, "anthropic.session_resources", 1): self.session_admin,
+            (NativeSessionResources, "anthropic.session_resources", 1): self.session_admin,
             (ResourceWalk, "anthropic.resource_walk", 1): AnthropicResourceWalk(
                 self.agents, self.environments, native_skills, native_versions
             ),
@@ -105,6 +143,9 @@ class AnthropicManagedAgents:
                 "anthropic.model_config",
                 "anthropic.environment_config",
                 "anthropic.agent_create_nulls",
+                "anthropic.session_create",
+                "anthropic.session_resource_create",
+                "anthropic.session_update",
             )
         )
         extra = tuple(

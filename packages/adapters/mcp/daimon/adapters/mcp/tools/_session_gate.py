@@ -17,6 +17,8 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_personal_servers import visible_tools
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
@@ -115,7 +117,11 @@ async def _recorded_as_gated(
     recorded = live.effective_config
     if recorded is None:
         return False
-    agent = await runtime.client.beta.agents.retrieve(ma_agent_id)
+    agent = await retrieve_agent(
+        runtime.client,
+        ma_agent_id,
+        scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+    )
     hidden = await resolve_hidden_mcp_server_names(
         runtime.session_factory,
         tenant_id=auth.tenant_id,

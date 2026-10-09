@@ -14,6 +14,7 @@ from anthropic import AnthropicError, AsyncAnthropic
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
+    FileMetadata,
     SkillCreateResponse,
     SkillListResponse,
 )
@@ -33,11 +34,19 @@ from mux.contracts.resources import (
     SkillUpload,
     SkillUploadFile,
 )
+from mux.drivers.anthropic.resources._secrets import CredentialFileUpload
+from mux.drivers.anthropic.resources.artifacts import Artifacts as NativeArtifacts
 from mux.drivers.anthropic.resources.walk import ResourceWalk
 from mux.errors import ProviderError
 
 if TYPE_CHECKING:
+    from anthropic.types.beta import BetaManagedAgentsVault
+    from anthropic.types.beta.vaults.beta_managed_agents_credential import (
+        BetaManagedAgentsCredential,
+    )
     from mux.contracts.resources import Skill, SkillVersion
+    from mux.drivers.anthropic import AnthropicManagedAgents
+    from mux.drivers.anthropic.resources.vaults import Vaults as NativeVaults
 
 
 async def legacy_call[T](call: Awaitable[T]) -> T:
@@ -157,7 +166,17 @@ def _environment_values(payload: Mapping[str, object]) -> dict[str, object]:
 
 
 def environment_spec(payload: Mapping[str, object]) -> EnvironmentSpec:
-    return EnvironmentSpec.model_validate(_environment_values(payload))
+    values = _environment_values(payload)
+    if "description" in payload and payload["description"] is None:
+        native = _mapping(values.get("native_config", {}))
+        native_values = dict(_mapping(native.get("value", {})))
+        native_values["create_nulls"] = ["description"]
+        values["native_config"] = {
+            "namespace": "anthropic.environment_config",
+            "version": 1,
+            "value": native_values,
+        }
+    return EnvironmentSpec.model_validate(values)
 
 
 def environment_patch(payload: Mapping[str, object]) -> EnvironmentPatch:
@@ -479,3 +498,257 @@ async def delete_skill_version(
 async def delete_skill(client: AsyncAnthropic, skill_id: str, *, scope: Scope) -> None:
     backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
     await legacy_call(backend.skills.delete(scope, skill_id, key=str(uuid4())))
+
+
+# PR3 host edge; append after existing skill helpers.
+
+
+def _credential_refs(payload: Mapping[str, object]) -> tuple[dict[str, object], dict[str, str]]:
+    """The host retains material; only opaque references enter driver DTOs."""
+    secrets: dict[str, str] = {}
+    secret_names = {"token", "access_token", "refresh_token", "client_secret", "secret_value"}
+
+    def replace(node: object) -> object:
+        if not isinstance(node, Mapping):
+            return node
+        result: dict[str, object] = {}
+        for name, value in _mapping(cast(Mapping[str, object], node)).items():
+            if name in secret_names:
+                if value is None:
+                    result[name + "_ref"] = None
+                else:
+                    if not isinstance(value, str):
+                        raise TypeError("credential material must be text")
+                    reference = str(uuid4())
+                    secrets[reference] = value
+                    result[name + "_ref"] = reference
+            else:
+                result[name] = replace(value)
+        return result
+
+    result = dict(payload)
+    if "auth" in result:
+        result["auth"] = replace(result["auth"])
+    return result, secrets
+
+
+def _vault_port(
+    client: AsyncAnthropic,
+    *,
+    scope: Scope,
+    vault_id: str | None = None,
+    secrets: Mapping[str, str] | None = None,
+) -> tuple[AnthropicManagedAgents, NativeVaults]:
+    from mux.drivers.anthropic.resources.vaults import Vaults
+
+    backend = managed_agents(
+        client,
+        scope=scope,
+        resources=frozenset({("vault", vault_id)}) if vault_id is not None else frozenset(),
+        secrets=(lambda _scope, reference: secrets[reference]) if secrets is not None else None,
+    )
+    return backend, backend.extension(Vaults, namespace="anthropic.vaults", version=1)
+
+
+async def list_vaults(
+    client: AsyncAnthropic, *, scope: Scope
+) -> AsyncIterator[BetaManagedAgentsVault]:
+    from anthropic.types.beta import BetaManagedAgentsVault
+
+    _backend, port = _vault_port(client, scope=scope)
+    async for record in legacy_iter(port.walk(scope)):
+        yield BetaManagedAgentsVault.model_construct(_fields_set=None, **_mapping(record.native))
+
+
+async def create_vault(
+    client: AsyncAnthropic, display_name: str, *, scope: Scope
+) -> BetaManagedAgentsVault:
+    from anthropic.types.beta import BetaManagedAgentsVault
+
+    _backend, port = _vault_port(client, scope=scope)
+    record = await legacy_call(port.create(scope, display_name, key=str(uuid4())))
+    return BetaManagedAgentsVault.model_construct(_fields_set=None, **_mapping(record.native))
+
+
+async def archive_vault(client: AsyncAnthropic, vault_id: str, *, scope: Scope) -> None:
+    backend, port = _vault_port(client, scope=scope, vault_id=vault_id)
+    await legacy_call(
+        port.archive(scope, resource_ref(backend, "vault", vault_id, scope=scope), key=str(uuid4()))
+    )
+
+
+async def list_credentials(
+    client: AsyncAnthropic, vault_id: str, *, scope: Scope
+) -> AsyncIterator[BetaManagedAgentsCredential]:
+    from anthropic.types.beta.vaults.beta_managed_agents_credential import (
+        BetaManagedAgentsCredential,
+    )
+
+    backend, port = _vault_port(client, scope=scope, vault_id=vault_id)
+    async for record in legacy_iter(
+        port.credential_walk(scope, resource_ref(backend, "vault", vault_id, scope=scope))
+    ):
+        yield BetaManagedAgentsCredential.model_construct(
+            _fields_set=None, **_mapping(record.native)
+        )
+
+
+async def create_credential(
+    client: AsyncAnthropic, vault_id: str, payload: Mapping[str, object], *, scope: Scope
+) -> BetaManagedAgentsCredential:
+    from anthropic.types.beta.vaults.beta_managed_agents_credential import (
+        BetaManagedAgentsCredential,
+    )
+    from mux.drivers.anthropic.credential_schemas import CredentialCreate
+
+    refs, secrets = _credential_refs(payload)
+    try:
+        backend, port = _vault_port(client, scope=scope, vault_id=vault_id, secrets=secrets)
+        record = await legacy_call(
+            port.create_credential(
+                scope,
+                resource_ref(backend, "vault", vault_id, scope=scope),
+                CredentialCreate.model_validate(refs),
+                key=str(uuid4()),
+            )
+        )
+        return BetaManagedAgentsCredential.model_construct(
+            _fields_set=None, **_mapping(record.native)
+        )
+    finally:
+        secrets.clear()
+
+
+async def store_credential(
+    client: AsyncAnthropic, vault_id: str, payload: Mapping[str, object], *, scope: Scope
+) -> None:
+    """Keep the original write paths that discarded the SDK create response."""
+    from mux.drivers.anthropic.credential_schemas import CredentialCreate
+
+    refs, secrets = _credential_refs(payload)
+    try:
+        backend, port = _vault_port(client, scope=scope, vault_id=vault_id, secrets=secrets)
+        await legacy_call(
+            port.store_credential(
+                scope,
+                resource_ref(backend, "vault", vault_id, scope=scope),
+                CredentialCreate.model_validate(refs),
+                key=str(uuid4()),
+            )
+        )
+    finally:
+        secrets.clear()
+
+
+async def update_credential(
+    client: AsyncAnthropic,
+    vault_id: str,
+    credential_id: str,
+    payload: Mapping[str, object],
+    *,
+    scope: Scope,
+) -> BetaManagedAgentsCredential:
+    from anthropic.types.beta.vaults.beta_managed_agents_credential import (
+        BetaManagedAgentsCredential,
+    )
+    from mux.drivers.anthropic.credential_schemas import CredentialUpdate
+
+    refs, secrets = _credential_refs(payload)
+    try:
+        backend, port = _vault_port(client, scope=scope, vault_id=vault_id, secrets=secrets)
+        record = await legacy_call(
+            port.update_credential(
+                scope,
+                resource_ref(backend, "vault", vault_id, scope=scope),
+                credential_id,
+                CredentialUpdate.model_validate(refs),
+                key=str(uuid4()),
+            )
+        )
+        return BetaManagedAgentsCredential.model_construct(
+            _fields_set=None, **_mapping(record.native)
+        )
+    finally:
+        secrets.clear()
+
+
+async def delete_credential(
+    client: AsyncAnthropic, vault_id: str, credential_id: str, *, scope: Scope
+) -> None:
+    backend, port = _vault_port(client, scope=scope, vault_id=vault_id)
+    await legacy_call(
+        port.remove(
+            scope,
+            resource_ref(backend, "vault", vault_id, scope=scope),
+            credential_id,
+            key=str(uuid4()),
+        )
+    )
+
+
+async def upload_credential_file(
+    client: AsyncAnthropic,
+    content: bytes,
+    *,
+    filename: str,
+    media_type: str,
+    secret_values: list[str],
+    scope: Scope,
+) -> FileMetadata:
+    # The host owns material; the closed driver spec holds only opaque refs.
+    content_ref = str(uuid4())
+    secrets = {content_ref: content.decode("utf-8")}
+    value_refs: list[str] = []
+    for value in secret_values:
+        reference = str(uuid4())
+        value_refs.append(reference)
+        secrets[reference] = value
+    try:
+        backend = managed_agents(
+            client, scope=scope, secrets=lambda _scope, reference: secrets[reference]
+        )
+        port = backend.extension(NativeArtifacts, namespace="anthropic.artifacts", version=1)
+        config = CredentialFileUpload(
+            filename=filename,
+            media_type=media_type,
+            content_ref=content_ref,
+            secret_refs=tuple(value_refs),
+        )
+        record = await legacy_call(port.upload_credential_file(scope, config, key=str(uuid4())))
+        return FileMetadata.model_construct(_fields_set=None, **_mapping(record.native))
+    finally:
+        secrets.clear()
+
+
+async def rotate_session_repo_token(
+    client: AsyncAnthropic, session_id: str, resource_id: str, token: str, *, scope: Scope
+) -> None:
+    reference = str(uuid4())
+    secrets = {reference: token}
+    try:
+        backend = managed_agents(
+            client,
+            scope=scope,
+            resources=frozenset({("session", session_id)}),
+            secrets=lambda _scope, ref: secrets[ref],
+        )
+        await legacy_call(
+            backend.session_admin.rotate_repo_token(
+                scope,
+                resource_ref(backend, "session", session_id, scope=scope),
+                resource_id,
+                reference,
+                key=str(uuid4()),
+            )
+        )
+    finally:
+        secrets.clear()
+
+
+async def archive_session(client: AsyncAnthropic, session_id: str, *, scope: Scope) -> None:
+    backend = managed_agents(client, scope=scope, resources=frozenset({("session", session_id)}))
+    await legacy_call(
+        backend.session_admin.archive(
+            scope, resource_ref(backend, "session", session_id, scope=scope), key=str(uuid4())
+        )
+    )

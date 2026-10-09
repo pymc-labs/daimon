@@ -21,6 +21,8 @@ from anthropic import APIStatusError
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.config import load_settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.stores.routines import (
     list_routines_missing_agent_name,
     update_routine,
@@ -78,7 +80,9 @@ async def run_backfill_agent_names(
     for row in rows:
         resolved: str
         try:
-            agent = await rt.anthropic.beta.agents.retrieve(row.agent_id)
+            agent = await retrieve_agent(
+                rt.anthropic, row.agent_id, scope=resource_scope(tenant_id=str(row.tenant_id))
+            )
         except APIStatusError as err:
             if err.status_code == 404:
                 resolved = _FALLBACK_NAME
