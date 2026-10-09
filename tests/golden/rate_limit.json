@@ -2,24 +2,38 @@
   "database": null,
   "effects": [
     {
-      "operation": "stream",
+      "operation": "request",
       "payload": {
-        "args": [],
-        "kwargs": {
-          "session_id": "<id:1>",
-          "timeout": {
-            "connect": 5.0,
-            "pool": 120.0,
-            "read": 120.0,
-            "write": 120.0
-          }
-        }
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_1/events/stream",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
       },
-      "platform": "FakeEventsResource",
+      "platform": "ma_http",
       "result": {
-        "error_kind": "RateLimitError",
-        "message": "rate limited",
-        "status_code": 429
+        "body": {
+          "error": {
+            "message": "rate limited",
+            "type": "rate_limit_error"
+          },
+          "type": "error"
+        },
+        "status": 429
       }
     },
     {
@@ -32,7 +46,7 @@
               "cause_kind": "RateLimitError",
               "error_kind": "TurnError",
               "kind": "upstream",
-              "message": "upstream: rate limited"
+              "message": "upstream: Error code: 429 - {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'rate limited'}}"
             },
             "finished_tool_ids": [],
             "mcp_failures": [],
@@ -76,7 +90,7 @@
               "cause_kind": "RateLimitError",
               "error_kind": "TurnError",
               "kind": "upstream",
-              "message": "upstream: rate limited"
+              "message": "upstream: Error code: 429 - {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'rate limited'}}"
             },
             "finished_tool_ids": [],
             "mcp_failures": [],
@@ -97,7 +111,7 @@
             "cause_kind": "RateLimitError",
             "error_kind": "TurnError",
             "kind": "upstream",
-            "message": "upstream: rate limited"
+            "message": "upstream: Error code: 429 - {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'rate limited'}}"
           }
         ],
         "kwargs": {}

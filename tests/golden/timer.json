@@ -5,7 +5,7 @@
         "attempts": 0,
         "available_at": "<time:anchor-900000s>",
         "claimed_at": null,
-        "created_at": "<time>",
+        "created_at": "<time:epoch+0s>",
         "delivered_at": null,
         "id": "<id:1>",
         "idempotency_key": "<id:2>",
@@ -59,7 +59,7 @@
       "result": {
         "body": {
           "archived_at": null,
-          "created_at": "<time>",
+          "created_at": "<time:epoch-24278400s>",
           "description": null,
           "id": "agent_stats",
           "mcp_servers": [],
@@ -77,7 +77,7 @@
           "system": null,
           "tools": [],
           "type": "agent",
-          "updated_at": "<time>",
+          "updated_at": "<time:epoch-24278400s>",
           "version": 1
         },
         "status": 200

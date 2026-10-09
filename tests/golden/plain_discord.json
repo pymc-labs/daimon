@@ -7,7 +7,7 @@
         "delta_usd": "-0.001050",
         "id": "<id:6>",
         "idempotency_key": "turn:sess_parity_test:evt_parity_usage",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch+0s>",
         "payment_event_id": null,
         "payment_intent": null,
         "reason": "turn_debit",
@@ -18,7 +18,7 @@
         "delta_usd": "100.000000",
         "id": "<id:7>",
         "idempotency_key": "trial:6bd28aa5-8c67-5b2f-828a-30232a83b06f",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch+0s>",
         "payment_event_id": null,
         "payment_intent": null,
         "reason": "trial",
@@ -32,7 +32,7 @@
         "active_turn_message_id": null,
         "active_turn_started_at": null,
         "channel_id": "99999",
-        "created_at": "<time>",
+        "created_at": "<time:epoch+0s>",
         "effective_config": {
           "agent_name": "test-agent",
           "agent_version": 1,
@@ -76,7 +76,7 @@
         "thread_id": "100000",
         "transfer_file_id": null,
         "transfer_kind": null,
-        "updated_at": "<time>",
+        "updated_at": "<time:epoch+0s>",
         "watermark_message_id": "<id:2>"
       }
     ],
@@ -90,7 +90,7 @@
         "channel_id": "99999",
         "cost_usd": "0.0010500000",
         "duration_ms": 0,
-        "ended_at": "<time>",
+        "ended_at": "<time:epoch+0s>",
         "error_class": null,
         "id": "<id:8>",
         "input_tokens": 100,
@@ -105,7 +105,7 @@
         "recovered": false,
         "release": "0.2.0",
         "session_id": "<id:4>",
-        "started_at": "<time>",
+        "started_at": "<time:epoch+0s>",
         "tenant_id": "6bd28aa5-8c67-5b2f-828a-30232a83b06f",
         "thread_id": "100000",
         "unpriced_calls": 0,
@@ -127,7 +127,7 @@
         "input_tokens": 100,
         "managed_session_id": "<id:4>",
         "model": "claude-sonnet-4-6",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch+0s>",
         "output_tokens": 50,
         "platform_user_id": "555000111",
         "tenant_id": "6bd28aa5-8c67-5b2f-828a-30232a83b06f"
@@ -168,7 +168,7 @@
           "data": [
             {
               "archived_at": null,
-              "created_at": "<time>",
+              "created_at": "<time:epoch-24278400s>",
               "description": null,
               "id": "ag_parity_test",
               "mcp_servers": [],
@@ -186,7 +186,7 @@
               "system": null,
               "tools": [],
               "type": "agent",
-              "updated_at": "<time>",
+              "updated_at": "<time:epoch-24278400s>",
               "version": 1
             }
           ],
@@ -243,7 +243,7 @@
                 },
                 "type": "cloud"
               },
-              "created_at": "<time>",
+              "created_at": "<time:epoch-24278400s>",
               "description": "",
               "id": "env_parity_test",
               "metadata": {
@@ -253,7 +253,7 @@
               "name": "test-env",
               "scope": null,
               "type": "environment",
-              "updated_at": "<time>"
+              "updated_at": "<time:epoch-24278400s>"
             }
           ],
           "next_page": null
@@ -288,7 +288,7 @@
       "result": {
         "body": {
           "archived_at": null,
-          "created_at": "<time>",
+          "created_at": "<time:epoch-24278400s>",
           "description": null,
           "id": "ag_parity_test",
           "mcp_servers": [],
@@ -306,7 +306,7 @@
           "system": null,
           "tools": [],
           "type": "agent",
-          "updated_at": "<time>",
+          "updated_at": "<time:epoch-24278400s>",
           "version": 1
         },
         "status": 200
@@ -354,7 +354,7 @@
             },
             "type": "cloud"
           },
-          "created_at": "<time>",
+          "created_at": "<time:epoch-24278400s>",
           "description": "",
           "id": "env_parity_test",
           "metadata": {
@@ -364,7 +364,7 @@
           "name": "test-env",
           "scope": null,
           "type": "environment",
-          "updated_at": "<time>"
+          "updated_at": "<time:epoch-24278400s>"
         },
         "status": 200
       }
@@ -399,6 +399,9 @@
               "type": 1
             }
           ]
+        },
+        "receiver": {
+          "id": "100000"
         }
       },
       "platform": "platform_client",
@@ -505,6 +508,9 @@
             }
           ],
           "view": null
+        },
+        "receiver": {
+          "id": "42"
         }
       },
       "platform": "platform_client",
@@ -520,6 +526,9 @@
           },
           "content": "**test-agent**\n\nHello from the agent!",
           "view": null
+        },
+        "receiver": {
+          "id": "42"
         }
       },
       "platform": "platform_client",
@@ -531,7 +540,8 @@
         "args": [
           "\ud83d\udc4d"
         ],
-        "kwargs": {}
+        "kwargs": {},
+        "receiver": null
       },
       "platform": "platform_client",
       "result": null
@@ -542,7 +552,8 @@
         "args": [
           "\ud83d\udc4e"
         ],
-        "kwargs": {}
+        "kwargs": {},
+        "receiver": null
       },
       "platform": "platform_client",
       "result": null
@@ -553,7 +564,8 @@
         "args": [
           "\ud83d\ude4b"
         ],
-        "kwargs": {}
+        "kwargs": {},
+        "receiver": null
       },
       "platform": "platform_client",
       "result": null

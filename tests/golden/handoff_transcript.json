@@ -41,7 +41,7 @@
       "result": {
         "body": {
           "archived_at": null,
-          "created_at": "<time>",
+          "created_at": "<time:epoch+0s>",
           "description": null,
           "id": "agent_PvrJGuPK6AZ6sxv7WuqDlzwy",
           "mcp_servers": [],
@@ -56,7 +56,7 @@
           "system": null,
           "tools": [],
           "type": "agent",
-          "updated_at": "<time>",
+          "updated_at": "<time:epoch+0s>",
           "version": 1
         },
         "status": 200
@@ -112,7 +112,7 @@
             "version": 1
           },
           "archived_at": null,
-          "created_at": "<time>",
+          "created_at": "<time:epoch+0s>",
           "deployment_id": null,
           "environment_id": "<id:1>",
           "id": "session_jRwAW92TRBN4t1j30cJgPhf",
@@ -126,7 +126,7 @@
           "status": "idle",
           "title": null,
           "type": "session",
-          "updated_at": "<time>",
+          "updated_at": "<time:epoch+0s>",
           "usage": {
             "cache_creation": null,
             "cache_read_input_tokens": null,
@@ -184,8 +184,8 @@
             "type": "agent",
             "version": 1
           },
-          "archived_at": "<time>",
-          "created_at": "<time>",
+          "archived_at": "<time:epoch+0s>",
+          "created_at": "<time:epoch+0s>",
           "deployment_id": null,
           "environment_id": "<id:1>",
           "id": "session_jRwAW92TRBN4t1j30cJgPhf",
@@ -199,7 +199,7 @@
           "status": "idle",
           "title": null,
           "type": "session",
-          "updated_at": "<time>",
+          "updated_at": "<time:epoch+0s>",
           "usage": {
             "cache_creation": null,
             "cache_read_input_tokens": null,
@@ -257,7 +257,7 @@
                 }
               ],
               "id": "sevt_agent_1",
-              "processed_at": "<time>",
+              "processed_at": "<time:epoch-2214000s>",
               "type": "agent.message"
             }
           ],

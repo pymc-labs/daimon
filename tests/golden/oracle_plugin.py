@@ -3,7 +3,8 @@
 No production logic is replaced. Existing fakes drive existing test functions;
 this plugin records their boundary calls and final database rows. Random ids and
 application time are fixed before fixture creation. SQL defaults use the same fixed clock.
-Observed times normalize opaquely; deadlines retain whole-second anchor offsets. Prices, callers, errors, order and continuity remain.
+Frozen observed times retain epoch offsets; deadlines retain anchor offsets.
+Prices, callers, errors, order and continuity remain.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import time
 import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime, tzinfo
+from decimal import ROUND_HALF_UP, Decimal
 from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path
@@ -44,10 +46,14 @@ from daimon.core.turn import approvals, driver, outcomes
 from daimon.testing import effect_recorder, turn_fakes
 from daimon.testing.effect_recorder import EffectRecorder, json_value
 from daimon.testing.ma import not_found_response
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from daimon.testing.ma_transport import Json, ScriptedReply, ScriptedTransport
+from http_turn import HttpTurnFixtures
+from mutations import apply as apply_mutation
 from sqlalchemy import ColumnDefault, DateTime
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
+from sqlalchemy.sql.functions import current_timestamp
+from sqlalchemy.sql.functions import now as sql_now
 from sqlalchemy.sql.sqltypes import Uuid
 
 RECORDER = EffectRecorder()
@@ -58,6 +64,7 @@ RECOVERY_SCRIPT = ScriptedTransport()
 TEST_DSN = os.environ["DAIMON_DATABASE__TEST_URL"]
 OUTPUT = Path(os.environ["DAIMON_ORACLE_OUTPUT"])
 COLLECTION_IDS = itertools.count(0x100000)
+HTTP_TURNS: list[HttpTurnFixtures] = []
 PATCH.setattr(uuid, "uuid4", lambda: uuid.UUID(int=next(COLLECTION_IDS)))
 
 
@@ -97,6 +104,39 @@ class DateModule:
         return getattr(datetime_module, name)
 
 
+class GoldenNormalizer(effect_recorder.Normalizer):
+    """Unlike real-clock PR2 recordings, golden fixtures have a frozen epoch."""
+
+    def normalize(
+        self,
+        value: Json,
+        *,
+        field: str = "",
+        identity: bool = False,
+        anchor: datetime | None = None,
+        table: str = "",
+    ) -> Json:
+        if (
+            isinstance(value, str)
+            and field in effect_recorder.TIME_FIELDS - effect_recorder.SCHEDULED_TIME_FIELDS
+            and not identity
+        ):
+            try:
+                timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+            else:
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=UTC)
+                delta = timestamp - NOW
+                seconds = (
+                    Decimal(delta.days * 86400 + delta.seconds)
+                    + Decimal(delta.microseconds) / 1000000
+                ).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+                return f"<time:epoch{seconds:+f}s>"
+        return super().normalize(value, field=field, identity=identity, anchor=anchor, table=table)
+
+
 class RenderClock:
     """Freeze periodic render time; finalizer renders still execute normally.
 
@@ -129,6 +169,8 @@ def wire(value: Any) -> Any:
 
 
 def _wire(value: Any) -> Any:
+    if isinstance(value, SimpleNamespace):
+        return wire(vars(value))
     if isinstance(value, discord.File):
         position = value.fp.tell()
         try:
@@ -201,6 +243,18 @@ def wrap_async(cls: Any, name: str, *, result: bool = False) -> None:
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item: Any) -> None:
+    PATCH.setattr(effect_recorder, "Normalizer", GoldenNormalizer)
+
+    def fixed_sql_now(self: Any, compiler: Any, **kwargs: Any) -> str:
+        return "'2026-10-09T00:00:00+00:00'::timestamptz"
+
+    PATCH.setattr(sql_now, "_compiler_dispatch", fixed_sql_now)
+    PATCH.setattr(current_timestamp, "_compiler_dispatch", fixed_sql_now)
+    mutation = os.environ.get("DAIMON_ORACLE_MUTATION")
+    if mutation:
+        apply_mutation(PATCH, mutation)
+    importlib.import_module("parity.drivers.discord_driver")
+    importlib.import_module("parity.drivers.slack_driver")
     ids = itertools.count(1)
     original_uuid = uuid.uuid4
 
@@ -382,8 +436,7 @@ def pytest_runtest_setup(item: Any) -> None:
 
         PATCH.setattr(cls, "_make_message", make_message)
 
-    for name in ("send", "stream"):
-        wrap_async(turn_fakes.FakeEventsResource, name)
+    HTTP_TURNS.append(HttpTurnFixtures(PATCH))
     for name in (
         "on_render",
         "on_terminal_success",
@@ -450,6 +503,12 @@ def pytest_runtest_setup(item: Any) -> None:
             "url": str(url),
             "json": wire(kwargs.get("json")),
             "data": wire(kwargs.get("data")),
+            "params": wire(kwargs.get("params")),
+            "headers": {
+                name.lower(): value
+                for name, value in cast(dict[str, str], kwargs.get("headers") or {}).items()
+                if name.lower() in {"content-type", "accept"}
+            },
         }
         try:
             response = await original_platform(self, orig_self, method, url, *args, **kwargs)
@@ -508,6 +567,11 @@ def pytest_runtest_setup(item: Any) -> None:
             payload = {"args": wire(args), "kwargs": recorded}
         else:
             payload = wire({"args": args, "kwargs": kwargs})
+            parent = self._mock_parent or self._mock_new_parent
+            identifier = getattr(parent, "id", None)
+            payload["receiver"] = (
+                {"id": str(identifier)} if isinstance(identifier, int | str) else None
+            )
         try:
             actual = await original_mock(self, *args, **kwargs)
         except Exception as error:
@@ -549,6 +613,8 @@ async def database(schema: str) -> object:
 def pytest_runtest_call(item: Any) -> Generator[None]:
     yield
     RECOVERY_SCRIPT.assert_consumed()
+    for fixtures in HTTP_TURNS:
+        fixtures.assert_consumed()
     assert not INSTRUMENTATION_ERRORS, f"Oracle instrumentation failed: {INSTRUMENTATION_ERRORS}"
     runner = item.funcargs.get("_session_scoped_runner")
     if runner is not None:

@@ -24,8 +24,11 @@ SCENARIOS = {
     "reconnect": "packages/core/tests/turn/test_driver_hooks.py::test_driver_calls_on_reconnect_on_connection_drop",
     "rate_limit": "packages/core/tests/turn/test_driver_hooks.py::test_driver_calls_on_rate_limited_with_until_before_sleep",
     "mcp_degraded": "packages/core/tests/turn/test_driver.py::test_mcp_failure_then_reply_finalizes_as_success_carrying_the_failure",
-    "ceiling": "packages/core/tests/turn/test_driver_ceiling.py::test_past_deadline_returns_a_ceiling_turn_error",
+    "ceiling": "packages/core/tests/turn/test_driver_ceiling.py::test_ceiling_breach_closes_the_opened_stream",
     "billing_replay": "packages/core/tests/turn/test_driver_replay_billing.py::test_replayed_call_is_debited_with_the_turns_attribution",
+    "cold_discord": "tests/golden/test_boundary_scenarios.py::test_cold_thread_feedback_before_session_create[discord]",
+    "cold_slack": "tests/golden/test_boundary_scenarios.py::test_cold_thread_feedback_before_session_create[slack]",
+    "dm_delivery": "tests/golden/test_boundary_scenarios.py::test_dm_reply_delivery_and_deduplication",
     "plain_discord": "tests/parity/test_turn_billed.py::test_turn_billed_when_unblocked_writes_usage_event_and_ledger_debit[discord]",
     "plain_slack": "tests/parity/test_turn_billed.py::test_turn_billed_when_unblocked_writes_usage_event_and_ledger_debit[slack]",
     "blocked_balance": "tests/parity/test_turn_blocked_balance.py::test_turn_blocked_when_over_balance_writes_no_usage_and_no_ledger_row[discord]",
@@ -46,10 +49,15 @@ SCENARIOS = {
 }
 
 
-def replay(name: str) -> str:
+def replay(name: str, *, mutation: str | None = None) -> str:
     """One scenario per process prevents fixture/logging state leaking across goldens."""
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(GOLDENS), env.get("PYTHONPATH", ""))))
+    env.pop("DAIMON_ORACLE_MUTATION", None)
+    if mutation is not None:
+        env["DAIMON_ORACLE_MUTATION"] = mutation
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (str(GOLDENS), str(ROOT / "tests"), env.get("PYTHONPATH", "")))
+    )
     with tempfile.TemporaryDirectory(prefix="daimon-oracle-") as scratch:
         output = Path(scratch) / "transcript.json"
         env["DAIMON_ORACLE_OUTPUT"] = str(output)
@@ -76,8 +84,8 @@ def replay(name: str) -> str:
         return output.read_text()
 
 
-def check(name: str, *, regen: bool = False) -> None:
-    actual = replay(name)
+def check(name: str, *, regen: bool = False, mutation: str | None = None) -> None:
+    actual = replay(name, mutation=mutation)
     path = GOLDENS / f"{name}.json"
     if regen:
         path.write_text(actual)
@@ -97,9 +105,13 @@ def main() -> int:
         "--regen", action="store_true", help="N3-only: overwrite baseline recordings"
     )
     parser.add_argument("scenarios", nargs="*", choices=tuple(SCENARIOS))
+    parser.add_argument(
+        "--mutation", choices=("slack_eyes", "discord_eyes", "ledger_dating", "dm_delivery")
+    )
     args = parser.parse_args()
+    assert not (args.regen and args.mutation), "Never record mutated production behavior"
     for name in args.scenarios or SCENARIOS:
-        check(name, regen=args.regen)
+        check(name, regen=args.regen, mutation=args.mutation)
         print(f"{name}: {'recorded' if args.regen else 'matched'}", flush=True)
     return 0
 

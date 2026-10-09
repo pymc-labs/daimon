@@ -13,7 +13,7 @@
         "channel_id": "100000",
         "cost_usd": "0.0000000000",
         "duration_ms": 0,
-        "ended_at": "<time>",
+        "ended_at": "<time:epoch+0s>",
         "error_class": "AdmissionDenied",
         "id": "<id:2>",
         "input_tokens": 0,
@@ -26,7 +26,7 @@
         "recovered": false,
         "release": "0.2.0",
         "session_id": null,
-        "started_at": "<time>",
+        "started_at": "<time:epoch+0s>",
         "tenant_id": "b11bdbb5-c9e8-5c8a-8ae3-55f8c15ed157",
         "thread_id": "100001",
         "unpriced_calls": 0,
@@ -69,7 +69,7 @@
           "data": [
             {
               "archived_at": null,
-              "created_at": "<time>",
+              "created_at": "<time:epoch-24278400s>",
               "description": null,
               "id": "ag_parity_test",
               "mcp_servers": [],
@@ -87,7 +87,7 @@
               "system": null,
               "tools": [],
               "type": "agent",
-              "updated_at": "<time>",
+              "updated_at": "<time:epoch-24278400s>",
               "version": 1
             }
           ],
@@ -144,7 +144,7 @@
                 },
                 "type": "cloud"
               },
-              "created_at": "<time>",
+              "created_at": "<time:epoch-24278400s>",
               "description": "",
               "id": "env_parity_test",
               "metadata": {
@@ -154,7 +154,7 @@
               "name": "test-env",
               "scope": null,
               "type": "environment",
-              "updated_at": "<time>"
+              "updated_at": "<time:epoch-24278400s>"
             }
           ],
           "next_page": null
@@ -189,7 +189,7 @@
       "result": {
         "body": {
           "archived_at": null,
-          "created_at": "<time>",
+          "created_at": "<time:epoch-24278400s>",
           "description": null,
           "id": "ag_parity_test",
           "mcp_servers": [],
@@ -207,7 +207,7 @@
           "system": null,
           "tools": [],
           "type": "agent",
-          "updated_at": "<time>",
+          "updated_at": "<time:epoch-24278400s>",
           "version": 1
         },
         "status": 200
@@ -255,7 +255,7 @@
             },
             "type": "cloud"
           },
-          "created_at": "<time>",
+          "created_at": "<time:epoch-24278400s>",
           "description": "",
           "id": "env_parity_test",
           "metadata": {
@@ -265,7 +265,7 @@
           "name": "test-env",
           "scope": null,
           "type": "environment",
-          "updated_at": "<time>"
+          "updated_at": "<time:epoch-24278400s>"
         },
         "status": 200
       }
@@ -276,7 +276,10 @@
         "args": [
           "This server's daimon credit is depleted. A server admin can top up with `/billing`."
         ],
-        "kwargs": {}
+        "kwargs": {},
+        "receiver": {
+          "id": "100001"
+        }
       },
       "platform": "platform_client",
       "result": {

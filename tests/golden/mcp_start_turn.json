@@ -40,7 +40,7 @@
           "data": [
             {
               "archived_at": null,
-              "created_at": "<time>",
+              "created_at": "<time:epoch-24278400s>",
               "description": null,
               "id": "ag_test001",
               "mcp_servers": [],
@@ -58,7 +58,7 @@
               "system": null,
               "tools": [],
               "type": "agent",
-              "updated_at": "<time>",
+              "updated_at": "<time:epoch-24278400s>",
               "version": 1
             }
           ],
@@ -114,7 +114,7 @@
                 },
                 "type": "cloud"
               },
-              "created_at": "<time>",
+              "created_at": "<time:epoch-9331200s>",
               "description": "",
               "id": "env_test001",
               "metadata": {
@@ -123,7 +123,7 @@
               },
               "name": "production",
               "type": "environment",
-              "updated_at": "<time>"
+              "updated_at": "<time:epoch-9331200s>"
             }
           ],
           "next_page": null

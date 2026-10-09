@@ -4,9 +4,9 @@
       {
         "attempts": 1,
         "available_at": null,
-        "claimed_at": "<time>",
-        "created_at": "<time>",
-        "delivered_at": "<time>",
+        "claimed_at": "<time:epoch+0s>",
+        "created_at": "<time:epoch+0s>",
+        "delivered_at": "<time:epoch+0s>",
         "id": "<id:22>",
         "idempotency_key": "<id:23>",
         "lease_expires_at": null,
@@ -18,7 +18,7 @@
         "requester_account_id": "00000000-0000-0000-0000-000000000002",
         "requester_external_user_id": "555000333",
         "skip_reason": null,
-        "started_at": "<time>",
+        "started_at": "<time:epoch+0s>",
         "status": "delivered",
         "target_ma_agent_id": "ag_parity_test",
         "target_name": "test-agent",
@@ -32,7 +32,7 @@
         "delta_usd": "-0.001050",
         "id": "<id:12>",
         "idempotency_key": "turn:sess_parity_test:evt_parity_usage_0",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch+0s>",
         "payment_event_id": null,
         "payment_intent": null,
         "reason": "turn_debit",
@@ -43,7 +43,7 @@
         "delta_usd": "-0.001050",
         "id": "<id:13>",
         "idempotency_key": "turn:sess_parity_test:evt_parity_usage_1",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch+0s>",
         "payment_event_id": null,
         "payment_intent": null,
         "reason": "turn_debit",
@@ -54,7 +54,7 @@
         "delta_usd": "-0.001050",
         "id": "<id:14>",
         "idempotency_key": "turn:sess_parity_test:evt_parity_usage_2",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch+0s>",
         "payment_event_id": null,
         "payment_intent": null,
         "reason": "turn_debit",
@@ -65,7 +65,7 @@
         "delta_usd": "100.000000",
         "id": "<id:15>",
         "idempotency_key": "trial:c79ee749-2199-5db9-854a-2971a0d1b7f7",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch+0s>",
         "payment_event_id": null,
         "payment_intent": null,
         "reason": "trial",
@@ -79,7 +79,7 @@
         "active_turn_message_id": null,
         "active_turn_started_at": null,
         "channel_id": "299999",
-        "created_at": "<time>",
+        "created_at": "<time:epoch+0s>",
         "effective_config": {
           "agent_name": "test-agent",
           "agent_version": 1,
@@ -123,7 +123,7 @@
         "thread_id": "300000",
         "transfer_file_id": null,
         "transfer_kind": null,
-        "updated_at": "<time>",
+        "updated_at": "<time:epoch+0s>",
         "watermark_message_id": "<id:2>"
       }
     ],
@@ -137,7 +137,7 @@
         "channel_id": "299999",
         "cost_usd": "0.0010500000",
         "duration_ms": 0,
-        "ended_at": "<time>",
+        "ended_at": "<time:epoch+0s>",
         "error_class": null,
         "id": "<id:16>",
         "input_tokens": 100,
@@ -152,7 +152,7 @@
         "recovered": false,
         "release": "0.2.0",
         "session_id": "<id:6>",
-        "started_at": "<time>",
+        "started_at": "<time:epoch+0s>",
         "tenant_id": "c79ee749-2199-5db9-854a-2971a0d1b7f7",
         "thread_id": "300000",
         "unpriced_calls": 0,
@@ -172,7 +172,7 @@
         "channel_id": "299999",
         "cost_usd": "0.0010500000",
         "duration_ms": 0,
-        "ended_at": "<time>",
+        "ended_at": "<time:epoch+0s>",
         "error_class": null,
         "id": "<id:18>",
         "input_tokens": 100,
@@ -187,7 +187,7 @@
         "recovered": false,
         "release": "0.2.0",
         "session_id": "<id:6>",
-        "started_at": "<time>",
+        "started_at": "<time:epoch+0s>",
         "tenant_id": "c79ee749-2199-5db9-854a-2971a0d1b7f7",
         "thread_id": "300000",
         "unpriced_calls": 0,
@@ -207,7 +207,7 @@
         "channel_id": "299999",
         "cost_usd": "0.0010500000",
         "duration_ms": 0,
-        "ended_at": "<time>",
+        "ended_at": "<time:epoch+0s>",
         "error_class": null,
         "id": "<id:19>",
         "input_tokens": 100,
@@ -222,7 +222,7 @@
         "recovered": false,
         "release": "0.2.0",
         "session_id": "<id:6>",
-        "started_at": "<time>",
+        "started_at": "<time:epoch+0s>",
         "tenant_id": "c79ee749-2199-5db9-854a-2971a0d1b7f7",
         "thread_id": "300000",
         "unpriced_calls": 0,
@@ -244,7 +244,7 @@
         "input_tokens": 100,
         "managed_session_id": "<id:6>",
         "model": "claude-sonnet-4-6",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch+0s>",
         "output_tokens": 50,
         "platform_user_id": "555000333",
         "tenant_id": "c79ee749-2199-5db9-854a-2971a0d1b7f7"
@@ -258,7 +258,7 @@
         "input_tokens": 100,
         "managed_session_id": "<id:6>",
         "model": "claude-sonnet-4-6",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch+0s>",
         "output_tokens": 50,
         "platform_user_id": "555000333",
         "tenant_id": "c79ee749-2199-5db9-854a-2971a0d1b7f7"
@@ -272,7 +272,7 @@
         "input_tokens": 100,
         "managed_session_id": "<id:6>",
         "model": "claude-sonnet-4-6",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch+0s>",
         "output_tokens": 50,
         "platform_user_id": "555000333",
         "tenant_id": "c79ee749-2199-5db9-854a-2971a0d1b7f7"
@@ -313,7 +313,7 @@
           "data": [
             {
               "archived_at": null,
-              "created_at": "<time>",
+              "created_at": "<time:epoch-24278400s>",
               "description": null,
               "id": "ag_parity_test",
               "mcp_servers": [],
@@ -331,7 +331,7 @@
               "system": null,
               "tools": [],
               "type": "agent",
-              "updated_at": "<time>",
+              "updated_at": "<time:epoch-24278400s>",
               "version": 1
             }
           ],
@@ -388,7 +388,7 @@
                 },
                 "type": "cloud"
               },
-              "created_at": "<time>",
+              "created_at": "<time:epoch-24278400s>",
               "description": "",
               "id": "env_parity_test",
               "metadata": {
@@ -398,7 +398,7 @@
               "name": "test-env",
               "scope": null,
               "type": "environment",
-              "updated_at": "<time>"
+              "updated_at": "<time:epoch-24278400s>"
             }
           ],
           "next_page": null
@@ -433,7 +433,7 @@
       "result": {
         "body": {
           "archived_at": null,
-          "created_at": "<time>",
+          "created_at": "<time:epoch-24278400s>",
           "description": null,
           "id": "ag_parity_test",
           "mcp_servers": [],
@@ -451,7 +451,7 @@
           "system": null,
           "tools": [],
           "type": "agent",
-          "updated_at": "<time>",
+          "updated_at": "<time:epoch-24278400s>",
           "version": 1
         },
         "status": 200
@@ -499,7 +499,7 @@
             },
             "type": "cloud"
           },
-          "created_at": "<time>",
+          "created_at": "<time:epoch-24278400s>",
           "description": "",
           "id": "env_parity_test",
           "metadata": {
@@ -509,7 +509,7 @@
           "name": "test-env",
           "scope": null,
           "type": "environment",
-          "updated_at": "<time>"
+          "updated_at": "<time:epoch-24278400s>"
         },
         "status": 200
       }
@@ -544,6 +544,9 @@
               "type": 1
             }
           ]
+        },
+        "receiver": {
+          "id": "300000"
         }
       },
       "platform": "platform_client",
@@ -650,6 +653,9 @@
             }
           ],
           "view": null
+        },
+        "receiver": {
+          "id": "42"
         }
       },
       "platform": "platform_client",
@@ -665,6 +671,9 @@
           },
           "content": "**test-agent**\n\nHello from the agent!",
           "view": null
+        },
+        "receiver": {
+          "id": "42"
         }
       },
       "platform": "platform_client",
@@ -676,7 +685,8 @@
         "args": [
           "\ud83d\udc4d"
         ],
-        "kwargs": {}
+        "kwargs": {},
+        "receiver": null
       },
       "platform": "platform_client",
       "result": null
@@ -687,7 +697,8 @@
         "args": [
           "\ud83d\udc4e"
         ],
-        "kwargs": {}
+        "kwargs": {},
+        "receiver": null
       },
       "platform": "platform_client",
       "result": null
@@ -698,7 +709,8 @@
         "args": [
           "\ud83d\ude4b"
         ],
-        "kwargs": {}
+        "kwargs": {},
+        "receiver": null
       },
       "platform": "platform_client",
       "result": null
@@ -751,7 +763,7 @@
                 },
                 "type": "cloud"
               },
-              "created_at": "<time>",
+              "created_at": "<time:epoch-24278400s>",
               "description": "",
               "id": "env_parity_test",
               "metadata": {
@@ -761,7 +773,7 @@
               "name": "test-env",
               "scope": null,
               "type": "environment",
-              "updated_at": "<time>"
+              "updated_at": "<time:epoch-24278400s>"
             }
           ],
           "next_page": null
@@ -796,7 +808,7 @@
       "result": {
         "body": {
           "archived_at": null,
-          "created_at": "<time>",
+          "created_at": "<time:epoch-24278400s>",
           "description": null,
           "id": "ag_parity_test",
           "mcp_servers": [],
@@ -814,7 +826,7 @@
           "system": null,
           "tools": [],
           "type": "agent",
-          "updated_at": "<time>",
+          "updated_at": "<time:epoch-24278400s>",
           "version": 1
         },
         "status": 200
@@ -862,7 +874,7 @@
             },
             "type": "cloud"
           },
-          "created_at": "<time>",
+          "created_at": "<time:epoch-24278400s>",
           "description": "",
           "id": "env_parity_test",
           "metadata": {
@@ -872,7 +884,7 @@
           "name": "test-env",
           "scope": null,
           "type": "environment",
-          "updated_at": "<time>"
+          "updated_at": "<time:epoch-24278400s>"
         },
         "status": 200
       }
@@ -907,6 +919,9 @@
               "type": 1
             }
           ]
+        },
+        "receiver": {
+          "id": "300000"
         }
       },
       "platform": "platform_client",
@@ -1013,6 +1028,9 @@
             }
           ],
           "view": null
+        },
+        "receiver": {
+          "id": "42"
         }
       },
       "platform": "platform_client",
@@ -1028,6 +1046,9 @@
           },
           "content": "**test-agent**\n\nHello from the agent!",
           "view": null
+        },
+        "receiver": {
+          "id": "42"
         }
       },
       "platform": "platform_client",
@@ -1039,7 +1060,8 @@
         "args": [
           "\ud83d\udc4d"
         ],
-        "kwargs": {}
+        "kwargs": {},
+        "receiver": null
       },
       "platform": "platform_client",
       "result": null
@@ -1050,7 +1072,8 @@
         "args": [
           "\ud83d\udc4e"
         ],
-        "kwargs": {}
+        "kwargs": {},
+        "receiver": null
       },
       "platform": "platform_client",
       "result": null
@@ -1061,7 +1084,8 @@
         "args": [
           "\ud83d\ude4b"
         ],
-        "kwargs": {}
+        "kwargs": {},
+        "receiver": null
       },
       "platform": "platform_client",
       "result": null
@@ -1093,7 +1117,7 @@
       "result": {
         "body": {
           "archived_at": null,
-          "created_at": "<time>",
+          "created_at": "<time:epoch-24278400s>",
           "description": null,
           "id": "ag_parity_test",
           "mcp_servers": [],
@@ -1111,7 +1135,7 @@
           "system": null,
           "tools": [],
           "type": "agent",
-          "updated_at": "<time>",
+          "updated_at": "<time:epoch-24278400s>",
           "version": 1
         },
         "status": 200
@@ -1144,7 +1168,7 @@
       "result": {
         "body": {
           "archived_at": null,
-          "created_at": "<time>",
+          "created_at": "<time:epoch-24278400s>",
           "description": null,
           "id": "ag_parity_test",
           "mcp_servers": [],
@@ -1162,7 +1186,7 @@
           "system": null,
           "tools": [],
           "type": "agent",
-          "updated_at": "<time>",
+          "updated_at": "<time:epoch-24278400s>",
           "version": 1
         },
         "status": 200
@@ -1198,6 +1222,9 @@
               "type": 1
             }
           ]
+        },
+        "receiver": {
+          "id": "300000"
         }
       },
       "platform": "platform_client",
@@ -1304,6 +1331,9 @@
             }
           ],
           "view": null
+        },
+        "receiver": {
+          "id": "42"
         }
       },
       "platform": "platform_client",
@@ -1319,6 +1349,9 @@
           },
           "content": "**test-agent**\n\nHello from the agent!",
           "view": null
+        },
+        "receiver": {
+          "id": "42"
         }
       },
       "platform": "platform_client",
@@ -1330,7 +1363,8 @@
         "args": [
           "\ud83d\udc4d"
         ],
-        "kwargs": {}
+        "kwargs": {},
+        "receiver": null
       },
       "platform": "platform_client",
       "result": null
@@ -1341,7 +1375,8 @@
         "args": [
           "\ud83d\udc4e"
         ],
-        "kwargs": {}
+        "kwargs": {},
+        "receiver": null
       },
       "platform": "platform_client",
       "result": null
@@ -1352,7 +1387,8 @@
         "args": [
           "\ud83d\ude4b"
         ],
-        "kwargs": {}
+        "kwargs": {},
+        "receiver": null
       },
       "platform": "platform_client",
       "result": null

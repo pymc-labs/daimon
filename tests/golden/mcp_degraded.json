@@ -2,29 +2,38 @@
   "database": null,
   "effects": [
     {
-      "operation": "stream",
+      "operation": "request",
       "payload": {
-        "args": [],
-        "kwargs": {
-          "session_id": "<id:1>",
-          "timeout": {
-            "connect": 5.0,
-            "pool": 120.0,
-            "read": 120.0,
-            "write": 120.0
-          }
-        }
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_1/events/stream",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
       },
-      "platform": "FakeEventsResource",
-      "result": null
+      "platform": "ma_http",
+      "result": {
+        "body": null,
+        "status": 200
+      }
     },
     {
-      "operation": "send",
+      "operation": "request",
       "payload": {
-        "args": [
-          "sess_1"
-        ],
-        "kwargs": {
+        "body": {
           "events": [
             {
               "content": [
@@ -36,10 +45,37 @@
               "type": "user.message"
             }
           ]
-        }
+        },
+        "method": "POST",
+        "path": "/v1/sessions/sess_1/events",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
       },
-      "platform": "FakeEventsResource",
-      "result": null
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": null
+        },
+        "status": 200
+      }
     },
     {
       "operation": "on_sse_event",
@@ -55,7 +91,7 @@
               "type": "mcp_authentication_failed_error"
             },
             "id": "e_1",
-            "processed_at": "<time>",
+            "processed_at": "<time:epoch-24278400s>",
             "type": "session.error"
           }
         ],
@@ -76,7 +112,7 @@
               }
             ],
             "id": "m_1",
-            "processed_at": "<time>",
+            "processed_at": "<time:epoch-24278400s>",
             "type": "agent.message"
           }
         ],
@@ -91,7 +127,7 @@
         "args": [
           {
             "id": "s_1",
-            "processed_at": "<time>",
+            "processed_at": "<time:epoch-24278400s>",
             "stop_reason": {
               "type": "end_turn"
             },
@@ -127,9 +163,9 @@
             "rate_limit_until": null,
             "retrying_error": null,
             "seen_event_ids": [
+              "<id:1>",
               "<id:2>",
-              "<id:3>",
-              "<id:4>"
+              "<id:3>"
             ],
             "stop_reason": {
               "type": "end_turn"
@@ -173,9 +209,9 @@
             "rate_limit_until": null,
             "retrying_error": null,
             "seen_event_ids": [
+              "<id:1>",
               "<id:2>",
-              "<id:3>",
-              "<id:4>"
+              "<id:3>"
             ],
             "stop_reason": {
               "type": "end_turn"

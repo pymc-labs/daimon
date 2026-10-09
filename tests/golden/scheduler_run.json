@@ -7,7 +7,7 @@
         "delta_usd": "10.000000",
         "id": "<id:4>",
         "idempotency_key": "trial:8b369f43-5689-50e4-9636-670ae2d2e0ea",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch+0s>",
         "payment_event_id": null,
         "payment_intent": null,
         "reason": "trial_credit",

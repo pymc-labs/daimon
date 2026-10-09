@@ -50,7 +50,7 @@
             "version": 1
           },
           "archived_at": null,
-          "created_at": "<time>",
+          "created_at": "<time:epoch-14774400s>",
           "deployment_id": null,
           "environment_id": "<id:1>",
           "id": "sess_xyz",
@@ -64,7 +64,7 @@
           "status": "idle",
           "title": null,
           "type": "session",
-          "updated_at": "<time>",
+          "updated_at": "<time:epoch-14774400s>",
           "usage": {
             "cache_creation": null,
             "cache_read_input_tokens": null,
@@ -97,7 +97,7 @@
             "version": 1
           },
           "archived_at": null,
-          "created_at": "<time>",
+          "created_at": "<time:epoch-14774400s>",
           "deployment_id": null,
           "environment_id": "<id:1>",
           "id": "sess_xyz",
@@ -111,7 +111,7 @@
           "status": "idle",
           "title": null,
           "type": "session",
-          "updated_at": "<time>",
+          "updated_at": "<time:epoch-14774400s>",
           "usage": {
             "cache_creation": null,
             "cache_read_input_tokens": null,

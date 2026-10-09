@@ -5,9 +5,9 @@
       {
         "channel_id": null,
         "delta_usd": "-0.017500",
-        "id": "<id:8>",
+        "id": "<id:10>",
         "idempotency_key": "turn:sess_1:sevt_mre_1",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch-24278400s>",
         "payment_event_id": null,
         "payment_intent": null,
         "reason": "checkpoint_debit",
@@ -16,9 +16,9 @@
       {
         "channel_id": null,
         "delta_usd": "-0.017500",
-        "id": "<id:9>",
+        "id": "<id:11>",
         "idempotency_key": "turn:sess_1:sevt_mre_2",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch-24278400s>",
         "payment_event_id": null,
         "payment_intent": null,
         "reason": "checkpoint_debit",
@@ -32,12 +32,12 @@
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "channel_id": null,
-        "event_id": "<id:4>",
-        "id": "<id:6>",
+        "event_id": "<id:5>",
+        "id": "<id:7>",
         "input_tokens": 1000,
-        "managed_session_id": "<id:1>",
+        "managed_session_id": "<id:8>",
         "model": "claude-opus-4-7",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch+0s>",
         "output_tokens": 500,
         "platform_user_id": "U_AUTHOR",
         "tenant_id": "8b369f43-5689-50e4-9636-670ae2d2e0ea"
@@ -46,12 +46,12 @@
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "channel_id": null,
-        "event_id": "<id:5>",
-        "id": "<id:7>",
+        "event_id": "<id:6>",
+        "id": "<id:9>",
         "input_tokens": 1000,
-        "managed_session_id": "<id:1>",
+        "managed_session_id": "<id:8>",
         "model": "claude-opus-4-7",
-        "occurred_at": "<time>",
+        "occurred_at": "<time:epoch+0s>",
         "output_tokens": 500,
         "platform_user_id": "U_AUTHOR",
         "tenant_id": "8b369f43-5689-50e4-9636-670ae2d2e0ea"
@@ -60,29 +60,38 @@
   },
   "effects": [
     {
-      "operation": "stream",
+      "operation": "request",
       "payload": {
-        "args": [],
-        "kwargs": {
-          "session_id": "<id:1>",
-          "timeout": {
-            "connect": 5.0,
-            "pool": 120.0,
-            "read": 120.0,
-            "write": 120.0
-          }
-        }
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_1/events/stream",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
       },
-      "platform": "FakeEventsResource",
-      "result": null
+      "platform": "ma_http",
+      "result": {
+        "body": null,
+        "status": 200
+      }
     },
     {
-      "operation": "send",
+      "operation": "request",
       "payload": {
-        "args": [
-          "sess_1"
-        ],
-        "kwargs": {
+        "body": {
           "events": [
             {
               "content": [
@@ -94,10 +103,37 @@
               "type": "user.message"
             }
           ]
-        }
+        },
+        "method": "POST",
+        "path": "/v1/sessions/sess_1/events",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
       },
-      "platform": "FakeEventsResource",
-      "result": null
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": null
+        },
+        "status": 200
+      }
     },
     {
       "operation": "on_sse_event",
@@ -106,7 +142,7 @@
           {
             "id": "sevt_mre_1",
             "is_error": false,
-            "model_request_start_id": "<id:2>",
+            "model_request_start_id": "<id:1>",
             "model_usage": {
               "cache_creation_input_tokens": 0,
               "cache_read_input_tokens": 0,
@@ -114,7 +150,7 @@
               "output_tokens": 500,
               "speed": null
             },
-            "processed_at": "<time>",
+            "processed_at": "<time:epoch-24278400s>",
             "type": "span.model_request_end"
           }
         ],
@@ -122,6 +158,144 @@
       },
       "platform": "RecordingLifecycle",
       "result": null
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_1",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "agent": {
+            "description": null,
+            "id": "agent_fake",
+            "mcp_servers": [],
+            "model": {
+              "id": "claude-sonnet-4-6",
+              "speed": null
+            },
+            "multiagent": null,
+            "name": "fake-agent",
+            "skills": [],
+            "system": null,
+            "tools": [],
+            "type": "agent",
+            "version": 1
+          },
+          "archived_at": null,
+          "created_at": "<time:epoch-24278400s>",
+          "deployment_id": null,
+          "environment_id": "<id:2>",
+          "id": "sess_1",
+          "metadata": {},
+          "outcome_evaluations": [],
+          "resources": [],
+          "stats": {
+            "active_seconds": null,
+            "duration_seconds": null
+          },
+          "status": "idle",
+          "title": null,
+          "type": "session",
+          "updated_at": "<time:epoch-24278400s>",
+          "usage": {
+            "cache_creation": null,
+            "cache_read_input_tokens": null,
+            "input_tokens": null,
+            "output_tokens": null
+          },
+          "vault_ids": []
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_1/events",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": [
+            {
+              "id": "sevt_mre_1",
+              "is_error": false,
+              "model_request_start_id": "<id:1>",
+              "model_usage": {
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "speed": null
+              },
+              "processed_at": "<time:epoch-24278400s>",
+              "type": "span.model_request_end"
+            },
+            {
+              "id": "sevt_mre_2",
+              "is_error": false,
+              "model_request_start_id": "<id:3>",
+              "model_usage": {
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "speed": null
+              },
+              "processed_at": "<time:epoch-24278400s>",
+              "type": "span.model_request_end"
+            },
+            {
+              "id": "sevt_idle",
+              "processed_at": "<time:epoch-24278400s>",
+              "stop_reason": {
+                "type": "end_turn"
+              },
+              "type": "session.status_idle"
+            }
+          ],
+          "next_page": null
+        },
+        "status": 200
+      }
     },
     {
       "operation": "on_render",
@@ -135,9 +309,9 @@
             "rate_limit_until": null,
             "retrying_error": null,
             "seen_event_ids": [
-              "<id:3>",
               "<id:4>",
-              "<id:5>"
+              "<id:5>",
+              "<id:6>"
             ],
             "stop_reason": {
               "type": "end_turn"
@@ -169,9 +343,9 @@
             "rate_limit_until": null,
             "retrying_error": null,
             "seen_event_ids": [
-              "<id:3>",
               "<id:4>",
-              "<id:5>"
+              "<id:5>",
+              "<id:6>"
             ],
             "stop_reason": {
               "type": "end_turn"

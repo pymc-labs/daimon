@@ -47,7 +47,7 @@
       "platform": "ma_http",
       "result": {
         "body": {
-          "created_at": "<time>",
+          "created_at": "<time:epoch+0s>",
           "downloadable": false,
           "filename": ".env",
           "id": "file_PvrJGuPK6AZ6sxv7WuqDlzwy",
@@ -116,7 +116,7 @@
             "version": 1
           },
           "archived_at": null,
-          "created_at": "<time>",
+          "created_at": "<time:epoch+0s>",
           "deployment_id": null,
           "environment_id": "<id:1>",
           "id": "session_jRwAW92TRBN4t1j30cJgPhf",
@@ -124,12 +124,12 @@
           "outcome_evaluations": [],
           "resources": [
             {
-              "created_at": "<time>",
+              "created_at": "<time:epoch+0s>",
               "file_id": "<id:2>",
               "id": "res_OCqS44qSzS4etL1p82X8Pu",
               "mount_path": "/mnt/session/uploads/.env",
               "type": "file",
-              "updated_at": "<time>"
+              "updated_at": "<time:epoch+0s>"
             }
           ],
           "stats": {
@@ -139,7 +139,7 @@
           "status": "idle",
           "title": null,
           "type": "session",
-          "updated_at": "<time>",
+          "updated_at": "<time:epoch+0s>",
           "usage": {
             "cache_creation": null,
             "cache_read_input_tokens": null,
@@ -191,7 +191,7 @@
       "platform": "ma_http",
       "result": {
         "body": {
-          "created_at": "<time>",
+          "created_at": "<time:epoch+0s>",
           "downloadable": false,
           "filename": ".env",
           "id": "file_YPTfwwDTnAqowa4HG6S37AWe",
