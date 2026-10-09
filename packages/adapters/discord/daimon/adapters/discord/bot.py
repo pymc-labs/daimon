@@ -1925,24 +1925,8 @@ class DaimonBot(commands.Bot):
             if tr.provision_status == "pending":
                 await message.channel.send(_setting_up_message(bot_display_name))
                 return
-            # Only 'ready' proceeds.
-            if role_mentions:
-                try:
-                    async with self.runtime.sessionmaker() as session:
-                        managed_roles = await roles_mentioned(
-                            session,
-                            tenant_id=tenant_id,
-                            role_ids=[str(item.id) for item in role_mentions],
-                        )
-                except Exception:
-                    log.exception("agent_roles.mention_lookup_failed", guild_id=guild_id)
-                    managed_roles = []
-                if len(managed_roles) > 1:
-                    await message.channel.send("Name one agent at a time.")
-                    return
-                if not managed_roles and not directly_mentioned:
-                    return
-
+            # Only 'ready' proceeds. Managed role selection happens in admission;
+            # recorded-post replies and direct mentions also reach this path.
             log.info(
                 "mention_received",
                 guild_id=guild_id,

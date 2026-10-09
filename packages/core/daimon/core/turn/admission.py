@@ -416,7 +416,13 @@ async def admit_impl(
                         done.exception()
 
                 pending.add_done_callback(clear)
-            roster = await asyncio.shield(pending)
+            try:
+                roster = await asyncio.shield(pending)
+            except Exception as exc:
+                if requested_agent_name is None or requested_agent_id or requested_agent_ids:
+                    raise
+                _log.warning("named_agent.roster_lookup_failed", error_type=type(exc).__name__)
+                roster = []
         visible = [
             agent
             for agent in roster

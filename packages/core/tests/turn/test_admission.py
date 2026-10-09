@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -522,6 +523,40 @@ async def test_admit_happy_path_returns_admission_with_retrieved_agent_and_accou
     assert admission.account_id == principal.account_id, (
         "account_id must match the principal resolved for this (platform, external_id)"
     )
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_name_lookup_failure_uses_normal_routing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    platform: str,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await db_session.commit()
+    default = ma_agent(id="ag_default", name="daimon", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", name="default", tenant_id=tenant.id)
+    router = resolved_agent_env_router(default, env)
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+    with patch(
+        "daimon.core.turn.admission.list_agents_by_tenant",
+        new=AsyncMock(side_effect=RuntimeError("roster unavailable")),
+    ):
+        selected = await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform=platform,
+            external_user_id="user-1",
+            channel_id="channel",
+            now=_NOW,
+            requested_agent_name="Planner",
+        )
+    assert selected.agent.id == default.id
+    assert selected.config.agent_name_tier != "named"
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
