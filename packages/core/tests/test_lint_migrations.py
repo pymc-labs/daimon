@@ -231,6 +231,8 @@ def test_alembic_has_one_head() -> None:
 def test_github_migrations_follow_agent_avatars() -> None:
     config = Config(str(_REPO_ROOT / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
+    followup = script.get_revision("0076_github_connect_followup")
+    assert followup is not None and followup.down_revision == "0075_pending_skill_add_one_open"
     notices = script.get_revision("0054_github_new_repo_notices")
     audit = script.get_revision("0055_github_token_audit_versions")
     teams_sites = script.get_revision("0056_teams_channel_sites")

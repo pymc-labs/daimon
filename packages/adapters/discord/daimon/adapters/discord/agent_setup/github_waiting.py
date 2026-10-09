@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from daimon.adapters.discord.agent_setup.github_embed_panel import (
     EmbedActionRow,
@@ -396,6 +397,10 @@ class GitHubWaitingView(PanelViewBase):
                         verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
                         workspace_label=interaction.guild.name if interaction.guild else None,
                         requester_label=interaction.user.display_name,
+                        origin_parent_channel_id=str(interaction.channel_id),
+                        origin_thread_id=str(interaction.channel_id),
+                        origin_followup_token=f"{interaction.application_id}:{interaction.token}",
+                        origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
                     )
                     changed = await approve_connection_request(
                         session,
@@ -447,8 +452,9 @@ class GitHubWaitingView(PanelViewBase):
         )
         await self.swap_to(interaction, refreshed)
         if url is not None:
-            link_view = discord.ui.View(timeout=600)
-            link_view.add_item(discord.ui.Button(label="Open GitHub ↗", url=url))
+            from daimon.adapters.discord.agent_setup.github_home import connect_button_view
+
+            link_view = connect_button_view(url, timeout=600)
             await interaction.followup.send(
                 "Waiting for GitHub confirmation.", view=link_view, ephemeral=True
             )

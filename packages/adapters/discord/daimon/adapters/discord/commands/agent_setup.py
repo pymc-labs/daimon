@@ -7,7 +7,12 @@ from typing import cast
 import anthropic
 import structlog
 from daimon.adapters.discord.agent_setup.avatar import upload_agent_avatar
-from daimon.adapters.discord.agent_setup.github_new_repo import send_pending_notice
+from daimon.adapters.discord.agent_setup.github_new_repo import (
+    send_pending_notice as send_pending_new_repo_notice,
+)
+from daimon.adapters.discord.agent_setup.github_removal import (
+    send_pending_notice as send_pending_removal_notice,
+)
 from daimon.adapters.discord.agent_setup.hydrate import load_roster_state
 from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.checks import (
@@ -114,6 +119,7 @@ class AgentSetupCog(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             if is_admin:
-                await send_pending_notice(runtime, interaction, tenant_id=tenant_id)
+                await send_pending_new_repo_notice(runtime, interaction, tenant_id=tenant_id)
+                await send_pending_removal_notice(runtime, interaction, tenant_id=tenant_id)
         except (DaimonError, anthropic.APIError, discord.HTTPException) as exc:
             await interaction.followup.send(render_error(exc, request_id=rid), ephemeral=True)

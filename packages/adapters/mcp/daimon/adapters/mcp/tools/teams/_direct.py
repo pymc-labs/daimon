@@ -37,7 +37,11 @@ async def _shared_member(
 
 
 async def teams_direct_message(
-    runtime: McpRuntime, auth: AuthIdentity, *, recipient_id: str, chunks: list[str]
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    recipient_id: str,
+    chunks: list[str],
 ) -> tuple[str, list[str]]:
     """(1:1 chat id, message ids). A partial failure says how many were sent."""
     client, caller = require_client(runtime, auth)

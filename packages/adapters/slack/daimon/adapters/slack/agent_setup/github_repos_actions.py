@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.agent_policy import refuse_unless_allowed_for_agent_name
 from daimon.adapters.slack.agent_setup import github_add_repos, github_repos
+from daimon.adapters.slack.agent_setup.github_link import send_link
 from daimon.adapters.slack.agent_setup.read import load_panel_roster
 from daimon.adapters.slack.agent_setup.state import PanelMetadata
 from daimon.adapters.slack.credential_submissions import post_ephemeral
@@ -152,6 +154,14 @@ async def _handle_add(
                     verified_tenant_admin=is_admin,
                     agent_id=agent_id,
                     agent_name=meta.agent_name,
+                    origin_parent_channel_id=channel_id,
+                    origin_thread_id=meta.thread_id,
+                    origin_followup_token=str(payload.get("response_url") or "") or None,
+                    origin_followup_expires_at=(
+                        datetime.now(UTC) + timedelta(minutes=30)
+                        if payload.get("response_url")
+                        else None
+                    ),
                 )
         except ValueError as error:
             await post_ephemeral(
@@ -161,14 +171,13 @@ async def _handle_add(
                 text=safe_github_error(error),
             )
             return True
-        await post_ephemeral(
+        await send_link(
             client,
             channel_id=channel_id,
+            thread_id=meta.thread_id,
             user_id=user_id,
-            text=(
-                f"Opens GitHub to pick repos for {meta.agent_name}.\n"
-                f"Nothing is shared until you confirm.\n{url}"
-            ),
+            url=url,
+            line=f"Connect GitHub for {meta.agent_name}.",
         )
         return True
     elif action_id == github_add_repos.ACTION_ADD:

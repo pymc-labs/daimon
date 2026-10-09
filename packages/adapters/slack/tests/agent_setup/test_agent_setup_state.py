@@ -289,3 +289,8 @@ def test_toggled_opens_a_collapsed_list_and_closes_an_open_one() -> None:
     skills = opened.toggled("skills")
     assert skills.expanded == "skills", "opening one list closes the previous list"
     assert meta.expanded is None, "toggled returns a new metadata rather than mutating"
+
+
+def test_panel_metadata_keeps_origin_thread_for_connect_link() -> None:
+    meta = PanelMetadata(team_id="T1", channel_id="C1", thread_id="123.456", view="github_home")
+    assert decode_panel_metadata(encode_panel_metadata(meta)) == meta

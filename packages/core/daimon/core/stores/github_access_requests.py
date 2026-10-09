@@ -50,6 +50,7 @@ class AccessRequest(BaseModel):
     updated_at: datetime
     expires_at: datetime
     admin_notified_at: datetime | None
+    admin_card_message_id: str | None = None
     resumed_at: datetime | None
     expiry_notice_sent_at: datetime | None = None
 
@@ -422,6 +423,38 @@ async def lock_delivery_slot(
     )
 
 
+async def lock_shared_card_slot(session: AsyncSession, *, request: AccessRequest) -> None:
+    """Serialize posts and the per-thread mention budget across requests."""
+    key = f"github-request-admin-card:{request.tenant_id}:{request.platform}:{request.thread_id}"
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": key}
+    )
+
+
+async def shared_card_mention_allowed(session: AsyncSession, *, request: AccessRequest) -> bool:
+    since = datetime.now(UTC) - timedelta(hours=1)
+    count = await session.scalar(
+        select(func.count(GitHubAccessRequest.id)).where(
+            GitHubAccessRequest.tenant_id == request.tenant_id,
+            GitHubAccessRequest.platform == request.platform,
+            GitHubAccessRequest.thread_id == request.thread_id,
+            GitHubAccessRequest.admin_notified_at >= since,
+        )
+    )
+    return (count or 0) < 3
+
+
+async def record_shared_card(
+    session: AsyncSession, *, request: AccessRequest, message_id: str, mentioned: bool
+) -> None:
+    row = await session.get(GitHubAccessRequest, request.id, with_for_update=True)
+    if row is None or row.tenant_id != request.tenant_id:
+        return
+    row.admin_card_message_id = message_id
+    if mentioned:
+        row.admin_notified_at = datetime.now(UTC)
+
+
 async def record_delivery(
     session: AsyncSession,
     *,
@@ -451,12 +484,41 @@ async def record_delivery(
             platform_user_id=platform_user_id,
         )
         session.add(row)
-    elif row.dismissed_at is not None or row.message_id not in (None, message_id):
+    elif row.dismissed_at is not None or (
+        request.platform != "slack" and row.message_id not in (None, message_id)
+    ):
         return False
     row.message_id = message_id
     row.delivered_at = datetime.now(UTC)
     if recipient_account_id != request.requester_account_id:
         request.admin_notified_at = row.delivered_at
+    return True
+
+
+async def record_reposted_requester_card(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    request_id: uuid.UUID,
+    recipient_account_id: uuid.UUID,
+    message_id: str,
+) -> bool:
+    """Bind a new Slack ephemeral card even after an admin has declined."""
+    request = await session.get(GitHubAccessRequest, request_id)
+    row = await session.get(
+        GitHubAccessRequestDelivery, (request_id, recipient_account_id), with_for_update=True
+    )
+    if (
+        request is None
+        or request.tenant_id != tenant_id
+        or request.platform != "slack"
+        or request.requester_account_id != recipient_account_id
+        or row is None
+        or row.dismissed_at is not None
+    ):
+        return False
+    row.message_id = message_id
+    row.delivered_at = datetime.now(UTC)
     return True
 
 

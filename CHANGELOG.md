@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ||||||| parent of fc92a34c1 (fix(core): count an approval as taken only when its tool result appears)
 - A turn with several approval cards no longer fails with "The agent stopped because it couldn't confirm your approval" when the stream reconnects while the answers are being applied. An approval card that takes longer than two seconds to update now still updates, instead of keeping its buttons.
 - A new agent's first Slack or Discord answer now shows its generated face. The first turn waits up to three seconds for the face to render instead of posting without a picture.
+- GitHub connection links now appear as buttons where the person asked, without GitHub setup DMs. Discord conversation buttons mint the invitation on the requester's click and reveal its URL ephemerally; Slack uses ephemeral messages in the originating channel or thread. After a self-serve connection, interrupted work resumes in its thread. A bare connection confirms ephemerally where possible, with a count-only Discord thread fallback. Failed confirmations back off and expire after eight attempts or 24 hours.
+- GitHub new-repo and removal notices are available when an admin opens the setup panel; they are no longer pushed automatically.
 - Discord agent posts and MCP tools now wait at most two seconds for a new channel webhook, then post through the bot with the agent name while creation continues in the background. Creation is deduplicated per channel, 429 retries respect a cooldown, and new channels create one webhook.
 - **The scheduler's usage sweep no longer re-replays every model call it has
   already metered.** It asks the API for `span.model_request_end` events only

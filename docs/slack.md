@@ -152,9 +152,10 @@ Trust model notes for operators:
 
 `/agent-setup` opens the Agents roster, which pushes into either an agent's Details view or Who answers where. Setup conversations can be opened with **⚙️ Manage agents** from the Agents roster or from Details; creating a new agent lands on its Details view rather than a separate confirmation screen, and Details also offers **🧰 Use from your coding tools** to connect that agent over MCP. The channel gets a short launcher with a **Reply to Daimon** button; Daimon's welcome appears inside the shared thread. The panel also provides the reply button immediately after opening setup. Follow it, reply in that thread, and mention the bot. Daimon answers while the named agent is configured. Opening setup does not run a billed turn or change channel defaults. Each participant keeps a separate session.
 
-`/github connect` sends a workspace admin a private link for the agent answering
-in that channel. Use `/github connect AgentName` to choose another agent. The
-link lets the admin pick repos, then activates them for that agent. If the
+`/github connect` shows a workspace admin an ephemeral **Connect GitHub** button
+in the channel or thread where they asked. Use `/github connect AgentName` to
+choose another agent. The button opens the repo picker, then activates the
+selected repos for that agent. If the
 agent still has a saved GitHub key, `/github connect` asks the admin to contact
 the Daimon operator to switch it. Existing Slack installations need the
 `/github` command added from `docs/slack-app-manifest.yaml` and reinstallation.
@@ -163,12 +164,17 @@ Existing Slack apps must update **Event Subscriptions → Subscribe to bot event
 
 Workspace admins can click **🐙 GitHub** in `/agent-setup` or run `/github`.
 Anyone can run `/github` to see their personal GitHub link. Admins also see
-pending connection links and **Requests waiting**. The private link opens GitHub to
+pending connection links and **Requests waiting**. The ephemeral button opens GitHub to
 confirm repos. Each agent's Details view has
 **🐙 GitHub repos** to add connected repos to an agent. **Settings** changes or
 removes the agent's repos; **Manage connected repos** changes or disconnects
-them for the workspace. New repos appear in a private, grouped
-**Connect more repos** or **Not now** card after the UTC day closes. Add the
+them for the workspace. New repos appear in a grouped **Connect more repos**
+or **Not now** card when an admin opens GitHub setup after the UTC day closes.
+Installation removals appear as an ephemeral reconnect button when an admin opens setup.
+GitHub request cards use ephemeral replies in their originating thread; no
+GitHub connection or confirmation is sent as a DM. A bare connection confirms
+ephemerally in that channel or thread, while an interrupted task resumes in
+its original thread. Add the
 `/github` command from `docs/slack-app-manifest.yaml` and reinstall the Slack
 app before testing it.
 

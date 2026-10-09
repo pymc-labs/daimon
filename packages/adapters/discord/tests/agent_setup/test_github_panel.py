@@ -273,13 +273,11 @@ def test_discord_github_home_and_destructive_confirmations() -> None:
     pending_labels = [
         item.label for item in pending.walk_children() if isinstance(item, discord.ui.Button)
     ]
-    assert "Continue" in pending_labels and "Start over" in pending_labels
+    assert "Connect GitHub" in pending_labels and "Start over" in pending_labels
     assert "Choose agent" not in pending_labels
-    link = GitHubLinkView("https://example.invalid/connect", user_id=7)
+    link = GitHubLinkView("https://example.invalid/connect")
     assert {item.label for item in link.children if isinstance(item, discord.ui.Button)} == {
-        "Open GitHub ↗",
-        "Copy link",
-        "◀ Back",
+        "Connect GitHub",
     }
 
 
@@ -575,10 +573,12 @@ def test_discord_new_repo_card_hides_unverified_name() -> None:
     group = NewRepoNoticeGroup(notices=(notice,))
     generic = notice_module.NewRepoCard(MagicMock(), group, 7)
     assert [item.label for item in generic.children if isinstance(item, discord.ui.Button)] == [
-        "Connect more repos"
+        "Connect more repos",
+        "Back",
     ]
     named = notice_module.NewRepoCard(MagicMock(), group, 7, visible_names=("example/private",))
     assert [item.label for item in named.children if isinstance(item, discord.ui.Button)] == [
         "Connect repo",
         "Not now",
+        "Back",
     ]

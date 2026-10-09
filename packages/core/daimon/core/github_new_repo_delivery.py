@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Literal
@@ -45,19 +44,3 @@ async def poll_new_repo_notices_once(
                 await finish_notice(session, notice=notice, delivered=landed, now=datetime.now(UTC))
         sent += int(landed)
     return sent
-
-
-async def run_new_repo_notice_poller(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    platform: Literal["discord", "slack"],
-    deliver: DeliverGroup,
-    should_stop: Callable[[], bool],
-    interval_s: float = 60.0,
-) -> None:
-    while not should_stop():
-        try:
-            await poll_new_repo_notices_once(sessionmaker, platform=platform, deliver=deliver)
-        except Exception:
-            _log.exception("github_new_repo.poll_failed", platform=platform)
-        await asyncio.sleep(interval_s)

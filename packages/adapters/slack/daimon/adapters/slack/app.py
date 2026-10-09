@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import json
 import time
 import uuid
 from collections.abc import Coroutine
@@ -210,9 +211,8 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError
+from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
-from daimon.core.github_new_repo_delivery import run_new_repo_notice_poller
-from daimon.core.github_removal_delivery import run_removal_notice_poller
 from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
@@ -222,8 +222,7 @@ from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role, TaskContinuationRow
 from daimon.core.stores.github_access_requests import AccessRequest
-from daimon.core.stores.github_new_repo_notices import NewRepoNoticeGroup
-from daimon.core.stores.github_removal_notices import RemovalNotice
+from daimon.core.stores.github_connect_notices import ConnectNotice
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.slack_connect_prompts import mark_connect_prompted, was_connect_prompted
 from daimon.core.stores.slack_event_dedup import insert_if_new
@@ -464,35 +463,77 @@ class SlackApp:
             )
         )
 
-    def start_github_new_repo_poller(self) -> asyncio.Task[None]:
+    def start_connect_notice_poller(self) -> asyncio.Task[None]:
         return self._spawn(
-            run_new_repo_notice_poller(
+            run_connect_notice_poller(
                 self.runtime.sessionmaker,
                 platform="slack",
-                deliver=self._send_new_repo_group,
+                deliver=self._send_connect_notice,
                 should_stop=lambda: self.draining,
             )
         )
 
-    def start_github_removal_poller(self) -> asyncio.Task[None]:
-        return self._spawn(
-            run_removal_notice_poller(
-                self.runtime.sessionmaker,
-                platform="slack",
-                deliver=self._send_github_removal_notice,
-                should_stop=lambda: self.draining,
-            )
-        )
-
-    async def _send_new_repo_group(self, group: NewRepoNoticeGroup) -> bool:
-        from daimon.adapters.slack.agent_setup.github_new_repo import send_group_dm
-
-        return await send_group_dm(self.runtime, group)
-
-    async def _send_github_removal_notice(self, notice: RemovalNotice) -> bool:
-        from daimon.adapters.slack.agent_setup.github_removal import send_removal_dm
-
-        return await send_removal_dm(self.runtime, notice)
+    async def _send_connect_notice(self, notice: ConnectNotice) -> bool:
+        async with self.runtime.sessionmaker() as session:
+            tenant = await get_tenant(session, notice.tenant_id)
+        if tenant is None:
+            return True
+        client = await resolve_web_client(self.runtime, team_id=tenant.external_id)
+        if client is None:
+            return False
+        try:
+            if (
+                notice.encrypted_origin_followup is not None
+                and notice.origin_followup_expires_at is not None
+                and datetime.now(UTC) < notice.origin_followup_expires_at
+            ):
+                credentials = build_multifernet(
+                    tuple(key.get_secret_value() for key in self.runtime.settings.crypto.keys)
+                )
+                response_url = decrypt_token(credentials, notice.encrypted_origin_followup)
+                async with (
+                    aiohttp.ClientSession() as followup_client,
+                    followup_client.post(
+                        response_url,
+                        json={"text": notice.text, "response_type": "ephemeral"},
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as response,
+                ):
+                    if response.status < 300:
+                        body = await response.text()
+                        if not body.lstrip().startswith("{"):
+                            return True
+                        try:
+                            parsed = cast(object, json.loads(body))
+                            if not isinstance(parsed, dict):
+                                return True
+                            payload = cast(dict[str, object], parsed)
+                            if payload.get("ok", True):
+                                return True
+                        except ValueError:
+                            return True
+                    if response.status >= 500:
+                        return False
+            if notice.origin_parent_channel_id is None:
+                return True  # Old invitations have no private origin; never open a DM.
+            if notice.origin_thread_id is not None:
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=notice.origin_parent_channel_id,
+                    user=notice.requester_platform_user_id,
+                    thread_ts=notice.origin_thread_id,
+                    text=notice.text,
+                )
+            else:
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=notice.origin_parent_channel_id,
+                    user=notice.requester_platform_user_id,
+                    text=notice.text,
+                )
+            return True
+        except aiohttp.ClientError:
+            return False
+        except SlackApiError as error:
+            return cast(str, error.response["error"]) in ("user_not_found", "account_inactive")
 
     async def _post_github_request_expiry(self, request: AccessRequest) -> bool:
         try:
@@ -3114,13 +3155,6 @@ class SlackApp:
                     now=datetime.now(UTC),
                 )
                 await _at_session.commit()
-
-        if row.reason == "github_access_ready":
-            await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                channel=channel,
-                thread_ts=thread_id,
-                text="Access is ready, continuing.",
-            )
 
         handoff_notice = (
             build_handoff_notice(

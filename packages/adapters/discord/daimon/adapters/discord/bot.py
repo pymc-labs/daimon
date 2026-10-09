@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Final, Literal
 
+import aiohttp
 import anthropic as _anthropic
 import sentry_sdk
 import structlog
@@ -78,8 +79,8 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError, TurnError
-from daimon.core.github_new_repo_delivery import run_new_repo_notice_poller
-from daimon.core.github_removal_delivery import run_removal_notice_poller
+from daimon.core.github_connect_delivery import run_connect_notice_poller
+from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
@@ -90,8 +91,7 @@ from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.github_access_requests import AccessRequest
-from daimon.core.stores.github_new_repo_notices import NewRepoNoticeGroup
-from daimon.core.stores.github_removal_notices import RemovalNotice
+from daimon.core.stores.github_connect_notices import ConnectNotice
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenants import (
     get_tenant_liveness,
@@ -740,18 +740,10 @@ class DaimonBot(commands.Bot):
                 )
             )
             self._spawn(
-                run_new_repo_notice_poller(
+                run_connect_notice_poller(
                     self.runtime.sessionmaker,
                     platform="discord",
-                    deliver=self._send_new_repo_group,
-                    should_stop=lambda: self.draining or self.is_closed(),
-                )
-            )
-            self._spawn(
-                run_removal_notice_poller(
-                    self.runtime.sessionmaker,
-                    platform="discord",
-                    deliver=self._send_github_removal_notice,
+                    deliver=self._send_connect_notice,
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
@@ -836,6 +828,10 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.thread_handoff import HandOverButton
 
         self.add_dynamic_items(HandOverButton)
+
+        from daimon.adapters.discord.github_connect_button import GitHubConnectButton
+
+        self.add_dynamic_items(GitHubConnectButton)
 
     async def _post_to_guild(self, guild: discord.Guild, embed: discord.Embed) -> None:
         """Post an embed via the fallback chain: text channel → DM owner → skip."""
@@ -2239,15 +2235,59 @@ class DaimonBot(commands.Bot):
         except discord.HTTPException:
             return False
 
-    async def _send_new_repo_group(self, group: NewRepoNoticeGroup) -> bool:
-        from daimon.adapters.discord.agent_setup.github_new_repo import send_group_dm
+    async def _send_connect_notice(self, notice: ConnectNotice) -> bool:
+        from daimon.core.stores.tenants import get_tenant
 
-        return await send_group_dm(self, self.runtime, group)
-
-    async def _send_github_removal_notice(self, notice: RemovalNotice) -> bool:
-        from daimon.adapters.discord.agent_setup.github_removal import send_removal_dm
-
-        return await send_removal_dm(self, self.runtime, notice)
+        async with self.runtime.sessionmaker() as session:
+            tenant = await get_tenant(session, notice.tenant_id)
+        if tenant is None:
+            return True
+        try:
+            if (
+                notice.encrypted_origin_followup is not None
+                and notice.origin_followup_expires_at is not None
+                and datetime.now(UTC) < notice.origin_followup_expires_at
+            ):
+                credentials = build_multifernet(
+                    tuple(key.get_secret_value() for key in self.runtime.settings.crypto.keys)
+                )
+                application_id, interaction_token = decrypt_token(
+                    credentials, notice.encrypted_origin_followup
+                ).split(":", 1)
+                async with (
+                    aiohttp.ClientSession() as client,
+                    client.post(
+                        f"https://discord.com/api/v10/webhooks/{application_id}/{interaction_token}",
+                        json={
+                            "content": notice.text,
+                            "flags": 64,
+                            "allowed_mentions": {"parse": []},
+                        },
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as response,
+                ):
+                    if response.status < 300:
+                        return True
+                    if response.status == 429:
+                        return False
+                    if response.status >= 500:
+                        return False
+            destination_id = notice.origin_thread_id or notice.origin_parent_channel_id
+            if destination_id is None:
+                return True  # Old invitations have no public origin; never send a DM.
+            destination = await self._channel_by_id(int(destination_id))
+            if not isinstance(destination, discord.abc.Messageable):
+                return True
+            await destination.send(
+                notice.public_text, allowed_mentions=discord.AllowedMentions.none()
+            )
+            return True
+        except aiohttp.ClientError:
+            return False
+        except (discord.NotFound, discord.Forbidden, ValueError, LookupError):
+            return True
+        except discord.HTTPException:
+            return False
 
     async def open_member_dm(self, guild_id: int, user_id: int) -> discord.abc.Messageable:
         """A DM with a human member of `guild_id` (FEAT-085's delivery fallback).
@@ -2529,9 +2569,6 @@ class DaimonBot(commands.Bot):
                     now=datetime.now(UTC),
                 )
                 await session.commit()
-
-        if row.reason == "github_access_ready":
-            await safe_thread_send(thread, "Access is ready, continuing.")
 
         transfer_kind = prepared.continuity.transfer_kind
         workspace: Literal["transferred", "transcript_only", "history_only"] = (

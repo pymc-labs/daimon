@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
 
 from daimon.adapters.slack.admin import resolve_is_admin
@@ -442,6 +443,14 @@ async def handle(
                         verified_tenant_admin=is_admin,
                         requester_label=str(user.get("name") or user_id),
                         workspace_label=str(team.get("name") or team_id),
+                        origin_parent_channel_id=request.parent_channel_id,
+                        origin_thread_id=request.thread_id,
+                        origin_followup_token=str(payload.get("response_url") or "") or None,
+                        origin_followup_expires_at=(
+                            datetime.now(UTC) + timedelta(minutes=30)
+                            if payload.get("response_url")
+                            else None
+                        ),
                     )
                     changed = await approve_connection_request(
                         session,
@@ -450,7 +459,11 @@ async def handle(
                         account_id=principal.account_id,
                     )
                 await send_link(
-                    client, channel_id=meta.channel_id or user_id, user_id=user_id, url=url
+                    client,
+                    channel_id=meta.channel_id or user_id,
+                    thread_id=meta.thread_id,
+                    user_id=user_id,
+                    url=url,
                 )
                 if changed:
                     await update_requester_card(
