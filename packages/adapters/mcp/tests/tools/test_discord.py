@@ -1074,6 +1074,45 @@ async def test_post_credential_button_hydrates_thread_parent_before_permission_c
     assert message_id == "9103", "posting into an uncached thread must succeed"
 
 
+async def test_credential_button_checks_private_membership_but_allows_public_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    thread_type = 12
+    posts: list[str] = []
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            if str(route.channel_id) == "999":
+                return {**_thread_payload(), "type": thread_type}
+            return _text_channel_payload()
+        if route.path == "/channels/{channel_id}/thread-members/{user_id}":
+            raise discord.NotFound(MagicMock(status=404), {"message": "Unknown Member"})
+        if route.method == "POST" and route.path == "/channels/{channel_id}/messages":
+            posts.append(str(route.channel_id))
+            return _message_payload(message_id="9105", channel_id="999")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    runtime = _runtime_with_discord_token(session_factory=db_session_factory)
+    with pytest.raises(ToolError, match="missing view_channel permission"):
+        await _post_credential_button_impl(runtime, _auth(), **_post_kwargs(channel_id="999"))
+    assert posts == []
+
+    thread_type = 11
+    assert (
+        await _post_credential_button_impl(runtime, _auth(), **_post_kwargs(channel_id="999"))
+        == "9105"
+    )
+    assert posts == ["999"]
+
+
 async def test_post_credential_button_denies_without_send_permission_and_posts_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
