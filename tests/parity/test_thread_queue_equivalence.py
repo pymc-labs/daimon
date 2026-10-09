@@ -105,6 +105,19 @@ class Replay:
         self.pause_at = None
         self.turn_count = 0
 
+    @property
+    def state_key(self):
+        # The frozen Slack base owns a bare timestamp; the current adapter
+        # scopes ownership to its workspace conversation.
+        if self.platform == "slack" and not self.old:
+            return ("team", "channel", self.key)
+        return self.key
+
+    def base_key(self, key):
+        if self.platform == "slack" and not self.old:
+            return key[2]
+        return key
+
     def spawn(self, coroutine, **kwargs):
         # Record exactly what release schedules, without running a second owner yet.
         frame = coroutine.cr_frame
@@ -220,7 +233,7 @@ class Replay:
             await self.obj._queue_behind_inflight_turn(self.key, item)
         elif self.platform == "slack":
             # Slack's busy front door is unchanged and appends before its wait response.
-            self.obj._pending.setdefault(self.key, []).append(item)
+            self.obj._pending.setdefault(self.state_key, []).append(item)
             self.effects.append(("wait", number, "⌛"))
         else:
             await self.obj._orchestrate(item, TENANT)
@@ -275,12 +288,12 @@ class Replay:
         return (
             self.effects,
             resumes,
-            self.obj._processing,
+            {self.base_key(key) for key in self.obj._processing},
             {
-                key: [self.pending_message(m) for m in batch]
+                self.base_key(key): [self.pending_message(m) for m in batch]
                 for key, batch in self.obj._pending.items()
             },
-            self.obj._deferred_dispatch,
+            {self.base_key(key): request for key, request in self.obj._deferred_dispatch.items()},
             self.in_flight(),
             self.rows,
             error,
@@ -301,7 +314,7 @@ async def replay(platform, old, authors, pause_at, fault, cancel, draining):
         await run.external()
         return run.result()
     # Both owners see a pre-existing batch, then more arrivals at a controlled await.
-    run.obj._pending[run.key] = [run.message(a, n) for n, a in enumerate(authors, 1)]
+    run.obj._pending[run.state_key] = [run.message(a, n) for n, a in enumerate(authors, 1)]
     run.pause_at = pause_at
     task = asyncio.create_task(run.external())
     await asyncio.wait_for(run.paused.wait(), 3)
@@ -353,13 +366,13 @@ async def test_wake_caps_and_busy_before_cap_match_base(platform, capped, cap):
         run = Replay(platform, old, cap=cap)
         run.hold_slot()
         await run.external(capped=capped)
-        run.obj._processing.add(run.key)
+        run.obj._processing.add(run.state_key)
         await run.external(url="saved region", capped=False)
         await run.external(url=None, capped=True)
         if platform == "teams":
             run.obj._release(run.key)
         else:
-            run.obj._release_thread(run.key)
+            run.obj._release_thread(run.state_key)
         results.append(run.result())
     assert results[0] == results[1]
 
@@ -385,7 +398,9 @@ async def test_slack_authorless_events_and_per_author_errors_match_base():
     results = []
     for old in (True, False):
         run = Replay("slack", old, fault="expected")
-        run.obj._pending[run.key] = [run.message(a, n) for n, a in enumerate((None, 1, 2, 1), 1)]
+        run.obj._pending[run.state_key] = [
+            run.message(a, n) for n, a in enumerate((None, 1, 2, 1), 1)
+        ]
         await run.external()
         results.append(run.result())
     assert results[0] == results[1]
@@ -430,7 +445,7 @@ async def test_another_thread_runs_while_the_first_dispatch_waits(platform):
         item = run.message(2, 5)
         if platform == "teams":
             item = dataclasses.replace(item, conversation_id=run.key)
-        run.obj._pending[run.key] = [item]
+        run.obj._pending[run.state_key] = [item]
         await run.external()
         assert any(effect[0] == "admit" for effect in run.effects)
         run.proceed.set()

@@ -51,6 +51,10 @@ _CHANNEL = "C_CONT_ENTRY"
 _THREAD_ID = "9300000001.000001"
 
 
+def _thread_key(team_id: str) -> tuple[str, str, str]:
+    return (team_id, _CHANNEL, _THREAD_ID)
+
+
 def _make_app(sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id_str: str) -> SlackApp:
     settings = MagicMock()
     settings.crypto.keys = ()
@@ -142,7 +146,7 @@ async def test_dispatch_continuations_in_thread_skips_a_thread_already_processin
         requested_work="pick up the report",
     )
     app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
-    app._processing.add(_THREAD_ID)  # pyright: ignore[reportPrivateUsage]
+    app._processing.add(_thread_key("T_CONT_ENTRY"))  # pyright: ignore[reportPrivateUsage]
 
     await app.dispatch_continuations_in_thread(
         web_client=fake_slack_web_client.client,
@@ -165,7 +169,7 @@ async def test_dispatch_continuations_in_thread_skips_a_thread_already_processin
     assert len(pending) == 1, (
         f"the row must stay pending for the running turn's tail, got {pending}"
     )
-    assert _THREAD_ID in app._processing, (  # pyright: ignore[reportPrivateUsage]
+    assert _thread_key("T_CONT_ENTRY") in app._processing, (  # pyright: ignore[reportPrivateUsage]
         "the guard belongs to the turn that took it; a skipped call must not release it"
     )
 
@@ -203,7 +207,7 @@ async def test_dispatch_continuations_in_thread_releases_the_guard_after_dispatc
     assert row is not None, "the seeded continuation should still exist"
     assert row.status == "skipped", "the dispatch must have run and settled the row"
     assert row.skip_reason == "skip_save_only", f"unexpected skip reason {row.skip_reason}"
-    assert _THREAD_ID not in app._processing, (  # pyright: ignore[reportPrivateUsage]
+    assert _thread_key("T_CONT_ENTRY") not in app._processing, (  # pyright: ignore[reportPrivateUsage]
         "the guard must be released once the dispatch finishes"
     )
 
@@ -232,7 +236,7 @@ async def test_dispatch_continuations_in_thread_releases_the_guard_when_dispatch
             team_id="T_CONT_ENTRY",
         )
 
-    assert _THREAD_ID not in app._processing, (  # pyright: ignore[reportPrivateUsage]
+    assert _thread_key("T_CONT_ENTRY") not in app._processing, (  # pyright: ignore[reportPrivateUsage]
         "a raising dispatch must still release the guard"
     )
 
@@ -830,7 +834,7 @@ async def test_dispatch_skipped_while_processing_runs_when_the_turn_releases_the
     assert row.status == "skipped" and row.skip_reason == "skip_save_only", (
         f"the skipped dispatch must run once the thread is released, got {row.status}"
     )
-    assert _THREAD_ID not in app._processing, (  # pyright: ignore[reportPrivateUsage]
+    assert _thread_key("T_CONT_ENTRY_TAIL") not in app._processing, (  # pyright: ignore[reportPrivateUsage]
         "the re-run dispatch must release the guard it took"
     )
 
@@ -848,7 +852,7 @@ async def test_no_redispatch_while_draining(
         requested_work=None,
     )
     app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
-    app._processing.add(_THREAD_ID)  # pyright: ignore[reportPrivateUsage]
+    app._processing.add(_thread_key("T_CONT_ENTRY"))  # pyright: ignore[reportPrivateUsage]
     await app.dispatch_continuations_in_thread(
         web_client=fake_slack_web_client.client,
         tenant_id=tenant_id,
@@ -858,7 +862,7 @@ async def test_no_redispatch_while_draining(
         team_id="T_CONT_ENTRY",
     )
     app.draining = True
-    app._release_thread(_THREAD_ID)  # pyright: ignore[reportPrivateUsage]
+    app._release_thread(_thread_key("T_CONT_ENTRY"))  # pyright: ignore[reportPrivateUsage]
     assert not app._bg_tasks, "a draining adapter must not spawn the dispatch"  # pyright: ignore[reportPrivateUsage]
     async with db_session_factory() as session:
         row = await get_continuation(session, idempotency_key=key)
@@ -901,7 +905,7 @@ async def test_mention_queued_during_a_continuation_dispatch_gets_its_own_turn(
             web_client=web_client,
             tenant_id=tenant_id,
         )
-        assert app._pending.get(_THREAD_ID) == [mention], (  # pyright: ignore[reportPrivateUsage]
+        assert app._pending.get(_thread_key("T_CONT_ENTRY_MENTION")) == [mention], (  # pyright: ignore[reportPrivateUsage]
             "a mention during the dispatch must queue behind it, not run beside it"
         )
 
@@ -944,8 +948,8 @@ async def test_mention_queued_during_a_continuation_dispatch_gets_its_own_turn(
     assert call.args[0] is mention
     assert call.kwargs["content_override"] == "and the chart too?"
     assert call.kwargs["team_id"] == "T_CONT_ENTRY_MENTION"
-    assert _THREAD_ID not in app._pending  # pyright: ignore[reportPrivateUsage]
-    assert _THREAD_ID not in app._processing  # pyright: ignore[reportPrivateUsage]
+    assert _thread_key("T_CONT_ENTRY_MENTION") not in app._pending  # pyright: ignore[reportPrivateUsage]
+    assert _thread_key("T_CONT_ENTRY_MENTION") not in app._processing  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_a_timer_set_with_another_agent_is_refused_before_bind(

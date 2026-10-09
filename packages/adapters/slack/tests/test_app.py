@@ -564,12 +564,13 @@ async def test_drain_and_close_waits_for_in_flight_tasks_before_closing() -> Non
     app = _make_app()
 
     thread_ts = "1000000000.000002"
-    app._processing.add(thread_ts)  # pyright: ignore[reportPrivateUsage]
+    thread_key = ("T_DRAIN", "C_DRAIN", thread_ts)
+    app._processing.add(thread_key)  # pyright: ignore[reportPrivateUsage]
 
     # Release the in-flight slot after a short delay so drain can proceed.
     async def _release() -> None:
         await asyncio.sleep(0.05)
-        app._processing.discard(thread_ts)  # pyright: ignore[reportPrivateUsage]
+        app._processing.discard(thread_key)  # pyright: ignore[reportPrivateUsage]
 
     asyncio.create_task(_release())
     await app.drain_and_close(fake_client)  # type: ignore[arg-type]

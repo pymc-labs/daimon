@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stop subscribes to the session's events before sending the interrupt, so a fast stop no longer waits two minutes and reports "Stop not confirmed".
 - Worker deploys allow 95 seconds for container shutdown, exceeding the worker compose asset's 90-second grace for turn draining and cleanup.
 
+- Slack keeps turns and Stop buttons separate when message timestamps match in different channels or workspaces.
 - When an agent with a rule, or one in a channel kept to its own agents, is refused a publish or upload after the approval step, the MCP server now logs why (`publish_gate.needs_approval`, with the missing proof: no turn origin, no live session, a session that does not hold the tool on a card, another agent's session or an unreadable session). The refusal used to log nothing, so a missed Approve could not be traced.
 - Discord replaces a missing status card before delivering an answer and ignores stale message edits after delivery, instead of posting a false Unknown Message error. Stopping a deleted card still interrupts the turn.
 - Discord acknowledges mentions with 👀 before resolving agents and environments, and clears it when the turn settles. Queued follow-up ⌛ markers and Slack 👀 markers also clear on completion, failure or cancellation, regardless of completion pings.
