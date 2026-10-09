@@ -194,8 +194,10 @@ rows retain their original discriminator and pagination behavior. Tenant and
 account checks still run before requests, and environment metadata checks still
 run after the existing response. Neutral resource records remain validated.
 Thread handoff uses lifecycle reads with its tenant/account context. Workspace
-bundle reuploads use Artifacts with the existing Files API headers and bytes;
-the host retains checkpoint billing and transfer fallback policy.
+bundle reuploads use the native outputs extension with the existing Files API
+headers and bytes. Rehosting consumes only the returned ID, so a partial upload
+reply still produces the full handoff and cleanup entry. The request helper is
+shared with Artifacts; the host retains checkpoint billing and fallback policy.
 
 Workspace transfer uses `anthropic.workspace_transfer@1` to carry the inline
 full/transcript/history rung. The closed schema stays in the driver. Pure native

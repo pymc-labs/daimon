@@ -16,6 +16,7 @@ from daimon.core.session_ports_compat import session_scope
 from daimon.core.session_seal import session_facts
 from daimon.testing.ma_models import ma_session
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
@@ -151,3 +152,75 @@ async def test_rehost_keeps_default_upload_beta_and_bundle_queue_outcome(
     else:
         assert result == "upload_failed"
         queued.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "upload_reply",
+    [
+        {"id": "file_upload"},
+        {
+            "id": "file_upload",
+            "filename": "handoff.tar.gz",
+            "mime_type": "application/gzip",
+            "size_bytes": 3,
+        },
+    ],
+    ids=["id-only", "missing-created-at"],
+)
+async def test_partial_bundle_upload_preserves_rehost_result_and_cleanup(
+    upload_reply: dict[str, JsonValue], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def pinned_entropy(count: int) -> bytes:
+        return b"\x05" * count
+
+    monkeypatch.setattr("httpx._multipart.os.urandom", pinned_entropy)
+    queued = AsyncMock()
+    monkeypatch.setattr(workspace_transfer, "enqueue_pending_file_delete", queued)
+    factory = cast(async_sessionmaker[AsyncSession], SessionFactory())
+    content = b"abc"
+    bundle = FileMetadata(
+        id="file_output",
+        filename="handoff.tar.gz",
+        mime_type="application/gzip",
+        size_bytes=3,
+        created_at=NOW,
+        type="file",
+        downloadable=True,
+    )
+    old, new = ScriptedTransport(), ScriptedTransport()
+    for transport in (old, new):
+        transport.queue(
+            ScriptedReply(
+                "GET", "/v1/files/file_output/content", httpx.Response(200, content=content)
+            ),
+            ScriptedReply(
+                "DELETE",
+                "/v1/files/file_output",
+                httpx.Response(200, json={"id": "file_output", "type": "file_deleted"}),
+            ),
+            ScriptedReply("POST", "/v1/files", httpx.Response(200, json=upload_reply)),
+        )
+    async with old.client() as legacy, new.client() as client:
+        response = await legacy.beta.files.download(bundle.id, betas=["managed-agents-2026-04-01"])
+        legacy_content = await response.read()
+        await legacy.beta.files.delete(bundle.id, betas=["managed-agents-2026-04-01"])
+        uploaded = await legacy.beta.files.upload(
+            file=(bundle.filename, io.BytesIO(legacy_content), "application/gzip")
+        )
+        expected = (uploaded.id, len(legacy_content))
+        result = await workspace_transfer._rehost_bundle(  # pyright: ignore[reportPrivateUsage]
+            client,
+            factory,
+            bundle=bundle,
+            now=lambda: NOW,
+            scope=session_scope(tenant_id=TENANT, account_id=None, call_site="test:partial-upload"),
+        )
+    old.assert_consumed()
+    new.assert_consumed()
+    assert result == expected == ("file_upload", 3)
+    assert old.requests == new.requests
+    assert len(new.requests) == 3
+    queued.assert_awaited_once_with(
+        factory, file_id="file_upload", delete_after=NOW + workspace_transfer.BUNDLE_RETENTION
+    )
+    assert uploaded.model_dump(mode="json", exclude_unset=True) == upload_reply

@@ -790,8 +790,8 @@ rows retain their original discriminator and pagination behavior. Tenant and
 account checks still run before requests, and environment metadata checks still
 run after the existing response. Neutral resource records remain validated.
 Thread handoff collects session seals through scoped lifecycle reads before its
-policy transaction. Bundle reuploads use the scoped Artifacts port with the same
-Files API request, archive bytes and retention queue. Checkpoint billing,
+policy transaction. Bundle reuploads use the native outputs extension and share
+the Artifacts upload request, archive bytes and retention queue. Checkpoint billing,
 access rechecks and the full/transcript/history fallback ladder remain host policy.
 
 Workspace transfer uses `anthropic.workspace_transfer@1` to carry the inline
@@ -803,3 +803,9 @@ No manifest upload, provider lookup, second session create or first send is adde
 The host retains the one billed checkpoint, its access fence, fallback notices,
 quoted transcript and system-message policy. Generic lifecycle export/restore
 stay unsupported; this explicit native extension handles the existing MA ladder.
+
+Workspace rehosting uses the native outputs extension's ID-only upload result.
+The request helper is shared with the generic Artifacts port; beta headers,
+multipart bytes and download/delete/upload ordering stay unchanged. Successful
+partial upload replies do not require a filename, media type or timestamp before
+the uploaded file is mounted and queued for cleanup.

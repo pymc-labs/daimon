@@ -16,10 +16,11 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import httpx
+import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions.beta_managed_agents_agent_message_event import (
     BetaManagedAgentsAgentMessageEvent,
@@ -73,6 +74,7 @@ from daimon.testing.ma_sessions import (
     make_fake_sessions_handler,
     session_turn_sse,
 )
+from pydantic import JsonValue
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1119,3 +1121,65 @@ def test_full_handoff_framing_names_the_normalised_mount_path() -> None:
     assert "tar xzf /daimon-handoff.tar.gz" not in framing_text, (
         "the requested (un-normalised) path must never be the extraction command"
     )
+
+
+@pytest.mark.parametrize("id_only", [True, False], ids=["id-only", "missing-created-at"])
+async def test_full_transfer_accepts_partial_upload_reply_and_enqueues_cleanup(
+    id_only: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    state = FakeSessionsState(ma=FakeMAState())
+    base = make_fake_sessions_handler(state)
+    upload_replies: list[dict[str, JsonValue]] = []
+
+    def partial_upload(request: httpx.Request) -> httpx.Response:
+        response = base(request)
+        if request.method == "POST" and request.url.path == "/v1/files":
+            record = cast(dict[str, JsonValue], response.json())
+            reply = (
+                {"id": record["id"]}
+                if id_only
+                else {key: value for key, value in record.items() if key != "created_at"}
+            )
+            upload_replies.append(reply)
+            assert "managed-agents-2026-04-01" not in request.headers.get("anthropic-beta", "")
+            return httpx.Response(response.status_code, json=reply)
+        return response
+
+    async with build_fake_anthropic(
+        combine_handlers(
+            partial_upload, make_fake_memory_store_handler(), make_fake_ma_handler(state.ma)
+        )
+    ) as client:
+        old_session = await _make_session(client)
+        _seed_conversation(state, old_session, with_reply=True)
+        _script_checkpoint_reply(state, old_session, "ok")
+        output = state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
+        outcome = await transfer_workspace(
+            client,
+            db_session_factory,
+            old_session_id=old_session,
+            old_snapshot=_snapshot(),
+            tenant_id=TENANT_ID,
+            external_user_id="U123",
+            transfer_id=TRANSFER_ID,
+            markup=Decimal("1.0"),
+            checkpoint_deadline=DEADLINE,
+            from_agent_name="analysis-bot",
+            sleep=_no_sleep,
+            now=_now,
+        )
+    assert isinstance(outcome, FullHandoff)
+    assert outcome.mount_path == HANDOFF_MOUNT_PATH
+    assert outcome.bytes_transferred == len(TARBALL)
+    assert outcome.transcript is not None and "hierarchical model" in outcome.transcript
+    assert outcome.unpreserved == ()
+    assert len(upload_replies) == 1
+    assert upload_replies[0]["id"] == outcome.transfer_file_id
+    assert "created_at" not in upload_replies[0]
+    assert output.id not in state.files
+    assert state.files[outcome.transfer_file_id][1] == TARBALL
+    due = await list_due_pending_file_deletes(db_session, now=NOW + timedelta(days=8))
+    assert [row.file_id for row in due] == [outcome.transfer_file_id]
+    assert due[0].delete_after == NOW + timedelta(days=7)

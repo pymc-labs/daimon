@@ -97,6 +97,7 @@ from daimon.core.usage_recording import record_turn_usage
 from daimon.core.workspace_ports_compat import restore_transfer_records
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import Scope
+from mux.drivers.anthropic.outputs import Outputs
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -360,7 +361,9 @@ async def _rehost_bundle(
             yield content
 
         uploaded = await legacy_call(
-            managed_agents(client, scope=scope).artifacts.upload(
+            managed_agents(client, scope=scope)
+            .extension(Outputs, namespace="anthropic.outputs", version=1)
+            .upload_bundle(
                 scope,
                 body(),
                 filename=bundle.filename,
@@ -374,9 +377,9 @@ async def _rehost_bundle(
 
     async with sessionmaker() as session, session.begin():
         await enqueue_pending_file_delete(
-            session, file_id=uploaded.ref.id, delete_after=now() + BUNDLE_RETENTION
+            session, file_id=uploaded, delete_after=now() + BUNDLE_RETENTION
         )
-    return (uploaded.ref.id, len(content))
+    return (uploaded, len(content))
 
 
 async def transfer_workspace(
