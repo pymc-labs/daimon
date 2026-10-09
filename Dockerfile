@@ -67,6 +67,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 COPY --chown=daimon:daimon defaults/ ./defaults/
 COPY --chown=daimon:daimon packages/ ./packages/
+COPY --chown=daimon:daimon assets/daimon-face.png ./assets/daimon-face.png
 
 USER daimon
 

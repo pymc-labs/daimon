@@ -86,6 +86,7 @@ default) posts with no override, so it keeps the app's own name and icon.
   `channel.create_webhook(name="Daimon agents")`, so it is application-owned:
   it can carry buttons and select menus, and their interactions come to the
   bot as today. Messages in threads use `thread=`.
+- New webhook creation runs in the background; posts wait up to two seconds, then use the bot with the agent name while creation or its rate-limit cooldown continues.
 - Webhooks are found by listing the channel's webhooks and keeping the one
   whose `application_id` is ours and whose channel matches; creation is
   serialized per channel. The token stays in process memory, never in the
