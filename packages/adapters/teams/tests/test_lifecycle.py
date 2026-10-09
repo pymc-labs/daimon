@@ -211,24 +211,32 @@ async def test_the_summary_line_names_the_agent_time_debit_and_money_left(
     assert asked[0]["budget_channel_id"] == "19:budget", "a channel budget's remainder wins"
 
 
+@pytest.mark.parametrize(
+    "error", [OperationalError("select", {}, OSError("refused")), RuntimeError("anything")]
+)
 async def test_the_summary_line_leaves_out_a_name_shown_above_and_money_it_cannot_read(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
     async def unreadable(session: object, **kw: Any) -> str:
-        raise OperationalError("select", {}, OSError("refused"))
+        raise error
 
     monkeypatch.setattr(lifecycle_module, "balance_footer", unreadable)
+    kw: dict[str, Any] = {
+        "tenant_id": uuid.uuid4(),
+        "agent_name": "Ada",
+        "agent_name_prefix": "Ada",
+        "sessionmaker": _Sessions(),
+    }
     sender = FakeSender()
-    lifecycle = await _posted(
-        sender,
-        tenant_id=uuid.uuid4(),
-        agent_name="Ada",
-        agent_name_prefix="Ada",
-        sessionmaker=_Sessions(),
-    )
-    await lifecycle.on_terminal_success(_answer("Done."))
+    await (await _posted(sender, **kw)).on_terminal_success(_answer("Done."))
     assert _card_text(sender, -1) == "0s", "identity named the agent; the balance read failed"
     assert _rated(sender.activities[-1]), "the controls still land"
+
+    sender = FakeSender()
+    tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
+    await (await _posted(sender, **kw)).on_terminal_success(TurnState(content=[tool]))
+    _done, summary = _card_body(sender, -1)
+    assert summary["text"] == "Ada\u2003\u20030s", "no answer above names the agent here"
 
 
 async def test_a_failed_turn_card_carries_the_summary_line() -> None:
@@ -584,7 +592,8 @@ async def test_a_tool_only_turn_carries_the_controls_and_a_cancelled_one_none() 
     sender = FakeSender()
     lifecycle = await _posted(sender, ask_human=True)
     await lifecycle.on_terminal_success(TurnState())
-    assert not _rated(sender.activities[-1]) and not _asks(sender, -1), "cancelled: nothing"
+    assert not _rated(sender.activities[-1]) and not _asks(sender, -1), "cancelled: no controls"
+    assert _card_body(sender, -1)[1]["text"] == "0s", "but the summary line, as on Slack"
 
 
 async def test_failure_closes_the_card_with_the_termination_notice_once() -> None:

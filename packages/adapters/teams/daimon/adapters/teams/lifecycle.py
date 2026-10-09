@@ -51,7 +51,6 @@ from daimon.core.turn.termination import termination_reason
 from microsoft_teams.api import Account, MessageActivityInput, SentActivity
 from microsoft_teams.cards import Action, ExecuteAction
 from pydantic import SecretStr
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
@@ -278,8 +277,11 @@ class TeamsTurnLifecycle:
         self._notices[message_id] = (actions, rated, summary)
         self._shown[message_id] = text
 
-    async def _summary(self, state: TurnState) -> str:
-        """Slack's summary line: the agent, the time, what was debited, the money left."""
+    async def _summary(self, state: TurnState, *, named_above: bool = False) -> str:
+        """Slack's summary line: the agent, the time, what was debited, the money left.
+
+        `named_above`: agent identity's bold name leads the answer just above it.
+        """
         t = state.usage_totals
         usage = BetaManagedAgentsSpanModelUsage(
             input_tokens=t.input_tokens,
@@ -293,8 +295,7 @@ class TeamsTurnLifecycle:
             # What the tenant is debited, markup included, so `used` matches `left`.
             cost = float(debit_amount(cost, markup=self._markup))
         return format_summary(
-            # Agent identity already names it above the answer.
-            agent_name=None if self._agent_name_prefix is not None else self._agent_name,
+            agent_name=None if named_above else self._agent_name,
             elapsed_seconds=self._clock() - self._state.started_at,
             cost=format_cost(cost),
             left=await self._balance(),
@@ -312,8 +313,8 @@ class TeamsTurnLifecycle:
                     budget_channel_id=self._budget_channel_id,
                     now=datetime.now(UTC),
                 )
-        except (SQLAlchemyError, OSError):
-            # OSError: asyncpg raises a refused connection raw.
+        except Exception:
+            # As on Slack: a balance read never costs the turn its answer or its close.
             log.warning("turn.balance_footer_failed", exc_info=True)
             return None
 
@@ -345,7 +346,7 @@ class TeamsTurnLifecycle:
                     text = f"{degraded}\n\n{text}"
                 # As on Slack: a cancelled turn carries no controls, a tool-only one does.
                 ask = (card.ask_human_action(),) if tool_only and self._ask_human else ()
-                summary = await self._summary(state) if tool_only else None
+                summary = await self._summary(state)
                 await self._close(text, actions=ask, rated=tool_only, summary=summary)
                 return
             if self.answer_prefix is not None:
@@ -401,7 +402,9 @@ class TeamsTurnLifecycle:
     async def _post_controls(self, state: TurnState) -> None:
         """The summary line, Ask a human and 👍/👎 below the answer; best effort, it landed."""
         try:
-            controls = card.controls_card(await self._summary(state), ask_human=self._ask_human)
+            named = self._agent_name_prefix is not None
+            summary = await self._summary(state, named_above=named)
+            controls = card.controls_card(summary, ask_human=self._ask_human)
             await self._send(controls, message_id=None)
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.controls_failed", exc_info=True)

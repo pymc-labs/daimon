@@ -531,13 +531,9 @@ Self-service top-ups additionally need `DAIMON_MCP__PUBLIC_URL` and
 `DAIMON_MCP__JWT_SECRET` for the adapter-to-MCP hop, and the image must carry
 the optional `billing` extra, which is what pulls in `stripe`.
 
-Discord and Slack status cards end on a summary of tokens, cost and, for
-prepaid tenants, the balance left after the turn's debit. In a channel with an
-active budget (a DM: its source channel's) it shows instead what that budget
-has left, for either funding mode. The answer replaces
-the card (unless a completion ping posts it fresh), so the summary stays only
-above a pinged answer or on a turn with none; answers themselves carry no
-usage line on any platform. Teams uses the summary line above instead.
+The summary line's money left is the prepaid balance after the turn's debit
+or, in a channel with an active budget (a DM: its source channel's), what that
+budget has left, for either funding mode.
 
 ## What you can see
 

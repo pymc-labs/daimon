@@ -468,4 +468,6 @@ async def test_cancel_from_the_author_interrupts_the_session_and_closes_the_card
     assert streams == [] and not release.is_set(), "the interrupt ends the turn, not the stream"
     _status, closed = teams_api_fake.activity_requests
     assert (closed.method, _path(closed)) == ("PUT", _path(status) + "/m-1"), "the card is closed"
-    assert _texts(closed) == [card.CANCELLED_NOTICE] and _actions(closed) == [], "and says so"
+    notice, summary = _texts(closed)
+    assert notice == card.CANCELLED_NOTICE and _actions(closed) == [], "and says so"
+    assert summary.startswith("test-agent"), "with the summary line, as on Slack"
