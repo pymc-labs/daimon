@@ -234,7 +234,7 @@ Media MCP tools: YouTube transcript and file upload.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_file_upload_url` | all callers | Attach, post, send, or share a file in Discord — step 1 of 2. |
+| `create_file_upload_url` | all callers | Post, send, or share a file to another channel, or from a routine — step 1 of 2. |
 | `fetch_youtube_transcript` | all callers | Fetch the transcript of a public YouTube video for summarization or Q&A. |
 
 ## `notebook`

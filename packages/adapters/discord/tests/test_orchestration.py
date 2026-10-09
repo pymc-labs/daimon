@@ -400,6 +400,11 @@ class TestNewThreadCreation:
         deliver.assert_awaited_once()
         assert deliver.await_args.args[1] is thread
         assert deliver.await_args.kwargs["session_id"] == "sess-output"
+        answer = deliver.await_args.kwargs["answer"]
+        assert answer is not None and answer.message_id == 1000, (
+            "the files go onto the answer that carries the summary"
+        )
+        assert "posted" not in deliver.await_args.kwargs
 
     # TODO: migrate to MARouter transport-level fake
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
