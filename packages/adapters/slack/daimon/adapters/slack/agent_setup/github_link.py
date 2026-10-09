@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.agent_setup.panel_views import build_github_home_view
 from daimon.adapters.slack.agent_setup.state import PanelMetadata
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.github_connect_cards import connect_button_blocks
+from daimon.core.github_connect_cards import (
+    ConnectCard,
+    build_connect_card,
+    connect_attachment,
+)
 from daimon.core.github_panel import CONNECT_COPY
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.github_connected_repos import summary
@@ -26,13 +31,20 @@ async def send_link(
     user_id: str,
     url: str,
     line: str = CONNECT_COPY,
+    card: ConnectCard | None = None,
 ) -> None:
-    blocks = connect_button_blocks(url, line)
+    parts = urlsplit(url)
+    card = card or build_connect_card(
+        agent_name=None,
+        identity_enabled=False,
+        avatar_url=None,
+        public_base_url=f"{parts.scheme}://{parts.netloc}",
+    )
     kwargs: dict[str, Any] = {
         "channel": channel_id,
         "user": user_id,
-        "text": "Connect GitHub",
-        "blocks": blocks,
+        "text": line if line != CONNECT_COPY else "Connect GitHub",
+        "attachments": [connect_attachment(url, card=card)],
     }
     if thread_id is not None:
         kwargs["thread_ts"] = thread_id
@@ -71,5 +83,6 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
             owners=home.owners,
             agent_count=home.agent_count,
             pending_url=pending_url,
+            public_base_url=str(runtime.settings.mcp.app_root_url or ""),
         ),
     )

@@ -452,11 +452,21 @@ class GitHubWaitingView(PanelViewBase):
         )
         await self.swap_to(interaction, refreshed)
         if url is not None:
+            from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
             from daimon.adapters.discord.agent_setup.github_home import connect_button_view
+            from daimon.core.github_connect_cards import resolve_connect_card
 
             link_view = connect_button_view(url, timeout=600)
+            card = await resolve_connect_card(
+                self.runtime.sessionmaker,
+                self.runtime.settings,
+                tenant_id=tenant_id,
+                platform="discord",
+                workspace_id=str(self.state.guild_id),
+                agent_name=request.agent_name,
+            )
             await interaction.followup.send(
-                "Waiting for GitHub confirmation.", view=link_view, ephemeral=True
+                embed=connect_embed(card), view=link_view, ephemeral=True
             )
 
     async def _on_decline(self, interaction: discord.Interaction) -> None:

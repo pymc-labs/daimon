@@ -137,6 +137,7 @@ from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
+from daimon.core.github_connect_cards import resolve_connect_card
 from daimon.core.github_panel import connect_link, pending_connect_link, safe_github_error
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.models_catalog import list_model_choices
@@ -254,6 +255,7 @@ async def github_home_view(
         linked = await account_link_status(session, account_id=principal.account_id)
     return panel_views.build_github_home_view(
         dataclasses.replace(meta, github_step="pick"),
+        public_base_url=str(runtime.settings.mcp.app_root_url or ""),
         connected_count=home.count if home else 0,
         is_admin=is_admin,
         owners=home.owners if home else (),
@@ -363,6 +365,7 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
             )
             rendered = panel_views.build_github_home_view(
                 meta,
+                public_base_url=str(runtime.settings.mcp.app_root_url or ""),
                 connected_count=home.count if home else 0,
                 is_admin=is_admin,
                 owners=home.owners if home else (),
@@ -975,7 +978,10 @@ async def _dispatch_panel_action(
         if action_id == panel_views.ACTION_GITHUB_UNLINK:
             next_meta = dataclasses.replace(meta, github_step="personal_unlink")
             view = panel_views.build_github_home_view(
-                next_meta, connected_count=0, is_admin=is_admin
+                next_meta,
+                connected_count=0,
+                is_admin=is_admin,
+                public_base_url=str(runtime.settings.mcp.app_root_url or ""),
             )
         else:
             view = await github_home_view(
@@ -1092,6 +1098,14 @@ async def _dispatch_panel_action(
             thread_id=meta.thread_id,
             user_id=user_id,
             url=url,
+            card=await resolve_connect_card(
+                runtime.sessionmaker,
+                runtime.settings,
+                tenant_id=tenant_id,
+                platform="slack",
+                workspace_id=meta.team_id,
+                agent_name=agent.name if agent is not None else None,
+            ),
         )
         return
 

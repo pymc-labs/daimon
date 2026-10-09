@@ -19,7 +19,12 @@ from daimon.adapters.mcp.tools.setup_target import (
     resolve_setup_agent,
 )
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
-from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, connect_button_blocks
+from daimon.core.github_connect_cards import (
+    CONNECT_GITHUB_EMOJI,
+    connect_attachment,
+    discord_embed_payload,
+    resolve_connect_card,
+)
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
@@ -57,6 +62,16 @@ async def _post_discord_connect_card(
     intent_id: uuid.UUID,
     agent_name: str,
 ) -> None:
+    if auth.external_id is None:
+        raise ToolError("GitHub setup requires a Discord server.")
+    card = await resolve_connect_card(
+        runtime.session_factory,
+        runtime.settings,
+        tenant_id=auth.tenant_id,
+        platform="discord",
+        workspace_id=auth.external_id,
+        agent_name=agent_name,
+    )
     view = discord.ui.View(timeout=None)
     view.add_item(
         discord.ui.Button(
@@ -71,7 +86,7 @@ async def _post_discord_connect_card(
         if not isinstance(channel, discord.Thread) or str(channel.guild.id) != auth.external_id:
             raise ToolError("GitHub setup requires the originating Discord thread.")
         await channel.send(
-            f"Connect GitHub for {agent_name}.",
+            embed=discord.Embed.from_dict(discord_embed_payload(card)),
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -89,13 +104,21 @@ async def _post_slack_connect_card(
 ) -> None:
     if auth.external_id is None:
         raise ToolError("GitHub setup requires a Slack workspace.")
+    card = await resolve_connect_card(
+        runtime.session_factory,
+        runtime.settings,
+        tenant_id=auth.tenant_id,
+        platform="slack",
+        workspace_id=auth.external_id,
+        agent_name=agent_name,
+    )
     client = await slack_web_client(runtime, team_id=auth.external_id)
     await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
         channel=channel_id,
         thread_ts=thread_id,
         user=requester_id,
         text="Connect GitHub",
-        blocks=connect_button_blocks(url, f"Connect GitHub for {agent_name}."),
+        attachments=[connect_attachment(url, card=card)],
     )
 
 

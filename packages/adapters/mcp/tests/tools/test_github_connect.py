@@ -20,6 +20,7 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
+from daimon.core.github_connect_cards import build_connect_card
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
@@ -55,19 +56,28 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
         return "bot-token"
 
     monkeypatch.setattr(connect_tool, "_require_bot_token", bot_token)
-    discord_auth = SimpleNamespace(external_id="123")
+    card = build_connect_card(
+        agent_name="ResearchBot",
+        identity_enabled=True,
+        avatar_url="https://mcp.test/avatars/research.png",
+        public_base_url="https://mcp.test",
+    )
+    monkeypatch.setattr(connect_tool, "resolve_connect_card", AsyncMock(return_value=card))
+    runtime = SimpleNamespace(session_factory=object(), settings=object())
+    discord_auth = SimpleNamespace(external_id="123", tenant_id=uuid.uuid4())
     await connect_tool._post_discord_connect_card(  # pyright: ignore[reportPrivateUsage]
-        SimpleNamespace(),  # type: ignore[arg-type]
+        runtime,  # type: ignore[arg-type]
         discord_auth,  # type: ignore[arg-type]
         thread_id="789",
         requester_id="456",
         intent_id=uuid.UUID(int=1),
         agent_name="ResearchBot",
     )
-    text = thread.send.await_args.args[0]
     kwargs = thread.send.await_args.kwargs
-    assert text == "Connect GitHub for ResearchBot."
-    assert "https://" not in text
+    assert thread.send.await_args.args == ()
+    assert kwargs["embed"].to_dict()["author"]["name"] == "ResearchBot"
+    assert kwargs["embed"].description == "Pick repos ResearchBot can use."
+    assert kwargs["embed"].to_dict()["color"] == 0x0C1F40
     item = kwargs["view"].children[0]
     assert item.custom_id == f"gh_connect:456:{uuid.UUID(int=1).hex}"
     assert item.emoji.name == "🔗"
@@ -75,9 +85,9 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
 
     slack_client = SimpleNamespace(chat_postEphemeral=AsyncMock(), conversations_open=AsyncMock())
     monkeypatch.setattr(connect_tool, "slack_web_client", AsyncMock(return_value=slack_client))
-    slack_auth = SimpleNamespace(external_id="T1")
+    slack_auth = SimpleNamespace(external_id="T1", tenant_id=uuid.uuid4())
     await connect_tool._post_slack_connect_card(  # pyright: ignore[reportPrivateUsage]
-        SimpleNamespace(),  # type: ignore[arg-type]
+        runtime,  # type: ignore[arg-type]
         slack_auth,  # type: ignore[arg-type]
         channel_id="C1",
         thread_id="123.456",
@@ -90,8 +100,13 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
     sent = slack_client.chat_postEphemeral.await_args.kwargs
     assert (sent["channel"], sent["thread_ts"], sent["user"]) == ("C1", "123.456", "U1")
     assert "https://" not in sent["text"]
-    assert sent["blocks"][1]["elements"][0]["url"] == "https://mcp.test/private-link"
-    assert sent["blocks"][1]["elements"][0]["text"] == {
+    attachment = sent["attachments"][0]
+    assert attachment["color"] == "#0C1F40"
+    button = next(block for block in attachment["blocks"] if block["type"] == "actions")[
+        "elements"
+    ][0]
+    assert button["url"] == "https://mcp.test/private-link"
+    assert button["text"] == {
         "type": "plain_text",
         "text": "🔗 Connect GitHub",
         "emoji": True,

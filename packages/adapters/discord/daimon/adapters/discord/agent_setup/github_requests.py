@@ -6,12 +6,13 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
+from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
 from daimon.adapters.discord.checks import channel_admin_caller, is_member_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, resolve_connect_card
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.stores.github_access import list_authorized_repos
@@ -84,9 +85,21 @@ async def update_requester_card(
             if can_cancel
             else "success"
         )
+        card = (
+            await resolve_connect_card(
+                runtime.sessionmaker,
+                runtime.settings,
+                tenant_id=request.tenant_id,
+                platform="discord",
+                workspace_id=str(thread.guild.id),
+                agent_name=request.agent_name,
+            )
+            if link_url
+            else None
+        )
         await thread.get_partial_message(int(delivery.message_id)).edit(
             content=None,
-            embed=github_embed(text, state=state),
+            embed=connect_embed(card) if card else github_embed(text, state=state),
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -279,7 +292,17 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
             )
         from daimon.adapters.discord.agent_setup.github_home import connect_button_view
 
-        await reply("Connect GitHub.", view=connect_button_view(url))
+        card = await resolve_connect_card(
+            runtime.sessionmaker,
+            runtime.settings,
+            tenant_id=request.tenant_id,
+            platform="discord",
+            workspace_id=str(interaction.guild_id),
+            agent_name=request.agent_name,
+        )
+        await interaction.response.send_message(
+            embed=connect_embed(card), view=connect_button_view(url), ephemeral=True
+        )
         return True
     if action == "cancel":
         async with runtime.sessionmaker.begin() as session:
@@ -444,8 +467,16 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
     from daimon.adapters.discord.agent_setup.github_home import connect_button_view
 
     await edit_card(embed=github_embed("Waiting for GitHub confirmation.", state="waiting"))
+    card = await resolve_connect_card(
+        runtime.sessionmaker,
+        runtime.settings,
+        tenant_id=request.tenant_id,
+        platform="discord",
+        workspace_id=str(interaction.guild_id),
+        agent_name=request.agent_name,
+    )
     await interaction.followup.send(
-        "Connect GitHub.", view=connect_button_view(url), ephemeral=True
+        embed=connect_embed(card), view=connect_button_view(url), ephemeral=True
     )
     await update_requester_card(
         interaction.client,

@@ -8,10 +8,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Self, cast
 
 import structlog
+from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
 from daimon.adapters.discord.agent_setup.github_home import connect_button_view
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import is_member_guild_admin
-from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, resolve_connect_card
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.github_connect import bind_discord_connect_click
@@ -126,8 +127,18 @@ class GitHubConnectButton(
             return
         encrypted_token, agent_name = link
         token = decrypt_token(credentials, encrypted_token)
+        card = await resolve_connect_card(
+            bot.runtime.sessionmaker,
+            settings,
+            tenant_id=derive_tenant_uuid(
+                platform="discord", workspace_id=str(interaction.guild_id)
+            ),
+            platform="discord",
+            workspace_id=str(interaction.guild_id),
+            agent_name=agent_name,
+        )
         await interaction.followup.send(
-            f"Connect GitHub for {agent_name}." if agent_name else "Connect GitHub.",
+            embed=connect_embed(card),
             view=connect_button_view(f"{root}/oauth/github/connect/{token}"),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),

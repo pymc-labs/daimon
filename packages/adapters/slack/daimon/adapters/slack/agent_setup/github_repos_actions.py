@@ -15,6 +15,7 @@ from daimon.adapters.slack.agent_setup.read import load_panel_roster
 from daimon.adapters.slack.agent_setup.state import PanelMetadata
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.github_connect_cards import resolve_connect_card
 from daimon.core.github_panel import (
     GrantsPanel,
     activate_grants,
@@ -178,6 +179,14 @@ async def _handle_add(
             user_id=user_id,
             url=url,
             line=f"Connect GitHub for {meta.agent_name}.",
+            card=await resolve_connect_card(
+                runtime.sessionmaker,
+                runtime.settings,
+                tenant_id=tenant_id,
+                platform="slack",
+                workspace_id=meta.team_id,
+                agent_name=meta.agent_name,
+            ),
         )
         return True
     elif action_id == github_add_repos.ACTION_ADD:
@@ -205,7 +214,21 @@ async def _handle_add(
             user_id=user_id,
             channel_id=channel_id,
         )
-    view = github_add_repos.build_view(next_meta, panel, is_admin=is_admin)
+    connect_card = (
+        await resolve_connect_card(
+            runtime.sessionmaker,
+            runtime.settings,
+            tenant_id=tenant_id,
+            platform="slack",
+            workspace_id=meta.team_id,
+            agent_name=meta.agent_name,
+        )
+        if is_admin and not panel.repos
+        else None
+    )
+    view = github_add_repos.build_view(
+        next_meta, panel, is_admin=is_admin, connect_card=connect_card
+    )
     if push:
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]
             trigger_id=str(payload.get("trigger_id") or ""), view=view

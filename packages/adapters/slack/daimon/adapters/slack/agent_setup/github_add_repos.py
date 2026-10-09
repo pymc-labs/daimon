@@ -8,7 +8,7 @@ from typing import Any, Final
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, encode_panel_metadata
 from daimon.adapters.slack.modal_limits import finish_modal
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
-from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, ConnectCard
 from daimon.core.github_panel import GrantsPanel, RepoChoice, suggested_repo
 from daimon.core.stores.github_connect import CLIENT_AGENT_MESSAGE
 
@@ -65,7 +65,11 @@ def _ability(meta: PanelMetadata, repo: RepoChoice | None = None) -> str:
 
 
 def build_view(
-    meta: PanelMetadata, panel: GrantsPanel, *, is_admin: bool = False
+    meta: PanelMetadata,
+    panel: GrantsPanel,
+    *,
+    is_admin: bool = False,
+    connect_card: ConnectCard | None = None,
 ) -> dict[str, Any]:
     name = meta.agent_name or "this agent"
     selected = _selected(meta, panel)
@@ -79,16 +83,58 @@ def build_view(
         blocks.append(_section(CLIENT_AGENT_MESSAGE))
         blocks.append({"type": "actions", "elements": [_button(ACTION_BACK, "◀ Back")]})
     elif meta.github_step == "pick":
-        blocks.extend(
-            [
-                _section(f"*Repos {name} uses*"),
-                {
-                    "type": "section",
-                    "fields": [{"type": "mrkdwn", "text": f"*Can*\n{_ability(meta)}"}],
-                },
-                {"type": "divider"},
-            ]
-        )
+        if not panel.repos and connect_card is not None:
+            blocks.extend(
+                [
+                    {
+                        "type": "context",
+                        "elements": [
+                            {
+                                "type": "image",
+                                "image_url": connect_card.author_icon_url,
+                                "alt_text": connect_card.author_name,
+                            },
+                            {"type": "plain_text", "text": connect_card.author_name},
+                        ],
+                    },
+                    {
+                        "type": "header",
+                        "text": {"type": "plain_text", "text": connect_card.title},
+                    },
+                    {
+                        "type": "section",
+                        "text": {"type": "plain_text", "text": connect_card.description},
+                        "accessory": {
+                            "type": "image",
+                            "image_url": connect_card.github_mark_url,
+                            "alt_text": "GitHub",
+                        },
+                    },
+                    {"type": "divider"},
+                ]
+            )
+            if connect_card.detail:
+                blocks.append(
+                    {"type": "section", "text": {"type": "plain_text", "text": connect_card.detail}}
+                )
+            if connect_card.footer:
+                blocks.append(
+                    {
+                        "type": "context",
+                        "elements": [{"type": "plain_text", "text": connect_card.footer}],
+                    }
+                )
+        else:
+            blocks.extend(
+                [
+                    _section(f"*Repos {name} uses*"),
+                    {
+                        "type": "section",
+                        "fields": [{"type": "mrkdwn", "text": f"*Can*\n{_ability(meta)}"}],
+                    },
+                    {"type": "divider"},
+                ]
+            )
         page = min(meta.page, max(0, (len(panel.repos) - 1) // 20))
         page_repos = panel.repos[page * 20 : (page + 1) * 20]
         if page_repos:
@@ -110,7 +156,7 @@ def build_view(
                 "max_selected_items": len(page_repos),
             }
             blocks.append({"type": "actions", "elements": [select]})
-        else:
+        elif connect_card is None:
             blocks.append(_section("No repos connected here."))
         suggestion = suggested_repo(panel.repos, meta.channel_name)
         if suggestion is not None and suggestion.repo_id not in selected:
