@@ -15,9 +15,19 @@ def test_discord_username_removes_reserved_words_and_fences() -> None:
     assert discord_username("discord") == "Agent"
 
 
-def test_fallback_prefix_labels_only_the_passed_chunk() -> None:
-    assert fallback_name_prefix("Research", "First answer") == "**Research**\n\nFirst answer"
-    assert fallback_name_prefix("A* @everyone", "x") == "**A\\* @\u200beveryone**\n\nx"
+def test_fallback_prefix_is_one_subtext_line_above_the_chunk() -> None:
+    assert fallback_name_prefix("Research", "First answer") == "-# Research\nFirst answer"
+    assert fallback_name_prefix("Research", "") == "-# Research\n"
+
+
+def test_fallback_prefix_escapes_markdown_mentions_and_backticks() -> None:
+    assert fallback_name_prefix("A* @everyone", "x") == "-# A\\* @\u200beveryone\nx"
+    assert fallback_name_prefix("ag_acme `x` ||y||", "x") == "-# ag\\_acme \\`x\\` \\|\\|y\\|\\|\nx"
+    assert fallback_name_prefix("back\\slash ~~s~~", "x") == "-# back\\\\slash \\~\\~s\\~\\~\nx"
+
+
+def test_fallback_prefix_keeps_the_name_on_one_line() -> None:
+    assert fallback_name_prefix("two\nlines", "x") == "-# two lines\nx"
 
 
 def test_webhook_must_match_application_and_channel() -> None:
@@ -31,3 +41,11 @@ def test_thread_webhook_selection_is_stable_over_sorted_ids() -> None:
     assert select_discord_webhook_id([33, 31, 32], 4) == 32
     assert select_discord_webhook_id([33, 31], 4) == 31
     assert select_discord_webhook_id([], 4) is None
+
+
+def test_a_long_escaped_name_keeps_a_full_chunk_inside_discords_limit() -> None:
+    labelled = fallback_name_prefix("_" * 80, "x" * 1900)
+    label = labelled.split("\n", 1)[0]
+    assert len(labelled) <= 2000
+    assert label.startswith("-# \\_") and label.endswith("\u2026")
+    assert not label[:-1].endswith("\\") or label[:-1].endswith("\\\\")

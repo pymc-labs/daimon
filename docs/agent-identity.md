@@ -94,9 +94,18 @@ default) posts with no override, so it keeps the app's own name and icon.
   restart recovery) resolves the webhook the same way.
 - One transport, `DiscordPostTransport`, owns send, edit and delete for agent
   posts: webhook (`wait=True`, so the sent message is returned and recorded)
-  when available, else `thread.send` with `**Agent name**` prefixed to the
-  first chunk of each answer only. Fallback cases: DMs, missing Manage
-  Webhooks, the webhook limit, voice and stage text chats, locked threads.
+  when available, else `thread.send` with the agent's name as one subtext
+  line (`-# Agent name`) above the first chunk of each answer only. Fallback
+  cases: DMs, missing Manage Webhooks, the webhook limit, voice and stage text
+  chats, locked threads. After a 403 or the webhook limit (30007), a channel
+  backs off webhook lookup and creation for 60 seconds; on the bot, a role,
+  bot-member or channel-overwrite change that grants Manage Webhooks ends the
+  back-off early. The first fallback for want of Manage Webhooks logs
+  `discord.identity_fallback_no_manage_webhooks` once per guild per process.
+- When identity is on and the bot's server permissions lack Manage Webhooks,
+  `/agent-setup` shows admins one line saying agents answer as Daimon there,
+  with a re-authorize link that re-adds the bot with its full install
+  permissions. Members don't see it, and nothing is posted in channels.
   Edits and deletes go through the webhook when the message's `webhook_id` is
   ours (with the thread), through the bot otherwise. If our webhook was
   deleted, its old messages can no longer be edited: an edit that fails that
@@ -186,7 +195,8 @@ Named-agent routing is tracked separately from this identity work.
   name normalized as #409 normalizes names (NFKC, casefolded), so an agent the
   resolver recreates keeps its avatar. A rename moves the row; archiving or
   deleting the agent, and tenant purge, delete it, so a later agent reusing
-  the name starts from a fresh default. Uploads remain 256×256 PNG, at most 256 KB.
+  the name starts from a fresh default. Pictures uploaded before uploads were
+  turned off stay as stored 256×256 PNGs.
 - With the identity switch on, the first turn reads the current picture without
   waiting for artwork. A missing face is generated after the turn proceeds; an
   existing initials URL stays valid after the new PNG is stored, until an admin
@@ -216,13 +226,15 @@ Named-agent routing is tracked separately from this identity work.
   open its image, and platform and browser caches keep it after we delete it.
   The panel says so. The same route accepts `?size=128` or `?size=512` for a
   resized PNG; a size without a query returns the stored bytes.
-- Setup panel: an Avatar row on the agent's detail screen with **Change** and
-  **Reset** (back to the generated one). Change takes an uploaded image, never
-  a URL we fetch: a Slack modal `file_input` (downloaded from Slack's file API
-  with the bot token) and on Discord an attachment option on the agent setup
-  command (downloaded from Discord's CDN). The download is bounded in time and
-  bytes, decoded with a pixel cap, center-cropped, resized and re-encoded as
-  PNG without metadata. Admin only, recorded in the panel audit.
+- Setup panel: a Picture row on the agent's detail screen with **Use default**
+  (back to the generated face) and **Details**. Admin only, recorded in the
+  panel audit. Custom uploads are turned off: there is no Change button and no
+  attachment option on Discord's agent setup command. A Change button, Slack
+  upload form or `/agent-setup` picture option left over from before answers
+  "Custom pictures are turned off." and writes nothing. A Discord upload form
+  left open across a restart shows Discord's "interaction failed". An agent
+  that already has an uploaded picture keeps showing it until an admin uses
+  **Use default**.
 
 ## Permissions and app changes
 

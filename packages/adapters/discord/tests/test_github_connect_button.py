@@ -54,8 +54,16 @@ async def test_requester_gets_ephemeral_link_and_click_sets_followup(
     interaction.application_id = 1234
     interaction.token = "interaction-token"
     interaction.client.runtime = runtime
-    interaction.guild = SimpleNamespace(owner_id=456, fetch_member=AsyncMock(return_value=object()))
+
+    async def fetch_member(_user_id: int) -> object:
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        return object()
+
+    interaction.guild = SimpleNamespace(
+        owner_id=456, fetch_member=AsyncMock(side_effect=fetch_member)
+    )
     button = button_module.GitHubConnectButton(requester_id="456", intent_id=uuid.UUID(int=1))
+    assert button.item.emoji.name == "🔗"
     assert len(button.item.custom_id or "") <= 100
     await button._reveal(interaction)  # pyright: ignore[reportPrivateUsage]
     interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
@@ -65,8 +73,10 @@ async def test_requester_gets_ephemeral_link_and_click_sets_followup(
     assert bind.await_args.kwargs["followup_expires_at"] > datetime.now(UTC)
     kwargs = interaction.followup.send.await_args.kwargs
     assert kwargs["ephemeral"] is True
-    assert "https://" not in interaction.followup.send.await_args.args[0]
-    assert interaction.followup.send.await_args.args[0] == "Connect GitHub for ResearchBot."
+    assert interaction.followup.send.await_args.args == ()
+    assert kwargs["embed"].description == "Pick repos ResearchBot can use."
+    assert kwargs["embed"].to_dict()["author"]["name"] == "Daimon"
     assert kwargs["view"].children[0].url == (
         "https://mcp.test/oauth/github/connect/private-link-token"
     )
+    assert kwargs["view"].children[0].emoji.name == "🔗"

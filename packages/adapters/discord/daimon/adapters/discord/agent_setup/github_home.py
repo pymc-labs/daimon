@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
+from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
 from daimon.adapters.discord.agent_setup.github_embed_panel import (
     EmbedActionRow,
 )
@@ -15,8 +16,12 @@ from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.github_connect_cards import (
+    CONNECT_GITHUB_EMOJI,
+    build_connect_card,
+    resolve_connect_card,
+)
 from daimon.core.github_panel import (
-    CONNECT_COPY,
     connect_link,
     pending_connect_link,
     safe_github_error,
@@ -35,7 +40,9 @@ import discord
 
 def connect_button(url: str) -> discord.ui.Button[discord.ui.View]:
     """The shared Discord link button for private GitHub connection URLs."""
-    return discord.ui.Button(label="Connect GitHub", style=discord.ButtonStyle.link, url=url)
+    return discord.ui.Button(
+        label="Connect GitHub", emoji=CONNECT_GITHUB_EMOJI, style=discord.ButtonStyle.link, url=url
+    )
 
 
 def connect_button_view(url: str, *, timeout: float | None = None) -> discord.ui.View:
@@ -113,6 +120,7 @@ class GitHubHomeView(PanelViewBase):
         elif state.is_admin:
             connect: discord.ui.Button[GitHubHomeView] = discord.ui.Button(
                 label="Connect more repos" if connected_count else "Connect GitHub",
+                emoji=CONNECT_GITHUB_EMOJI if not connected_count else None,
                 style=discord.ButtonStyle.primary,
             )
             connect.callback = self._on_connect  # type: ignore[method-assign]
@@ -153,6 +161,15 @@ class GitHubHomeView(PanelViewBase):
             waiting_row.add_item(waiting)
             container.add_item(waiting_row)
         self.add_item(container)
+        if state.is_admin and not connected_count and runtime.settings.mcp.app_root_url:
+            self.embed = connect_embed(
+                build_connect_card(
+                    agent_name=None,
+                    identity_enabled=False,
+                    avatar_url=None,
+                    public_base_url=str(runtime.settings.mcp.app_root_url),
+                )
+            )
 
     async def _on_waiting(self, interaction: discord.Interaction) -> None:
         if (
@@ -215,8 +232,16 @@ class GitHubHomeView(PanelViewBase):
         except ValueError as error:
             await interaction.followup.send(safe_github_error(error), ephemeral=True)
             return
+        card = await resolve_connect_card(
+            self.runtime.sessionmaker,
+            self.runtime.settings,
+            tenant_id=tenant_id,
+            platform="discord",
+            workspace_id=str(self.state.guild_id),
+            agent_name=agent.name if agent is not None else None,
+        )
         await interaction.followup.send(
-            embed=github_embed(CONNECT_COPY, state="waiting"),
+            embed=connect_embed(card),
             view=GitHubLinkView(url),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),

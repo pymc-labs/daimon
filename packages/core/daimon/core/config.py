@@ -382,10 +382,10 @@ class DiscordSettings(BaseModel):
         default=3.0,
         ge=0,
         description=(
-            "Seconds after an admitted opening mention before replying in the parent channel "
-            "that its Discord thread is still opening. Includes thread naming and Discord "
-            "rate-limit waits. Set to 0 to reply immediately. The notice is edited with a "
-            "thread link or retry guidance when creation finishes."
+            "Seconds after an admitted opening mention before reacting to it to show that its "
+            "Discord thread is still opening. Includes thread naming and Discord rate-limit "
+            "waits. Set to 0 to react immediately. The reaction is removed when creation "
+            "finishes; a failed creation is answered with a visible error reply."
         ),
     )
     max_concurrent_turns_per_tenant: int = Field(

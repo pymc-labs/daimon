@@ -265,6 +265,17 @@ class ToolSafetyPolicy(BaseModel):
             "Daimon's own add_skill never confirms unattended."
         ),
     )
+    confirmation_timeout_s: int = Field(
+        default=600,
+        ge=30,
+        le=3600,
+        description=(
+            "How long an approval card waits for the requester's Approve or Deny, in "
+            "seconds, before it expires and the call is refused. Production keeps the "
+            "10-minute default; staging can set it short (60-90) so a precheck or load "
+            "test does not hold a turn for ten minutes."
+        ),
+    )
 
 
 OPEN_TOOL_SAFETY: Final[ToolSafetyPolicy] = ToolSafetyPolicy()

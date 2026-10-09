@@ -553,6 +553,7 @@ async def run_wizard_submit_turn_observed(
                 edit=_edit_message,
                 agent_name=agent.name,
                 model_id=agent.model.id,
+                markup=bot.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=interaction.user.id, cancel=cancel, turn_id=turn_id
                 ),
@@ -660,6 +661,7 @@ async def run_wizard_submit_turn_observed(
                 edit=_edit_message,
                 agent_name=agent.name,
                 model_id=agent.model.id,
+                markup=bot.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=interaction.user.id,
                     cancel=cancel_event,

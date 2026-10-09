@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from daimon.adapters.mcp.tools.github_request_delivery import _slack_blocks
 from daimon.adapters.slack.agent_setup import github_requests as module
+from daimon.core.github_connect_cards import build_connect_card
 from daimon.core.github_request_cards import RequestCard
 
 
@@ -183,6 +184,31 @@ def test_slack_review_modal_escapes_only_mrkdwn_control_characters() -> None:
     )
     text = view["blocks"][0]["text"]["text"]
     assert 'A" &amp; &lt;B&gt;' in text
+
+
+@pytest.mark.asyncio
+async def test_slack_review_modal_connect_button_has_link_emoji() -> None:
+    client = SimpleNamespace(views_update=AsyncMock())
+    await module._replace_modal(  # type: ignore[attr-defined]
+        client,
+        {"view": {"id": "V1", "private_metadata": "{}"}},
+        "Ready.",
+        url="https://example.test/link",
+        card=build_connect_card(
+            agent_name="ResearchBot",
+            identity_enabled=False,
+            avatar_url=None,
+            public_base_url="https://mcp.test",
+        ),
+    )
+    view = client.views_update.await_args.kwargs["view"]
+    assert next(block for block in view["blocks"] if block["type"] == "actions")["elements"][0][
+        "text"
+    ] == {
+        "type": "plain_text",
+        "text": "🔗 Connect GitHub",
+        "emoji": True,
+    }
 
 
 @pytest.mark.asyncio

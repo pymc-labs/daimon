@@ -250,6 +250,7 @@ async def handle(
             home = await summary(session, tenant_id=tenant_id)
         view = panel_views.build_github_home_view(
             meta,
+            public_base_url=str(runtime.settings.mcp.app_root_url or ""),
             connected_count=home.count,
             owners=home.owners,
             agent_count=home.agent_count,
@@ -288,6 +289,7 @@ async def handle(
                     home = await summary(session, tenant_id=tenant_id)
                 view = panel_views.build_github_home_view(
                     meta,
+                    public_base_url=str(runtime.settings.mcp.app_root_url or ""),
                     connected_count=home.count,
                     owners=home.owners,
                     agent_count=home.agent_count,

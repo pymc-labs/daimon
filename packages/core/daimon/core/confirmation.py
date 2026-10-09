@@ -93,6 +93,10 @@ async def no_confirmation_surface(prompt: ConfirmationPrompt) -> ConfirmationAns
     return "denied"
 
 
+def _in_days(days: object) -> str:
+    return f"in {days} day" if days == 1 else f"in {days} days"
+
+
 def _short(value: object, *, limit: int = 80) -> str:
     text = str(value)
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -134,7 +138,11 @@ def _recipients(value: object) -> str:
 
 
 def prompt_for_tool_call(
-    call: ToolCall, *, requester_platform_user_id: str, now: datetime
+    call: ToolCall,
+    *,
+    requester_platform_user_id: str,
+    now: datetime,
+    timeout: timedelta = CONFIRMATION_TIMEOUT,
 ) -> ConfirmationPrompt:
     """The card for one gated write, with short product-facing details."""
     server = call.server_name or "a tool"
@@ -161,7 +169,7 @@ def prompt_for_tool_call(
         days = data.get("ttl_days") or 1
         detail_lines = (
             f"Notebook: {slug or 'New notebook'}",
-            f"Link expires: {'Never' if data.get('permanent') else f'in {days} days'}",
+            f"Link expires: {'Never' if data.get('permanent') else _in_days(days)}",
             f"Editable: {'Yes' if data.get('editable') else 'No'}",
         )
     elif call.tool_name == "create_attachment_upload_url" and publishing:
@@ -223,7 +231,7 @@ def prompt_for_tool_call(
         denied_action=denied_action,
         detail_lines=detail_lines,
         requester_platform_user_id=requester_platform_user_id,
-        expires_at=now + CONFIRMATION_TIMEOUT,
+        expires_at=now + timeout,
     )
 
 

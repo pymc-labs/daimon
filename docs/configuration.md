@@ -406,10 +406,10 @@ Discord bot token. Required to run the Discord adapter.
 
 `float` · optional · default `3.0`
 
-Seconds after an admitted opening mention before replying in the parent channel that its
-Discord thread is still opening. Includes thread naming and Discord rate-limit waits.
-Set to 0 to reply immediately. The notice is edited with a thread link or retry guidance
-when creation finishes.
+Seconds after an admitted opening mention before reacting to it to show that its Discord
+thread is still opening. Includes thread naming and Discord rate-limit waits. Set to 0
+to react immediately. The reaction is removed when creation finishes; a failed creation
+is answered with a visible error reply.
 
 ### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS_PER_TENANT`
 
@@ -1181,6 +1181,14 @@ Servers or server/tool pairs that are always refused, e.g. ["hubspot/delete_deal
 Servers or server/tool pairs whose writes may run in routines and other unattended runs,
 e.g. ["linear/create_issue"]. "*" allows every write there. Daimon's own add_skill never
 confirms unattended.
+
+### `DAIMON_TOOL_SAFETY__CONFIRMATION_TIMEOUT_S`
+
+`int` · optional · default `600`
+
+How long an approval card waits for the requester's Approve or Deny, in seconds, before
+it expires and the call is refused. Production keeps the 10-minute default; staging can
+set it short (60-90) so a precheck or load test does not hold a turn for ten minutes.
 
 ## Artifacts
 

@@ -19,6 +19,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Collection
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import structlog
@@ -48,6 +49,7 @@ from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import render_termination_notice
@@ -150,6 +152,7 @@ class DiscordTurnLifecycle:
         agent_name: str,
         fallback_active: Callable[[], bool] | None = None,
         model_id: str,
+        markup: Decimal = Decimal(1),
         cancel_view: discord.ui.View | None = None,
         requester_id: int | None = None,
         trigger_message: discord.Message | None = None,
@@ -188,6 +191,7 @@ class DiscordTurnLifecycle:
         self._fallback_active = fallback_active
         self._name_prefix_sent = False
         self._model_id = model_id
+        self._markup = markup
         self._clock = clock
         self._state = EmbedState(
             phase=TurnPhase.THINKING,
@@ -363,6 +367,9 @@ class DiscordTurnLifecycle:
             speed="standard",
         )
         cost = cost_of(usage, MODEL_PRICING.get(self._model_id))
+        if cost is not None:
+            # What the tenant is debited, markup included, so `used` matches `left`.
+            cost = float(debit_amount(cost, markup=self._markup))
         self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
 
     async def _flush_terminal(self) -> None:

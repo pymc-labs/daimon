@@ -28,7 +28,6 @@ from daimon.adapters.discord.agent_setup.details_view import (
     SHOW_FEWER_LABEL,
     SHOW_MORE_LABEL,
     DetailsView,
-    PictureUploadModal,
     build_details_container,
     picture_details_embed,
 )
@@ -219,11 +218,13 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
     )
     assert any(isinstance(item, discord.ui.Thumbnail) for item in _walk(container))
     assert "Shown next to this agent's messages." in _container_text(container)
-    assert {item.label for item in _walk(container) if isinstance(item, discord.ui.Button)} >= {
-        "Change",
-        "Use default",
-        "Details",
-    }
+    labels = {item.label for item in _walk(container) if isinstance(item, discord.ui.Button)}
+    assert labels >= {"Use default", "Details"}
+    assert "Change" not in labels
+    assert not any(
+        isinstance(item, discord.ui.Button) and item.custom_id == "agent-setup:avatar-change"
+        for item in _walk(container)
+    )
 
     member = build_details_container(
         state,
@@ -262,124 +263,6 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
         isinstance(item, discord.ui.Button) and item.label in {"Change", "Use default", "Details"}
         for item in _walk(disabled)
     )
-
-
-async def test_picture_upload_refreshes_live_panel_without_expiring_it(
-    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    details = _details()
-    state = _state(details, account_id=account_id)
-    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
-    panel_interaction = _admin_interaction()
-    view.bind_render_interaction(panel_interaction, panel=state)
-    modal = PictureUploadModal(view)
-    attachment = MagicMock(spec=discord.Attachment)
-    modal.file_input._values = [attachment]
-    avatar = AvatarRow(token="new-token", sha256="abcdef123456more", png=b"", source="upload")
-    monkeypatch.setattr(
-        details_view_mod,
-        "upload_agent_avatar",
-        AsyncMock(return_value=("Picture changed.", avatar)),
-    )
-    interaction = _admin_interaction()
-
-    await modal.on_submit(interaction)
-
-    interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
-    panel_interaction.edit_original_response.assert_awaited_once()
-    refreshed = panel_interaction.edit_original_response.await_args.kwargs["view"]
-    assert isinstance(refreshed, DetailsView)
-    assert any(isinstance(item, discord.ui.Thumbnail) for item in _walk(refreshed))
-    await view.on_timeout()
-    assert panel_interaction.edit_original_response.await_count == 1
-
-
-@pytest.mark.parametrize(
-    "panel_error",
-    [
-        discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Webhook"),
-        discord.HTTPException(
-            MagicMock(status=401, reason="Unauthorized"),
-            {"code": 50027, "message": "Invalid Webhook Token"},
-        ),
-    ],
-)
-async def test_picture_upload_ignores_missing_live_panel(
-    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch, panel_error: discord.HTTPException
-) -> None:
-    details = _details()
-    state = _state(details, account_id=account_id)
-    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
-    panel_interaction = _admin_interaction()
-    panel_interaction.edit_original_response.side_effect = panel_error
-    view.bind_render_interaction(panel_interaction, panel=state)
-    modal = PictureUploadModal(view)
-    modal.file_input._values = [MagicMock(spec=discord.Attachment)]
-    avatar = AvatarRow(token="new-token", sha256="abcdef123456more", png=b"", source="upload")
-    monkeypatch.setattr(
-        details_view_mod,
-        "upload_agent_avatar",
-        AsyncMock(return_value=("Picture changed.", avatar)),
-    )
-
-    await modal.on_submit(_admin_interaction())
-
-    panel_interaction.edit_original_response.assert_awaited_once()
-
-
-@pytest.mark.parametrize(
-    ("message", "retry"),
-    [
-        ("Agent pictures are turned off.", False),
-        ("Only admins can change this agent's picture. Ask an admin to change it.", False),
-        ("This agent is no longer available.", False),
-        ("We couldn't read that file. Upload it again.", True),
-    ],
-)
-async def test_picture_upload_retry_owns_modal_response(
-    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch, message: str, retry: bool
-) -> None:
-    details = _details()
-    state = _state(details, account_id=account_id)
-    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
-    panel_interaction = _admin_interaction()
-    view.bind_render_interaction(panel_interaction, panel=state)
-    modal = PictureUploadModal(view)
-    modal.file_input._values = [MagicMock(spec=discord.Attachment)]
-    monkeypatch.setattr(
-        details_view_mod, "upload_agent_avatar", AsyncMock(return_value=(message, None))
-    )
-    interaction = _admin_interaction()
-
-    await modal.on_submit(interaction)
-
-    interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
-    retry_view = interaction.edit_original_response.await_args.kwargs["view"]
-    assert (retry_view is not None) is retry
-    if retry:
-        assert retry_view._render_interaction is interaction
-        await retry_view.on_timeout()
-        assert interaction.edit_original_response.await_count == 2
-        expired = interaction.edit_original_response.await_args.kwargs
-        assert expired["view"] is None
-        assert isinstance(expired["embed"], discord.Embed)
-        assert expired["embed"].title == "Panel expired."
-        panel_interaction.edit_original_response.assert_not_awaited()
-
-
-async def test_picture_retry_timeout_ignores_missing_response(account_id: uuid.UUID) -> None:
-    state = _state(_details(), account_id=account_id)
-    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
-    interaction = _admin_interaction()
-    interaction.edit_original_response.side_effect = discord.NotFound(
-        MagicMock(status=404, reason="Not Found"), "Unknown Webhook"
-    )
-    retry_view = details_view_mod.PictureRetryView(view)
-    retry_view.bind_render_interaction(interaction, panel=None)
-
-    await retry_view.on_timeout()
-
-    interaction.edit_original_response.assert_awaited_once()
 
 
 @pytest.mark.parametrize("excluded", [False, True])
@@ -446,7 +329,6 @@ async def test_reset_avatar_button_updates_detail_image(
     account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from daimon.adapters.discord.agent_setup import details_view as details_module
-    from daimon.core.stores.agent_avatars import AvatarRow
 
     details = _details()
     state = _state(details, account_id=account_id)
@@ -471,19 +353,7 @@ async def test_reset_avatar_button_updates_detail_image(
     confirmation.swap_to.assert_awaited_once()
 
 
-async def test_change_picture_opens_file_modal(account_id: uuid.UUID) -> None:
-    details = _details()
-    state = _state(details, account_id=account_id, is_admin=True)
-    view = DetailsView(state, runtime=_make_runtime(settings=_mcp_settings()), allowed_user_id=42)
-    interaction = _admin_interaction()
-    interaction.response.send_modal = AsyncMock()
-
-    await _find_button(view, "Change").callback(interaction)
-
-    modal = interaction.response.send_modal.await_args.args[0]
-    assert isinstance(modal, PictureUploadModal)
-    assert isinstance(modal.file_input, discord.ui.FileUpload)
-    assert modal.file_input.required
+def test_picture_details_embed_keeps_visibility_guidance() -> None:
     assert picture_details_embed().to_dict()["fields"][0]["value"] == (
         "Anyone who sees a message can open the picture."
     )
@@ -965,7 +835,6 @@ async def test_back_returns_to_the_roster_with_its_page_and_selection_intact(
 
 
 async def test_setup_targets_the_agent_this_card_describes(account_id: uuid.UUID) -> None:
-    import daimon.adapters.discord.agent_setup.details_view as details_view_mod
 
     captured: dict[str, Any] = {}
 
@@ -992,7 +861,6 @@ async def test_rendered_details_actions_keep_the_card_agent_after_selection_chan
     account_id: uuid.UUID,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import daimon.adapters.discord.agent_setup.details_view as details_view_mod
 
     setup_targets: list[RosterAgent | None] = []
     coding_targets: list[RosterAgent | None] = []

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+import structlog
 from daimon.adapters.discord import post_transport
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.post_transport import (
@@ -23,9 +24,11 @@ from daimon.adapters.discord.post_transport import (
 def clear_webhook_cache() -> None:
     _webhooks.clear()
     _unavailable_until.clear()
+    post_transport._permission_backoff.clear()  # pyright: ignore[reportPrivateUsage]
     _send_unavailable_until.clear()
     post_transport._creation_tasks.clear()  # pyright: ignore[reportPrivateUsage]
     post_transport._deferred_channels.clear()  # pyright: ignore[reportPrivateUsage]
+    post_transport._warned_no_manage_webhooks.clear()  # pyright: ignore[reportPrivateUsage]
 
 
 def test_webhook_429s_are_counted_from_discord_library_logger() -> None:
@@ -140,10 +143,31 @@ async def test_missing_permission_falls_back_to_bot() -> None:
         client, channel, name="Research", avatar_url=None, builtin=False
     )
     await transport.send(content="answer")
-    channel.send.assert_awaited_once_with(content="**Research**\n\nanswer")
+    channel.send.assert_awaited_once_with(content="-# Research\nanswer")
     hook.send.assert_not_awaited()
     assert transport.fallback_used
     assert channel.id in _unavailable_until
+
+
+async def test_missing_permission_is_logged_once_per_guild() -> None:
+    client, channel, _ = _world(manage_webhooks=False)
+    with structlog.testing.capture_logs() as logs:
+        for content in ("one", "two"):
+            _unavailable_until.clear()
+            transport = DiscordPostTransport(
+                client, channel, name="Research", avatar_url=None, builtin=False
+            )
+            await transport.send(content=content)
+    warnings = [
+        entry for entry in logs if entry["event"] == "discord.identity_fallback_no_manage_webhooks"
+    ]
+    assert warnings == [
+        {
+            "event": "discord.identity_fallback_no_manage_webhooks",
+            "guild_id": 123,
+            "log_level": "warning",
+        }
+    ]
 
 
 async def test_thread_post_targets_parent_webhook_and_thread() -> None:
@@ -175,7 +199,7 @@ async def test_concurrent_turns_create_only_one_channel_webhook() -> None:
     await asyncio.gather(first.send(content="one"), second.send(content="two"))
     channel.create_webhook.assert_awaited_once_with(name="Daimon agents")
     hook.send.assert_awaited_once()
-    channel.send.assert_awaited_once_with(content="**Writer**\n\ntwo")
+    channel.send.assert_awaited_once_with(content="-# Writer\ntwo")
 
 
 async def test_pending_create_does_not_make_later_posts_wait(
@@ -196,7 +220,7 @@ async def test_pending_create_does_not_make_later_posts_wait(
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     await asyncio.wait_for(later.send(content="second"), 0.05)
-    channel.send.assert_awaited_once_with(content="**Writer**\n\nsecond")
+    channel.send.assert_awaited_once_with(content="-# Writer\nsecond")
     release.set()
     await first_post
     channel.create_webhook.assert_awaited_once()
@@ -218,7 +242,7 @@ async def test_slow_webhook_create_falls_back_then_uses_created_hook(
         client, channel, name="Research", avatar_url=None, builtin=False
     )
     await transport.send(content="first")
-    channel.send.assert_awaited_once_with(content="**Research**\n\nfirst")
+    channel.send.assert_awaited_once_with(content="-# Research\nfirst")
     channel.create_webhook.assert_awaited_once()
     release.set()
     await post_transport._creation_tasks[channel.id]  # pyright: ignore[reportPrivateUsage]
@@ -272,14 +296,14 @@ async def test_create_429_falls_back_within_budget_and_respects_cooldown(
         client, channel, name="Research", avatar_url=None, builtin=False
     )
     await transport.send(content="first")
-    channel.send.assert_awaited_once_with(content="**Research**\n\nfirst")
+    channel.send.assert_awaited_once_with(content="-# Research\nfirst")
     release.set()
     await post_transport._creation_tasks[channel.id]  # pyright: ignore[reportPrivateUsage]
     cooldown_transport = DiscordPostTransport(
         client, channel, name="Research", avatar_url=None, builtin=False
     )
     await cooldown_transport.send(content="during cooldown")
-    assert channel.send.call_args.kwargs["content"] == "**Research**\n\nduring cooldown"
+    assert channel.send.call_args.kwargs["content"] == "-# Research\nduring cooldown"
     channel.create_webhook.assert_awaited_once()
     assert _unavailable_until[channel.id] > post_transport.time.monotonic() + 60
     _unavailable_until[channel.id] = 0
@@ -297,7 +321,7 @@ async def test_webhook_403_falls_back_with_name_and_caches_unavailability() -> N
         client, channel, name="Research", avatar_url=None, builtin=False
     )
     await transport.send(content="answer")
-    channel.send.assert_awaited_once_with(content="**Research**\n\nanswer")
+    channel.send.assert_awaited_once_with(content="-# Research\nanswer")
 
 
 async def test_exhausted_webhook_429_is_not_silently_reposted_by_bot() -> None:
@@ -356,7 +380,7 @@ async def test_webhook_400_cooldown_only_applies_to_that_agent_identity() -> Non
     assert (channel.id, "Writer", None) not in _send_unavailable_until
 
 
-async def test_webhook_limit_is_cached_for_ten_minutes() -> None:
+async def test_webhook_limit_is_cached_across_turns() -> None:
     client, channel, _ = _world()
     channel.create_webhook = AsyncMock(
         side_effect=discord.HTTPException(
@@ -371,7 +395,7 @@ async def test_webhook_limit_is_cached_for_ten_minutes() -> None:
         client, channel, name="Research", avatar_url=None, builtin=False
     )
     await next_turn.send(content="two")
-    assert channel.send.call_args.kwargs["content"] == "**Research**\n\ntwo"
+    assert channel.send.call_args.kwargs["content"] == "-# Research\ntwo"
     channel.create_webhook.assert_awaited_once()
     client.http.channel_webhooks.assert_awaited_once()
 
@@ -472,7 +496,7 @@ async def test_locked_thread_uses_bot_fallback() -> None:
         client, thread, name="Research", avatar_url=None, builtin=False
     )
     await transport.send(content="answer")
-    thread.send.assert_awaited_once_with(content="**Research**\n\nanswer")
+    thread.send.assert_awaited_once_with(content="-# Research\nanswer")
     hook.send.assert_not_awaited()
 
 
@@ -620,7 +644,7 @@ async def test_missing_webhook_token_posts_edit_as_replacement() -> None:
     client.http.channel_webhooks = AsyncMock(return_value=[])
     replacement = await transport.edit(message, content="updated")
     assert replacement is channel.send.return_value
-    channel.send.assert_awaited_once_with(content="**Research**\n\nupdated")
+    channel.send.assert_awaited_once_with(content="-# Research\nupdated")
     hook.edit_message.assert_not_awaited()
 
 
@@ -755,5 +779,98 @@ async def test_lifecycle_prefix_is_not_duplicated_after_webhook_rejection() -> N
     transport = DiscordPostTransport(
         client, channel, name="Research", avatar_url=None, builtin=False
     )
-    await transport.send(content="**Research**\n\nfirst")
-    assert channel.send.call_args.kwargs["content"] == "**Research**\n\nfirst"
+    await transport.send(content="-# Research\nfirst")
+    assert channel.send.call_args.kwargs["content"] == "-# Research\nfirst"
+    await transport.send(content="second")
+    assert channel.send.call_args.kwargs["content"] == "second"
+
+
+async def test_missing_permission_backs_off_for_sixty_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(post_transport, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    client, channel, _ = _world(manage_webhooks=False)
+
+    async def send() -> None:
+        transport = DiscordPostTransport(
+            client, channel, name="Research", avatar_url=None, builtin=False
+        )
+        await transport.send(content="answer")
+
+    await send()
+    assert channel.permissions_for.call_count == 1
+    now[0] += 59
+    await send()
+    assert channel.permissions_for.call_count == 1, "the back-off holds inside 60 s"
+    now[0] += 2
+    await send()
+    assert channel.permissions_for.call_count == 2, "and the next answer checks again after it"
+
+
+def test_gaining_manage_webhooks_clears_that_guilds_back_off() -> None:
+    allowed = MagicMock(spec=discord.TextChannel)
+    allowed.permissions_for.return_value.manage_webhooks = True
+    denied = MagicMock(spec=discord.TextChannel)
+    denied.permissions_for.return_value.manage_webhooks = False
+    guild = MagicMock(spec=discord.Guild)
+    guild.id = 123
+    guild.get_channel.side_effect = {20: allowed, 21: denied}.get
+    _unavailable_until.update({20: 9e9, 21: 9e9, 99: 9e9})
+    post_transport._permission_backoff.update({20, 21, 99})  # pyright: ignore[reportPrivateUsage]
+
+    post_transport.clear_webhook_backoff(guild)
+
+    assert set(_unavailable_until) == {21, 99}, (
+        "only this guild's channels the bot can now manage leave the back-off"
+    )
+
+
+def test_a_permission_event_leaves_rate_limit_and_cap_back_offs() -> None:
+    allowed = MagicMock(spec=discord.TextChannel)
+    allowed.permissions_for.return_value.manage_webhooks = True
+    guild = MagicMock(spec=discord.Guild)
+    guild.id = 123
+    guild.get_channel.return_value = allowed
+    _unavailable_until.update({30: 9e9, 31: 9e9})
+    post_transport._permission_backoff.discard(30)  # pyright: ignore[reportPrivateUsage]
+    post_transport._permission_backoff.discard(31)  # pyright: ignore[reportPrivateUsage]
+
+    post_transport.clear_webhook_backoff(guild)
+
+    assert set(_unavailable_until) >= {30, 31}, "a 429 or 30007 back-off waits out its time"
+
+
+async def test_permission_events_clear_the_back_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    from daimon.adapters.discord import bot as bot_module
+
+    cleared: list[object] = []
+    monkeypatch.setattr(bot_module, "clear_webhook_backoff", cleared.append)
+    bot = MagicMock()
+    bot.user.id = 10
+    guild = MagicMock(spec=discord.Guild)
+
+    before_role = MagicMock(permissions=discord.Permissions.none(), guild=guild)
+    after_role = MagicMock(permissions=discord.Permissions(manage_webhooks=True), guild=guild)
+    await bot_module.DaimonBot.on_guild_role_update(bot, before_role, after_role)
+    await bot_module.DaimonBot.on_guild_role_update(bot, after_role, after_role)
+
+    def member(user_id: int, roles: list[MagicMock]) -> MagicMock:
+        found = MagicMock(spec=discord.Member)
+        found.id = user_id
+        found.roles = roles
+        found.guild = guild
+        return found
+
+    before_me = member(10, [])
+    await bot_module.DaimonBot.on_member_update(bot, before_me, member(10, [MagicMock()]))
+    await bot_module.DaimonBot.on_member_update(bot, before_me, member(11, [MagicMock()]))
+
+    before_channel = MagicMock(overwrites={}, guild=guild)
+    after_channel = MagicMock(overwrites={"bot": "allow"}, guild=guild)
+    await bot_module.DaimonBot.on_guild_channel_update(bot, before_channel, after_channel)
+    await bot_module.DaimonBot.on_guild_channel_update(bot, after_channel, after_channel)
+
+    assert cleared == [guild, guild, guild], (
+        "a role, bot-member or overwrite change re-checks the back-off; no change, no re-check"
+    )

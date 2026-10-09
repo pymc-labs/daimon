@@ -9,10 +9,10 @@ import anthropic
 import httpx
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.agent_setup.github_link import connect_button_blocks
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.ma_index import list_agents_by_tenant
+from daimon.core.github_connect_cards import connect_attachment, resolve_connect_card
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.roster import load_roster
@@ -43,12 +43,12 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
     if client is None:
         return
 
-    async def reply(message: str, *, blocks: list[dict[str, Any]] | None = None) -> None:
+    async def reply(message: str, *, attachments: list[dict[str, Any]] | None = None) -> None:
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             user=user_id,
             text=message,
-            blocks=blocks,
+            attachments=attachments,
             unfurl_links=False,
             unfurl_media=False,
         )
@@ -163,11 +163,17 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 outcome="allowed",
                 reason="admin link minted",
             )
+        card = await resolve_connect_card(
+            runtime.sessionmaker,
+            runtime.settings,
+            tenant_id=tenant_id,
+            platform="slack",
+            workspace_id=team_id,
+            agent_name=target_name,
+        )
         await reply(
             "Connect GitHub",
-            blocks=connect_button_blocks(
-                f"{root}/oauth/github/connect/{token}", f"Connect GitHub for {target_name}."
-            ),
+            attachments=[connect_attachment(f"{root}/oauth/github/connect/{token}", card=card)],
         )
     except ClientAgentConnectionError:
         await reply(CLIENT_AGENT_MESSAGE)

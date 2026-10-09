@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import anthropic
+from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
 from daimon.adapters.discord.agent_setup.github_home import connect_button_view, load_home
 from daimon.adapters.discord.agent_setup.hydrate import load_roster_state
 from daimon.adapters.discord.checks import (
@@ -13,6 +14,7 @@ from daimon.adapters.discord.checks import (
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.ma_index import list_agents_by_tenant
+from daimon.core.github_connect_cards import resolve_connect_card
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import set_role
@@ -181,8 +183,16 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     outcome="allowed",
                     reason="admin link minted",
                 )
+            card = await resolve_connect_card(
+                runtime.sessionmaker,
+                runtime.settings,
+                tenant_id=tenant_id,
+                platform="discord",
+                workspace_id=str(interaction.guild_id),
+                agent_name=target_name,
+            )
             await interaction.followup.send(
-                f"Connect GitHub for {target_name}.",
+                embed=connect_embed(card),
                 view=connect_button_view(f"{root}/oauth/github/connect/{token}"),
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),

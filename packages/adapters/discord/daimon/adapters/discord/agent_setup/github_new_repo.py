@@ -13,7 +13,6 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_notice_visibility import new_repo_notice_copy, visible_new_repo_names
 from daimon.core.github_panel import (
-    CONNECT_COPY,
     connect_link,
     safe_github_error,
     sync_connect_admin,
@@ -45,15 +44,16 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
     except ValueError:
         await interaction.response.send_message("This card is unavailable.", ephemeral=True)
         return True
+    await interaction.response.defer(ephemeral=True, thinking=True)
     async with runtime.sessionmaker() as session:
         tenant = await get_tenant(session, tenant_id)
         group = await notices_for_day(session, tenant_id=tenant_id, day=parts[2])
     if tenant is None or group is None:
-        await interaction.response.send_message("This card is unavailable.", ephemeral=True)
+        await interaction.followup.send("This card is unavailable.", ephemeral=True)
         return True
     guild = interaction.client.get_guild(int(tenant.external_id))
     if guild is None:
-        await interaction.response.send_message("This card is unavailable.", ephemeral=True)
+        await interaction.followup.send("This card is unavailable.", ephemeral=True)
         return True
     try:
         member = guild.get_member(interaction.user.id) or await guild.fetch_member(
@@ -62,9 +62,7 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
     except discord.HTTPException:
         member = None
     if member is None or not is_member_guild_admin(member, guild_owner_id=guild.owner_id):
-        await interaction.response.send_message(
-            "Only a server admin can connect repos.", ephemeral=True
-        )
+        await interaction.followup.send("Only a server admin can connect repos.", ephemeral=True)
         return True
     async with runtime.sessionmaker.begin() as session:
         await sync_connect_admin(
@@ -103,7 +101,7 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
                         repo_full_name=notice.repo_full_name,
                         now=datetime.now(UTC),
                     )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Connect later: /github home → Connect more repos.", ephemeral=True
         )
         return True
@@ -131,11 +129,22 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
                 origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
             )
     except ValueError as error:
-        await interaction.response.send_message(safe_github_error(error), ephemeral=True)
+        await interaction.followup.send(safe_github_error(error), ephemeral=True)
         return True
+    from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
+    from daimon.core.github_connect_cards import resolve_connect_card
+
+    card = await resolve_connect_card(
+        runtime.sessionmaker,
+        runtime.settings,
+        tenant_id=tenant_id,
+        platform="discord",
+        workspace_id=str(interaction.guild_id),
+        agent_name=None,
+    )
     view = connect_button_view(url)
-    await interaction.response.send_message(
-        embed=github_embed("Connect GitHub to choose repos.", state="waiting"),
+    await interaction.followup.send(
+        embed=connect_embed(card),
         view=view,
         ephemeral=True,
         allowed_mentions=discord.AllowedMentions.none(),
@@ -196,6 +205,7 @@ class NewRepoCard(discord.ui.View):
         return True
 
     async def connect(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(thinking=False)
         try:
             async with self.runtime.sessionmaker.begin() as session:
                 await sync_connect_admin(
@@ -220,13 +230,22 @@ class NewRepoCard(discord.ui.View):
                     origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
                 )
         except ValueError:
-            await interaction.response.send_message(
-                "GitHub connection is unavailable.", ephemeral=True
-            )
+            await interaction.followup.send("GitHub connection is unavailable.", ephemeral=True)
             return
-        await interaction.response.edit_message(
+        from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
+        from daimon.core.github_connect_cards import resolve_connect_card
+
+        card = await resolve_connect_card(
+            self.runtime.sessionmaker,
+            self.runtime.settings,
+            tenant_id=self.group.tenant_id,
+            platform="discord",
+            workspace_id=str(interaction.guild_id),
+            agent_name=None,
+        )
+        await interaction.edit_original_response(
             content=None,
-            embed=github_embed(CONNECT_COPY, state="waiting"),
+            embed=connect_embed(card),
             view=GitHubLinkView(url),
             allowed_mentions=discord.AllowedMentions.none(),
         )

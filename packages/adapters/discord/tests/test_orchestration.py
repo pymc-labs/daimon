@@ -279,16 +279,19 @@ class TestNewThreadCreation:
         runtime.settings.discord.thread_open_notice_after_s = 0
         bot = make_bot(runtime)
         message = _make_channel_message()
-        notice = MagicMock(spec=discord.Message)
-        notice.edit = AsyncMock()
-        message.reply = AsyncMock(return_value=notice)  # pyright: ignore[reportAttributeAccessIssue]
+        message.reply = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        message.add_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        message.remove_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
         message.create_thread = AsyncMock(side_effect=RuntimeError("Discord unavailable"))  # pyright: ignore[reportAttributeAccessIssue]
 
         await bot.on_message(message)
 
-        notice.edit.assert_awaited_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-            content="I couldn't open your chat. Please try mentioning me again."
-        )
+        # The failure is answered with exactly one visible error, never a
+        # channel-level "opening your chat" notice.
+        message.reply.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        error_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        assert "rid:" in error_text
         assert bot.turn_queue.in_flight() == 0
         assert bot.turn_queue.depth() == 0
         assert bot._processing == set()  # pyright: ignore[reportPrivateUsage]

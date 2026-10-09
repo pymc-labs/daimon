@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import discord
 import pytest
 from daimon.adapters.discord.agent_setup.hydrate import (
+    BOT_INSTALL_PERMISSIONS,
     github_facts,
     load_roster_state,
     resolve_attributions,
+    webhook_fix_url,
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -84,6 +87,80 @@ def _interaction(*, in_thread: bool) -> MagicMock:
     else:
         interaction.channel = parent
     return interaction
+
+
+# ---------------------------------------------------------------------------
+# webhook_fix_url
+# ---------------------------------------------------------------------------
+
+APPLICATION_ID = 5550001
+
+
+def _identity_runtime(*, enabled: bool) -> DiscordRuntime:
+    settings = Settings.model_validate(
+        {
+            "database": {"url": "postgresql+asyncpg://test:test@localhost/daimon_test"},
+            "anthropic": {"api_key": "test"},
+            "agent_identity": {"enabled": enabled},
+        }
+    )
+    return cast(DiscordRuntime, SimpleNamespace(settings=settings))
+
+
+def _guild_interaction(*, manage_webhooks: bool, administrator: bool = False) -> MagicMock:
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.application_id = APPLICATION_ID
+    interaction.guild = MagicMock(spec=discord.Guild)
+    interaction.guild.id = GUILD_ID
+    interaction.guild.me.guild_permissions = discord.Permissions(
+        manage_webhooks=manage_webhooks, administrator=administrator
+    )
+    return interaction
+
+
+def test_an_admin_without_manage_webhooks_gets_the_reauthorize_link() -> None:
+    url = webhook_fix_url(
+        _identity_runtime(enabled=True),
+        _guild_interaction(manage_webhooks=False),
+        is_admin=True,
+    )
+
+    assert BOT_INSTALL_PERMISSIONS == 326954503232
+    assert url == (
+        f"https://discord.com/oauth2/authorize?client_id={APPLICATION_ID}"
+        "&permissions=326954503232&scope=bot+applications.commands"
+        f"&guild_id={GUILD_ID}&disable_guild_select=true"
+    ), "the link re-adds this bot to this server with the full install permission set"
+
+
+@pytest.mark.parametrize(
+    ("enabled", "manage_webhooks", "administrator", "is_admin", "reason"),
+    [
+        (True, True, False, True, "the permission is already granted"),
+        (True, False, True, True, "administrator implies Manage Webhooks"),
+        (True, False, False, False, "only an admin can re-authorize the bot"),
+        (False, False, False, True, "with identity off there is nothing to fix"),
+    ],
+)
+def test_the_reauthorize_link_is_withheld(
+    enabled: bool, manage_webhooks: bool, administrator: bool, is_admin: bool, reason: str
+) -> None:
+    url = webhook_fix_url(
+        _identity_runtime(enabled=enabled),
+        _guild_interaction(manage_webhooks=manage_webhooks, administrator=administrator),
+        is_admin=is_admin,
+    )
+
+    assert url is None, reason
+
+
+def test_an_excluded_guild_gets_no_reauthorize_link() -> None:
+    runtime = _identity_runtime(enabled=True)
+    runtime.settings.agent_identity.excluded_discord_guild_ids = [str(GUILD_ID)]
+
+    url = webhook_fix_url(runtime, _guild_interaction(manage_webhooks=False), is_admin=True)
+
+    assert url is None, "a guild excluded from identity never posts through webhooks"
 
 
 # ---------------------------------------------------------------------------

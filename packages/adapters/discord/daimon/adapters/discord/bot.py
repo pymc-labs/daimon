@@ -18,6 +18,7 @@ import sentry_sdk
 import structlog
 import structlog.contextvars
 from daimon.adapters.discord import theme
+from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
 from daimon.adapters.discord.attachments import build_attachment_url_prefix
 from daimon.adapters.discord.budget_notice import with_budget_notifier
 from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
@@ -34,7 +35,11 @@ from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.names import remember_guild_user
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
-from daimon.adapters.discord.post_transport import DiscordPostTransport, known_webhook_ids
+from daimon.adapters.discord.post_transport import (
+    DiscordPostTransport,
+    clear_webhook_backoff,
+    known_webhook_ids,
+)
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
@@ -207,16 +212,23 @@ _SWEEP_CONCURRENCY = 2
 _TURN_CARD_RECOVERY_CONCURRENCY = 4
 
 
+THREAD_OPENING_REACTION = "⌛"
+
+
 async def _open_thread_with_notice(
     message: discord.Message,
     opening: Coroutine[Any, Any, discord.Thread],
     *,
-    guild_id: str,
     after_s: float,
 ) -> discord.Thread:
-    """Keep an opening mention visible while naming or Discord creation waits."""
+    """Keep an opening mention visibly acknowledged while naming or Discord creation waits.
+
+    The acknowledgment is a reaction on the mention, never a channel message: a
+    channel-level "your chat is ready" post outlives the wait and reads as a stray
+    reply. A failed opening propagates to `_handle_mention`, which renders the error
+    as a visible reply, so the mention is never left without an answer."""
     task = asyncio.create_task(opening)
-    notice: discord.Message | None = None
+    reacted = False
     try:
         try:
             if after_s > 0:
@@ -224,38 +236,21 @@ async def _open_thread_with_notice(
         except TimeoutError:
             pass
         try:
-            notice = await message.reply(
-                "Opening your chat… Discord is busy, this can take a minute.",
-                mention_author=False,
-            )
+            await message.add_reaction(THREAD_OPENING_REACTION)
+            reacted = True
         except discord.HTTPException as exc:
             log.warning("discord.thread_open_notice_failed", error=str(exc))
-        try:
-            thread = await task
-        except Exception:
-            if notice is not None:
-                try:
-                    await notice.edit(
-                        content="I couldn't open your chat. Please try mentioning me again."
-                    )
-                except discord.HTTPException as exc:
-                    log.warning("discord.thread_open_notice_edit_failed", error=str(exc))
-            raise
-        if notice is not None:
-            try:
-                await notice.edit(
-                    content=(
-                        f"Your chat is ready: https://discord.com/channels/{guild_id}/{thread.id}"
-                    )
-                )
-            except discord.HTTPException as exc:
-                log.warning("discord.thread_open_notice_edit_failed", error=str(exc))
-        return thread
+        return await task
     finally:
         if not task.done():
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        if reacted and message.guild is not None:
+            try:
+                await message.remove_reaction(THREAD_OPENING_REACTION, message.guild.me)
+            except discord.HTTPException as exc:
+                log.warning("discord.thread_open_notice_clear_failed", error=str(exc))
 
 
 def _resolve_bot_display_name(settings: Settings) -> str:
@@ -832,6 +827,10 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.github_connect_button import GitHubConnectButton
 
         self.add_dynamic_items(GitHubConnectButton)
+
+        # A setup panel from before picture uploads were turned off can still
+        # show Change; the click gets the refusal instead of "interaction failed".
+        self.add_dynamic_items(StalePictureChangeButton)
 
     async def _post_to_guild(self, guild: discord.Guild, embed: discord.Embed) -> None:
         """Post an embed via the fallback chain: text channel → DM owner → skip."""
@@ -2527,6 +2526,7 @@ class DaimonBot(commands.Bot):
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
+                markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=int(row.requester_external_user_id),
                     cancel=cancel,
@@ -2648,6 +2648,7 @@ class DaimonBot(commands.Bot):
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
+                markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=int(row.requester_external_user_id),
                     cancel=cancel_event,
@@ -2759,6 +2760,20 @@ class DaimonBot(commands.Bot):
         )
         if archive_after:
             await self._archive_after_outputs(outcome, thread)
+
+    async def on_guild_role_update(self, before: discord.Role, after: discord.Role) -> None:
+        if before.permissions != after.permissions:
+            clear_webhook_backoff(after.guild)
+
+    async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
+        if self.user is not None and after.id == self.user.id and before.roles != after.roles:
+            clear_webhook_backoff(after.guild)
+
+    async def on_guild_channel_update(
+        self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel
+    ) -> None:
+        if before.overwrites != after.overwrites:
+            clear_webhook_backoff(after.guild)
 
     async def on_raw_thread_update(self, payload: discord.RawThreadUpdateEvent) -> None:
         metadata = payload.data["thread_metadata"]
@@ -3036,7 +3051,6 @@ class DaimonBot(commands.Bot):
             thread = await _open_thread_with_notice(
                 message,
                 _open_thread(),
-                guild_id=guild_id,
                 after_s=discord_settings.thread_open_notice_after_s,
             )
 
@@ -3098,6 +3112,7 @@ class DaimonBot(commands.Bot):
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
+                markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=message.author.id, cancel=cancel, turn_id=turn_id
                 ),
@@ -3530,6 +3545,7 @@ class DaimonBot(commands.Bot):
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
+                markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=message.author.id,
                     cancel=cancel_event,

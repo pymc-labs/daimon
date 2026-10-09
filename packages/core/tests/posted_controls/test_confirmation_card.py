@@ -438,3 +438,23 @@ async def test_order_holds_even_when_the_earlier_edit_is_very_slow() -> None:
             break
         await asyncio.sleep(0)
     assert landed == ["approved", "stopped"]
+
+
+def test_a_one_day_notebook_link_reads_singular() -> None:
+    from datetime import UTC, datetime
+
+    from daimon.core.confirmation import prompt_for_tool_call
+    from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
+
+    def lines(ttl: int) -> tuple[str, ...]:
+        call = ToolCall(
+            tool_use_id="t",
+            server_name=DAIMON_SERVER_NAME,
+            tool_name="create_notebook_upload_url",
+            input={"slug": "x", "ttl_days": ttl},
+        )
+        now = datetime(2026, 10, 9, tzinfo=UTC)
+        return prompt_for_tool_call(call, requester_platform_user_id="U1", now=now).detail_lines
+
+    assert "Link expires: in 1 day" in lines(1)
+    assert "Link expires: in 14 days" in lines(14)
