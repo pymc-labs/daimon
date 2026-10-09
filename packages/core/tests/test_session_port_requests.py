@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import traceback
 import uuid
 from types import SimpleNamespace
 from typing import cast
@@ -9,17 +11,64 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from anthropic import AsyncAnthropic, omit
+from anthropic import APIStatusError, AsyncAnthropic, omit
 from anthropic.types.beta import BetaManagedAgentsSessionAgent
+from anthropic.types.beta.session_create_params import Resource
 from daimon.core.session_ports_compat import create_session_record, session_scope
+from daimon.core.session_seal import inherited_seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.contracts.actions import UserMessage
+from mux.contracts.ids import Scope
+from mux.contracts.resources import Session, SessionSpec
+from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
+from pydantic import JsonValue
+
+
+@pytest.mark.parametrize("tenant_seals_anything", [False, True])
+@pytest.mark.parametrize("lightweight", [False, True])
+async def test_predecessor_seal_read_accepts_a_partial_reply_without_identity(
+    tenant_seals_anything: bool, lightweight: bool
+) -> None:
+    if lightweight:
+        retrieve = AsyncMock()
+        client = cast(
+            AsyncAnthropic,
+            SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace(retrieve=retrieve))),
+        )
+        result = await inherited_seal_ids(
+            client,
+            predecessor_session_id="sess_predecessor",
+            own_thread_id="thread_1",
+            tenant_seals_anything=tenant_seals_anything,
+        )
+        retrieve.assert_awaited_once_with("sess_predecessor")
+    else:
+        old, new = ScriptedTransport(), ScriptedTransport()
+        for transport in (old, new):
+            transport.queue(
+                ScriptedReply("GET", "/v1/sessions/sess_predecessor", httpx.Response(200, json={}))
+            )
+        async with old.client() as legacy, new.client() as client:
+            original = await legacy.beta.sessions.retrieve("sess_predecessor")
+            assert original.metadata is None
+            result = await inherited_seal_ids(
+                client,
+                predecessor_session_id="sess_predecessor",
+                own_thread_id="thread_1",
+                tenant_seals_anything=tenant_seals_anything,
+            )
+        old.assert_consumed()
+        new.assert_consumed()
+        assert old.requests == new.requests
+    assert result == (frozenset({"thread_1"}) if tenant_seals_anything else frozenset())
 
 
 @pytest.mark.parametrize(
     "response",
     [
+        {"id": "sess_partial", "status": "paused_future"},
         {"id": "sess_partial", "agent": {"model": {"id": "claude-sonnet-4-5"}, "system": None}},
         {
             "id": "sess_partial",
@@ -27,7 +76,9 @@ from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
         },
     ],
 )
-async def test_partial_sdk_response_keeps_original_parser_semantics(response: dict) -> None:
+async def test_partial_sdk_response_keeps_original_parser_semantics(
+    response: dict[str, JsonValue],
+) -> None:
     old, new = ScriptedTransport(), ScriptedTransport()
     for transport in (old, new):
         transport.queue(ScriptedReply("POST", "/v1/sessions", httpx.Response(200, json=response)))
@@ -89,7 +140,9 @@ async def test_session_create_matches_legacy_wire_request(
     environment = ma_environment(id="env_parity")
     tenant = uuid.UUID(int=1) if stamped else None
     account = uuid.UUID(int=2) if stamped else None
-    resources = [{"type": "file", "file_id": "file_parity", "mount_path": "/bundle.tar.gz"}]
+    resources: list[Resource] = [
+        {"type": "file", "file_id": "file_parity", "mount_path": "/bundle.tar.gz"}
+    ]
     if not mounted:
         resources = []
     metadata = {"daimon_account": str(account), "daimon_tenant": str(tenant)} if stamped else {}
@@ -168,10 +221,10 @@ async def test_last_access_check_runs_before_create_request() -> None:
     assert checked
 
 
-async def test_repository_tokens_stay_opaque_until_the_single_wire_request(monkeypatch) -> None:
-    from anthropic.types.beta.session_create_params import Resource
+async def test_repository_tokens_stay_opaque_until_the_single_wire_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from daimon.core.session_ports_compat import create_session_record, session_scope
-    from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
 
     resources: list[Resource] = [
         {
@@ -185,9 +238,16 @@ async def test_repository_tokens_stay_opaque_until_the_single_wire_request(monke
     scoped_specs: list[str] = []
     original = AnthropicSessions.create
 
-    async def inspect_spec(self, scope, spec, **kwargs):
+    async def inspect_spec(
+        self: AnthropicSessions,
+        scope: Scope,
+        spec: SessionSpec,
+        *,
+        key: str,
+        initial: UserMessage | None = None,
+    ) -> Session:
         scoped_specs.append(spec.model_dump_json())
-        return await original(self, scope, spec, **kwargs)
+        return await original(self, scope, spec, key=key, initial=initial)
 
     monkeypatch.setattr(AnthropicSessions, "create", inspect_spec)
     old, new = ScriptedTransport(), ScriptedTransport()
@@ -221,3 +281,61 @@ async def test_repository_tokens_stay_opaque_until_the_single_wire_request(monke
     for index in range(2):
         assert f"dummy-repo-token-{index}" not in scoped_specs[0]
     assert "authorization_token_ref" in scoped_specs[0]
+
+
+@pytest.mark.parametrize("status", [400, 404, 500])
+async def test_repository_create_errors_keep_sdk_type_and_redact_every_token(
+    status: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    tokens = [f"dummy-repository-secret-{index}" for index in range(2)]
+    resources: list[Resource] = [
+        {
+            "type": "github_repository",
+            "url": f"https://github.com/example/repo-{index}",
+            "authorization_token": token,
+        }
+        for index, token in enumerate(tokens)
+    ]
+    old, new = ScriptedTransport(), ScriptedTransport()
+    for transport in (old, new):
+        transport.queue(
+            ScriptedReply(
+                "POST",
+                "/v1/sessions",
+                httpx.Response(
+                    status,
+                    json={"error": {"type": "api_error", "message": "failed: " + " ".join(tokens)}},
+                    headers={"x-provider-detail": " ".join(tokens)},
+                ),
+            )
+        )
+    caplog.set_level(logging.DEBUG, logger="anthropic._base_client")
+    async with old.client() as legacy, new.client() as client:
+        with pytest.raises(APIStatusError) as original:
+            await legacy.beta.sessions.create(
+                agent="ag_1", environment_id="env_1", resources=resources
+            )
+        caplog.clear()
+        with pytest.raises(APIStatusError) as migrated:
+            await create_session_record(
+                client,
+                agent="ag_1",
+                environment_id="env_1",
+                scope=session_scope(tenant_id=None, account_id=None, call_site="test:redaction"),
+                metadata=None,
+                resources=resources,
+            )
+    old.assert_consumed()
+    new.assert_consumed()
+    assert old.requests == new.requests
+    assert type(migrated.value) is type(original.value)
+    assert migrated.value.status_code == status
+    error = migrated.value
+    rendered = (
+        "".join(traceback.format_exception(error)) + str(error) + repr(error) + str(error.body)
+    )
+    rendered += repr(error.request.content) + str(dict(error.request.headers))
+    rendered += str(dict(error.response.headers))
+    for token in tokens:
+        assert token not in rendered
+        assert token not in caplog.text

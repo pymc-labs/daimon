@@ -25,6 +25,9 @@ Install a driver's SDK with its extra: `daimon-mux[anthropic]`,
 The full description is [docs/mux.md](../../docs/mux.md). Tests:
 `uv run pytest packages/mux`.
 
+Conformance adapters can declare individual fixtures PENDING with typed capability,
+live-key or dependency reasons. Declarations remain visible and never certify.
+
 The Anthropic skills version extension also supports workspace-key downloads by
 native version ID, omitting the skills beta header on that request. The ordinary
 pinned-version port and generic recovery download keep their existing SDK requests. Both paths enforce the same
@@ -103,3 +106,26 @@ endpoints, state ownership and offline validation. Existing defaults stay Anthro
 The persistent profile is temporarily non-core until skills and artifacts land;
 its missing mandatory capabilities are surfaced by admission. Vault and multiagent
 support are unsupported, and complete workspace export/import is unknown.
+
+The native `anthropic.session_walk@1` extension exposes `SessionWalk.walk(scope)`
+as an async iterator of neutral sessions with opaque native snapshots. It sends
+no list filters and follows the SDK paginator exactly. Workspace-wide billing
+sweeps pass a justified platform scope; tenant walks retain grants and tag checks.
+In-place session changes use closed `anthropic.session_update@1` configs, carried
+by SessionSpec and UpdatePlan extensions. Planning performs no provider read;
+apply checks the caller's plan revision and makes one native update. Anthropic's
+endpoint has no server revision CAS. Unsupported generic revision/environment
+changes and fresh-state requests are refused; they never silently replace a thread.
+
+Session output delivery uses `anthropic.outputs@1`: one listing page per poll,
+with opaque entries preserving partial SDK response fields. The host filters
+pending entries before reading delivery metadata; no timestamp is synthesized.
+Buffered download and deletion retain the managed-agents beta. Standalone bundle
+uploads and the workspace-wide TTL queue retain the default Files API headers.
+The host keeps settle timing, exclusions, size limits, consent deferral and
+post-before-delete ordering. No additional provider requests are introduced.
+
+The native session-resources extension adds lazy `walk` and identity-returning
+`add_file` methods. Existing methods retain their behavior. The host stops at
+the first `.env` mount without fetching later pages and records the one add
+response identity without a retrieve. Session and file grants are checked before I/O.

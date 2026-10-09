@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+from secrets import token_hex
 
 import anthropic
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.core.mux_backend import managed_agents, platform_scope, resource_ref
+from daimon.core.mux_compat import legacy_call
 from daimon.core.stores.pending_file_deletes import (
     delete_pending_file_delete,
     list_due_pending_file_deletes,
@@ -45,12 +48,22 @@ async def sweep_pending_file_deletes(
     async with session_factory() as session:
         due = await list_due_pending_file_deletes(session, now=now)
 
+    # The queue has no tenant partition: this existing cleanup spans every
+    # tenant's disposable Files API uploads, never session creation/turn I/O.
+    scope = platform_scope("Files API TTL cleanup spans all queued tenant uploads")
+    backend = managed_agents(anthropic_client, scope=scope)
     swept: list[str] = []
     for row in due:
         # A 404 (object already gone — e.g. MA's server-side TTL beat us) is
         # treated as success; we still drop the row. Other APIError propagates.
         with contextlib.suppress(anthropic.NotFoundError):
-            await anthropic_client.beta.files.delete(row.file_id)
+            await legacy_call(
+                backend.artifacts.delete(
+                    scope,
+                    resource_ref(backend, "file", row.file_id, scope=scope),
+                    key=token_hex(16),
+                )
+            )
         async with session_factory() as session, session.begin():
             await delete_pending_file_delete(session, file_id=row.file_id)
         swept.append(row.file_id)

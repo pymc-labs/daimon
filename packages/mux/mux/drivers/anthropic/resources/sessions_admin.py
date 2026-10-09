@@ -1,5 +1,6 @@
 """Session mount administration and archive; no turns or event operations."""
 
+from collections.abc import AsyncIterator
 from typing import Protocol, cast
 
 from anthropic import AsyncAnthropic
@@ -37,6 +38,12 @@ class RepoTokenUpdate(NativeConfig):
 
 class SessionResources(CoreSessionResources, Protocol):
     async def archive(self, scope: Scope, session: ResourceRef, *, key: str) -> Operation: ...
+
+    def walk(self, scope: Scope, session: ResourceRef) -> AsyncIterator[ResourceBinding]: ...
+
+    async def add_file(
+        self, scope: Scope, session: ResourceRef, resource: ResourceBinding, *, key: str
+    ) -> ResourceBinding: ...
 
 
 class AnthropicSessionAdmin:
@@ -99,6 +106,39 @@ class AnthropicSessionAdmin:
                     self._client.beta.sessions.resources.list(session.id)
                 )
             ]
+        )
+
+    async def walk(self, scope: Scope, session: ResourceRef) -> AsyncIterator[ResourceBinding]:
+        """Keep SDK paging lazy so a caller can stop at its first matching mount."""
+        self._check(scope, session)
+        async for item in provider_iter(self._client.beta.sessions.resources.list(session.id)):
+            yield self._binding(scope, item)
+
+    async def add_file(
+        self, scope: Scope, session: ResourceRef, resource: ResourceBinding, *, key: str
+    ) -> ResourceBinding:
+        """Add one file and retain its returned mount identity without another lookup."""
+        self._check(scope, session)
+        if resource.kind != "artifact" or resource.resource is None:
+            raise UnsupportedCapability(
+                ("session_add_non_file_resource",), "anthropic.managed_agents"
+            )
+        authorize(self._authorization, scope, "file", resource.resource.id)
+        check_ref(scope, resource.resource, self._account_scope_id, "file")
+        kwargs: ResourceAddParams = {"type": "file", "file_id": resource.resource.id}
+        if "target_path" in resource.model_fields_set:
+            kwargs["mount_path"] = resource.target_path
+        added = await provider_call(self._client.beta.sessions.resources.add(session.id, **kwargs))
+        return ResourceBinding(
+            id=added.id,
+            kind="artifact",
+            resource=resource.resource,
+            target_path=resource.target_path,
+            native=ExtensionConfig(
+                namespace="anthropic.session_resource",
+                version=1,
+                value=cast(dict[str, JsonValue], added.model_dump(mode="json", exclude_unset=True)),
+            ),
         )
 
     async def add(

@@ -703,6 +703,11 @@ async def _prepare_session_for_turn_locked(
                 predecessor_session_id=row.ma_session_id,
                 own_thread_id=thread_id,
                 tenant_seals_anything=bool(admission.origin_seal_ids),
+                scope=session_scope(
+                    tenant_id=row.tenant_id,
+                    account_id=row.account_id,
+                    call_site="session_preparation:inherited_seal_ids",
+                ),
             )
         admission = await restrict_inherited_memory(deps, admission, inherited)
         agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))

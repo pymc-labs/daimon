@@ -15,6 +15,7 @@ from mux.contracts.resources import ResourceBinding, SessionSpec
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
 from mux.errors import ProviderError, ScopeViolation
+from pydantic import JsonValue
 
 SCOPE = Scope(
     tenant_id="tenant", account_id="account", principal_id="host", authorization_id="auth"
@@ -62,7 +63,7 @@ async def test_create_preserves_omitted_and_explicit_empty_resources(
             SCOPE, spec(**({"resources": resources} if resources is not None else {})), key="create"
         )
     transport.assert_consumed()
-    expected = {"agent": "ag_1", "environment_id": "env_1"}
+    expected: dict[str, JsonValue] = {"agent": "ag_1", "environment_id": "env_1"}
     if resources is not None:
         expected["resources"] = []
     assert transport.requests[0].json() == expected
@@ -143,7 +144,7 @@ async def test_override_cannot_select_another_agent() -> None:
 async def test_create_preserves_override_tool_key_order_in_request_bytes() -> None:
     # SDK response models dump configs/default_config before the type tag;
     # schema reserialization would reorder those keys and change the request.
-    agent = {
+    agent: dict[str, JsonValue] = {
         "type": "agent_with_overrides",
         "id": "ag_1",
         "mcp_servers": [{"name": "server", "type": "url", "url": "https://mcp.example"}],

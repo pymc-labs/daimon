@@ -36,6 +36,12 @@ from anthropic.types.beta import FileMetadata
 from daimon.core.checkpoint_prompt import HANDOFF_FILENAME_PREFIX
 from daimon.core.errors import DaimonError
 from daimon.core.media.filenames import sanitize_title
+from daimon.core.output_ports_compat import (
+    delete_output_record,
+    list_output_records,
+    read_output_record,
+)
+from mux.contracts.ids import Scope
 
 _log = structlog.get_logger(__name__)
 
@@ -98,6 +104,7 @@ async def _poll_until_settled(
     *,
     session_id: str,
     sleep: Callable[[float], Awaitable[None]],
+    scope: Scope | None = None,
 ) -> dict[str, FileMetadata]:
     """Poll the session listing until it settles; return downloadable entries by id.
 
@@ -113,11 +120,14 @@ async def _poll_until_settled(
             await sleep(delay)
         elapsed += delay
         polls += 1
-        page = await anthropic_client.beta.files.list(
-            scope_id=session_id, betas=[_MA_BETA], limit=1000
+        records = await list_output_records(
+            anthropic_client,
+            session_id,
+            scope=scope
+            or Scope.legacy_host_authorized(call_site="output_delivery:_poll_until_settled"),
         )
         added_new_id = False
-        for meta in page.data:
+        for meta in records:
             if meta.downloadable is True and meta.id not in seen:
                 seen[meta.id] = meta
                 added_new_id = True
@@ -135,18 +145,29 @@ async def _poll_until_settled(
     return seen
 
 
-async def download_output_file(anthropic_client: AsyncAnthropic, file_id: str) -> bytes:
+async def download_output_file(
+    anthropic_client: AsyncAnthropic, file_id: str, *, scope: Scope | None = None
+) -> bytes:
     """The bytes of one session output file."""
-    response = await anthropic_client.beta.files.download(file_id, betas=[_MA_BETA])
-    return await response.read()
+    return await read_output_record(
+        anthropic_client,
+        file_id,
+        scope=scope
+        or Scope.legacy_host_authorized(call_site="output_delivery:download_output_file"),
+    )
 
 
 async def delete_output_file(
-    anthropic_client: AsyncAnthropic, *, session_id: str, file_id: str
+    anthropic_client: AsyncAnthropic, *, session_id: str, file_id: str, scope: Scope | None = None
 ) -> None:
     """Delete a listing entry after its post won; failure to delete is logged, not raised."""
     try:
-        await anthropic_client.beta.files.delete(file_id, betas=[_MA_BETA])
+        await delete_output_record(
+            anthropic_client,
+            file_id,
+            scope=scope
+            or Scope.legacy_host_authorized(call_site="output_delivery:delete_output_file"),
+        )
     except anthropic.NotFoundError:
         # An entry a concurrent sweep already removed is not an error.
         pass
@@ -168,6 +189,7 @@ async def sweep_session_outputs(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     max_bytes: int = MAX_BYTES_PER_FILE,
     exclude_filename_prefixes: tuple[str, ...] = (HANDOFF_FILENAME_PREFIX,),
+    scope: Scope | None = None,
 ) -> int:
     """Deliver the session's output files via ``post``; return how many posted.
 
@@ -183,7 +205,9 @@ async def sweep_session_outputs(
     basename-only (capability matrix P4.a), so a name prefix is the whole
     available key.
     """
-    settled = await _poll_until_settled(anthropic_client, session_id=session_id, sleep=sleep)
+    settled = await _poll_until_settled(
+        anthropic_client, session_id=session_id, sleep=sleep, scope=scope
+    )
 
     posted = 0
     for meta in settled.values():
@@ -201,7 +225,9 @@ async def sweep_session_outputs(
             # Snapshot-at-first-write means a 0-byte entry can never gain
             # content; it is permanent noise unless deleted.
             _log.info("output_delivery.skipped_empty", session_id=session_id, file_id=meta.id)
-            await delete_output_file(anthropic_client, session_id=session_id, file_id=meta.id)
+            await delete_output_file(
+                anthropic_client, session_id=session_id, file_id=meta.id, scope=scope
+            )
             continue
 
         try:
@@ -223,7 +249,9 @@ async def sweep_session_outputs(
                             size_bytes=meta.size_bytes,
                         )
                     )
-                await delete_output_file(anthropic_client, session_id=session_id, file_id=meta.id)
+                await delete_output_file(
+                    anthropic_client, session_id=session_id, file_id=meta.id, scope=scope
+                )
                 continue
 
             await post(
@@ -232,7 +260,7 @@ async def sweep_session_outputs(
                     filename=meta.filename,
                     mime_type=meta.mime_type,
                     size_bytes=meta.size_bytes,
-                    content=await download_output_file(anthropic_client, meta.id),
+                    content=await download_output_file(anthropic_client, meta.id, scope=scope),
                 )
             )
         except OutputDeliveryDeferred:
@@ -250,7 +278,9 @@ async def sweep_session_outputs(
             )
             continue
 
-        await delete_output_file(anthropic_client, session_id=session_id, file_id=meta.id)
+        await delete_output_file(
+            anthropic_client, session_id=session_id, file_id=meta.id, scope=scope
+        )
         posted += 1
         _log.info(
             "output_delivery.posted",

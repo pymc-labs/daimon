@@ -515,11 +515,12 @@ to the existing session administration driver.
 The optional Session native snapshot supports a temporary host codec that retains
 SDK response extras, fields-set semantics and exception types. Host preparation
 policy, billing checkpoints, recovery order and first feedback remain unchanged.
+Retrieval can bind a partial reply to its already authorized requested identity;
+the opaque provider snapshot retains only fields present in that reply.
 Tenant-aware creation also forwards its scope through vault bootstrap, credential
 mirroring and rollback; vault discovery retains its existing exact-name inventory
 check. Tenantless established creation uses a named legacy host capability.
-Update planning and workspace export/restore are separate follow-on changes;
-unsupported lifecycle methods fail explicitly. The driver keeps no operation cache
+Workspace export/restore remain unsupported lifecycle methods and fail explicitly. The driver keeps no operation cache
 and makes no request during construction.
 ## Accounting observations
 
@@ -585,3 +586,42 @@ token revocation, vault archive and local session retirement retain their
 existing order, duplicate-session handling, operator output and SDK errors.
 Repeated vault cleanup keeps its existing missing, conflict and already-archived
 responses. Grant edits that can rotate tokens in place keep that path.
+
+### Adapter-declared conformance gaps
+
+Adapters can declare individual fixtures PENDING with a typed capability,
+live-key or dependency reason. The declaration remains visible and blocks
+certification; undeclared capability errors still fail their probes.
+The native `anthropic.session_walk@1` extension exposes `SessionWalk.walk(scope)`
+as an async iterator of neutral sessions with opaque native snapshots. It sends
+no list filters and follows the SDK paginator exactly. Workspace-wide billing
+sweeps pass a justified platform scope; tenant walks retain grants and tag checks.
+### In-place session updates
+
+Session tool/MCP changes use a pure plan followed by one apply request. The closed
+`anthropic.session_update@1` config accepts only the native agent tool/MCP patch
+and session metadata; it retains native ordering, omissions, nulls and empty
+arrays. Plans carry the caller's snapshot revision and apply rejects a different
+revision before I/O. The Anthropic endpoint does not offer server revision CAS.
+An explicit empty patch reuses the session without I/O; unsupported generic
+revision/environment changes and fresh-state requests fail explicitly. The host
+still decides changes and preserves existing busy deferral and snapshots.
+
+Mount deletion and repository token rotation use session administration. Token
+material is resolved and redacted at the existing driver boundary. Secret file
+upload and inherited-seal reads receive the existing tenant/account context.
+An unreadable predecessor remains conservatively sealed to the successor thread.
+
+Session output delivery uses `anthropic.outputs@1`: one listing page per poll,
+whose entries retain their opaque SDK snapshots. Listing does not require
+delivery fields on pending entries or invent missing creation timestamps;
+the host applies its existing downloadable filter and delivery field checks.
+Buffered download and deletion retain the managed-agents beta. Standalone bundle
+uploads and the workspace-wide TTL queue retain the default Files API headers.
+The host keeps settle timing, exclusions, size limits, consent deferral and
+post-before-delete ordering. No additional provider requests are introduced.
+
+The native session-resources extension adds lazy `walk` and identity-returning
+`add_file` methods. Existing methods retain their behavior. The host stops at
+the first `.env` mount without fetching later pages and records the one add
+response identity without a retrieve. Session and file grants are checked before I/O.

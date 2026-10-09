@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Discord and Slack Connect GitHub buttons now show a link emoji.
 - GitHub connection links now appear in a branded card with the agent's face and readable name when agent identity is enabled. Generated names are shown as "this agent". The compact card is the default; a richer card is available with a one-line switch.
+- Report adapter-declared conformance gaps as typed PENDING results, retaining
+  their reasons and blocking certification without hiding other probe failures.
+
 - Add an opt-in Gemini inline-reuse driver with offline transport probes, explicit continuity loss, normalized turn events and revisioned usage; Anthropic remains the default.
 - Filter completed Gemini function calls from required actions, defer open saved steps, and persist parsed usage timestamp watermarks without duplicate charges.
 
@@ -18,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the OpenAI hosted profile non-core until its skills and artifact ports land; refuse required unimplemented vault, multiagent and whole-workspace export/import capabilities.
 - Resolve OpenAI required-action turn identity from the documented nested session payload and suppress stale actions after root completion.
 - Route CLI GitHub grant cleanup through tenant-scoped session and vault archive ports while preserving revocation order, operator output and cleanup errors.
+- Preserve partial session output listings through the native port, including
+  pending entries and downloadable files without unused creation timestamps.
+
+- Preserve inherited seal recovery for partial session retrieval replies without
+  adding an identity field to the provider snapshot.
+
+- Discover the first mounted `.env` lazily and retain the added mount identity
+  through scoped session-resource ports, preserving pagination and request order.
 
 - Route CLI agent, environment and skill operations through tenant-scoped neutral resource ports, preserving requests, output and SDK error handling.
 - MCP agent, environment and skill operations now consume tenant-scoped neutral resource ports.
@@ -25,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve original credential JSON key order and redact alternate quote-escaped secret echoes; verify `.env` upload filename, media type and bytes at the host call site.
 
 - Advertise closed session create, resource-mount and update configuration namespaces for backend admission.
+- Expose scoped workspace session enumeration through the native SDK paginator,
+  preserving full native records and pagination stop rules for billing sweeps.
+- Route session output polling, download and deletion through scoped native ports,
+  preserving Files API beta headers, settle timing and post-before-delete delivery.
+
+- Plan native session tool/MCP changes before one in-place apply call, preserving
+  busy deferral, mount deletion, repository-token rotation and inherited seals.
+
 - Route session creation and preparation through neutral lifecycle ports, preserving
   native request bytes, response fields, recovery ordering and SDK exception types.
 
