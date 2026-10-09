@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 from mux.contracts.actions import UserMessage
@@ -27,6 +28,8 @@ from mux.drivers.openai.transport import Object, object_json, segment
 from mux.errors import ContinuityLost, MigrationUnsupported, ProviderError, ScopeViolation
 
 BindingLookup = Callable[[Scope, str], ProviderBinding | None]
+_DELETE_TIMEOUT = 30.0
+_DELETE_POLL_INTERVAL = 1.0
 
 
 class OpenAISessions:
@@ -272,16 +275,49 @@ class OpenAISessions:
     @owned
     async def delete(self, scope: Scope, ref: ResourceRef, *, key: str) -> DeletionReceipt:
         self._c.check(scope, ref, "session")
-        raw = await self._c.call("GET", "/agents/sessions/" + segment(ref.id))
-        if raw.get("id") != ref.id:
-            raise ValueError("wrong session identity")
-        self._c.record(scope, raw)
-        vault_ids = raw.get("vault_ids", [])
-        if not isinstance(vault_ids, list):
-            raise ValueError("invalid vault IDs")
-        vaults = tuple(self._c.ref(scope, "vault", text(v)) for v in vault_ids)
-        await self._c.call("DELETE", "/agents/sessions/" + segment(ref.id))
-        return DeletionReceipt(operation_id=key, deleted=(ref,), retained=vaults)
+        path = "/agents/sessions/" + segment(ref.id)
+        deleting = False
+        try:
+            async with asyncio.timeout(_DELETE_TIMEOUT):
+                while True:
+                    self._c.check(scope, ref, "session")
+                    raw = await self._c.call("GET", path)
+                    if raw.get("id") != ref.id:
+                        raise ValueError("wrong session identity")
+                    self._c.record(scope, raw)
+                    vault_ids = raw.get("vault_ids", [])
+                    if not isinstance(vault_ids, list):
+                        raise ValueError("invalid vault IDs")
+                    vaults = tuple(self._c.ref(scope, "vault", text(v)) for v in vault_ids)
+                    status = text(raw["status"])
+                    if status not in ("idle", "failed", "in_progress", "requires_action"):
+                        raise ValueError("unknown native session status")
+                    if status in ("idle", "failed"):
+                        try:
+                            deleting = True
+                            await self._c.call("DELETE", path, key=key)
+                        except ProviderError as error:
+                            deleting = False
+                            # A definite HTTP 409 rejects this deletion. An idle
+                            # snapshot can race backend shutdown; re-read before
+                            # another attempt, never replay an uncertain mutation.
+                            if error.category != "conflict" or error.native_code != "409":
+                                raise
+                        else:
+                            return DeletionReceipt(
+                                operation_id=key, deleted=(ref,), retained=vaults
+                            )
+                    await asyncio.sleep(_DELETE_POLL_INTERVAL)
+        except TimeoutError:
+            if deleting:
+                raise ProviderError(
+                    "transient_network",
+                    retryable=False,
+                    native_code="session_delete_outcome_unknown",
+                ) from None
+            raise ProviderError(
+                "conflict", retryable=True, native_code="session_delete_deadline"
+            ) from None
 
     @owned
     async def export(

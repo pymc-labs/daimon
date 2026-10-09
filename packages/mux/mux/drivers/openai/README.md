@@ -176,6 +176,22 @@ while preserving the real JSON on the wire, verified with actual SDK logs.
 Static bearer and MCP OAuth access-token bindings require HTTPS destinations;
 environment credentials, archive and conditional credential writes refuse.
 Session deletion retains attached vaults and never deletes their provider resources.
+It waits for native `idle` or `failed` status before deleting. A definite HTTP 409
+triggers another scoped read and a one-second wait before the next eligible
+deletion attempt, using the same `Idempotency-Key`. The complete operation has a
+30-second deadline, including HTTP calls. Busy sessions are left for their work
+to finish; callers can explicitly cancel first when needed. Other provider
+errors propagate without a retry. Expiry during a DELETE reports an unknown
+outcome with automatic retry disabled; expiry while waiting reports a cleanup
+deadline failure, never a deletion receipt. Native identity, host authorization
+and tenant ownership are checked again on every poll.
+
+This follows the [session deletion reference](https://developers.openai.com/api/reference/resources/beta/subresources/agents/subresources/sessions/methods/delete)
+(verified 2026-10-09): running execution must stop before deletion, and physical
+cleanup may continue after the public resource is deleted. Actual pinned-SDK
+regressions cover the idle/409/running/failed race, bounded busy/conflict waits,
+ownership changes, transport failures and interrupted deletion. Live C10/C15/C16
+reruns remain subject to review of this fix.
 
 Initial file mounts use uploaded `file:` refs at canonical `/workspace/` paths.
 Repositories, raw native/secret bindings and conditional resource replacement are
