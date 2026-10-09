@@ -13,6 +13,7 @@ from mux.conformance.runner import (
     StateStore,
     require,
 )
+from mux.conformance.state_fixtures import c03, c04, c07, c13
 from mux.contracts.actions import NativeInput, UserMessage
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ResolvedBackend
 from mux.contracts.errors import (
@@ -48,7 +49,10 @@ def pending(id_: str, reason: str) -> Result:
 
 
 async def c01(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
-    return pending("C01", "N2 binding/lease store and N10 multi-human attribution seam pending")
+    return pending(
+        "C01",
+        "N4/N10 host multi-human attribution, queue/batching and workspace binding seam pending",
+    )
 
 
 async def c02(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
@@ -109,18 +113,6 @@ async def c02(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
         )
     return passed(
         "C02", "256 binary bytes preserved", "expiry and unexpected loss typed and visible"
-    )
-
-
-async def c03(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
-    return pending(
-        "C03", "N2 persisted operation intent/digest and unknown-send reconciliation pending"
-    )
-
-
-async def c04(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
-    return pending(
-        "C04", "N2 restartable store, operation recovery and stale-fence commit seam pending"
     )
 
 
@@ -243,10 +235,6 @@ async def c06(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
         "C06: observed stop must release root occupancy",
     )
     return passed("C06", "cancel receipt/EOF held occupancy until observed interrupted outcome")
-
-
-async def c07(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
-    return pending("C07", "N2 revisioned usage/outbox and N8 signed-delta accounting seam pending")
 
 
 async def c08(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
@@ -477,12 +465,8 @@ async def c12(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
     )
 
 
-async def c13(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
-    return pending("C13", "N2 atomic new-binding race seam pending")
-
-
 async def c14(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
-    return pending("C14", "N2 binding store and N10 backend selection/registry seam pending")
+    return pending("C14", "N4/N10 existing/new-thread backend selection and registry seam pending")
 
 
 async def c15(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
@@ -557,7 +541,10 @@ async def c16(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
 
 
 async def c17(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
-    return pending("C17", "N2 binding fence and N5 host wake generation seam pending")
+    return pending(
+        "C17",
+        "N5 host wake generation adapter pending; StateStore fencing alone is not a wake probe",
+    )
 
 
 async def c18(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:

@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
+- Conformance now probes durable send replay, independent recovery evidence, lease ownership,
+  usage revision accounting, and binding races against the merged StateStore;
+  host-dependent fixtures remain explicitly pending.
+
 - Content-free baseline SQL and a pinned JSON converter summarize 14-day token
   mix and total latency, with explicit first-token and turn-bridge dependencies.
 

@@ -57,17 +57,17 @@ async def test_pending_is_never_success_and_fixtures_are_isolated() -> None:
     assert all(r.evidence for r in results)
     assert {r.fixture_id for r in results if r.status == "pending"} == {
         "C01",
-        "C03",
-        "C04",
-        "C07",
         "C12",
-        "C13",
         "C14",
         "C17",
         "C18",
     }
     assert {r.fixture_id for r in results if r.status == "pass"} == {
         "C02",
+        "C03",
+        "C04",
+        "C07",
+        "C13",
         "C05",
         "C06",
         "C08",
@@ -90,7 +90,7 @@ async def test_runner_detects_silent_workspace_reset() -> None:
         t = Transport()
         driver = ReferenceDriver(t)
         driver.sessions = BrokenSessions(t)
-        return Adapter(cast(ManagedAgents, driver), None, t)
+        return Adapter(cast(ManagedAgents, driver), t.store, t)
 
     registry = Registry()
     registry.register("broken", broken)
@@ -226,7 +226,7 @@ def variant(
     driver = ReferenceDriver(t)
     driver.events = events(t)
     driver.artifacts = artifacts(t)
-    return Adapter(cast(ManagedAgents, driver), None, t)
+    return Adapter(cast(ManagedAgents, driver), t.store, t)
 
 
 async def test_c05_child_completion_does_not_release_root_before_reconcile() -> None:
@@ -273,7 +273,7 @@ def factory():
     t = Transport()
     driver = ReferenceDriver(t)
     driver.events = Broken(t)
-    return Adapter(cast(ManagedAgents, driver), None, t)
+    return Adapter(cast(ManagedAgents, driver), t.store, t)
 async def main():
     registry = Registry()
     registry.register("broken-reference", factory)
@@ -299,7 +299,7 @@ async def test_c09_detects_provider_deletion_hidden_by_a_retained_receipt() -> N
     driver = ReferenceDriver(t)
     driver.sessions = LyingDelete(t)
     registry = Registry()
-    registry.register("lying-delete", lambda: Adapter(cast(ManagedAgents, driver), None, t))
+    registry.register("lying-delete", lambda: Adapter(cast(ManagedAgents, driver), t.store, t))
     result = next(r for r in await run(registry, "lying-delete") if r.fixture_id == "C09")
     assert result.status == "fail"
     assert "actually delete shared resources" in result.evidence[0]
@@ -320,10 +320,11 @@ def test_fixture_checks_cannot_reintroduce_optimized_away_assertions() -> None:
     import ast
     import inspect
 
-    from mux.conformance import fixtures
+    from mux.conformance import fixtures, state_fixtures
 
-    tree = ast.parse(inspect.getsource(fixtures))
-    assert not any(isinstance(node, ast.Assert) for node in ast.walk(tree))
+    for module in (fixtures, state_fixtures):
+        tree = ast.parse(inspect.getsource(module))
+        assert not any(isinstance(node, ast.Assert) for node in ast.walk(tree))
 
 
 @pytest.mark.parametrize(
@@ -364,7 +365,7 @@ async def test_c11_rejects_resource_records_without_deployment_evidence(fault: s
         driver.skills = BrokenSkills(t)
         driver.agents = BrokenAgents(t)
         driver.environments = BrokenEnvironments(t)
-        return Adapter(cast(ManagedAgents, driver), None, t)
+        return Adapter(cast(ManagedAgents, driver), t.store, t)
 
     registry = Registry()
     registry.register("broken-resource-reference", broken)
@@ -488,7 +489,7 @@ async def test_c11_rejects_conflicting_pins_and_invalid_uploaded_bytes(fault: st
         driver = ReferenceDriver(t)
         driver.skills = BrokenSkills(t)
         driver.agents = BrokenAgents(t)
-        return Adapter(cast(ManagedAgents, driver), None, t)
+        return Adapter(cast(ManagedAgents, driver), t.store, t)
 
     registry = Registry()
     registry.register("conflicting-skill-reference", broken)
