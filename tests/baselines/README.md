@@ -19,6 +19,10 @@ percentile ordering, then records the SDK pin, SQL/export hashes and date.
 Baseline JSON is generated only from an export; no fake production baseline
 is checked in.
 
+Offline SQL validation accepts only localhost databases named
+`daimon_test_nc_<window>` (including worker, evaluator and reviewer windows).
+Shared databases, remote hosts and connection query overrides are refused.
+
 Tokens come from `usage_events`, which covers metered tenant calls, excluding
 exempt DMs. Its legacy input/cache-read/cache-write buckets are disjoint. The
 converter computes input mix without double counting; no observations stay

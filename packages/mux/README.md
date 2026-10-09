@@ -43,6 +43,20 @@ native version ID, omitting the skills beta header on that request. The ordinary
 pinned-version port and generic recovery download keep their existing SDK requests. Both paths enforce the same
 host-provided scope and skill grant before I/O.
 
+`mux.conformance.budget` provides standalone manual budget admission and spend
+receipts without recorder or SDK imports. Its pinned ledger, checkpoint and
+stable sequence lock refuse reset/rollback attempts. Authorized operators supply
+reviewed model prices and enforce token bounds across the whole probe.
+
+`mux.conformance.recording` retains only normalized mux events and request
+metadata, excluding raw HTTP bodies, body values and opaque native provenance.
+Tool/action argument mappings become a fixed omission sentinel; export and replay
+refuse arbitrary mappings outside the closed normalized payload schema.
+An offline event fake re-runs fixture checks with the same credential audit;
+unsupported opaque event content refuses recording. Native codec replay is
+outside this format. `live_probe.run_probe` optionally combines reservation,
+callback, settlement and normalized export. See `mux/conformance/README.md`.
+
 ### Anthropic turn event translation
 
 `AnthropicManagedAgents` registers an `AnthropicEvents` port over the

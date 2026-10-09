@@ -185,3 +185,80 @@ outside this local guard's boundary. Initialization is an operator convention,
 not authentication. Never delete state to retry. The lead reconciles corrupted
 state and actual provider spend; the guard has no automatic reset or repair.
 Recording, provider adapters and live certification are separate features.
+
+## Normalized conformance recordings
+
+`recording.Recorder` records only request metadata and fixed, validated mux
+`Event` contracts. It has no HTTP transport callback, raw response field, SSE
+reader or binary response format. Version 1 native tapes are rejected; there is
+no migration or fallback. Capture events **after** driver normalization. This
+feature exercises normalized contract behavior, not provider HTTP/SSE codecs.
+
+```python
+from mux.conformance.recording import Recorder, RequestMetadata
+
+recorder = Recorder()
+metadata = RequestMetadata.from_request(
+    "POST", "https://probe.invalid/v1/events?key=not-retained",
+    headers={"content-type": "application/json", "authorization": "not-retained"},
+    body={"input": "body values are never retained"},
+)
+# normalized_events are actual mux Event objects emitted by the driver.
+# recorder.record(metadata, normalized_events)
+# recorder.save(path, fixture_id="C16", provider="fake", model="fake", complete=True)
+```
+
+Request projection retains method, path without origin/userinfo/query/fragment,
+body field names (top-level only), and a closed, redacted header allowlist.
+`accept`/`content-type` retain only JSON/SSE media constants; other values become
+`[redacted]`. `authorization`, `x-api-key`, and `x-goog-api-key` always retain only
+that marker. All other headers disappear. Direct metadata construction enforces
+the same allowlist. Body values never enter a tape, including nested objects.
+
+`Event.native.record` and `raw_ref` are removed **before serialization**. Open
+`native.*`/`agent.thread.*` event types, native content parts/actions, and inline
+binary images are refused, because they could hide opaque response bodies.
+Use normalized text or artifact references. These unsupported evidence shapes
+need a separate adapter capability/PENDING declaration; they never silently pass.
+Tool-use `input` and required-action `payload` mappings retain only the fixed
+sentinel `{"input_omitted": true}`. Tool names and required fixed scalar fields
+remain; arbitrary argument keys/values are never serialized. Export and replay
+require that exact sentinel (boolean true, no extra keys), even after mutation.
+Every other payload mapping must be a closed contract DTO; new arbitrary mapping
+slots refuse recording. Replay cannot certify tool argument content and adapters
+must declare PENDING for checks that require it. Existing free-form-input v2 tapes
+are refused rather than rewritten. Other normalized text remains unchanged.
+
+Fixed event payloads, metadata and their string leaves receive the same final
+credential audit on export and replay. Actual event text is joined across all
+batches with structural IDs/type metadata excluded, including decoded text-leaf
+projections. Percent, Unicode, hex, literal escapes and base64 text are audited
+with bounded decoding and per-operation memoization. Any `sk-`/`AIza` prefix plus
+at least 32 key-alphabet characters is sensitive regardless of its neighbour.
+Supplied `secrets=(...)` cover additional opaque credential formats. Auth fields,
+Bearer/Basic credentials, surviving key patterns or ambiguous long encoded runs
+refuse the entire tape before a temporary file is opened. Normalized text is not
+rewritten; false positives require inspected evidence to be re-recorded.
+
+Tapes are created with mode 0600, capped at 4 MiB and never overwrite an existing
+path. A rejected batch poisons that recorder so catching an error cannot export a
+partial safe-looking run. Incomplete runs cannot be replayed for certification.
+
+`await replay.events(metadata)` returns detached normalized events in recorded
+batch order with no network fallback. A caller-provided fake transport builds its
+Events port from those events. `await replay_fixture(path, factory)` supplies a
+fresh replay to each adapter, runs the Cxx check again and requires full batch
+consumption. Changed metadata, extra calls or unconsumed evidence fail; declared
+PENDING remains visible and never certifies. Metadata matching deliberately
+cannot compare body values or dropped query/header values. Native pagination,
+error kinds, raw byte fidelity and codec behavior are outside this tape format.
+The C16 reference test re-runs its journal-invariance check and fails when a
+recorded normalized event changes; it is no provider certification.
+
+`live_probe.run_probe(guard, plan, path, invoke, secrets=())` is an explicitly
+supplied callback wrapper around the standalone budget guard and recorder.
+Callbacks enforce token bounds across setup/retries/cleanup and return
+`ProbeOutcome(usage, result)`; the result is not stored as evidence. Reservation
+precedes callback I/O, settlement precedes export, and failures/cancellation keep
+conservative receipts even when recording is refused. No credentials, SDKs or
+live calls are discovered or scheduled by this harness.
