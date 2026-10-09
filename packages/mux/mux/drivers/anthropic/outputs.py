@@ -1,5 +1,6 @@
 """Session outputs use MA headers; standalone uploads keep the Files API default."""
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Protocol, cast
 
@@ -26,6 +27,10 @@ class OutputEntry:
 
 
 class Outputs(Protocol):
+    async def upload_bundle(
+        self, scope: Scope, body: AsyncIterator[bytes], *, filename: str, media_type: str, key: str
+    ) -> str: ...
+
     async def list_outputs(self, scope: Scope, session: ResourceRef) -> tuple[OutputEntry, ...]: ...
 
     async def read_output(self, scope: Scope, ref: ResourceRef) -> bytes: ...
@@ -38,10 +43,17 @@ class Outputs(Protocol):
 class AnthropicOutputs(AnthropicArtifacts):
     """One listing page and buffered reads, matching the existing host sweeps.
 
-    Inherit N6's reference construction and default upload
-    implementation. Only the three session-output requests differ from the
-    standalone Files API port; they explicitly opt into the MA beta.
+    Inherit N6's reference construction and shared upload request. Bundle
+    rehosting consumes only its returned ID. The three session-output requests
+    differ from the standalone Files API port; they explicitly opt into the MA beta.
     """
+
+    async def upload_bundle(
+        self, scope: Scope, body: AsyncIterator[bytes], *, filename: str, media_type: str, key: str
+    ) -> str:
+        """Return only the upload identity the existing rehost consumer uses."""
+        item = await self._upload_file(scope, body, filename=filename, media_type=media_type)
+        return item.id
 
     async def list_outputs(self, scope: Scope, session: ResourceRef) -> tuple[OutputEntry, ...]:
         authorize(self._authorization, scope, "session", session.id)

@@ -193,3 +193,18 @@ unused paths, identifiers, configuration or timestamps. Prefix and unknown list
 rows retain their original discriminator and pagination behavior. Tenant and
 account checks still run before requests, and environment metadata checks still
 run after the existing response. Neutral resource records remain validated.
+Thread handoff uses lifecycle reads with its tenant/account context. Workspace
+bundle reuploads use the native outputs extension with the existing Files API
+headers and bytes. Rehosting consumes only the returned ID, so a partial upload
+reply still produces the full handoff and cleanup entry. The request helper is
+shared with Artifacts; the host retains checkpoint billing and fallback policy.
+
+Workspace transfer uses `anthropic.workspace_transfer@1` to carry the inline
+full/transcript/history rung. The closed schema stays in the driver. Pure native
+export declares its archive, digest, transcript presence and losses with
+`best_effort` consistency; restore verifies the payload, source authorization
+and accepted losses, then returns neutral mounts for the existing create call.
+No manifest upload, provider lookup, second session create or first send is added.
+The host retains the one billed checkpoint, its access fence, fallback notices,
+quoted transcript and system-message policy. Generic lifecycle export/restore
+stay unsupported; this explicit native extension handles the existing MA ladder.
