@@ -24,6 +24,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_identity import CUSTOM_PICTURES_OFF
 from daimon.core.errors import DaimonError
 from daimon.core.stores.tenants import get_tenant
+from sqlalchemy.exc import SQLAlchemyError
 
 import discord
 from discord import Interaction, app_commands
@@ -112,5 +113,5 @@ class AgentSetupCog(commands.Cog):
             if is_admin:
                 await send_pending_new_repo_notice(runtime, interaction, tenant_id=tenant_id)
                 await send_pending_removal_notice(runtime, interaction, tenant_id=tenant_id)
-        except (DaimonError, anthropic.APIError, discord.HTTPException) as exc:
+        except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await interaction.followup.send(render_error(exc, request_id=rid), ephemeral=True)

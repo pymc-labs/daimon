@@ -51,7 +51,7 @@ from daimon.adapters.slack.agent_setup.state import (
 )
 from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.agent_identity import identity_enabled_for
+from daimon.core.agent_identity import identity_enabled_for, queue_agent_face
 from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.constants import DEFAULT_AGENT_MODEL
@@ -300,6 +300,13 @@ async def run_new_agent_submission(
             return
 
         log.info("slack.agent_setup.new_agent.created", team_id=team_id, agent_name=name)
+        queue_agent_face(
+            runtime.sessionmaker,
+            tenant_id=tenant_id,
+            agent_name=name,
+            metadata=None,  # create_blank_agent is never managed
+            default_agent_name=runtime.deployment_default.agent_name,
+        )
 
         is_admin = await resolve_is_admin(web_client, user_id=user_id)
         caller = await channel_admin_caller(

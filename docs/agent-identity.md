@@ -128,6 +128,15 @@ default) posts with no override, so it keeps the app's own name and icon.
   one channel webhook carries concurrent turns and MCP posts, so staging
   checks two concurrent turns in one channel.
 
+### Routine results and form answers
+
+A routine result the agent did not post itself goes out under the agent's
+identity on Slack (`post_as_agent`) and Discord (`DiscordPostTransport`, with
+the fallback name label). Discord drops "from <agent>" from its first line;
+Slack keeps it, because Slack drops the header silently without
+`chat:write.customize`. The answer to a submitted Discord form runs through the
+same transport as a mention turn.
+
 ### Teams
 
 Bold name prefix on the first chunk when the agent is not the built-in one.
@@ -197,10 +206,19 @@ Named-agent routing is tracked separately from this identity work.
   deleting the agent, and tenant purge, delete it, so a later agent reusing
   the name starts from a fresh default. Pictures uploaded before uploads were
   turned off stay as stored 256×256 PNGs.
-- With the identity switch on, the first turn reads the current picture without
-  waiting for artwork. A missing face is generated after the turn proceeds; an
-  existing initials URL stays valid after the new PNG is stored, until an admin
-  changes or resets the picture. The default is
+- A new agent's face is rendered when the agent is created: from a setup
+  panel's New agent form, the `create_agent` tool, `daimon agents create`, or
+  a copy (`fork_agent`, `daimon agents fork`, a channel rule that copies an
+  agent). The bots and the MCP service render it in the background, off the
+  platform acknowledgement; a CLI command waits up to 10 seconds for it,
+  because a background render dies with the process. The agent's first card
+  or answer therefore already has its face. This happens whatever the identity
+  switch says; the row is unused while the switch is off.
+- An agent with no face yet, made before faces were rendered at creation or
+  whose render failed, gets one the first time a turn resolves its identity
+  with the switch on. Answers wait up to 3 seconds for it; other posts go out
+  with the current picture. An existing initials URL stays valid after the new
+  PNG is stored, until an admin changes or resets the picture. The default is
   a 512×512 mascot face. The production mascot supplies the base face and the
   canonical expression sprites supply relaxed closed eyes; the remaining eyes
   are small plain ovals. The production laugh mouth and two restrained warm
@@ -217,7 +235,8 @@ Named-agent routing is tracked separately from this identity work.
   do not change earlier assignments. Retired layers stay available to render
   stored variants. Reset renders the same combination with a new token. The
   built-in agent keeps its fixed classic platform avatar.
-- With the switch off, no default row is created by message posting. The legacy
+- With the switch off, no default row is created by message posting; only
+  creating an agent stores its face. The legacy
   initials generator remains available to callers that explicitly request it.
 - Served publicly by the MCP service at `/avatars/{token}/{sha256[:12]}.png`
   (`token` random and replaced on every change, so the URL names no tenant or

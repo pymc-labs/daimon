@@ -21,6 +21,7 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_memory_stores import get_memory_store_id
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
+from sqlalchemy.exc import SQLAlchemyError
 
 import discord
 from discord import Interaction, app_commands
@@ -177,7 +178,7 @@ class MemoryCog(commands.Cog):
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-        except (DaimonError, anthropic.APIError, discord.HTTPException) as exc:
+        except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             log.warning("memory.handler.failed", rid=rid, error=str(exc))
             await interaction.followup.send(
                 render_error(exc, request_id=rid),

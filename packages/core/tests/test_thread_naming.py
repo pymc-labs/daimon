@@ -16,8 +16,10 @@ import pytest
 from anthropic import BadRequestError
 from anthropic.types import Message, TextBlock, Usage
 from daimon.core.thread_naming import (
+    _SYSTEM_PROMPT,  # pyright: ignore[reportPrivateUsage]
     THREAD_NAME_MAX_CHARS,
     THREAD_NAMING_MODEL,
+    naming_text,
     parse_thread_name,
     strip_mentions,
     suggest_thread_name,
@@ -39,6 +41,26 @@ def test_strip_mentions_leaves_only_empty_for_attachment_only_mention() -> None:
     assert strip_mentions("<@999>") == "", (
         "a bare bot mention has no text to title; the caller must skip the metered call"
     )
+
+
+def test_naming_text_puts_file_names_before_the_text() -> None:
+    assert naming_text("shorten this", ["brief.pdf", "notes.md"]) == (
+        "Attached: brief.pdf, notes.md\nshorten this"
+    ), "file names lead, ahead of a long message tail that max_input_chars may cut"
+
+
+def test_naming_text_names_a_file_only_mention_and_leaves_plain_text_alone() -> None:
+    assert naming_text("", ["q3_sales.csv"]) == "Attached: q3_sales.csv", (
+        "a mention with only a file is titled from its name"
+    )
+    assert naming_text("hello", []) == "hello", "no files, no prefix"
+
+
+def test_prompt_asks_for_short_sentence_case_titles() -> None:
+    assert "sentence case" in _SYSTEM_PROMPT and "title case" not in _SYSTEM_PROMPT, (
+        "titles read like something a person would type, not a headline"
+    )
+    assert THREAD_NAME_MAX_CHARS == 50, "short enough to scan in the thread list"
 
 
 # ---------------------------------------------------------------------------

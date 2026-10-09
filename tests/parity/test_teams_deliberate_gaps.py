@@ -20,13 +20,13 @@ spent (Discord and Slack spend it first, then say so privately; the Teams
 adapter's credential tests assert the unspent request). Removing the app from a
 team forgets that team and archives no tenant: a deployment serves one
 organisation. A bot cannot react, so a completion ping is an @mention alone and
-Ask a human is a button on the answer (and the `support` form); a post_wizard form has no step images. An agent edits or deletes its own
+Ask a human is a button on the card below the answer (and the `support` form); a post_wizard form has no step images. An agent edits or deletes its own
 posts but closes no thread (`delete_thread`, `archive_thread`).
 Thread participation shares Discord's gates
 (`test_thread_participation_platforms.py`) but needs Graph, so without the
 consent a followed thread stays mention-only; and where Discord's unprompted
-card appears once there is output, Teams posts only the answer, so there is no
-running card or Cancel button. The `here` card counts only the place it was
+card appears once there is output, Teams posts only the answer and its controls,
+so there is no running card or Cancel button. The `here` card counts only the place it was
 typed in as one the caller can see: naming their other channels would take
 Graph lookups per team, so an agent rule's other channels stay unnamed. Slack
 answers `memory` privately inside the channel; Teams answers in the 1:1 chat,
@@ -297,7 +297,7 @@ async def test_an_unprompted_teams_turn_shows_no_running_card() -> None:
     await lifecycle.on_render(TurnState(content=[TextBlock(kind="text", text="draft")]))
     assert sent == [], "no card while it runs, so no Cancel button"
     await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="Done.")]))
-    assert [a.text for a in sent] == ["Done."], "only the answer is posted"
+    assert [a.text for a in sent] == ["Done.", None], "the answer, then its controls card"
 
 
 async def test_removing_the_teams_app_forgets_the_team_and_archives_nothing() -> None:

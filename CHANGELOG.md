@@ -9,18 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Teams answers end like Discord and Slack ones: a card under the answer shows the summary line (`Ada  12s  $0.042 used  $41.20 left`) with 👍/👎 and, when support is set up, Ask a person, all in one place. A tool-only or failed turn's card shows the summary line too.
+- Teams support and 👎 feedback posts are easier to read: each line is its own paragraph, since Teams ran them together, and the long message URL is a short "Open the message" link.
 - When Daimon can't post as the agent on Discord, the agent's name now sits above the answer as a small subtext line instead of a bold header. Admins whose server hasn't given Daimon Manage Webhooks see a one-line note with a re-authorize link in `/agent-setup`. After a webhook permission error, Daimon retries agent names after 60 seconds instead of 10 minutes, and right away when the bot is granted Manage Webhooks.
 - Discord and Slack Connect GitHub buttons now show a link emoji.
 - GitHub connection links now appear in a branded card with the agent's face and readable name when agent identity is enabled. Generated names are shown as "this agent". The compact card is the default; a richer card is available with a one-line switch.
+- With agent identity on, a routine result that Daimon posts for an agent on Slack or Discord now shows the agent's name and face. On Discord it reads `Routine result (0 17 * * 5, Europe/London):` instead of naming the agent in the text; Slack keeps the agent's name in the text. The answer to a submitted Discord form also posts as the agent, like a mention reply.
 
 ### Fixed
 
 - When a restart cuts an answer short, the card now reads "Daimon restarted before this request finished." and "@mention Daimon with your request to try again." in the same words on Discord, Slack and Teams. Teams used to say "Send a message to try again.", which does nothing in a channel.
+- Discord agent tools now check a caller's thread access and posting rights before sending, and split long messages when agent identity is unavailable.
+- A Discord thread that can't be opened gets one plain reply under the mention: "Couldn't open a thread. @mention Daimon again." It used to be the generic error with a request id. A failed typing indicator no longer stops the thread from opening.
+- Discord thread names are short and plain, like "Shorten the competitive brief" instead of "Simplify Text By Removing Jargon While Keeping Key Points": sentence case, at most 50 characters. Attached file names count, so a mention with only a file gets a name too.
+- Discord's `/billing`, `/agent-setup`, `/routines`, `/privacy` and `/memory` answer with an error when a database read fails, instead of staying on "thinking" forever.
+- **Teams answers arrive again when support is set up.** The answer's last message carried the Ask a person button in a card beside its text, and Teams refuses an edit carrying both, so every answer was replaced by "Something went wrong. Mention me to try again." The button now follows the answer in a message of its own.
+- A conversation is no longer stuck after Daimon restarts while an approval card is up. The next message used to fail every time. Daimon now clears the unanswered request and carries on, and if that ever fails the thread says to start a new thread.
+- A new agent's face is rendered when the agent is created, so its first card or answer has it instead of the Daimon picture. This covers the setup panels' New agent form, `create_agent`, copies (`fork_agent`, `daimon agents fork`, channel rules that copy an agent) and `daimon agents create`; CLI commands wait up to 10 seconds for it.
 - Discord acknowledges a GitHub requester's Link click before minting the link and resolving the card. Connect cards clip long agent names, escape Discord markdown, and load images from the configured app host.
 - The `used` amount on a finished Discord or Slack answer is what the tenant is debited, markup included, so it agrees with `left`. With a 1.1 markup it showed the raw model cost, 10% low.
 - A deploy no longer stops an answer that is about to finish with "Stopped: Daimon restarted." When a deploy replaces the worker containers, in-flight turns now get up to 60 seconds to finish, as the adapters intended; Docker killed them after its default 10.
 - A finished Discord or Slack answer ends with one short line instead of a five-line Details block: `Ada  12s  $0.042 used  $41.20 left`. Fields are set apart by spacing, not dots. Token counts are gone, and a channel budget's remainder reads `$8.10 left` like the prepaid balance.
-- The summary line and Discord's 👍 👎 🙋 sit under the last message of an answer, not the first: the last chunk of a long answer on Discord and Slack, or on Discord a file Daimon posts after it.
+- On Discord, the files an agent makes are attached to its answer, the same message that carries the summary line and the 👍 👎 🙋 reactions, instead of arriving as separate posts after it. The summary line no longer moves onto a file post, which left an empty-looking card at the end of the thread. Agents on Discord, Slack and Teams 1:1 chats are now told to put only files for the person in their outputs folder, keep working files such as `.typ` sources elsewhere, name files instead of saying "above" or "below", and not post a file into their own thread themselves.
+- The summary line and Discord's 👍 👎 🙋 sit under the last message of an answer, not the first: the last chunk of a long answer on Discord and Slack.
 - Discord no longer attaches a generated file twice when the agent already sent it in the thread itself.
 - On Discord, a reply to any message of an answer reaches the agent, not only a reply to the first one. With agent identity off, a reply without the ping to the card or a later chunk used to be ignored.
 - Hackathon staging layouts accept the existing QA admin bot and recognize Discord Administrator permissions, so private team roles can be provisioned without the roleless fallback.

@@ -80,9 +80,12 @@ when the file is genuinely small or you genuinely need all of it.
 
 ## Files you produce for the user
 
-Every new file written to `/mnt/session/outputs/` is posted to the thread after
+Every new file written to `/mnt/session/outputs/` is attached to your reply after
 the turn, then removed from outputs. Write only this turn's finished deliverables
 there — the chart, notebook or PDF. Never copy a whole working/run directory into
-outputs or re-copy files already delivered. Keep working data elsewhere, such as
-`/workspace`. Do not read a file back purely to prove you wrote it; `ls -la`
-confirms it exists and costs nothing.
+outputs or re-copy files already delivered. Keep working files — sources such as
+`.typ` or `.tex`, drafts, intermediate data, logs — in `/root/work`, which a
+workspace move also carries. Name each file in your reply by its filename and
+never call it "above" or "below". Do not also post it with `send_message` into
+the thread you are answering; that delivers it twice. Do not read a file back
+purely to prove you wrote it; `ls -la` confirms it exists and costs nothing.

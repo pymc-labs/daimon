@@ -167,3 +167,13 @@ def isolate_card_edits() -> Iterator[None]:
 
     yield
     cancel_pending_card_edits()
+
+
+@pytest.fixture(autouse=True)
+def isolate_agent_faces() -> Iterator[None]:
+    """Creating an agent starts its face render in the background; one test's
+    render must not write into the next test's database or back-off state."""
+    from daimon.core.agent_identity import cancel_pending_agent_faces
+
+    yield
+    cancel_pending_agent_faces()

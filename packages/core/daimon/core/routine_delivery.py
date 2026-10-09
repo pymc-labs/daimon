@@ -34,8 +34,17 @@ from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
 import structlog
+from anthropic import AsyncAnthropic
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_identity import (
+    AgentIdentity,
+    identity_enabled_for,
+    is_builtin_agent,
+    resolve_agent_identity,
+)
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_subject
+from daimon.core.config import Settings
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.permissions import any_writers_none
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
@@ -262,10 +271,61 @@ def destination_shape_error(platform: str, kind: str, destination_id: str) -> st
     return f"routine destinations are not supported on {platform}"
 
 
-def render_fallback_post(row: RoutineRow) -> str:
-    """The message posted for a routine whose agent did not post itself."""
+def render_fallback_post(row: RoutineRow, *, as_agent: bool = False) -> str:
+    """The message posted for a routine whose agent did not post itself.
+
+    `as_agent` is for a post that carries the agent's own name and face, which
+    already say who it is from; the schedule is kept either way.
+    """
     payload = (row.delivery_payload or "").strip()
-    return f"Routine result from {row.agent_name} ({row.cron_expr}, {row.timezone}):\n\n{payload}"
+    sender = "" if as_agent else f" from {row.agent_name}"
+    return f"Routine result{sender} ({row.cron_expr}, {row.timezone}):\n\n{payload}"
+
+
+async def resolve_routine_identity(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    client: AsyncAnthropic,
+    settings: Settings,
+    *,
+    row: RoutineRow,
+    platform: Literal["discord", "slack"],
+    workspace_id: str,
+    default_agent_name: str | None,
+) -> AgentIdentity:
+    """The identity a routine's result is posted under.
+
+    The built-in agent, identity switched off, or a failed lookup all come back
+    built-in, so the post reads exactly as it did before agent identity. Any
+    error is caught here: a lookup that fails must not cost the result its post.
+    The poller is off any interaction deadline, so a new agent's face is waited for.
+    """
+    plain = AgentIdentity(name=row.agent_name, avatar_url=None, builtin=True)
+    if not identity_enabled_for(settings, platform, workspace_id):
+        return plain
+    try:
+        agent = await find_agent_by_daimon_tag(client, tenant_id=row.tenant_id, name=row.agent_name)
+        async with sessionmaker.begin() as session:
+            return await resolve_agent_identity(
+                session,
+                tenant_id=row.tenant_id,
+                agent_name=row.agent_name,
+                is_builtin=is_builtin_agent(
+                    name=row.agent_name,
+                    metadata=agent.metadata if agent is not None else None,
+                    default_agent_name=default_agent_name,
+                ),
+                public_base_url=settings.mcp.app_root_url,
+                enabled=True,
+                background_sessionmaker=sessionmaker,
+                wait_for_face=True,
+            )
+    except Exception as exc:  # identity is cosmetic: never lose the result over it
+        log.warning(
+            "routine.identity_lookup_failed",
+            routine_id=str(row.id),
+            error_type=type(exc).__name__,
+        )
+        return plain
 
 
 _DM_REASONS: Final[dict[str, str]] = {

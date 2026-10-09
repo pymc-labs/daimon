@@ -25,7 +25,9 @@ from uuid import UUID
 import discord
 import httpx
 import pytest
+from daimon.adapters.discord import wizard_submit as wizard_submit_module
 from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.wizard_submit import WizardSubmitButton
@@ -314,6 +316,35 @@ async def test_submitting_a_form_resumes_the_threads_existing_session(
     assert intent is not None and intent.status == "retired" and intent.message_id == "42", (
         "a normally completed wizard turn must persist its response ID and retire the intent"
     )
+
+
+async def test_the_wizard_turn_posts_through_the_agent_post_transport(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    made: list[DiscordPostTransport] = []
+
+    class _Recording(DiscordPostTransport):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
+    monkeypatch.setattr(wizard_submit_module, "DiscordPostTransport", _Recording)
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800001009")
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+    channel = _make_channel(thread_id=5009, parent_id=4009)
+    router = _build_router(str(tenant.id), sent_events=[], stream_hits=[])
+    bot = _make_bot(_make_runtime(db_session_factory, router))
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    item = await WizardSubmitButton.from_custom_id(interaction, MagicMock(), _submit_match(row.id))
+    await item.callback(interaction)
+    await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+
+    (transport,) = made
+    assert transport.channel is channel and transport.client is bot
+    assert channel.send.await_count >= 1, "with identity off the transport posts as the bot"
 
 
 # --- answer block as the user message ----------------------------------------
