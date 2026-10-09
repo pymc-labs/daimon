@@ -280,7 +280,8 @@ def register_upload_tool(mcp: FastMCP, *, runtime: McpRuntime) -> None:
             f"Upload {row.display_filename!r} with:\n"
             f'  curl -sS -X PUT --data-binary @<your-file> "{upload_url}"\n'
             f"Then post it by passing handle id {row.id!r} to `send_message`'s "
-            f"`file_handles` argument. Use the same channel/thread where the user "
-            f"asked — do not post to a different channel. Max "
+            f"`file_handles` argument, in the channel the user named — never one "
+            f"they did not name, and never the thread you were invoked from: a "
+            f"file for that chat goes in /mnt/session/outputs instead. Max "
             f"{MAX_UPLOAD_BYTES // 1_000_000} MB; the URL is single-use."
         )

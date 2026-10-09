@@ -177,6 +177,12 @@ async def test_create_file_upload_url_returns_a_put_url_and_a_handle(
     assert "https://t.example.com/uploads/" in text, (
         "url should be built from app_root_url, beside /healthz"
     )
+    assert "same channel/thread" not in text, (
+        "the result must not send the file back into the thread the agent answers"
+    )
+    assert "/mnt/session/outputs" in text and "never the thread you were invoked from" in text, (
+        "a file for the chat the agent was invoked from goes out with its reply"
+    )
 
 
 async def test_create_file_upload_url_takes_no_data_argument(
