@@ -114,7 +114,9 @@ per other tenant is then two).
 
 ## What is not modelled
 
-The per-tenant cap is a constant here; the code reads it per admission and runs
+A turn that waited runs the balance gate again once it holds a slot; a
+refusal there is one more end path of a started turn (`Finish`), so it needs
+no action of its own. The per-tenant cap is a constant here; the code reads it per admission and runs
 a dispatch first, so a raised cap starts waiting turns before a newcomer.
 Thread-level queueing (`_processing`/`_pending`) is in
 [`thread_queue/`](../thread_queue/README.md); a queued turn holds its thread

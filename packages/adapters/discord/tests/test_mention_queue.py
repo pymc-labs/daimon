@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,6 +28,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from daimon.core.turn.slots import wait_for_slot
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -150,7 +152,10 @@ async def queued_bot(
 ):
     """Bot with tenant provisioned. _handle_mention is left intact; tests
     install per-test stubs."""
-    result = await provision_tenant(db_session_factory, platform="discord", workspace_id="123456")
+    # Funded: a turn that queued re-checks the balance once it holds a slot.
+    result = await provision_tenant(
+        db_session_factory, platform="discord", workspace_id="123456", signup_credit=Decimal("10")
+    )
 
     runtime = _make_runtime(result.tenant_id, db_session_factory)
     return make_bot(runtime)
@@ -188,29 +193,71 @@ async def test_no_queueing_when_serial_mentions(queued_bot: DaimonBot) -> None:
 
 
 @pytest.mark.asyncio
-async def test_per_tenant_cap_refuses_before_global_cap(queued_bot: DaimonBot) -> None:
-    queued_bot.runtime.settings.discord.max_concurrent_turns = 1
+async def test_over_the_tenant_cap_a_mention_queues_instead_of_refusing(
+    queued_bot: DaimonBot,
+) -> None:
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id="123456")
-    queued_bot._inflight[tenant_id] = 100  # pyright: ignore[reportPrivateUsage]
-    queued_bot._global_inflight = 1  # pyright: ignore[reportPrivateUsage]
+    cap = queued_bot.runtime.settings.discord.max_concurrent_turns_per_tenant
+    held = [queued_bot.turn_queue.claim(tenant_id) for _ in range(cap)]
+    slots: list[str] = []
+    waiting = asyncio.Event()
+
+    async def stub(*_args: object, **_kwargs: object) -> None:
+        # Stands in for _orchestrate: the card is up, now wait for a slot.
+        waiting.set()
+        slots.append(
+            await wait_for_slot(
+                asyncio.Event(),
+                sessionmaker=queued_bot.runtime.sessionmaker,
+                tenant_id=tenant_id,
+            )
+        )
+
+    queued_bot._orchestrate = stub  # type: ignore[method-assign]
+    message = _make_channel_message()
+    turn = asyncio.create_task(queued_bot.on_message(message))
+    await waiting.wait()
+    assert queued_bot.turn_queue.depth(tenant_id) == 1
+    held[0].release()
+    await turn
+    assert slots == ["started"]
+    message.channel.send.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+    for ticket in held:
+        ticket.release()
+    assert queued_bot.turn_queue.in_flight() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_full_tenant_queue_refuses_with_the_plain_notice(queued_bot: DaimonBot) -> None:
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id="123456")
+    queued_bot.turn_queue.max_queued_per_tenant = 0
+    cap = queued_bot.runtime.settings.discord.max_concurrent_turns_per_tenant
+    for _ in range(cap):
+        queued_bot.turn_queue.claim(tenant_id)
     message = _make_channel_message()
 
     await queued_bot.on_message(message)
 
-    assert queued_bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
     message.channel.send.assert_awaited_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         "This server has too many chats in flight right now — try again in a moment."
     )
 
 
 @pytest.mark.asyncio
-async def test_global_cap_refuses_second_turn_and_releases_first(queued_bot: DaimonBot) -> None:
-    queued_bot.runtime.settings.discord.max_concurrent_turns = 1
+async def test_over_the_global_cap_a_mention_waits_for_the_first_to_finish(
+    queued_bot: DaimonBot,
+) -> None:
+    queued_bot.turn_queue.global_cap = 1
     entered = asyncio.Event()
     release = asyncio.Event()
     started: list[int] = []
 
     async def stub(message: discord.Message, *_args: object, **_kwargs: object) -> None:
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id="123456")
+        result = await wait_for_slot(
+            asyncio.Event(), sessionmaker=queued_bot.runtime.sessionmaker, tenant_id=tenant_id
+        )
+        assert result == "started"
         started.append(message.id)
         entered.set()
         if len(started) == 1:
@@ -223,20 +270,37 @@ async def test_global_cap_refuses_second_turn_and_releases_first(queued_bot: Dai
     second_message.id = 2
     first = asyncio.create_task(queued_bot.on_message(first_message))
     await entered.wait()
-    try:
-        await queued_bot.on_message(second_message)
-        assert started == [1]
-        assert queued_bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
-        second_message.channel.send.assert_awaited_once_with(GLOBAL_CAP_NOTICE)
-    finally:
-        release.set()
-        await first
-    assert queued_bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
+    second = asyncio.create_task(queued_bot.on_message(second_message))
+    async with asyncio.timeout(5):
+        while not queued_bot.turn_queue.depth():
+            await asyncio.sleep(0.01)
+    assert started == [1]
+    assert queued_bot.turn_queue.in_flight() == 1
+    assert queued_bot.turn_queue.depth() == 1
+    release.set()
+    await asyncio.gather(first, second)
+    assert started == [1, 2]
+    second_message.channel.send.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+    assert queued_bot.turn_queue.in_flight() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_full_queue_at_the_global_cap_refuses_with_the_global_notice(
+    queued_bot: DaimonBot,
+) -> None:
+    queued_bot.turn_queue.global_cap = 1
+    queued_bot.turn_queue.max_queued = 0
+    queued_bot.turn_queue.claim(uuid.uuid4())
+    message = _make_channel_message()
+
+    await queued_bot.on_message(message)
+
+    message.channel.send.assert_awaited_once_with(GLOBAL_CAP_NOTICE)  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
 
 
 @pytest.mark.asyncio
 async def test_global_slot_released_when_turn_fails(queued_bot: DaimonBot) -> None:
-    queued_bot.runtime.settings.discord.max_concurrent_turns = 1
+    queued_bot.turn_queue.global_cap = 1
 
     async def fail(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("turn failed")
@@ -246,8 +310,8 @@ async def test_global_slot_released_when_turn_fails(queued_bot: DaimonBot) -> No
 
     await queued_bot.on_message(message)
 
-    assert queued_bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
-    assert queued_bot._inflight == {}  # pyright: ignore[reportPrivateUsage]
+    assert queued_bot.turn_queue.in_flight() == 0
+    assert queued_bot.turn_queue.depth() == 0
 
 
 @pytest.mark.asyncio

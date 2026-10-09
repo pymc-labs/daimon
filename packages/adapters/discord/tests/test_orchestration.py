@@ -20,8 +20,10 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.views import CancelView
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, ThreadNamingSettings
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig, ScopeContext
@@ -34,7 +36,12 @@ from daimon.core.session_snapshot import (
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.tenants import set_provision_status
+from daimon.core.stores.turn_card_intents import (
+    TurnCardIntentRow,
+    list_recoverable_turn_card_intents,
+)
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
+from daimon.core.turn_queue import TurnTicket
 from daimon.testing import (
     DEFAULT_MODEL_ID,
     ma_agent,
@@ -282,8 +289,8 @@ class TestNewThreadCreation:
         notice.edit.assert_awaited_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
             content="I couldn't open your chat. Please try mentioning me again."
         )
-        assert bot._inflight == {}  # pyright: ignore[reportPrivateUsage]
-        assert bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
+        assert bot.turn_queue.in_flight() == 0
+        assert bot.turn_queue.depth() == 0
         assert bot._processing == set()  # pyright: ignore[reportPrivateUsage]
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -1381,7 +1388,10 @@ class TestProtectedChannelSilence:
         bot, tenant_id = await self._bot_for(
             db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
         )
-        bot._inflight[tenant_id] = 10_000  # pyright: ignore[reportPrivateUsage]  # saturate the cap
+        # Saturate the cap with no queue room, so the plain notice is due.
+        bot.turn_queue.max_queued_per_tenant = 0
+        for _ in range(100):
+            bot.turn_queue.claim(tenant_id)
         message = _make_channel_message(channel_id=789)
         message.channel.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -1398,15 +1408,16 @@ class TestProtectedChannelSilence:
             db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
         )
         assert bot.runtime.settings.discord is not None
-        bot.runtime.settings.discord.max_concurrent_turns = 1
-        bot._global_inflight = 1  # pyright: ignore[reportPrivateUsage]
+        bot.turn_queue.global_cap = 1
+        bot.turn_queue.max_queued = 0
+        bot.turn_queue.claim(uuid.uuid4())
         message = _make_channel_message(channel_id=789)
         message.channel.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
 
         await bot.on_message(message)
 
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        assert bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+        assert bot.turn_queue.in_flight() == 1
 
     async def test_global_capacity_notice_is_not_posted_into_a_protected_thread(
         self,
@@ -1417,14 +1428,15 @@ class TestProtectedChannelSilence:
             db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
         )
         assert bot.runtime.settings.discord is not None
-        bot.runtime.settings.discord.max_concurrent_turns = 1
-        bot._global_inflight = 1  # pyright: ignore[reportPrivateUsage]
+        bot.turn_queue.global_cap = 1
+        bot.turn_queue.max_queued = 0
+        bot.turn_queue.claim(uuid.uuid4())
         message = _make_thread_message(parent_id=789)
 
         await bot.on_message(message)
 
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        assert bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+        assert bot.turn_queue.in_flight() == 1
 
     @pytest.mark.parametrize("fetch_fails", [False, True], ids=["fetched", "fetch-failed"])
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
@@ -2597,3 +2609,199 @@ class TestUnpromptedAdmission:
         mention.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         sent: str = mention.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "spending budget" in sent, "a mention gets the channel budget notice"
+
+
+class TestOverCapQueue:
+    """Over a cap a mention posts the ordinary card and waits behind it."""
+
+    async def _queued_turn(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> tuple[DaimonBot, TurnTicket, MagicMock, MagicMock, asyncio.Task[None]]:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        bot.turn_queue.global_cap = 1
+        held = bot.turn_queue.claim(uuid.uuid4())  # another guild's turn holds the only slot
+        message = _make_channel_message()
+        card = MagicMock(spec=discord.Message)
+        card.id = 4242
+        card.webhook_id = None
+        card.edit = AsyncMock(return_value=card)
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 9999
+        thread.send = AsyncMock(return_value=card)
+        message.create_thread = AsyncMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+        turn = asyncio.create_task(bot.on_message(message))
+        for _ in range(200):
+            if thread.send.await_count:
+                break
+            await asyncio.sleep(0.01)
+        assert thread.send.await_count, "the card is posted while the turn waits"
+        assert bot.turn_queue.depth() == 1
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        return bot, held, thread, card, turn
+
+    @staticmethod
+    def _card_texts(card: MagicMock) -> list[str]:
+        return [str(c.kwargs.get("content")) for c in card.edit.await_args_list]
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_queued_mention_shows_the_ordinary_card_and_starts_on_a_free_slot(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        mock_create_session.return_value = ma_session(id="sess-queued")
+        bot, held, thread, _card, turn = await self._queued_turn(db_session, db_session_factory)
+
+        embed = cast("list[discord.Embed]", thread.send.await_args.kwargs["embeds"])[0]
+        assert embed.title == "Working on it…", "the same card as any turn; no queue words"
+        assert "slot" not in (embed.description or "").lower()
+        await asyncio.sleep(0.05)
+        mock_create_session.assert_not_called()
+
+        held.release()  # the other guild's turn ends: the queued one starts
+        await asyncio.wait_for(turn, 5)
+        mock_create_session.assert_awaited_once()
+        assert bot.turn_queue.depth() == 0
+        assert bot.turn_queue.in_flight() == 0
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_stop_while_queued_ends_the_card_as_stopped_and_never_starts(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        bot, held, thread, card, turn = await self._queued_turn(db_session, db_session_factory)
+
+        view = thread.send.await_args.kwargs["view"]
+        assert isinstance(view, CancelView)
+        view._cancel.set()  # pyright: ignore[reportPrivateUsage]  # the Stop click
+        await asyncio.wait_for(turn, 5)
+
+        assert self._card_texts(card) == ["Stopped.\nSend a message to start again."]
+        assert bot.turn_queue.depth() == 0
+        held.release()
+        await asyncio.sleep(0.05)
+        mock_create_session.assert_not_called()
+        assert bot.turn_queue.in_flight() == 0
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_the_max_wait_ends_the_card_with_the_ordinary_error(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        bot.turn_queue.global_cap = 1
+        bot.turn_queue.max_wait_s = 0.05
+        bot.turn_queue.claim(uuid.uuid4())
+        message = _make_channel_message()
+        card = MagicMock(spec=discord.Message)
+        card.id = 4243
+        card.edit = AsyncMock(return_value=card)
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 9998
+        thread.send = AsyncMock(return_value=card)
+        message.create_thread = AsyncMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+
+        await asyncio.wait_for(bot.on_message(message), 5)
+
+        assert self._card_texts(card) == ["Something went wrong. Mention me to try again."]
+        mock_create_session.assert_not_called()
+        assert bot.turn_queue.depth() == 0
+        assert bot.turn_queue.in_flight() == 1, "only the other guild's turn holds a slot"
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_restart_retires_a_queued_card_like_any_orphan(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        bot, _held, _thread, card, turn = await self._queued_turn(db_session, db_session_factory)
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id="123456")
+
+        # The process dies with the turn still queued; a new one boots.
+        restarted = make_bot(_make_runtime(tenant_id, db_session_factory))
+        restarted_thread = MagicMock(spec=discord.Thread)
+        restarted_thread.fetch_message = AsyncMock(return_value=card)
+        restarted.get_channel = MagicMock(return_value=restarted_thread)  # pyright: ignore[reportAttributeAccessIssue]
+        restarted.wait_until_ready = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        intents: list[TurnCardIntentRow] = []
+        for _ in range(100):  # the card's id commits just after its post
+            async with db_session_factory() as session:
+                intents = await list_recoverable_turn_card_intents(session, platform="discord")
+            if intents and intents[0].message_id is not None:
+                break
+            await asyncio.sleep(0.01)
+        (intent,) = intents
+        assert intent.message_id == str(card.id), "the queued card is recorded like any other"
+        # What the boot sweep runs for each recoverable intent. The card's Stop
+        # button carries the intent id; a mock message has no components.
+        with patch(
+            "daimon.adapters.discord.turn_card_recovery.turn_card_ids_from_message",
+            return_value=frozenset({intent.id}),
+        ):
+            await restarted._reconcile_turn_card_intent(intent)  # pyright: ignore[reportPrivateUsage]
+
+        titles = [
+            embed.title
+            for call in card.edit.await_args_list
+            for embed in cast("list[discord.Embed]", call.kwargs.get("embeds") or [])
+        ] + [
+            call.kwargs["embed"].title
+            for call in card.edit.await_args_list
+            if call.kwargs.get("embed") is not None
+        ]
+        assert "Stopped: Daimon restarted." in titles
+        turn.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await turn
+        mock_create_session.assert_not_called()
+        assert bot.turn_queue.depth() == 0

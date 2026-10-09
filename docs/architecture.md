@@ -227,18 +227,42 @@ verdict runs an ordinary turn through `admit()` as the burst's newest author,
 with every notice withheld. Teams also counts a quote of the bot's message as
 a mention.
 
-Discord checks its per-guild in-flight limit before the optional process-wide
-turn limit (`DAIMON_DISCORD__MAX_CONCURRENT_TURNS`). Guild mentions, unprompted
-replies and DMs count against it; an excess requested turn gets a retry notice.
-Unprompted replies follow their existing silent-refusal policy. Continuation
-wakes retain their existing admission path. The limit is unset by default and
-applies only to this Discord process.
+Discord, Slack and Teams limit simultaneous chat turns per tenant, and Discord
+also has an optional process-wide limit (`DAIMON_DISCORD__MAX_CONCURRENT_TURNS`,
+unset by default). `daimon tenants turn-cap PLATFORM WORKSPACE_ID N` stores a
+tenant override; `default` clears it and restores the adapter's deployment
+setting (3 by default). The limits cover Discord mentions, DMs, thread
+participation and wizard submits, Slack mentions, and Teams messages, wakes and
+thread participation. They do not limit MCP or routine turns, and they count
+per adapter process.
 
-Discord, Slack and Teams also limit simultaneous chat turns per tenant before admission.
-`daimon tenants turn-cap PLATFORM WORKSPACE_ID N` stores a tenant override;
-`default` clears it and restores the adapter's deployment setting (3 by default).
-The check covers Discord mentions, thread participation and wizard submits,
-Slack mentions, and Teams messages, wakes and thread participation. It does not limit MCP or routine turns.
+Each adapter process keeps its slots in one `TurnQueue`
+(`packages/core/daimon/core/turn_queue.py`). A requested turn over either limit
+is not refused: it joins its tenant's queue (`DAIMON_TURN_QUEUE__*`), posts the
+ordinary "Working on it…" card with Stop, and waits after the card and before
+`bind_session` (`wait_for_slot` in `packages/core/daimon/core/turn/slots.py`).
+Nothing on the card says it is queued. A released slot goes, in the same
+synchronous span, to the first tenant in round-robin order that has a waiting
+turn and a free tenant slot; within a tenant the queue is FIFO. Stop removes a
+waiting turn and ends its card as Stopped. After `max_wait_s` (300 s) the turn
+leaves the queue and its card ends with "Something went wrong. Mention me to
+try again." A turn that waited runs the balance gate again once it has a slot,
+since `admit()` ran before the wait. The per-turn ceiling starts after the
+wait. Only a full queue (50 per tenant, 500 in total) refuses, with the plain
+capacity notice and the existing `turn.skipped.*concurrency_shed` logs, now
+with a `reason`. Discord DMs have no card and wait under the typing indicator;
+Slack DMs are not limited. Unprompted replies and Teams continuation wakes
+never queue: they take a free slot or keep their silent refusal or retry. The
+queue is in memory, so a restart drops it; queued turns' card intents are
+written before the wait, so the boot sweep retires their cards as "Stopped:
+Daimon restarted." like any orphan. `formal/turn_queue/` models it.
+
+Queue events: `turn.queue.enqueued`, `turn.queue.started` (`waited_ms`),
+`turn.queue.cancelled`, `turn.queue.timed_out` (`waited_ms`),
+`turn.queue.full` (`reason`) and `turn.queue.balance_depleted`. The
+`runtime.health` heartbeat carries `turn_queue` beside `turns_in_flight`: depth
+now (global and largest tenant) and the p50, p95 and max wait of the turns that
+started in that window.
 
 A channel with `writers: none` hears nothing from the agent, not even a
 refusal or an error. Each turn entry decides FIRST, before tenant liveness, provisioning or
@@ -878,8 +902,8 @@ not recognise is `unknown`. Each `AdmissionDenied` reason with a member of its
 own (balance, cap, channel budget, writers none, agent rule, own agents only) maps to it, and
 `denial_termination_reason` gives the same member to a gate that decides with
 `authorize` instead of raising; the rest are `admission_denied`. Two members have no exception behind them and are
-set outside the mapper: `admission_concurrency_shed` by callers when
-`should_admit_turn` refuses, and `recovery_failed` by `run_prepared_turn` on
+set outside the mapper: `admission_concurrency_shed` by callers when the
+turn queue is full or a queued turn passes its max wait, and `recovery_failed` by `run_prepared_turn` on
 the terminal hook when replacing a lost session raises (the exception it
 re-raises maps to `unknown`). A session MA reports terminated without any terminal
 event for this turn is `session_terminated`, never `completed`.

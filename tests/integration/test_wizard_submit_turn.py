@@ -29,7 +29,7 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.wizard_submit import WizardSubmitButton
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import McpSettings
+from daimon.core.config import McpSettings, TurnQueueSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -124,6 +124,7 @@ def _make_runtime(
     settings.github.oauth_scopes = ()
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100
+    settings.turn_queue = TurnQueueSettings()
     discord_settings.thread_open_notice_after_s = 3.0
     discord_settings.bot_display_name = "daimon"
     settings.discord = discord_settings
@@ -510,7 +511,7 @@ async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
         await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]  # asserting the spawn contract
 
     assert stream_hits, "the turn must actually have run"
-    assert bot._inflight == {}, (  # pyright: ignore[reportPrivateUsage]  # asserting the cap bookkeeping contract
+    assert bot.turn_queue.in_flight() == 0, (
         "the in-flight slot the turn claimed must be released once it finishes"
     )
     assert await list_orphaned_turns(db_session, platform="discord") == [], (
@@ -518,7 +519,7 @@ async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
     )
 
 
-async def test_a_submit_over_the_per_tenant_cap_runs_no_turn_and_says_so(
+async def test_a_submit_over_the_per_tenant_cap_with_a_full_queue_runs_no_turn_and_says_so(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await _seed_funded_tenant(db_session, workspace_id="800007001")
@@ -531,7 +532,9 @@ async def test_a_submit_over_the_per_tenant_cap_runs_no_turn_and_says_so(
     runtime = _make_runtime(db_session_factory, router)
     runtime.settings.discord.max_concurrent_turns_per_tenant = 1
     bot = _make_bot(runtime)
-    bot._inflight[tenant.id] = 1  # pyright: ignore[reportPrivateUsage]  # simulates a mention turn already holding this tenant's only slot
+    # A mention turn already holds this tenant's only slot, and the queue is full.
+    bot.turn_queue.max_queued_per_tenant = 0
+    bot.turn_queue.claim(tenant.id)
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
 
     with patch("daimon.core.turn.prepare.create_session"):
@@ -543,7 +546,7 @@ async def test_a_submit_over_the_per_tenant_cap_runs_no_turn_and_says_so(
         await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]  # asserting the spawn contract
 
     assert stream_hits == [], "an over-cap submit must never reach the SSE turn stream"
-    assert bot._inflight == {tenant.id: 1}, (  # pyright: ignore[reportPrivateUsage]  # asserting the cap bookkeeping contract
+    assert bot.turn_queue.in_flight(tenant.id) == 1, (
         "a refused turn must not claim (or release) a slot it never took"
     )
 
@@ -559,6 +562,50 @@ async def test_a_submit_over_the_per_tenant_cap_runs_no_turn_and_says_so(
 
     usage_rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
     assert usage_rows == [], "an over-cap refusal must write zero usage_events rows"
+
+
+async def test_a_submit_over_the_per_tenant_cap_waits_behind_its_card_then_runs(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Someone clicked submit and is waiting: over the cap the turn queues like
+    a mention, posts its ordinary card, and runs once the slot frees."""
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800007003")
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+    channel = _make_channel(thread_id=5027, parent_id=4027)
+    stream_hits: list[str] = []
+    router = _build_router(str(tenant.id), sent_events=[], stream_hits=stream_hits)
+    runtime = _make_runtime(db_session_factory, router)
+    runtime.settings.discord.max_concurrent_turns_per_tenant = 1
+    bot = _make_bot(runtime)
+    held = bot.turn_queue.claim(tenant.id)  # a mention turn holds the only slot
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    with patch("daimon.core.turn.prepare.create_session") as mock_create_session:
+        mock_create_session.return_value = ma_session(
+            id="sess_queued_submit", agent_id=_AGENT_ID, model=_MODEL_ID, environment_id=_ENV_ID
+        )
+        item = await WizardSubmitButton.from_custom_id(
+            interaction, MagicMock(), _submit_match(row.id)
+        )
+        assert await item.interaction_check(interaction) is True
+        await item.callback(interaction)
+        for _ in range(300):
+            if bot.turn_queue.depth(tenant.id) and channel.send.await_count:
+                break
+            await asyncio.sleep(0.01)
+        assert bot.turn_queue.depth(tenant.id) == 1, "the submit waits for a slot"
+        assert stream_hits == [], "no turn runs while it waits"
+        posted = [
+            call.args[0]
+            for call in channel.send.call_args_list
+            if call.args and isinstance(call.args[0], str)
+        ]
+        assert not any("in flight" in text for text in posted), "no capacity notice"
+        held.release()
+        await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+
+    assert stream_hits, "the queued submit turn ran once the slot freed"
+    assert bot.turn_queue.in_flight() == 0 and bot.turn_queue.depth() == 0
 
 
 async def test_mention_claiming_last_slot_during_submit_cap_read_sheds_submit(
@@ -589,13 +636,15 @@ async def test_mention_claiming_last_slot_during_submit_cap_read_sheds_submit(
         await item.callback(interaction)
         try:
             await asyncio.wait_for(cap_read.wait(), timeout=2)
-            bot._inflight[tenant.id] = 1  # pyright: ignore[reportPrivateUsage]  # a mention claims the last slot while the submit waits
+            # A mention claims the last slot while the submit waits; the queue is full.
+            bot.turn_queue.max_queued_per_tenant = 0
+            bot.turn_queue.claim(tenant.id)
         finally:
             release_cap.set()
         await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
 
     assert stream_hits == []
-    assert bot._inflight == {tenant.id: 1}  # pyright: ignore[reportPrivateUsage]
+    assert bot.turn_queue.in_flight(tenant.id) == 1
 
 
 # --- post-hoc admission refusal -------------------------------------------------
@@ -735,7 +784,9 @@ async def test_a_submit_in_a_protected_channel_posts_nothing_and_runs_no_turn(
     router = _build_router(str(tenant.id), sent_events=[], stream_hits=stream_hits)
     bot = _make_bot(_make_runtime(db_session_factory, router))
     if saturate:
-        bot._inflight[tenant.id] = 10_000  # pyright: ignore[reportPrivateUsage]  # saturate the cap
+        bot.turn_queue.max_queued_per_tenant = 0  # saturate the cap, no queue room
+        for _ in range(100):
+            bot.turn_queue.claim(tenant.id)
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
 
     with patch("daimon.core.turn.prepare.create_session") as mock_create_session:

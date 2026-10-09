@@ -310,11 +310,16 @@ async def test_a_due_timer_waits_while_the_tenant_is_at_its_turn_cap(
         ran.append(inbound)
 
     with patch.object(TeamsApp, "_run_turn", _turn):
-        teams._inflight[TENANT] = teams._teams.max_concurrent_turns_per_tenant
+        held = [
+            teams.turn_queue.claim(TENANT)
+            for _ in range(teams._teams.max_concurrent_turns_per_tenant)
+        ]
         await _poll(db_session_factory, teams)
         assert ran == [], "no wake runs over the cap"
         assert (await _status(db_session_factory, key))[0] == "pending", "the timer stays due"
-        del teams._inflight[TENANT]
+        assert teams.turn_queue.depth() == 0, "a wake is retried by the next poll, not queued"
+        for ticket in held:
+            ticket.release()
         await _poll(db_session_factory, teams)
     assert len(ran) == 1, "the next poll under the cap runs it"
     assert await _status(db_session_factory, key) == ("delivered", None)
@@ -376,7 +381,8 @@ async def test_a_wake_deferred_behind_a_turn_keeps_the_saved_input_and_the_cap(
         ran.append(thread_id)
 
     with patch.object(TeamsApp, "_dispatch_continuations", _dispatch):
-        teams._inflight[TENANT] = teams._teams.max_concurrent_turns_per_tenant
+        for _ in range(teams._teams.max_concurrent_turns_per_tenant):
+            teams.turn_queue.claim(TENANT)
         teams._release(CONVERSATION_ID)
         teams._release(THREAD_ID)
         await asyncio.gather(*teams._tasks)

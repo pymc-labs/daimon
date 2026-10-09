@@ -125,13 +125,13 @@ from daimon.core.turn.errors import (
     SessionBusyError,
     SessionPreparationFailed,
 )
-from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, holding, wait_for_slot
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
     ThreadQueue,
@@ -148,6 +148,7 @@ from daimon.core.turn_origin import (
     render_turn_origin,
     turn_origin,
 )
+from daimon.core.turn_queue import TurnQueue
 from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -500,11 +501,20 @@ class DaimonBot(commands.Bot):
         # `_release_thread`). Last writer wins; a dispatch reads every pending
         # row for the thread, so one entry is enough.
         self._deferred_dispatch: dict[int, tuple[uuid.UUID, discord.Thread, str]] = {}
-        # Per-tenant concurrency cap (SCALE-01): active turn count keyed by tenant_id.
-        # Incremented before the turn starts; decremented in a finally that brackets
-        # the whole drain loop so the slot is always released.
-        self._inflight: dict[uuid.UUID, int] = {}
-        self._global_inflight = 0
+        # Turn slots under the per-tenant cap (SCALE-01) and the optional global
+        # cap, with the queue a turn waits in when either is full. A ticket is
+        # claimed at admission and released in a `holding` block that brackets
+        # the whole drain loop, so the slot is always returned.
+        global_cap = (
+            runtime.settings.discord.max_concurrent_turns
+            if runtime.settings.discord is not None
+            else None
+        )
+        self.turn_queue = TurnQueue.from_settings(
+            runtime.settings.turn_queue,
+            platform="discord",
+            global_cap=global_cap if isinstance(global_cap, int) else None,
+        )
         # Organic thread participation: per-thread quiet-period batches, keyed
         # by thread id. Populated only for threads that resolved to `on`.
         self._participation_pending: dict[int, _ParticipationBatch] = {}
@@ -679,7 +689,7 @@ class DaimonBot(commands.Bot):
         log.info("discord.draining", inflight_threads=len(self._processing))
         deadline = asyncio.get_running_loop().time() + _DRAIN_GRACE_S
         while (
-            self._processing or self._global_inflight
+            self._processing or self.turn_queue.in_flight()
         ) and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.5)
         log.info("discord.drain_complete", remaining=len(self._processing))
@@ -1466,24 +1476,6 @@ class DaimonBot(commands.Bot):
             await set_provision_status(self.runtime.sessionmaker, tenant_id=tenant_id, archive=True)
         log.warning("guild_removed", guild_id=guild_id, guild_name=guild.name)
 
-    def _release_inflight(self, tenant_id: uuid.UUID) -> None:
-        """Release one per-tenant in-flight slot, dropping the key at zero."""
-        self._inflight[tenant_id] = self._inflight.get(tenant_id, 1) - 1
-        if self._inflight[tenant_id] <= 0:
-            self._inflight.pop(tenant_id, None)
-
-    def try_claim_global_turn(self) -> bool:
-        """Claim a process-wide slot without yielding between check and increment."""
-        settings = self.runtime.settings.discord
-        cap = settings.max_concurrent_turns if settings is not None else None
-        if self.draining or (isinstance(cap, int) and self._global_inflight >= cap):
-            return False
-        self._global_inflight += 1
-        return True
-
-    def release_global_turn(self) -> None:
-        self._global_inflight -= 1
-
     def _cancel_participation_batch(self, thread_id: int) -> None:
         """Drop a thread's pending auto batch and its timer, if any."""
         batch = self._participation_pending.pop(thread_id, None)
@@ -1644,33 +1636,37 @@ class DaimonBot(commands.Bot):
         )
         if self.draining or thread_id in self._processing:
             return  # protection and cap reads both awaited
-        count = self._inflight.get(tenant_id, 0)
-        if not should_admit_turn(current_in_flight=count, cap=cap):
-            record_refusal(
-                self.runtime.sessionmaker,
-                tenant_id=tenant_id,
-                platform="discord",
-                channel_id=str(thread_id),
-                thread_id=str(thread_id),
-            )
-            log.info(
-                "turn.skipped.concurrency_shed",
-                tenant_id=str(tenant_id),
-                guild_id=guild_id,
-                channel_id=str(thread_id),
-                in_flight=count,
-                cap=cap,
-            )
+        # Nobody asked for this turn, so nobody waits on it: it takes a free
+        # slot or is silently refused, and never queues.
+        count = self.turn_queue.in_flight(tenant_id)
+        ticket = self.turn_queue.try_claim(tenant_id, cap=cap)
+        if ticket is None:
+            if count >= cap or self.turn_queue.depth(tenant_id):
+                record_refusal(
+                    self.runtime.sessionmaker,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    channel_id=str(thread_id),
+                    thread_id=str(thread_id),
+                )
+                log.info(
+                    "turn.skipped.concurrency_shed",
+                    tenant_id=str(tenant_id),
+                    guild_id=guild_id,
+                    channel_id=str(thread_id),
+                    in_flight=count,
+                    cap=cap,
+                    reason="unprompted_at_cap",
+                )
+            else:
+                log.info(
+                    "turn.skipped.global_concurrency_shed",
+                    tenant_id=str(tenant_id),
+                    guild_id=guild_id,
+                    channel_id=str(thread_id),
+                    reason="unprompted_at_cap",
+                )
             return
-        if not self.try_claim_global_turn():
-            log.info(
-                "turn.skipped.global_concurrency_shed",
-                tenant_id=str(tenant_id),
-                guild_id=guild_id,
-                channel_id=str(thread_id),
-            )
-            return  # unprompted participation follows the per-tenant silent refusal
-        self._inflight[tenant_id] = count + 1
         self._processing.add(thread_id)
         try:
             # The ledger row is written when the turn is admitted, not when it
@@ -1689,8 +1685,7 @@ class DaimonBot(commands.Bot):
         finally:
             self._release_thread(thread_id)
             self._pending.pop(thread_id, None)
-            self._release_inflight(tenant_id)
-            self.release_global_turn()
+            ticket.release()
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Remember the clicker's name for /billing; the command tree handles the rest."""
@@ -1866,110 +1861,112 @@ class DaimonBot(commands.Bot):
                 await self._queue_behind_inflight_turn(thread_id, message)
                 return
 
-            # --- Per-tenant concurrency cap (SCALE-01) ---
-            # Read-check-increment in one synchronous span (no await between read
-            # and increment) to avoid a race where two coroutines both read 0 and
-            # both increment past the cap. The queue check above is also synchronous,
-            # so there is exactly one increment per coroutine that reaches this point
-            # and one matching decrement in the finally block below.
+            # --- Turn slots (SCALE-01 per tenant, optional process-wide cap) ---
+            # Admission is synchronous (no await between the per-thread check
+            # above and the claim). Over either cap the turn queues: it posts
+            # the ordinary card and waits for a slot after it (`wait_for_slot`
+            # in _orchestrate). Only a full queue refuses, with the plain notice.
+            # `holding` returns the slot, or leaves the queue, on every exit.
             cap = (
                 tr.turn_cap
                 if tr.turn_cap is not None
                 else self.runtime.settings.discord.max_concurrent_turns_per_tenant
             )
-            count = self._inflight.get(tenant_id, 0)
-            if not should_admit_turn(current_in_flight=count, cap=cap):
-                # Mirror of the Slack shed log — here the notice is a visible
-                # channel message, but the log keeps shed counts greppable
-                # across both adapters.
-                record_refusal(
-                    self.runtime.sessionmaker,
-                    tenant_id=tenant_id,
-                    platform="discord",
-                    channel_id=str(thread_id),
-                    thread_id=str(thread_id),
-                )
-                log.info(
-                    "turn.skipped.concurrency_shed",
-                    tenant_id=str(tenant_id),
-                    guild_id=str(message.guild.id) if message.guild else None,
-                    channel_id=str(message.channel.id),
-                    in_flight=count,
-                    cap=cap,
-                )
-                await message.channel.send(
-                    "This server has too many chats in flight right now — try again in a moment."
-                )
-                return
-            if not self.try_claim_global_turn():
+            ticket = self.turn_queue.admit(
+                tenant_id, cap=cap, guild_id=guild_id, channel_id=str(thread_id)
+            )
+            if ticket is None:
+                count = self.turn_queue.in_flight(tenant_id)
+                if count >= cap:
+                    # Mirror of the Slack shed log — here the notice is a visible
+                    # channel message, but the log keeps shed counts greppable
+                    # across both adapters.
+                    record_refusal(
+                        self.runtime.sessionmaker,
+                        tenant_id=tenant_id,
+                        platform="discord",
+                        channel_id=str(thread_id),
+                        thread_id=str(thread_id),
+                    )
+                    log.info(
+                        "turn.skipped.concurrency_shed",
+                        tenant_id=str(tenant_id),
+                        guild_id=str(message.guild.id) if message.guild else None,
+                        channel_id=str(message.channel.id),
+                        in_flight=count,
+                        cap=cap,
+                        reason="queue_full",
+                    )
+                    await message.channel.send(
+                        "This server has too many chats in flight right now — "
+                        "try again in a moment."
+                    )
+                    return
                 log.info(
                     "turn.skipped.global_concurrency_shed",
                     tenant_id=str(tenant_id),
                     guild_id=guild_id,
                     channel_id=str(thread_id),
+                    reason="queue_full",
                 )
                 await message.channel.send(GLOBAL_CAP_NOTICE)
                 return
-            self._inflight[tenant_id] = count + 1
 
-            # Channel-level mentions each open their own thread + MA session, so
-            # they run in parallel — no serialization (bounded by the
-            # per-tenant and optional process-wide caps claimed above).
-            # Serializing them by channel id wedged the whole channel whenever
-            # a single turn stalled (e.g. an
-            # upstream overload backoff with no SSE events for minutes).
-            #
-            # Channel mentions still parallelize per-mention (each opens its own
-            # thread + MA session up front). But the bot-created thread is
-            # registered in self._processing at creation time (inside
-            # _orchestrate, immediately after create_thread), so an in-thread
-            # follow-up mention that arrives during the *same* originating turn
-            # queues instead of racing a second turn onto that thread's session —
-            # this is the actual fix for the in-thread queue race. The earlier closure of
-            # #163 was documentation-only; its regression test covered parallel
-            # channel mentions, not the channel→in-thread sequence this closes.
-            #
-            # Only follow-up mentions *within an existing thread* are queued and
-            # coalesced: a thread is one conversation on one MA session, and
-            # overlapping turns on the same session must not interleave. After the
-            # in-flight thread turn completes, the queue drains once into a single
-            # composite follow-up turn.
-            if not isinstance(message.channel, discord.Thread):
-                created_thread_ids: list[int] = []
-                try:
-                    await self._handle_mention(
-                        message, guild_id, tenant_id, created_thread_ids=created_thread_ids
-                    )
-                    # Drain-always: _handle_mention never raises after its own
-                    # boundary, so this runs on both success and turn failure —
-                    # a follow-up queued behind a failing originating turn still
-                    # gets its drain turn instead of being silently discarded.
-                    if created_thread_ids:
-                        await self._drain_pending_mentions(
-                            created_thread_ids[0], guild_id, tenant_id
+            with holding(ticket):
+                # Channel-level mentions each open their own thread + MA session, so
+                # they run in parallel — no serialization (bounded by the
+                # per-tenant and optional process-wide slots claimed above).
+                # Serializing them by channel id wedged the whole channel whenever
+                # a single turn stalled (e.g. an
+                # upstream overload backoff with no SSE events for minutes).
+                #
+                # Channel mentions still parallelize per-mention (each opens its own
+                # thread + MA session up front). But the bot-created thread is
+                # registered in self._processing at creation time (inside
+                # _orchestrate, immediately after create_thread), so an in-thread
+                # follow-up mention that arrives during the *same* originating turn
+                # queues instead of racing a second turn onto that thread's session —
+                # this is the actual fix for the in-thread queue race. The earlier closure of
+                # #163 was documentation-only; its regression test covered parallel
+                # channel mentions, not the channel→in-thread sequence this closes.
+                #
+                # Only follow-up mentions *within an existing thread* are queued and
+                # coalesced: a thread is one conversation on one MA session, and
+                # overlapping turns on the same session must not interleave. After the
+                # in-flight thread turn completes, the queue drains once into a single
+                # composite follow-up turn.
+                if not isinstance(message.channel, discord.Thread):
+                    created_thread_ids: list[int] = []
+                    try:
+                        await self._handle_mention(
+                            message, guild_id, tenant_id, created_thread_ids=created_thread_ids
                         )
-                finally:
-                    # No-op in the normal case (the drain above already emptied
-                    # the queue) — this only catches messages that arrive after
-                    # the final drain iteration, the same residual window the
-                    # thread branch below has.
-                    for created_id in created_thread_ids:
-                        self._release_thread(created_id)
-                        self._pending.pop(created_id, None)
-                    self._release_inflight(tenant_id)
-                    self.release_global_turn()
-                return
+                        # Drain-always: _handle_mention never raises after its own
+                        # boundary, so this runs on both success and turn failure —
+                        # a follow-up queued behind a failing originating turn still
+                        # gets its drain turn instead of being silently discarded.
+                        if created_thread_ids:
+                            await self._drain_pending_mentions(
+                                created_thread_ids[0], guild_id, tenant_id
+                            )
+                    finally:
+                        # No-op in the normal case (the drain above already emptied
+                        # the queue) — this only catches messages that arrive after
+                        # the final drain iteration, the same residual window the
+                        # thread branch below has.
+                        for created_id in created_thread_ids:
+                            self._release_thread(created_id)
+                            self._pending.pop(created_id, None)
+                    return
 
-            thread_id = message.channel.id
-            self._processing.add(thread_id)
-            try:
-                await self._handle_mention(message, guild_id, tenant_id)
-                await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
-            finally:
-                self._release_thread(thread_id)
-                self._pending.pop(thread_id, None)
-                self._release_inflight(tenant_id)
-                self.release_global_turn()
+                thread_id = message.channel.id
+                self._processing.add(thread_id)
+                try:
+                    await self._handle_mention(message, guild_id, tenant_id)
+                    await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
+                finally:
+                    self._release_thread(thread_id)
+                    self._pending.pop(thread_id, None)
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await self._handle_prologue_failure(message, exc, guild_id, post_state=post_state)
         except Exception as exc:  # on_message event-handler boundary
@@ -2917,12 +2914,6 @@ class DaimonBot(commands.Bot):
                 await target.send(admission_refusal_message(err.reason, self.runtime.settings))
             return
 
-        # D-03 boundary: the per-turn ceiling clock starts here, once admission
-        # has passed, and covers session bind/create (bind_session) plus the
-        # driver pump (run_prepared_turn) as ONE shared budget -- admit()
-        # itself is deliberately outside it.
-        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
-
         agent = admission.agent
 
         # --- Create thread + status embed BEFORE session create ---
@@ -3057,6 +3048,38 @@ class DaimonBot(commands.Bot):
         turn_send = recorder.sender(
             thread, turn_card_intent_id=turn_card_intent.id, transport=transport
         )
+
+        # Over a cap the turn waits here, behind its ordinary card: the queue
+        # is never shown. Stop ends the wait like any turn; the max wait is a
+        # safeguard that ends the card with the ordinary error.
+        slot = await wait_for_slot(
+            cancel, sessionmaker=self.runtime.sessionmaker, tenant_id=tenant_id
+        )
+        if slot != "started":
+            ended = {
+                "cancelled": "Stopped.\nSend a message to start again.",
+                "timed_out": QUEUE_TIMED_OUT_TEXT,
+                "balance_depleted": admission_refusal_message(
+                    "balance_depleted", self.runtime.settings
+                ),
+            }[slot]
+            if lifecycle.message_ref is not None:
+                await _edit_message(lifecycle.message_ref, content=ended, embed=None, view=None)
+            else:
+                await turn_send(ended)
+            await retire_terminal_turn_card(
+                self.runtime.sessionmaker,
+                intent_id=turn_card_intent.id,
+                expected_message_id=lifecycle.card_message_id,
+                no_post_confirmed=not lifecycle.first_post_attempted,
+            )
+            return
+
+        # D-03 boundary: the per-turn ceiling clock starts here, once admission
+        # has passed and the turn holds its slot, and covers session
+        # bind/create (bind_session) plus the driver pump (run_prepared_turn)
+        # as ONE shared budget -- admit() and the queue wait are outside it.
+        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
 
         discord_settings = self.runtime.settings.discord
         assert discord_settings is not None, (
