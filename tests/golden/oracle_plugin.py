@@ -48,6 +48,7 @@ from daimon.testing.ma import not_found_response
 from daimon.testing.ma_transport import Json, ScriptedReply, ScriptedTransport
 from http_turn import HttpTurnFixtures, synchronize_approval_poll, synchronize_cancel_timer
 from mutations import apply as apply_mutation
+from runner import TURN_CONTROL_KWARGS
 from sqlalchemy import ColumnDefault, DateTime
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -553,6 +554,8 @@ def pytest_runtest_setup(item: Any) -> None:
             }
             recorded: dict[str, Any] = {}
             for key, value in kwargs.items():
+                if key in TURN_CONTROL_KWARGS:
+                    continue
                 if key in opaque:
                     recorded[key] = (
                         None if value is None else {"fixture_type": type(value).__name__}

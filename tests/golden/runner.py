@@ -1,15 +1,22 @@
-"""Replay existing offline scenarios through the current integration path."""
+"""Replay both turn paths against the same committed offline recordings."""
 
 from __future__ import annotations
 
 import argparse
 import difflib
+import inspect
 import json
 import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Literal
+
+type TurnPath = Literal["legacy", "mux"]
+TURN_PATHS: tuple[TurnPath, ...] = ("legacy", "mux")
+TURN_CONTROL_KWARGS = frozenset({"path", "backend", "scope", "session_ref"})
+MUX_PENDING = "mux golden parity pending: N4's public turn bridge has not landed on integration"
 
 ROOT = Path(__file__).resolve().parents[2]
 GOLDENS = Path(__file__).resolve().parent
@@ -50,9 +57,24 @@ SCENARIOS = {
 }
 
 
-def replay(name: str, *, mutation: str | None = None) -> str:
+def mux_turn_bridge_available() -> bool:
+    """Require the complete public N4 seam; an unwired flag is not mux coverage."""
+    from daimon.core.turn import driver
+
+    return TURN_CONTROL_KWARGS.issubset(inspect.signature(driver.run_turn).parameters)
+
+
+def replay(name: str, *, mutation: str | None = None, turn_path: TurnPath = "legacy") -> str:
     """One scenario per process prevents fixture/logging state leaking across goldens."""
+    if turn_path not in TURN_PATHS:
+        raise ValueError("Oracle turn path must be legacy or mux")
+    if turn_path == "mux" and not mux_turn_bridge_available():
+        raise RuntimeError(MUX_PENDING)
     env = os.environ.copy()
+    # Pin both the real application flag and the fixture's requested mode.
+    # An ambient mux flag must never change a legacy check or regeneration.
+    env["DAIMON_TURN__PATH"] = turn_path
+    env["DAIMON_ORACLE_TURN_PATH"] = turn_path
     env.pop("DAIMON_ORACLE_MUTATION", None)
     if mutation is not None:
         env["DAIMON_ORACLE_MUTATION"] = mutation
@@ -70,6 +92,8 @@ def replay(name: str, *, mutation: str | None = None) -> str:
                 SCENARIOS[name],
                 "-p",
                 "oracle_plugin",
+                "-p",
+                "turn_path_plugin",
                 "-q",
                 "--tb=short",
             ],
@@ -80,7 +104,9 @@ def replay(name: str, *, mutation: str | None = None) -> str:
             text=True,
             timeout=120,
         )
-        assert result.returncode == 0, f"Oracle scenario {name} failed:\n{result.stdout}"
+        assert result.returncode == 0, (
+            f"Oracle scenario {name} ({turn_path}) failed:\n{result.stdout}"
+        )
         assert output.exists(), f"Oracle scenario {name} produced no transcript"
         return output.read_text()
 
@@ -98,8 +124,16 @@ def legacy_transcript(transcript: str) -> str:
     return json.dumps(data, indent=2, sort_keys=True) + "\n"
 
 
-def check(name: str, *, regen: bool = False, mutation: str | None = None) -> None:
-    actual = legacy_transcript(replay(name, mutation=mutation))
+def check(
+    name: str,
+    *,
+    regen: bool = False,
+    mutation: str | None = None,
+    turn_path: TurnPath = "legacy",
+) -> None:
+    if regen and (turn_path != "legacy" or mutation is not None):
+        raise ValueError("Only the unmutated legacy path may regenerate shared golden files")
+    actual = legacy_transcript(replay(name, mutation=mutation, turn_path=turn_path))
     path = GOLDENS / f"{name}.json"
     if regen:
         path.write_text(actual)
@@ -122,11 +156,21 @@ def main() -> int:
     parser.add_argument(
         "--mutation", choices=("slack_eyes", "discord_eyes", "ledger_dating", "dm_delivery")
     )
+    parser.add_argument("--turn-path", choices=(*TURN_PATHS, "both"), default="legacy")
     args = parser.parse_args()
-    assert not (args.regen and args.mutation), "Never record mutated production behavior"
+    if args.regen and (args.mutation or args.turn_path != "legacy"):
+        parser.error("Only the unmutated legacy path may regenerate shared golden files")
+    available = mux_turn_bridge_available()
+    if args.turn_path == "mux" and not available:
+        parser.error(MUX_PENDING)
+    paths = TURN_PATHS if args.turn_path == "both" else (args.turn_path,)
     for name in args.scenarios or SCENARIOS:
-        check(name, regen=args.regen, mutation=args.mutation)
-        print(f"{name}: {'recorded' if args.regen else 'matched'}", flush=True)
+        for turn_path in paths:
+            if turn_path == "mux" and not available:
+                print(f"{name} (mux): skipped — {MUX_PENDING}", flush=True)
+                continue
+            check(name, regen=args.regen, mutation=args.mutation, turn_path=turn_path)
+            print(f"{name} ({turn_path}): {'recorded' if args.regen else 'matched'}", flush=True)
     return 0
 
 
