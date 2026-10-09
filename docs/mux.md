@@ -671,3 +671,15 @@ The native session-resources extension adds lazy `walk` and identity-returning
 `add_file` methods. Existing methods retain their behavior. The host stops at
 the first `.env` mount without fetching later pages and records the one add
 response identity without a retrieve. Session and file grants are checked before I/O.
+### OpenAI offline conformance
+
+Explicit registration through `mux.drivers.openai.conformance.register` runs the
+actual OpenAI driver and pinned SDK against synthetic HTTP/SSE records. Each
+shared fixture gets a fresh driver and independent request log. C05, C06, C10,
+C15 and C16 pass; the other thirteen entries declare typed pending reasons for
+resource ports, unsupported conditional updates or missing host certification
+adapters. Pending entries prevent a complete certificate. Broken variants cover
+content corruption, premature root release/stop, admission/scope bypass,
+successful unsupported migration, public handles and undeclared extensions.
+The registration context closes streams and SDK clients. This adds no provider
+discovery or host activation and makes no live calls.
