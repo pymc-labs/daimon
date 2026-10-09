@@ -5363,12 +5363,12 @@
     },
     {
       "file": "packages/core/tests/test_transfer_port_requests.py",
-      "line": 120,
-      "end": 120,
+      "line": 129,
+      "end": 129,
       "scope": "test_rehost_keeps_default_upload_beta_and_bundle_queue_outcome",
       "category": "test",
       "resource": "files.download",
-      "call": "legacy.beta.files.download(bundle.id, betas=[workspace_transfer._MA_BETA])",
+      "call": "legacy.beta.files.download(bundle.id, betas=['managed-agents-2026-04-01'])",
       "request_keys": [],
       "response_access": [
         "response.read"
@@ -5376,19 +5376,19 @@
     },
     {
       "file": "packages/core/tests/test_transfer_port_requests.py",
-      "line": 122,
-      "end": 122,
+      "line": 131,
+      "end": 131,
       "scope": "test_rehost_keeps_default_upload_beta_and_bundle_queue_outcome",
       "category": "test",
       "resource": "files.delete",
-      "call": "legacy.beta.files.delete(bundle.id, betas=[workspace_transfer._MA_BETA])",
+      "call": "legacy.beta.files.delete(bundle.id, betas=['managed-agents-2026-04-01'])",
       "request_keys": [],
       "response_access": []
     },
     {
       "file": "packages/core/tests/test_transfer_port_requests.py",
-      "line": 58,
-      "end": 58,
+      "line": 62,
+      "end": 62,
       "scope": "test_recorded_handoff_sessions_keep_wire_request_and_fail_closed",
       "category": "test",
       "resource": "sessions.retrieve",
@@ -5398,8 +5398,8 @@
     },
     {
       "file": "packages/core/tests/test_transfer_port_requests.py",
-      "line": 124,
-      "end": 126,
+      "line": 133,
+      "end": 135,
       "scope": "test_rehost_keeps_default_upload_beta_and_bundle_queue_outcome",
       "category": "test",
       "resource": "files.upload",
@@ -15246,7 +15246,7 @@
     },
     {
       "file": "packages/core/tests/test_transfer_port_requests.py",
-      "line": 11,
+      "line": 12,
       "module": "anthropic",
       "names": [
         "APIError",
@@ -15256,7 +15256,7 @@
     },
     {
       "file": "packages/core/tests/test_transfer_port_requests.py",
-      "line": 12,
+      "line": 13,
       "module": "anthropic.types.beta",
       "names": [
         "FileMetadata"
