@@ -178,7 +178,7 @@ class DiscordPostTransport:
     async def _webhook(
         self, *, create: bool = True, webhook_id: int | None = None
     ) -> discord.Webhook | None:
-        self._creation_fallback = False
+        self._creation_fallback = create and self.identity_enabled and not self.builtin
         if create:
             destination = self._destination()
             if destination is None or self.builtin or not self.identity_enabled:
@@ -193,10 +193,13 @@ class DiscordPostTransport:
                 return None
             pool = _webhooks.get(parent.id, {})
             if pool:
+                self._creation_fallback = False
                 return self._pick(pool)
             if _unavailable_until.get(parent.id, 0) > time.monotonic():
                 return None
             task = _creation_tasks.get(parent.id)
+            if task is not None and not task.done():
+                return None
             if task is None:
                 task = asyncio.create_task(self._resolve_webhook(create=True))
                 _creation_tasks[parent.id] = task
@@ -212,8 +215,8 @@ class DiscordPostTransport:
                 hook = None
             except Exception:
                 hook = None
-            if hook is None:
-                self._creation_fallback = True
+            if hook is not None:
+                self._creation_fallback = False
             return hook
         return await self._resolve_webhook(create=False, webhook_id=webhook_id)
 
@@ -239,6 +242,10 @@ class DiscordPostTransport:
             if webhook_id is not None:
                 raise discord.ClientException("application identity unavailable")
             return None
+        if webhook_id is not None:
+            cached = _webhooks.get(parent.id, {}).get(webhook_id)
+            if cached is not None:
+                return cached
         lock = _locks.setdefault(parent.id, asyncio.Lock())
         async with lock:
             pool = _webhooks.setdefault(parent.id, {})

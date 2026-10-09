@@ -174,7 +174,32 @@ async def test_concurrent_turns_create_only_one_channel_webhook() -> None:
     second = DiscordPostTransport(client, channel, name="Writer", avatar_url=None, builtin=False)
     await asyncio.gather(first.send(content="one"), second.send(content="two"))
     channel.create_webhook.assert_awaited_once_with(name="Daimon agents")
-    assert hook.send.await_count == 2
+    hook.send.assert_awaited_once()
+    channel.send.assert_awaited_once_with(content="**Writer**\n\ntwo")
+
+
+async def test_pending_create_does_not_make_later_posts_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, channel, hook = _world()
+    release = asyncio.Event()
+
+    async def create(*, name: str) -> MagicMock:
+        await release.wait()
+        return hook
+
+    channel.create_webhook = AsyncMock(side_effect=create)
+    monkeypatch.setattr(post_transport, "_CREATE_WAIT_SECONDS", 0.2)
+    first = DiscordPostTransport(client, channel, name="Research", avatar_url=None, builtin=False)
+    later = DiscordPostTransport(client, channel, name="Writer", avatar_url=None, builtin=False)
+    first_post = asyncio.create_task(first.send(content="first"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await asyncio.wait_for(later.send(content="second"), 0.05)
+    channel.send.assert_awaited_once_with(content="**Writer**\n\nsecond")
+    release.set()
+    await first_post
+    channel.create_webhook.assert_awaited_once()
 
 
 async def test_slow_webhook_create_falls_back_then_uses_created_hook(
@@ -250,7 +275,11 @@ async def test_create_429_falls_back_within_budget_and_respects_cooldown(
     channel.send.assert_awaited_once_with(content="**Research**\n\nfirst")
     release.set()
     await post_transport._creation_tasks[channel.id]  # pyright: ignore[reportPrivateUsage]
-    await transport.send(content="during cooldown")
+    cooldown_transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    await cooldown_transport.send(content="during cooldown")
+    assert channel.send.call_args.kwargs["content"] == "**Research**\n\nduring cooldown"
     channel.create_webhook.assert_awaited_once()
     assert _unavailable_until[channel.id] > post_transport.time.monotonic() + 60
     _unavailable_until[channel.id] = 0
@@ -338,9 +367,45 @@ async def test_webhook_limit_is_cached_for_ten_minutes() -> None:
         client, channel, name="Research", avatar_url=None, builtin=False
     )
     await transport.send(content="one")
-    await transport.send(content="two")
+    next_turn = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    await next_turn.send(content="two")
+    assert channel.send.call_args.kwargs["content"] == "**Research**\n\ntwo"
     channel.create_webhook.assert_awaited_once()
     client.http.channel_webhooks.assert_awaited_once()
+
+
+async def test_cached_edit_does_not_wait_for_pending_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, channel, hook = _world()
+    release = asyncio.Event()
+
+    async def create(*, name: str) -> MagicMock:
+        await release.wait()
+        return hook
+
+    channel.create_webhook = AsyncMock(side_effect=create)
+    monkeypatch.setattr(post_transport, "_CREATE_WAIT_SECONDS", 0.2)
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    post = asyncio.create_task(transport.send(content="first"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    known = MagicMock(spec=discord.Webhook)
+    known.id = 31
+    known.edit_message = AsyncMock(return_value=MagicMock(spec=discord.Message))
+    _webhooks[channel.id] = {known.id: known}
+    message = MagicMock(spec=discord.Message)
+    message.webhook_id = known.id
+    message.application_id = client.application_id
+    message.id = 40
+    await asyncio.wait_for(transport.edit(message, content="updated"), 0.05)
+    known.edit_message.assert_awaited_once_with(40, content="updated")
+    release.set()
+    await post
 
 
 async def test_one_hook_per_channel_and_edits_by_existing_message_webhook_id() -> None:
@@ -407,7 +472,7 @@ async def test_locked_thread_uses_bot_fallback() -> None:
         client, thread, name="Research", avatar_url=None, builtin=False
     )
     await transport.send(content="answer")
-    thread.send.assert_awaited_once_with(content="answer")
+    thread.send.assert_awaited_once_with(content="**Research**\n\nanswer")
     hook.send.assert_not_awaited()
 
 

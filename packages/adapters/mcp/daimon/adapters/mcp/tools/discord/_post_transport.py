@@ -25,7 +25,7 @@ _lookup_unavailable_until: dict[int, float] = {}
 _LOOKUP_UNAVAILABLE_SECONDS = 600
 _CREATE_WAIT_SECONDS = 2.0
 _creation_tasks: dict[int, asyncio.Task[discord.Webhook | None]] = {}
-_created_hooks: dict[int, discord.Webhook] = {}
+_created_hooks: dict[int, tuple[int, str]] = {}
 _create_unavailable_until: dict[int, float] = {}
 _deferred_channels: set[int] = set()
 _log = structlog.get_logger()
@@ -43,6 +43,8 @@ def _finish_creation(channel_id: int, task: asyncio.Task[discord.Webhook | None]
                 channel_id=channel_id,
                 error_type=type(exc).__name__,
             )
+        elif task.result() is not None:
+            _create_unavailable_until.pop(channel_id, None)
 
 
 def _retry_after(exc: discord.HTTPException) -> float:
@@ -125,11 +127,12 @@ async def own_webhook(
         return None
     if isinstance(channel, discord.Thread) and channel.locked:
         return None
-    if hook := _created_hooks.get(parent.id):
-        return hook
+    if credentials := _created_hooks.get(parent.id):
+        return discord.Webhook.partial(*credentials, client=client)
     if _create_unavailable_until.get(parent.id, 0) > time.monotonic():
         return None
     task = _creation_tasks.get(parent.id)
+    started_here = task is None
     if task is None:
         task = asyncio.create_task(_resolve_own_webhook(client, channel, create=True))
         _creation_tasks[parent.id] = task
@@ -139,12 +142,15 @@ async def own_webhook(
     try:
         hook = await asyncio.wait_for(asyncio.shield(task), _CREATE_WAIT_SECONDS)
     except TimeoutError:
+        _create_unavailable_until[parent.id] = time.monotonic() + _LOOKUP_UNAVAILABLE_SECONDS
         if parent.id not in _deferred_channels:
             _deferred_channels.add(parent.id)
             _log.info("discord.webhook.create_deferred", channel_id=parent.id)
         return None
     except Exception:
         return None
+    if hook is not None and not started_here and hook.token is not None:
+        return discord.Webhook.partial(hook.id, hook.token, client=client)
     return hook
 
 
@@ -221,7 +227,7 @@ async def _resolve_own_webhook(
             if hook is None and target_listed:
                 raise discord.ClientException("own webhook token unavailable")
             if create and hook is not None and hook.token is not None:
-                _created_hooks[parent.id] = hook
+                _created_hooks[parent.id] = (hook.id, hook.token)
             return hook if hook is not None and hook.token is not None else None
         except discord.HTTPException as exc:
             if create and exc.status == 429:
