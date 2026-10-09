@@ -7,8 +7,12 @@ SDK constructors (validated) and serialised with .model_dump(mode="json").
 
 from __future__ import annotations
 
+import io
 import re
 import uuid
+import zipfile
+from email.parser import BytesParser
+from email.policy import default
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +68,22 @@ def _parse_display_title_from_multipart(req: httpx.Request) -> str:
     return ""
 
 
+def _assert_skill_multipart(request: httpx.Request) -> bytes:
+    """Pin the old SDK file tuple at the actual host upload call site."""
+    message = BytesParser(policy=default).parsebytes(
+        b"Content-Type: " + request.headers["content-type"].encode() + b"\r\n\r\n" + request.content
+    )
+    files = [part for part in message.iter_parts() if part.get_filename() is not None]
+    assert len(files) == 1
+    part = files[0]
+    assert part.get_param("name", header="content-disposition") == "files[]"
+    assert part.get_filename() == "SKILL.zip"
+    assert part.get_content_type() == "application/zip"
+    data = part.get_payload(decode=True)
+    assert isinstance(data, bytes)
+    return data
+
+
 async def test_sync_creates_new_skill(tmp_path: Path) -> None:
     """No MA match → skills.create called with canonical title; outcome is CREATED."""
     skill = _skill(tmp_path)
@@ -71,10 +91,12 @@ async def test_sync_creates_new_skill(tmp_path: Path) -> None:
     router = MARouter()
     router.add("GET", r"/v1/skills", lambda req, _m: list_response([]))
     create_called = False
+    create_requests: list[httpx.Request] = []
 
     def on_create(req: httpx.Request, _m: object) -> httpx.Response:
         nonlocal create_called
         create_called = True
+        create_requests.append(req)
         return httpx.Response(
             200,
             json=SkillListResponse(
@@ -99,6 +121,10 @@ async def test_sync_creates_new_skill(tmp_path: Path) -> None:
     assert outcomes[0].action is Action.CREATED, "action should be CREATED"
     assert outcomes[0].anthropic_id == "sk_new", "should capture anthropic_id"
     assert create_called, "skills.create must have been called"
+    data = _assert_skill_multipart(create_requests[0])
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        assert archive.namelist() == ["brainstorming/SKILL.md"]
+        assert archive.read("brainstorming/SKILL.md") == (skill.skill_dir / "SKILL.md").read_bytes()
 
 
 async def test_sync_updates_existing_skill(tmp_path: Path) -> None:
@@ -108,10 +134,12 @@ async def test_sync_updates_existing_skill(tmp_path: Path) -> None:
     router = MARouter()
     router.add("GET", r"/v1/skills", lambda req, _m: list_response([_skill_row("sk_1", canonical)]))
     version_called = False
+    version_requests: list[httpx.Request] = []
 
     def on_version_create(req: httpx.Request, _m: object) -> httpx.Response:
         nonlocal version_called
         version_called = True
+        version_requests.append(req)
         return httpx.Response(
             200,
             json=VersionCreateResponse(
@@ -137,6 +165,10 @@ async def test_sync_updates_existing_skill(tmp_path: Path) -> None:
     assert outcomes[0].action is Action.UPDATED, "action should be UPDATED"
     assert outcomes[0].anthropic_id == "sk_1", "should use existing MA skill id"
     assert version_called, "skills.versions.create must have been called"
+    data = _assert_skill_multipart(version_requests[0])
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        assert archive.namelist() == ["brainstorming/SKILL.md"]
+        assert archive.read("brainstorming/SKILL.md") == (skill.skill_dir / "SKILL.md").read_bytes()
 
 
 async def test_sync_refuses_a_member_replacing_an_existing_library_skill(tmp_path: Path) -> None:

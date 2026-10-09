@@ -342,10 +342,13 @@ neutral specs continue to omit None. Duplicate native config namespaces are
 rejected before I/O. Native model and environment config namespaces are
 advertised by the assembled driver profile.
 
-
 Skill sync, add, fork and channel-copy resource calls now pass the tenant from
 Daimon's existing authorization context into the bound driver scope. The two
 skills helper callers also pass this scope to version retry, removing their
 legacy authorization seam. A denied bound sync target retains its existing
 DaimonError message. Generic agent/environment pages normalize the SDK's empty
 cursor to None; native full walks retain the SDK stop rule.
+
+Skill import and repository-sync call-site checks retain the legacy multipart
+file field, `SKILL.zip` filename, `application/zip` media type and archive bytes
+for create, version and duplicate-title recovery uploads.
