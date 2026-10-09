@@ -71,6 +71,8 @@ class PageRequest(Contract):
 
 
 class Page[T](Contract):
+    """One page. `next_cursor` is None exactly on the last page, even when it is empty."""
+
     data: tuple[T, ...]
     next_cursor: str | None = None
 

@@ -105,10 +105,28 @@ as `account_scope_id`. That is not a thread binding: a `ProviderBinding`
 (which provider session backs a thread, at which generation) has its own
 `id`, stable across generations.
 
+In a spec, `None` means "not set": the driver sends nothing and the
+provider's default applies, while an explicitly empty tuple or mapping is
+sent as empty. Agent and environment patches carry `extensions` keyed by
+namespace, each replacing that namespace's config. Records carry
+`created_at` and, where the provider reports it, `updated_at`. A `Page` has
+`next_cursor=None` exactly on its last page.
+
+`Skills.create` makes a new skill and `Skills.publish_version` adds a version
+to an existing one. Both take the bundle inline as a `SkillUpload` (file
+bytes in the same request, never a separate upload first). `Skills.list`
+returns full `Skill` records.
+
 Native features are typed extension ports addressed by
-`(port type, namespace, version)`. Anthropic offers `memory_stores`,
-`vaults`, `session_resources`, `skills_versions`, `multiagent` and
-`environments_fork`; OpenAI offers `vaults` and `steer`, all at version 1.
+`(port type, namespace, version)`. Anthropic offers `agent_tools`,
+`memory_stores`, `vaults`, `session_resources`, `skills_versions` (list,
+download and delete versions), `multiagent`, `environments_fork` and
+`platform_export`; OpenAI offers `vaults` and `steer`, all at version 1.
+Provider-specific agent shapes, such as Anthropic's toolset configuration or
+a multiagent roster, travel on the agent as an `ExtensionConfig` for
+`anthropic.agent_tools` or `anthropic.multiagent`; the driver owns and
+checks that schema. `anthropic.platform_export` returns native JSON on
+purpose, because exporting native state is the feature.
 Asking for a namespace the profile does not offer raises
 `UnsupportedCapability`, and asking for another version raises
 `ExtensionVersionError`. There is no raw client attribute on any port.
