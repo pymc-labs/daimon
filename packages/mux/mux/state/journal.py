@@ -93,7 +93,7 @@ def project(snapshot: ProjectionSnapshot, event: Event) -> ProjectionSnapshot:
             return snapshot.model_copy(
                 update={
                     "state": "running",
-                    "active_root_turn": snapshot.active_root_turn or running.root_turn_id,
+                    "active_root_turn": running.root_turn_id,
                     "required_actions": (),
                 }
             )
