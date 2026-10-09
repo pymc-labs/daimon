@@ -99,6 +99,7 @@ def test_setup_is_resumable_and_teardown_lifts_everything(tmp_path: Path, monkey
         no_roles=False,
         daimon_bot_id=layout.STAGING_DAIMON_BOT_ID,
         admin_user_id=None,
+        admin_role_id=None,
     )
     state = {"guild_id": args.guild_id, "run_id": args.run_id, "teams": {}}
     api = FakeDiscord()
@@ -128,7 +129,10 @@ def test_setup_is_resumable_and_teardown_lifts_everything(tmp_path: Path, monkey
     ), "teardown should archive the copy named in the wrapped isolate output"
 
 
-def test_roleless_layout_uses_public_channel_and_member_admin(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("admin_role_id", [None, "1533050393641095199"])
+def test_roleless_layout_uses_public_channel_and_member_admin(
+    tmp_path: Path, monkeypatch, admin_role_id: str | None
+) -> None:
     calls: list[tuple[str, ...]] = []
 
     def fake_cli(*args: str) -> str:
@@ -150,6 +154,7 @@ def test_roleless_layout_uses_public_channel_and_member_admin(tmp_path: Path, mo
         no_roles=True,
         daimon_bot_id=layout.STAGING_DAIMON_BOT_ID,
         admin_user_id=None,
+        admin_role_id=admin_role_id,
     )
     state = {"guild_id": args.guild_id, "run_id": args.run_id, "no_roles": True, "teams": {}}
     api = FakeDiscord()
@@ -163,9 +168,12 @@ def test_roleless_layout_uses_public_channel_and_member_admin(tmp_path: Path, mo
         "discord",
         args.guild_id,
         state_id(api),
-        "--user",
-        layout.QA_BOT_ID,
+        "--role" if admin_role_id else "--user",
+        admin_role_id or layout.QA_BOT_ID,
     ) in calls
+
+    if admin_role_id:
+        assert not any("--user" in call for call in calls)
 
 
 def state_id(api: FakeDiscord) -> str:
@@ -200,7 +208,13 @@ def test_setup_accepts_discord_administrator() -> None:
 
 
 @pytest.mark.parametrize(
-    "bot_id,allowed", [(layout.QA_BOT_ID, True), (layout.QA_ADMIN_BOT_ID, True), ("999", False)]
+    "bot_id,allowed",
+    [
+        (layout.QA_BOT_ID, True),
+        (layout.QA_ADMIN_BOT_ID, True),
+        (layout.STAGING_DAIMON_BOT_ID, True),
+        ("999", False),
+    ],
 )
 def test_main_qa_identity_allowlist(
     tmp_path: Path, monkeypatch, bot_id: str, allowed: bool
