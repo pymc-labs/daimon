@@ -435,12 +435,7 @@ def _confirmation_page(
             '<p id="selection-status" aria-live="polite">0 selected</p>'
             '<button class="gh-link-button" id="change-access" type="button" hidden>'
             "Change</button>"
-            + (
-                '<p class="gh-client-note">Clients use this server. '
-                "Pick only the repos they may see.</p>"
-                if clients_present
-                else ""
-            )
+            + ('<p class="gh-client-note">Clients use this server.</p>' if clients_present else "")
             + (
                 f'<p class="gh-inline-error" role="alert">{html.escape(selection_error)}</p>'
                 if selection_error
