@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Discord agent posts and MCP tools now wait at most two seconds for a new channel webhook, then post through the bot with the agent name while creation continues in the background. Creation is deduplicated per channel, 429 retries respect a cooldown, and new channels create one webhook.
 - **The scheduler's usage sweep no longer re-replays every model call it has
   already metered.** It asks the API for `span.model_request_end` events only
   and skips events already in `usage_events` before writing, so the startup and
@@ -40,6 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scripted offline MA transport and platform/DB effect recorders support
   deterministic neutral-core parity checks with exact billing values and
   jitter-safe DB timestamps that preserve scheduled durations.
+- MCP browser pages now share a responsive Daimon shell with Daimon's face in
+  the page header, local Inter font, brand colours, and inline action icons.
+  The picker uses separate desktop, tablet, and phone layouts. GitHub and Slack
+  page copy has been rewritten. The GitHub picker shows access
+  before the repo list on narrow screens, keeps selections across search, and
+  locks controls during Connect. Billing, Slack installation, personal GitHub
+  linking, and MCP connection pages use the same shell. Tailwind CSS is
+  generated from the server templates with a pinned standalone CLI and checked
+  in CI.
 - Agent identity can be disabled for selected Discord guilds or Slack workspaces
   while remaining enabled elsewhere in the deployment.
 - Discord and Slack GitHub setup panels now manage connected repos, agent grants,

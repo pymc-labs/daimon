@@ -97,6 +97,27 @@ The last three are trust boundaries rather than tidiness: a service that
 cannot import `daimon` cannot hold the Anthropic key or a database
 credential, whatever a future contributor is tempted to do inside it.
 
+## MCP browser pages
+
+The MCP adapter renders its GitHub, Slack, personal link, MCP connection, and
+billing pages through `web_shell.render_page`. The shell owns the Daimon mark,
+local Inter fonts, semantic colours, responsive card, and cache and frame
+headers. The pages are native HTML using shadcn New York styling recipes;
+checkboxes, radios and forms remain native controls. Page modules escape any
+dynamic content before passing their trusted markup to the shell. The
+stylesheet and assets are served at `/web/` from the MCP package.
+Meaningful page icons render as local inline Lucide SVGs. The GitHub mark is
+from Feather, since Lucide excludes brand marks; both licences are bundled
+beside the Inter font licence.
+
+`scripts/generate_web_css.py` compiles `static/input.css` using the pinned
+Tailwind v4 standalone Linux x64 CLI. Run the generator on Linux x64; it does
+not ship macOS binaries. The script verifies the binary's SHA-256, scans only
+the page modules listed in `input.css`, and writes the committed `static/web.css`.
+Run `uv run python scripts/generate_web_css.py` after editing styles; CI runs
+the same command with `--check`. The CLI is a build tool and is not part of the
+runtime image. The notebook and report hosts have their own page shells.
+
 ## How a message becomes a turn
 
 Discord, Slack and Teams run the same two-stage chokepoint in `daimon.core.turn`.

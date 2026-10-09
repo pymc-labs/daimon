@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.mcp.auth.verifier import TOKEN_KIND_CLAIM
+from daimon.adapters.mcp.web_shell import render_page
 from daimon.core.billing import BillingConfig
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.auth import TokenVerifier
@@ -100,21 +101,17 @@ def build_checkout_route(
     return handler
 
 
-_SUCCESS_HTML = (
-    "<html><body><h1>Payment received</h1>"
-    "<p>Your credit is updated. You can return to your chat.</p>"
-    "</body></html>"
-)
-_CANCEL_HTML = (
-    "<html><body><h1>Checkout cancelled</h1>"
-    "<p>No charge was made. You can return to your chat.</p>"
-    "</body></html>"
-)
-
-
 async def billing_success(_req: Request) -> HTMLResponse:
-    return HTMLResponse(_SUCCESS_HTML)
+    return render_page(
+        title="Payment received",
+        context="Billing",
+        body_html="<h1>Payment received</h1><p>Your credit is updated. Return to your chat.</p>",
+    )
 
 
 async def billing_cancel(_req: Request) -> HTMLResponse:
-    return HTMLResponse(_CANCEL_HTML)
+    return render_page(
+        title="Checkout cancelled",
+        context="Billing",
+        body_html="<h1>Checkout cancelled</h1><p>No charge was made. Return to your chat.</p>",
+    )

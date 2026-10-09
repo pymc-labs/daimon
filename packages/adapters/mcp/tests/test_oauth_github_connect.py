@@ -70,6 +70,59 @@ def test_routes_not_mounted_when_unconfigured(
     assert "/oauth/github/confirm" not in paths
 
 
+def test_picker_names_owner_type_for_screen_readers() -> None:
+    installations = [
+        oauth_github._Installation(
+            id=index,
+            owner_id=index,
+            owner_login=login,
+            repository_selection="selected",
+            repos=(oauth_github._Repo(index, index, index, f"{login}/repo", True),),
+            owner_type=owner_type,
+        )
+        for index, login, owner_type in (
+            (1, "company", "Organization"),
+            (2, "person", "User"),
+        )
+    ]
+    page = oauth_github._confirmation_page(
+        root="https://mcp.test",
+        state="state",
+        invitation_hash="invitation",
+        secret="secret",
+        cancel_url="https://discord.com",
+        installations=installations,
+        clients_present=False,
+        platform="discord",
+        workspace="Test Server",
+        agent_name="Test Agent",
+    )
+    assert '<span class="web-sr-only">Organization</span>company' in page.body.decode()
+    assert '<span class="web-sr-only">Personal account</span>person' in page.body.decode()
+    assert page.body.decode().count('class="web-icon web-icon--github"') >= 4
+    assert '<div class="gh-context"><svg class="web-icon web-icon--discord"' in page.body.decode()
+    assert (
+        '<button class="gh-primary" id="connect-repos" type="submit"><svg class="web-icon web-icon--github"'
+        in page.body.decode()
+    )
+
+
+def test_done_page_names_github_and_discord_with_marks() -> None:
+    page = oauth_github._done_page(
+        count=2,
+        platform="discord",
+        external_id="123",
+        requester_label="Alex",
+        same_person=True,
+        agent_name="ResearchBot",
+        update_pending=False,
+    )
+    body = page.body.decode()
+    assert '<h1 class="gh-title-marked"><svg class="web-icon web-icon--github"' in body
+    assert 'class="web-icon web-icon--discord"' in body
+    assert "Back to Discord" in body
+
+
 @pytest.mark.asyncio
 async def test_pending_installation_request_matches_signed_in_person(
     monkeypatch: pytest.MonkeyPatch,
@@ -93,10 +146,17 @@ async def test_pending_installation_request_matches_signed_in_person(
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         assert await oauth_github.has_pending_installation_request(
             client, app_id="42", private_key="pem", github_user_id=17
-        )
-        assert not await oauth_github.has_pending_installation_request(
+        ) == oauth_github._PendingInstallationRequest(True, "example")
+        assert await oauth_github.has_pending_installation_request(
             client, app_id="42", private_key="pem", github_user_id=20
-        )
+        ) == oauth_github._PendingInstallationRequest(False)
+
+
+def test_pending_page_names_verified_organization_safely() -> None:
+    page = oauth_github._pending_page("#check", "#cancel", "team<one>")
+    text = page.body.decode()
+    assert "An owner of team&lt;one&gt; must approve Daimon." in text
+    assert "team<one>" not in text
 
 
 @pytest.mark.asyncio
@@ -127,9 +187,9 @@ async def test_connection_happy_path_and_rechecks(
 
     async def pending_check(
         client: httpx.AsyncClient, *, app_id: str, private_key: str, github_user_id: int
-    ) -> bool:
+    ) -> oauth_github._PendingInstallationRequest:
         assert app_id == "42" and private_key == "pem" and github_user_id == 17
-        return approval_pending
+        return oauth_github._PendingInstallationRequest(approval_pending)
 
     monkeypatch.setattr(oauth_github, "has_pending_installation_request", pending_check)
 
@@ -256,12 +316,15 @@ async def test_connection_happy_path_and_rechecks(
         page = await browser.get("/oauth/github/confirm", params={"state": state})
         assert page.status_code == 200
         assert "Choose repos" in page.text
-        assert "Select at least one repo" in page.text
+        assert "0 selected" in page.text
         assert 'id="github-connect-form"' in page.text
-        assert 'submit.textContent = "Connecting…"' in page.text
+        assert "Connecting…" in page.text
         assert "submit.disabled = true" in page.text
         assert "if (connecting || !boxes.some(box => box.checked))" in page.text
         assert 'name="access" value="write" checked' in page.text
+        assert 'class="web-icon web-icon--search"' in page.text
+        assert 'class="web-icon web-icon--pencil"' in page.text
+        assert 'class="web-icon web-icon--github"' in page.text
         assert page.text.index('id="search-repos"') < page.text.index('class="gh-repo-list"')
         assert page.text.count('class="gh-primary"') == 1
         assert 'action="https://mcp.test/oauth/github/confirm"' in page.text
@@ -297,7 +360,7 @@ async def test_connection_happy_path_and_rechecks(
         approval_pending = True
         waiting = await browser.get("/oauth/github/confirm", params={"state": state})
         assert "Waiting for GitHub approval" in waiting.text
-        assert "GitHub has the request." in waiting.text
+        assert "A GitHub owner must approve Daimon." in waiting.text
         assert "Check again" in waiting.text
         assert waiting.text.count('class="gh-primary"') == 1
         approval_pending = False
@@ -503,7 +566,9 @@ async def test_connection_happy_path_and_rechecks(
             )
         ).status_code == 307
         client_form = await browser.get("/oauth/github/confirm", params={"state": client_state})
-        assert "Clients use this server. Pick only the repos they may see." in client_form.text
+        assert "Clients can see what connected agents share." in client_form.text
+        assert 'class="web-icon web-icon--triangle-alert"' in client_form.text
+        assert "Pick only the repos" not in client_form.text
         assert 'id="select-all-repos"' in client_form.text
         assert 'name="repo" value="101" checked' not in client_form.text
         assert 'type="hidden" name="repo"' not in client_form.text
