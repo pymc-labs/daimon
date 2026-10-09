@@ -65,6 +65,7 @@ from daimon.core.agent_pins import PIN_WRITE_REFUSAL
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
@@ -1068,12 +1069,32 @@ async def test_picture_retry_replaces_status_modal_instead_of_pushing(
     assert upload_meta is not None and upload_meta.root_view_id == "V_DETAILS"
 
 
+async def _grant_skill_agent(
+    db: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, channel_id: str
+) -> None:
+    async with db.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(agent_rules={_OTHER_AGENT: AgentRule(runs_in=(channel_id,))}),
+        )
+        await set_channel_admins(
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            channel_id=channel_id,
+            role_ids=[],
+            user_ids=[_USER_ID],
+            actor_account_id=None,
+        )
+
+
 async def test_add_skill_opens_the_form_or_refuses_by_where_the_agent_answers(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """A member may add to an agent that answers nowhere, not to the workspace default."""
+    """Unbound is refused; a rule-owned team fork opens; workspace default refuses."""
     tenant_id, fernet_key = await _seed_team(db_session)
     await db_session.commit()
     agent = _agent_payload(tenant_id=tenant_id, name=_OTHER_AGENT, agent_id="agent_other")
@@ -1088,6 +1109,9 @@ async def test_add_skill_opens_the_form_or_refuses_by_where_the_agent_answers(
     mock = fake_slack_web_client.mock
 
     await handle_agent_setup_action(runtime, click)
+    assert _sent(mock, _VIEWS_PUSH_KEY) == [], "unbound does not establish ownership"
+    await _grant_skill_agent(db_session_factory, tenant_id, _CHANNEL_ID)
+    await handle_agent_setup_action(runtime, click)
     (pushed,) = _sent(mock, _VIEWS_PUSH_KEY)
     assert pushed["view"]["callback_id"] == CALLBACK_ADD_SKILL
     meta = decode_panel_metadata(pushed["view"]["private_metadata"])
@@ -1096,7 +1120,9 @@ async def test_add_skill_opens_the_form_or_refuses_by_where_the_agent_answers(
     await _mark_tenant_default(db_session_factory, tenant_id=tenant_id, agent_name=_OTHER_AGENT)
     await handle_agent_setup_action(runtime, click)
     assert len(_sent(mock, _VIEWS_PUSH_KEY)) == 1, "the refused click pushes nothing"
-    (refusal,) = _sent(mock, ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")))
+    refusals = _sent(mock, ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")))
+    assert len(refusals) == 2
+    refusal = refusals[-1]
     assert "changing its skills needs a workspace admin" in refusal["text"]
 
 
@@ -1131,16 +1157,17 @@ async def test_add_skill_on_an_agent_with_a_rule_opens_only_inside_its_channels(
     (refusal,) = _sent(mock, ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")))
     assert refusal["text"] == PIN_WRITE_REFUSAL
 
+    await _grant_skill_agent(db_session_factory, tenant_id, "C_ELSEWHERE")
     await handle_agent_setup_action(runtime, click("C_ELSEWHERE"))
     assert len(_sent(mock, _VIEWS_PUSH_KEY)) == 1, "opens inside the rule"
 
 
-async def test_add_skill_ignores_the_members_own_conversations_with_the_agent(
+async def test_own_conversation_does_not_grant_unbound_agent_mutation_ownership(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """A member's own live session is not someone else's use, as on Discord and in chat."""
+    """An own conversation does not supply the required channel-rule ownership."""
     tenant_id, fernet_key = await _seed_team(db_session)
     principal = await get_or_create_platform_principal(
         db_session, platform="slack", external_id=_USER_ID, tenant_id=tenant_id
@@ -1167,4 +1194,4 @@ async def test_add_skill_ignores_the_members_own_conversations_with_the_agent(
 
     await handle_agent_setup_action(runtime, click)
 
-    assert len(_sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY)) == 1, "the form opens"
+    assert _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY) == [], "unbound must refuse"

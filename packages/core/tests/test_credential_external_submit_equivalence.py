@@ -553,9 +553,9 @@ async def test_external_submit_matches_real_base(
     assert results[0] == results[1]
     if kind == "mcp" and policy == "open" and shared and not admin:
         assert results[1][0] is True
-        assert results[1][1] == ("applied" if existing == "new" else "write_failed")
-        if existing != "new":
-            assert results[1][8] == ()
+        # A private token never grants permission to attach even a new server.
+        assert results[1][1] == "write_failed"
+        assert results[1][8] == ()
 
 
 @pytest.mark.parametrize("platform", ("discord", "slack", "teams"))

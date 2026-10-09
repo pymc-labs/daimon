@@ -348,7 +348,9 @@ async def test_an_mcp_token_needs_setup_and_a_token_the_server_accepts(
     assert "not finished being set up" in unconfigured["task"]["value"]
 
     probe = AsyncMock(return_value=McpProbe(status_code=401, resource_metadata_url=None))
-    runtime = dataclasses.replace(_runtime(db_session_factory, mcp=True), mcp_token_probe=probe)
+    runtime = dataclasses.replace(
+        _admin_runtime(db_session_factory, mcp=True), mcp_token_probe=probe
+    )
     fake, store = TeamsApiFake(), AsyncMock()
     with patch.object(module, "connect_mcp_server_with_token", store):
         async with _running(fake, runtime) as (service, dispatch):
@@ -366,7 +368,10 @@ async def test_an_mcp_token_is_stored_attached_and_resumes_the_work(
     row = await _request(db_session_factory, account_id, kind="mcp")
     fake, connect = TeamsApiFake(), AsyncMock()
     with patch.object(module, "connect_mcp_server_with_token", connect):
-        async with _running(fake, _runtime(db_session_factory, mcp=True)) as (service, dispatch):
+        async with _running(fake, _admin_runtime(db_session_factory, mcp=True)) as (
+            service,
+            dispatch,
+        ):
             await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
 
