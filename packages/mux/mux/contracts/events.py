@@ -74,6 +74,8 @@ class NativeProvenance(Contract):
     cursor: str | None = None
     ordering_domain: str | None = None
     raw_ref: str | None = None
+    record: JsonValue | None = None
+    """Opaque native event, read only by the temporary host compatibility edge."""
 
 
 # Payloads of the fixed event types.
