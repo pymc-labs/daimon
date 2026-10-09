@@ -78,7 +78,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError, TurnError
-from daimon.core.github_connect_delivery import ConnectNotice, run_connect_notice_poller
+from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_new_repo_delivery import run_new_repo_notice_poller
 from daimon.core.github_removal_delivery import run_removal_notice_poller
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -91,6 +91,7 @@ from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.github_access_requests import AccessRequest
+from daimon.core.stores.github_connect_notices import ConnectNotice
 from daimon.core.stores.github_new_repo_notices import NewRepoNoticeGroup
 from daimon.core.stores.github_removal_notices import RemovalNotice
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
@@ -2243,10 +2244,16 @@ class DaimonBot(commands.Bot):
         if tenant is None:
             return True
         try:
-            recipient = await self.open_member_dm(
-                int(tenant.external_id), int(notice.requester_platform_user_id)
-            )
-            await recipient.send(notice.text, allowed_mentions=discord.AllowedMentions.none())
+            if notice.in_thread and notice.origin_thread_id:
+                destination = await self._channel_by_id(int(notice.origin_thread_id))
+                if not isinstance(destination, discord.abc.Messageable):
+                    return True
+                await destination.send(notice.text, allowed_mentions=discord.AllowedMentions.none())
+            else:
+                destination = await self.open_member_dm(
+                    int(tenant.external_id), int(notice.requester_platform_user_id)
+                )
+                await destination.send(notice.text, allowed_mentions=discord.AllowedMentions.none())
             return True
         except (discord.NotFound, discord.Forbidden, ValueError, LookupError):
             return True

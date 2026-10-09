@@ -210,7 +210,7 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError
-from daimon.core.github_connect_delivery import ConnectNotice, run_connect_notice_poller
+from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_new_repo_delivery import run_new_repo_notice_poller
 from daimon.core.github_removal_delivery import run_removal_notice_poller
@@ -223,6 +223,7 @@ from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role, TaskContinuationRow
 from daimon.core.stores.github_access_requests import AccessRequest
+from daimon.core.stores.github_connect_notices import ConnectNotice
 from daimon.core.stores.github_new_repo_notices import NewRepoNoticeGroup
 from daimon.core.stores.github_removal_notices import RemovalNotice
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
@@ -504,13 +505,20 @@ class SlackApp:
         if client is None:
             return False
         try:
-            opened = await client.conversations_open(  # pyright: ignore[reportUnknownMemberType]
-                users=notice.requester_platform_user_id
-            )
-            channel_data = cast(dict[str, str], opened["channel"])
-            await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                channel=channel_data["id"], text=notice.text
-            )
+            if notice.in_thread and notice.origin_parent_channel_id:
+                await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=notice.origin_parent_channel_id,
+                    thread_ts=notice.origin_thread_id,
+                    text=notice.text,
+                )
+            else:
+                opened = await client.conversations_open(  # pyright: ignore[reportUnknownMemberType]
+                    users=notice.requester_platform_user_id
+                )
+                channel_data = cast(dict[str, str], opened["channel"])
+                await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel_data["id"], text=notice.text
+                )
             return True
         except SlackApiError as error:
             return cast(str, error.response["error"]) in ("user_not_found", "account_inactive")

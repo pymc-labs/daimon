@@ -2576,8 +2576,6 @@ class GitHubConnectInvitation(Base):
     origin_platform: Mapped[str | None] = mapped_column(Text)
     origin_parent_channel_id: Mapped[str | None] = mapped_column(Text)
     origin_thread_id: Mapped[str | None] = mapped_column(Text)
-    origin_ma_agent_id: Mapped[str | None] = mapped_column(Text)
-    requested_work: Mapped[str | None] = mapped_column(Text)
     connected_repos: Mapped[list[dict[str, str]] | None] = mapped_column(JSONB)
     notice_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notice_delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

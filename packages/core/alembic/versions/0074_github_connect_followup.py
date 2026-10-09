@@ -19,8 +19,6 @@ def upgrade() -> None:
         "origin_platform",
         "origin_parent_channel_id",
         "origin_thread_id",
-        "origin_ma_agent_id",
-        "requested_work",
     ):
         op.add_column("github_connect_invitations", sa.Column(name, sa.Text()))
     op.add_column("github_connect_invitations", sa.Column("connected_repos", JSONB()))
@@ -33,8 +31,6 @@ def downgrade() -> None:
         "notice_delivered_at",
         "notice_claimed_at",
         "connected_repos",
-        "requested_work",
-        "origin_ma_agent_id",
         "origin_thread_id",
         "origin_parent_channel_id",
         "origin_platform",

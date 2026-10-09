@@ -23,11 +23,11 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
-from daimon.core.github_connect_delivery import claim_next, settle
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores import github_access, github_app_installations, github_connect
 from daimon.core.stores.accounts import set_external, set_role
 from daimon.core.stores.domain import Role
+from daimon.core.stores.github_connect_notices import claim_next, settle
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -475,7 +475,10 @@ async def test_connection_happy_path_and_rechecks(
         async with sessionmaker.begin() as session:
             notice = await claim_next(session, platform="discord", now=datetime.now(UTC))
             assert notice is not None
-            assert notice.text == "Connected example/one, example/two, Read only. Ready."
+            assert notice.text == (
+                "GitHub connected for your workspace: example/one, example/two, Read only. "
+                "Mention an agent in a channel to start."
+            )
             await settle(session, notice=notice, delivered=True, now=datetime.now(UTC))
             assert await claim_next(session, platform="discord", now=datetime.now(UTC)) is None
         forged = await browser.post(

@@ -42,7 +42,6 @@ from daimon.core.github_app_session import (
     archive_app_vault,
     close_headless_app_session,
 )
-from daimon.core.github_connect_delivery import claim_next, settle
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.github_requester_access import (
     PermissionCache,
@@ -58,13 +57,13 @@ from daimon.core.stores import (
     github_issued_tokens,
     github_links,
 )
-from daimon.core.stores.task_continuations import get_continuation
+from daimon.core.stores.github_connect_notices import claim_next, settle
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 @pytest.mark.asyncio
-async def test_connect_followup_resumes_task_once_and_keeps_repo_names_private(
+async def test_connect_followup_posts_count_only_in_origin_thread(
     db_session: AsyncSession,
 ) -> None:
     tenant_id, admin_id, agent_id = (uuid.uuid4() for _ in range(3))
@@ -83,8 +82,6 @@ async def test_connect_followup_resumes_task_once_and_keeps_repo_names_private(
         origin_platform="discord",
         origin_parent_channel_id="100",
         origin_thread_id="200",
-        origin_ma_agent_id="ma-agent",
-        requested_work="Review the issue",
     )
     invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
     assert invitation is not None
@@ -97,12 +94,13 @@ async def test_connect_followup_resumes_task_once_and_keeps_repo_names_private(
         repo_id=1, owner_id=1, installation_id=1, full_name="private/secret", max_access="write"
     )
     await github_connect.queue_connect_followup(db_session, invitation=invitation, repos=[repo])
-    wake_id = uuid.uuid5(uuid.NAMESPACE_URL, f"github-connect:{invitation.token_hash}")
-    wake = await get_continuation(db_session, idempotency_key=wake_id)
-    assert wake is not None
-    assert wake.requested_work == "Review the issue"
-    assert wake.thread_id == "200"
-    assert "private/secret" not in wake.model_dump_json()
+    notice = await claim_next(db_session, platform="discord", now=datetime.now(UTC))
+    assert notice is not None
+    assert notice.in_thread
+    assert notice.origin_parent_channel_id == "100"
+    assert notice.origin_thread_id == "200"
+    assert notice.text == "GitHub connected: 1 repo(s), Read and write. What should I do first?"
+    assert "private/secret" not in notice.text
     assert await claim_next(db_session, platform="discord", now=datetime.now(UTC)) is None
 
 
@@ -134,7 +132,10 @@ async def test_bare_connect_notice_claim_is_single_and_failure_retries(
     row.used_at = datetime.now(UTC)
     await github_connect.queue_connect_followup(db_session, invitation=invitation, repos=[repo])
     first = await claim_next(db_session, platform="slack", now=datetime.now(UTC))
-    assert first is not None and first.text == "Connected private/repo, Read only. Ready."
+    assert first is not None and first.text == (
+        "GitHub connected for your workspace: private/repo, Read only. "
+        "Mention an agent in a channel to start."
+    )
     assert await claim_next(db_session, platform="slack", now=datetime.now(UTC)) is None
     await settle(db_session, notice=first, delivered=False, now=datetime.now(UTC))
     retry = await claim_next(db_session, platform="slack", now=datetime.now(UTC))

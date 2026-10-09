@@ -44,7 +44,6 @@ async def _github_connect_impl(
     origin_context_id: str,
     agent_name: str | None = None,
     expected_ma_agent_id: str | None = None,
-    requested_work: str | None = None,
 ) -> ConnectResult:
     if auth.platform not in ("discord", "slack") or auth.platform_user_id is None:
         raise ToolError("GitHub setup from chat is available in Discord and Slack.")
@@ -116,8 +115,6 @@ async def _github_connect_impl(
             origin_platform=auth.platform,
             origin_parent_channel_id=origin.parent_channel_id,
             origin_thread_id=origin.thread_id,
-            origin_ma_agent_id=str(agent.id),
-            requested_work=requested_work,
         )
         await append_event(
             session,
@@ -156,7 +153,6 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str,
         agent_name: str | None = None,
         expected_ma_agent_id: str | None = None,
-        requested_work: str | None = None,
     ) -> ConnectResult:
         """Connect this agent to GitHub when someone asks to set up GitHub.
 
@@ -164,9 +160,6 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Members get Ask an admin and a recorded request. Never repeat a private
         link in a shared reply. For a setup target, pass its current name and
         MA id from turn_controls; otherwise this defaults to the responder.
-        When GitHub access interrupted a task, pass a short restatement as
-        requested_work so the task resumes after connection. Leave it empty
-        when someone only asks to connect GitHub.
         """
         return await _github_connect_impl(
             runtime,
@@ -174,5 +167,4 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             origin_context_id=origin_context_id,
             agent_name=agent_name,
             expected_ma_agent_id=expected_ma_agent_id,
-            requested_work=requested_work,
         )
