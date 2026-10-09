@@ -21,9 +21,9 @@ CommitLocal ==
     /\ queued' = DurableCommit
     /\ UNCHANGED <<pending, gone, live, crashed, failures>>
 
-\* Death can happen after local commit or while upstream work is in flight.
+\* Death can also happen after MA deletion or after its local acknowledgement.
 Crash ==
-    /\ phase # "before" /\ ~crashed /\ live /\ ~gone
+    /\ phase # "before" /\ phase # "done" /\ ~crashed /\ live
     /\ live' = FALSE
     /\ crashed' = TRUE
     /\ phase' = "local"
@@ -45,10 +45,22 @@ Enumerate ==
     /\ UNCHANGED <<queued, pending, gone, live, crashed, failures>>
 
 Remember ==
-    /\ phase = "found" /\ live
+    /\ phase = "found" /\ live /\ ~gone
     /\ pending' = TRUE
     /\ phase' = "deleting"
     /\ UNCHANGED <<queued, gone, live, crashed, failures>>
+
+\* A saved ID is retried after a crash; MA's 404 is treated as success.
+RetryPending ==
+    /\ phase = "found" /\ live /\ pending
+    /\ phase' = "deleting"
+    /\ UNCHANGED <<queued, pending, gone, live, crashed, failures>>
+
+\* After acknowledgement, re-enumeration sees no live session.
+NoSessions ==
+    /\ phase = "found" /\ live /\ gone /\ ~pending
+    /\ phase' = "acknowledged"
+    /\ UNCHANGED <<queued, pending, gone, live, crashed, failures>>
 
 DeleteFailure ==
     /\ phase = "deleting" /\ live /\ failures = 0
@@ -75,10 +87,12 @@ Finish ==
     /\ UNCHANGED <<pending, gone, live, crashed, failures>>
 
 Next == CommitLocal \/ Crash \/ Restart \/ EnumerationFailure \/ Enumerate
-        \/ Remember \/ DeleteFailure \/ DeleteSuccess \/ Acknowledge \/ Finish
+        \/ Remember \/ RetryPending \/ NoSessions \/ DeleteFailure
+        \/ DeleteSuccess \/ Acknowledge \/ Finish
 Spec == Init /\ [][Next]_vars
 Progress == Spec /\ WF_vars(CommitLocal) /\ WF_vars(Restart)
             /\ WF_vars(Enumerate) /\ WF_vars(Remember)
+            /\ WF_vars(RetryPending) /\ WF_vars(NoSessions)
             /\ WF_vars(DeleteSuccess) /\ WF_vars(Acknowledge) /\ WF_vars(Finish)
 
 TypeOK ==

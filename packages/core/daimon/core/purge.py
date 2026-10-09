@@ -677,8 +677,11 @@ async def _retry_account_session_delete_locked(
 async def sweep_privacy_session_deletes(
     anthropic: AsyncAnthropic, sm: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Retry queued account erasures on each scheduler tick."""
+    """Retry queued account erasures, isolating failures by account."""
     async with sm() as session:
         work = await privacy_deletes_store.list_work(session)
     for item in work:
-        await retry_account_session_delete(anthropic, sm, account_id=item.account_id)
+        try:
+            await retry_account_session_delete(anthropic, sm, account_id=item.account_id)
+        except Exception:
+            log.exception("purge.queued_upstream_sessions_failed", account_id=str(item.account_id))

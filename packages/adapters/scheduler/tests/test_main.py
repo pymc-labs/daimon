@@ -1899,7 +1899,13 @@ async def test_run_loops_keeps_ticking_while_a_usage_pass_is_in_flight() -> None
             raise
 
     async with asyncio.timeout(5):
-        await _run_loops(tick=tick, usage_sweep=endless_pass, interval_s=0.01, stop_event=stop)
+        await _run_loops(
+            tick=tick,
+            usage_sweep=endless_pass,
+            privacy_sweep=unittest.mock.AsyncMock(),
+            interval_s=0.01,
+            stop_event=stop,
+        )
 
     assert ticks == 3, f"ticks continue while the usage pass runs, got {ticks}"
     assert pass_cancelled, "stopping cancels the usage pass in flight"
@@ -1922,7 +1928,13 @@ async def test_run_loops_repeats_usage_passes_while_a_tick_is_in_flight() -> Non
             third_pass.set()
 
     async with asyncio.timeout(5):
-        await _run_loops(tick=slow_tick, usage_sweep=usage_pass, interval_s=0.01, stop_event=stop)
+        await _run_loops(
+            tick=slow_tick,
+            usage_sweep=usage_pass,
+            privacy_sweep=unittest.mock.AsyncMock(),
+            interval_s=0.01,
+            stop_event=stop,
+        )
 
     assert passes >= 3, f"usage passes repeat while the first tick is still running, got {passes}"
 
@@ -1940,7 +1952,11 @@ async def test_run_loops_ends_when_a_usage_pass_crashes() -> None:
     async with asyncio.timeout(5):
         with pytest.raises(ExceptionGroup) as raised:
             await _run_loops(
-                tick=tick, usage_sweep=crashing_pass, interval_s=0.01, stop_event=asyncio.Event()
+                tick=tick,
+                usage_sweep=crashing_pass,
+                privacy_sweep=unittest.mock.AsyncMock(),
+                interval_s=0.01,
+                stop_event=asyncio.Event(),
             )
 
     assert raised.group_contains(RuntimeError, match="unexpected sweep failure"), (
@@ -1968,6 +1984,7 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
             await _run_loops(
                 tick=crashing_tick,
                 usage_sweep=endless_pass,
+                privacy_sweep=unittest.mock.AsyncMock(),
                 interval_s=0.01,
                 stop_event=asyncio.Event(),
             )
@@ -1976,6 +1993,41 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
         "the tick's error propagates out of the loops"
     )
     assert pass_cancelled.is_set(), "the usage pass in flight is cancelled"
+
+
+async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
+    stop = asyncio.Event()
+    upstream_started = asyncio.Event()
+    ticks = 0
+    cancelled = False
+
+    async def tick() -> None:
+        nonlocal ticks
+        await upstream_started.wait()
+        ticks += 1
+        if ticks == 3:
+            stop.set()
+
+    async def slow_privacy() -> None:
+        nonlocal cancelled
+        upstream_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    async with asyncio.timeout(5):
+        await _run_loops(
+            tick=tick,
+            usage_sweep=unittest.mock.AsyncMock(),
+            privacy_sweep=slow_privacy,
+            interval_s=0.01,
+            stop_event=stop,
+        )
+
+    assert ticks == 3
+    assert cancelled
 
 
 @pytest.mark.parametrize(
