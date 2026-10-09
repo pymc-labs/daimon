@@ -182,29 +182,80 @@ async def test_reply_to_recorded_agent_post_starts_turn(
 
 
 @pytest.mark.parametrize("excluded", [False, True])
-async def test_identity_off_or_excluded_ignores_reply_without_mention(
+@pytest.mark.parametrize(
+    ("source", "by_bot", "expected"),
+    [
+        ("turn", True, True),
+        ("tool", True, False),
+        ("auto_thread", True, False),
+        ("turn", False, False),
+    ],
+    ids=["answer-chunk", "tool-post", "thread", "not-the-bot"],
+)
+async def test_identity_off_reply_to_any_answer_message_starts_a_turn(
     db_session_factory: async_sessionmaker[AsyncSession],
     excluded: bool,
+    source: Literal["turn", "tool", "auto_thread"],
+    by_bot: bool,
+    expected: bool,
 ) -> None:
+    """Without identity a reply to ANY message of an answer counts, pinged or not.
+
+    Each chunk is a recorded `turn` post by the bot itself, so a reply to the
+    second chunk of a long answer starts a turn just like a reply to the first.
+    """
+    from daimon.core.defaults.provisioning import provision_tenant
+    from daimon.core.stores.agent_posts import record_post
+    from daimon.core.stores.turn_card_intents import create_turn_card_intent
+
+    guild_id = "801000099"
+    result = await provision_tenant(
+        db_session_factory,
+        platform="discord",
+        workspace_id=guild_id,
+        signup_credit=Decimal("5.00"),
+    )
+    async with db_session_factory() as session, session.begin():
+        intent = await create_turn_card_intent(
+            session,
+            tenant_id=result.tenant_id,
+            platform="discord",
+            thread_id="789",
+            turn_token=uuid.uuid4(),
+        )
+        await record_post(
+            session,
+            tenant_id=result.tenant_id,
+            platform="discord",
+            channel_id="789",
+            message_id="124",
+            agent_id=uuid.uuid4(),
+            source=source,
+            turn_card_intent_id=intent.id if source == "turn" else None,
+        )
     runtime = _make_runtime(db_session_factory)
     if excluded:
-        runtime.settings.agent_identity.excluded_discord_guild_ids = ["801000099"]
+        runtime.settings.agent_identity.excluded_discord_guild_ids = [guild_id]
     else:
         runtime.settings.agent_identity.enabled = False
     bot = make_bot(runtime)
     bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue,reportMethodAssign]
-    message = _make_channel_message(guild_id=801000099)
+    message = _make_channel_message(guild_id=int(guild_id))
     message.mentions = []
     message.webhook_id = None
-    message.reference = discord.MessageReference(message_id=123, channel_id=789, guild_id=801000099)
+    message.reference = discord.MessageReference(
+        message_id=124, channel_id=789, guild_id=int(guild_id)
+    )
     resolved = MagicMock(spec=discord.Message)
-    resolved.author.id = bot.user.id
-    resolved.webhook_id = None
+    resolved.author.id = bot.user.id if by_bot else 555
+    resolved.webhook_id = None if by_bot else 556
+    resolved.application_id = None
     message.reference.resolved = resolved
-    with patch("daimon.adapters.discord.bot.get_post", new_callable=AsyncMock) as get_post:
-        await bot.on_message(message)
-    get_post.assert_not_awaited()
-    bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+    await bot.on_message(message)
+    if expected:
+        bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
+    else:
+        bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
 
 
 async def test_reply_to_unrecorded_post_does_not_start_turn(

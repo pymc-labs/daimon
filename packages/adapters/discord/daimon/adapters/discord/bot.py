@@ -1745,11 +1745,19 @@ class DaimonBot(commands.Bot):
                 )
             )
         )
+        identity_on = identity_enabled_for(
+            self.runtime.settings, "discord", str(message.guild.id) if message.guild else None
+        )
+        # Without identity every agent post is the bot's own, so a reply to any of
+        # them (a later answer chunk, unpinged) counts, not only a pinged reply.
+        resolved_is_bot = (
+            isinstance(resolved, discord.Message)
+            and self.user is not None
+            and resolved.author.id == self.user.id
+        )
         if (
-            identity_enabled_for(
-                self.runtime.settings, "discord", str(message.guild.id) if message.guild else None
-            )
-            and not bot_mentioned
+            not bot_mentioned
+            and (identity_on or resolved_is_bot)
             and isinstance(reference, discord.MessageReference)
             and reference.type is discord.MessageReferenceType.reply
             and reference.message_id is not None
@@ -1776,7 +1784,9 @@ class DaimonBot(commands.Bot):
                         channel_id=str(message.channel.id),
                         message_id=str(reference.message_id),
                     )
-                reply_to_recorded_post = post is not None and post.source != "auto_thread"
+                reply_to_recorded_post = post is not None and (
+                    post.source != "auto_thread" if identity_on else post.source == "turn"
+                )
             except Exception as exc:
                 log.warning("reply_gate.lookup_failed", error_type=type(exc).__name__)
         if not should_process_message(
@@ -1784,9 +1794,6 @@ class DaimonBot(commands.Bot):
             author_id=str(message.author.id),
             bot_mentioned=bot_mentioned,
             reply_to_recorded_post=reply_to_recorded_post,
-            identity_enabled=identity_enabled_for(
-                self.runtime.settings, "discord", str(message.guild.id) if message.guild else None
-            ),
             author_is_webhook=is_webhook_post,
             guild_id=str(message.guild.id) if message.guild else None,
             self_user_id=str(self.user.id) if self.user is not None else None,
