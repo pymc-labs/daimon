@@ -10,6 +10,7 @@ import discord
 from daimon.adapters.discord.support_escalation import (
     SupportEscalateButton,
     SupportModal,
+    discord_channel,
 )
 from daimon.core.config import SupportSettings
 from daimon.core.stores import accounts
@@ -49,6 +50,7 @@ async def _submit(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     open_dm: Any = None,
+    escalation_channel: str = _ESCALATION,
 ) -> tuple[Any, Any, AsyncMock]:
     """Send a note on an answer in a thread of `_CHANNEL`; the bot, the escalation channel, a DM."""
     thread = MagicMock(spec=discord.Thread)
@@ -67,7 +69,7 @@ async def _submit(
     interaction.followup.send = AsyncMock()
     runtime = MagicMock()
     runtime.sessionmaker = sessionmaker
-    runtime.settings.support = SupportSettings(escalation_channel_id=_ESCALATION)
+    runtime.settings.support = SupportSettings(escalation_channel_id=escalation_channel)
     runtime.settings.direct_message_policies = {}
     modal = SupportModal(runtime=runtime, guild_id=_GUILD, channel_id=_THREAD, message_id="444")
     modal.note_input = SimpleNamespace(value="help please")  # type: ignore[assignment]
@@ -138,3 +140,27 @@ def test_the_dm_button_and_form_say_ask_the_team_like_slack() -> None:
     assert modal.note_input.label == "What do you need help with?"
     assert modal.note_input.placeholder == "Write a few words."
     assert len(modal.note_input.label) <= 45, "Discord rejects a longer text-input label"
+
+
+def test_a_teams_escalation_channel_is_not_a_discord_one() -> None:
+    """A Teams id left from when Teams shared the setting is not Discord's."""
+    teams = SupportSettings(escalation_channel_id="19:support@thread.tacv2")
+    assert discord_channel(teams) is None, "the Discord bot cannot post in a Teams channel"
+    assert discord_channel(SupportSettings(escalation_channel_id=_ESCALATION)) == _ESCALATION, (
+        "a Discord channel id stays the destination"
+    )
+
+
+async def test_a_teams_escalation_channel_spends_nothing_and_posts_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        await _seed(session, grant=False)
+
+    bot, escalation, dm = await _submit(
+        db_session_factory, escalation_channel="19:support@thread.tacv2"
+    )
+
+    escalation.send.assert_not_awaited()
+    dm.send.assert_not_awaited()
+    assert await _delivered(db_session_factory) == [], "no credit is spent on an undeliverable ask"

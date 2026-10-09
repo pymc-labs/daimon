@@ -222,6 +222,7 @@ async def test_a_failed_post_keeps_the_request_undelivered(
     async with _running(db_session_factory, fake) as svc:
         card = await _form(svc, fake, make_message_activity(text="support"))
         reply = await _send(svc, _token(card), "help")
+    assert fake.posting.is_set(), "the post was tried, and failed"
     assert support.RECEIVED.format(remaining=2) in reply, "recorded, whatever delivery does"
     [row] = await _rows(db_session_factory)
     assert row.delivered_at is None, "kept as undelivered"
@@ -269,6 +270,20 @@ def test_the_command_exists_only_with_a_teams_channel_and_credits(
         )
     )
     assert support.enabled(settings) is on
+
+
+def test_routed_feedback_needs_the_teams_channel() -> None:
+    """A tenant's 👎 forms never go to Discord's channel, which Teams once posted to."""
+    tenant = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    routed = {tenant: True}
+    discord_only: Any = SimpleNamespace(
+        support=SupportSettings(escalation_channel_id="123", feedback_to_support=routed)
+    )
+    teams: Any = SimpleNamespace(
+        support=SupportSettings(teams_escalation_channel_id=OPS, feedback_to_support=routed)
+    )
+    assert not support.routes_feedback(discord_only, tenant)
+    assert support.routes_feedback(teams, tenant)
 
 
 def _ask(op: str, **data: object) -> dict[str, object]:

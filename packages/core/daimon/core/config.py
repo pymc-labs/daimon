@@ -1055,22 +1055,25 @@ class SupportSettings(BaseModel):
 
     Each platform's requests go only to its own channel: Discord's to
     `escalation_channel_id`, Slack's to `slack_escalation_channel_id`, Teams'
-    to `teams_escalation_channel_id`. An unset channel disables the affordance it serves entirely
-    rather than recording requests nobody will ever see. Failing closed is the
-    honest behaviour: an escalate button that reaches no one is worse than no
-    button, because the person believes they have asked for help. Every
-    platform spends the same per-user, per-tenant allowance from one ledger.
+    to `teams_escalation_channel_id`. An unset channel disables the affordance
+    it serves entirely rather than recording requests nobody will ever see.
+    Failing closed is the honest behaviour: an escalate button that reaches no
+    one is worse than no button, because the person believes they have asked
+    for help. Every platform spends the same per-user, per-tenant allowance
+    from one ledger.
     """
 
     escalation_channel_id: str | None = Field(
         default=None,
         description=(
             "Discord channel id where human-support requests from Discord are "
-            "posted. Unset (the default) disables the escalate affordance on "
-            "Discord — a request that reaches nobody is worse than no button at "
-            "all. A channel rather than operator DMs: it survives one person's DMs "
-            "being closed, and it leaves a shared record anyone on the rota can "
-            "pick up. The bot must be able to post there."
+            "posted (the unprefixed name predates per-platform channels). A Teams "
+            "id (`19:…`) left here is ignored. Unset (the default) disables the "
+            "escalate affordance on Discord — a request that reaches nobody is "
+            "worse than no button at all. A channel rather than operator DMs: it "
+            "survives one person's DMs being closed, and it leaves a shared "
+            "record anyone on the rota can pick up. The bot must be able to post "
+            "there."
         ),
     )
     slack_escalation_channel_id: str | None = Field(
@@ -1102,6 +1105,19 @@ class SupportSettings(BaseModel):
             "channel, if it is private)."
         ),
     )
+
+    @field_validator("teams_escalation_channel_id")
+    @classmethod
+    def _require_teams_channel(cls, value: str | None) -> str | None:
+        """Another platform's id would spend Teams credits on posts that always fail."""
+        if not value:
+            return None
+        if not value.startswith("19:"):
+            raise ValueError(
+                "DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID must be a Teams channel id (19:…)"
+            )
+        return value
+
     credits_per_user: int = Field(
         default=20,
         ge=0,

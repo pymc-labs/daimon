@@ -1010,11 +1010,12 @@ per-user, per-tenant allowance from one ledger.
 
 `str | None` · optional · default unset
 
-Discord channel id where human-support requests from Discord are posted. Unset (the
-default) disables the escalate affordance on Discord — a request that reaches nobody is
-worse than no button at all. A channel rather than operator DMs: it survives one
-person's DMs being closed, and it leaves a shared record anyone on the rota can pick up.
-The bot must be able to post there.
+Discord channel id where human-support requests from Discord are posted (the unprefixed
+name predates per-platform channels). A Teams id (`19:…`) left here is ignored. Unset
+(the default) disables the escalate affordance on Discord — a request that reaches
+nobody is worse than no button at all. A channel rather than operator DMs: it survives
+one person's DMs being closed, and it leaves a shared record anyone on the rota can pick
+up. The bot must be able to post there.
 
 ### `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID`
 

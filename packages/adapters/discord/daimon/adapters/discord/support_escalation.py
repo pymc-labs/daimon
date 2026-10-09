@@ -49,7 +49,7 @@ import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.channel_admin_roles import member_roles
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import DirectMessagePolicy, SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import (
@@ -82,6 +82,18 @@ _EMPTY_NOTE = EMPTY_NOTE
 _MALFORMED = UNAVAILABLE
 _OUT_OF_CREDITS = OUT_OF_CREDITS
 _RECORDED_UNDELIVERED = RECORDED_UNDELIVERED
+
+
+def discord_channel(support: SupportSettings) -> str | None:
+    """Ask a human's escalation channel when the Discord bot can post in it, else None.
+
+    Teams once shared `escalation_channel_id`; its channel now has its own
+    setting. A Teams id (`19:…`) left here from then is not Discord's, so
+    Discord offers no Ask a human rather than spending credits on requests it
+    could never deliver.
+    """
+    channel = support.escalation_channel_id
+    return None if channel is None or channel.startswith("19:") else channel
 
 
 async def post_to_support_channel(
@@ -160,7 +172,7 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
             return
 
         settings = self._runtime.settings
-        channel_id = settings.support.escalation_channel_id
+        channel_id = discord_channel(settings.support)
         if channel_id is None:
             # Disabled between the reaction and the submit. Nothing is spent.
             await interaction.followup.send(_MALFORMED, ephemeral=True)

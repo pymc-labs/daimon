@@ -337,6 +337,23 @@ async def test_unrouted_text_stays_in_the_database(
     interaction.client.get_channel.assert_not_called()
 
 
+async def test_a_teams_support_channel_is_never_posted_to_from_discord(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, feedback_id = await _routed_setup(
+        db_session_factory, guild="guild-teams", message_id="msg-teams"
+    )
+    runtime = _routed_runtime(
+        sessionmaker=db_session_factory, routed={tenant_id: True}, channel_id="19:abc@thread.tacv2"
+    )
+    modal = _modal(runtime=runtime, feedback_id=feedback_id, text="wrong")
+    interaction, channel = _interaction_with_channel(user_id=_VOTER_ID)
+
+    await modal.on_submit(interaction)
+
+    channel.send.assert_not_awaited()
+
+
 async def test_someone_elses_row_is_never_routed(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
