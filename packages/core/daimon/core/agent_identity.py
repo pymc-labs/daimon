@@ -30,7 +30,7 @@ _MAX_FACE_ATTEMPTS = 3
 _FIRST_FACE_WAIT_S = 3.0
 
 # Shown wherever a stale control or form tries to upload an agent picture.
-CUSTOM_PICTURES_OFF = "Custom pictures are turned off. Each agent uses its generated face."
+CUSTOM_PICTURES_OFF = "Custom pictures are turned off."
 
 
 @dataclass(frozen=True)

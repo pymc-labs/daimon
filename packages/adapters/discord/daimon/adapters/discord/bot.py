@@ -18,6 +18,10 @@ import sentry_sdk
 import structlog
 import structlog.contextvars
 from daimon.adapters.discord import theme
+from daimon.adapters.discord.agent_setup.stale_picture import (
+    StalePictureChangeButton,
+    refuse_stale_picture_submit,
+)
 from daimon.adapters.discord.attachments import build_attachment_url_prefix
 from daimon.adapters.discord.budget_notice import with_budget_notifier
 from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
@@ -832,6 +836,10 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.github_connect_button import GitHubConnectButton
 
         self.add_dynamic_items(GitHubConnectButton)
+
+        # A setup panel from before picture uploads were turned off can still
+        # show Change; the click gets the refusal instead of "interaction failed".
+        self.add_dynamic_items(StalePictureChangeButton)
 
     async def _post_to_guild(self, guild: discord.Guild, embed: discord.Embed) -> None:
         """Post an embed via the fallback chain: text channel → DM owner → skip."""
@@ -1709,6 +1717,12 @@ class DaimonBot(commands.Bot):
         """Remember the clicker's name for /billing; the command tree handles the rest."""
         remember_guild_user(
             self.runtime.sessionmaker, guild_id=interaction.guild_id, user=interaction.user
+        )
+        # discord.py drops a submit from a form this process never opened.
+        # An old picture upload form gets the refusal rather than silence.
+        await refuse_stale_picture_submit(
+            interaction,
+            live_modal_ids=self._connection._view_store._modals,  # pyright: ignore[reportPrivateUsage]
         )
 
     async def on_message(self, message: discord.Message) -> None:

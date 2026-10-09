@@ -1018,7 +1018,8 @@ async def test_stale_change_click_is_refused_and_use_default_still_runs(
     (pushed,) = _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY)
     assert pushed["view"]["callback_id"] == CALLBACK_AVATAR_UPLOAD
     assert "file_input" not in json.dumps(pushed["view"])
-    assert "Custom pictures are turned off." in json.dumps(pushed["view"])
+    assert [block["type"] for block in pushed["view"]["blocks"]] == ["section"]
+    assert pushed["view"]["blocks"][0]["text"]["text"] == "Custom pictures are turned off."
     agent_lookup.assert_not_awaited()
     write.assert_not_awaited()
 
@@ -1066,7 +1067,8 @@ async def test_stale_retry_on_status_modal_shows_the_refusal_in_place(
     assert not _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY)
     (updated,) = _sent(fake_slack_web_client.mock, _VIEWS_UPDATE_KEY)
     assert updated["view_id"] == "V_STATUS"
-    assert "Custom pictures are turned off." in json.dumps(updated["view"])
+    assert [block["type"] for block in updated["view"]["blocks"]] == ["section"]
+    assert updated["view"]["blocks"][0]["text"]["text"] == "Custom pictures are turned off."
     assert "file_input" not in json.dumps(updated["view"])
 
 

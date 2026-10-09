@@ -43,10 +43,10 @@ def test_stale_upload_submission_gets_the_refusal() -> None:
     response = evaluate_avatar_submission(_payload([{"id": "F1", "size": 42}]))
     assert response is not None
     assert response["response_action"] == "update"
-    sections = [
-        block["text"]["text"] for block in response["view"]["blocks"] if block["type"] == "section"
+    assert CUSTOM_PICTURES_OFF == "Custom pictures are turned off."
+    assert response["view"]["blocks"] == [
+        {"type": "section", "text": {"type": "mrkdwn", "text": CUSTOM_PICTURES_OFF}}
     ]
-    assert " ".join(sections) == CUSTOM_PICTURES_OFF
     assert evaluate_avatar_submission({"view": {"private_metadata": "garbage"}}) is None
 
 

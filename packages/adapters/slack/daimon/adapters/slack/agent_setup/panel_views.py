@@ -685,16 +685,10 @@ def build_avatar_details_view(*, meta: PanelMetadata) -> dict[str, Any]:
 
 
 def build_avatar_status_view(*, meta: PanelMetadata, message: str) -> dict[str, Any]:
-    """Show a picture result in the modal it came from."""
-    title, separator, next_step = message.partition(". ")
+    """Show a one-line picture refusal in the modal it came from."""
     return finish_modal(
         title="Picture",
-        blocks=[
-            _section(title + ("." if separator else "")),
-            *([_section(next_step)] if next_step else []),
-            {"type": "divider"},
-            _context("Agent setup"),
-        ],
+        blocks=[_section(message)],
         private_metadata=encode_panel_metadata(meta),
         callback_id=CALLBACK_AVATAR_UPLOAD,
     )

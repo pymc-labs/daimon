@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 import anthropic
 import structlog
@@ -21,6 +21,7 @@ from daimon.adapters.discord.checks import (
 )
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_identity import CUSTOM_PICTURES_OFF
 from daimon.core.errors import DaimonError
 from daimon.core.stores.tenants import get_tenant
 
@@ -41,6 +42,19 @@ def _not_ready_message(provision_status: str) -> str:
     if provision_status == "failed":
         return "Setup hit a snag — check the message I posted in this server, then try again."
     return "This install is still being set up — try again in a moment."
+
+
+def _has_stale_picture_options(interaction: BotInteraction) -> bool:
+    """Pure: whether a client still sends the removed `agent` or `avatar` options.
+
+    Until Discord propagates the new command shape, an invocation can carry them.
+    """
+    data = cast(dict[str, Any], interaction.data if isinstance(interaction.data, dict) else {})
+    options = cast(list[object], data.get("options") or [])
+    return any(
+        isinstance(option, dict) and cast(dict[str, Any], option).get("name") in {"agent", "avatar"}
+        for option in options
+    )
 
 
 def _get_runtime(interaction: BotInteraction) -> DiscordRuntime:
@@ -64,6 +78,9 @@ class AgentSetupCog(commands.Cog):
         self,
         interaction: BotInteraction,
     ) -> None:
+        if _has_stale_picture_options(interaction):
+            await interaction.response.send_message(CUSTOM_PICTURES_OFF, ephemeral=True)
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         rid = generate_request_id()
         try:

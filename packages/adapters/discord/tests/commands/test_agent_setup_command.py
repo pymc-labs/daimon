@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import httpx
+import pytest
 from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -196,6 +197,31 @@ async def test_ready_status_still_renders_panel(
 def test_agent_setup_command_takes_no_picture_options() -> None:
     cog = AgentSetupCog(MagicMock())
     assert cog.agent_setup.parameters == []
+
+
+@pytest.mark.parametrize("option", ["agent", "avatar"])
+async def test_stale_picture_option_is_refused_before_the_roster_loads(
+    db_session_factory: async_sessionmaker[AsyncSession], option: str
+) -> None:
+    guild_id = 700000007
+    await _provision(db_session_factory, guild_id=guild_id, status="ready")
+    router, calls = _counting_router()
+    runtime = _make_runtime(
+        db_session_factory, anthropic_client=build_fake_anthropic(router.dispatch)
+    )
+    interaction = _make_interaction(runtime, guild_id=guild_id)
+    interaction.data = {"name": "agent-setup", "options": [{"name": option, "value": "x"}]}
+    interaction.response.send_message = AsyncMock()
+
+    cog = AgentSetupCog(MagicMock())
+    await cog.agent_setup.callback(cog, interaction)  # pyright: ignore[reportArgumentType]
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "Custom pictures are turned off.", ephemeral=True
+    )
+    interaction.response.defer.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
+    assert calls == [], "the refusal does not load the roster"
 
 
 async def test_ready_status_names_the_channel_and_offers_setup(
