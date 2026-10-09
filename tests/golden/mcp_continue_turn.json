@@ -6,7 +6,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/ses_test001",
+        "path": "/v1/sessions/<id:1>",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -29,7 +29,7 @@
         "body": {
           "agent": {
             "description": null,
-            "id": "ag_test001",
+            "id": "<id:2>",
             "mcp_servers": [],
             "model": {
               "id": "claude-sonnet-4-6",
@@ -46,8 +46,8 @@
           "archived_at": null,
           "created_at": "<time:epoch-24278400s>",
           "deployment_id": null,
-          "environment_id": "<id:1>",
-          "id": "ses_test001",
+          "environment_id": "<id:3>",
+          "id": "<id:1>",
           "metadata": {
             "daimon_account": "00000000-0000-0000-0000-000000100006"
           },
@@ -89,7 +89,7 @@
           ]
         },
         "method": "POST",
-        "path": "/v1/sessions/ses_test001/events",
+        "path": "/v1/sessions/<id:1>/events",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -122,7 +122,7 @@
                   "type": "text"
                 }
               ],
-              "id": "sevt_continue_boundary",
+              "id": "<id:4>",
               "processed_at": null,
               "type": "user.message"
             }
@@ -136,7 +136,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/ses_test001",
+        "path": "/v1/sessions/<id:1>",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -159,7 +159,7 @@
         "body": {
           "agent": {
             "description": null,
-            "id": "ag_test001",
+            "id": "<id:2>",
             "mcp_servers": [],
             "model": {
               "id": "claude-sonnet-4-6",
@@ -176,8 +176,8 @@
           "archived_at": null,
           "created_at": "<time:epoch-24278400s>",
           "deployment_id": null,
-          "environment_id": "<id:1>",
-          "id": "ses_test001",
+          "environment_id": "<id:3>",
+          "id": "<id:1>",
           "metadata": {
             "daimon_account": "00000000-0000-0000-0000-000000100006"
           },
@@ -207,7 +207,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/ses_test001",
+        "path": "/v1/sessions/<id:1>",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -230,7 +230,7 @@
         "body": {
           "agent": {
             "description": null,
-            "id": "ag_test001",
+            "id": "<id:2>",
             "mcp_servers": [],
             "model": {
               "id": "claude-sonnet-4-6",
@@ -247,8 +247,8 @@
           "archived_at": null,
           "created_at": "<time:epoch-24278400s>",
           "deployment_id": null,
-          "environment_id": "<id:1>",
-          "id": "ses_test001",
+          "environment_id": "<id:3>",
+          "id": "<id:1>",
           "metadata": {
             "daimon_account": "00000000-0000-0000-0000-000000100006"
           },
@@ -290,7 +290,7 @@
           ]
         },
         "method": "POST",
-        "path": "/v1/sessions/ses_test001/events",
+        "path": "/v1/sessions/<id:1>/events",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -323,7 +323,7 @@
                   "type": "text"
                 }
               ],
-              "id": "sevt_continue_boundary",
+              "id": "<id:4>",
               "processed_at": null,
               "type": "user.message"
             }
@@ -349,7 +349,7 @@
           ]
         },
         "method": "POST",
-        "path": "/v1/sessions/ses_test001/events",
+        "path": "/v1/sessions/<id:1>/events",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -382,7 +382,7 @@
                   "type": "text"
                 }
               ],
-              "id": "sevt_continue_boundary",
+              "id": "<id:4>",
               "processed_at": null,
               "type": "user.message"
             }

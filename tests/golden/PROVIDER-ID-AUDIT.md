@@ -1,0 +1,15 @@
+# Provider ID audit, 2026-10-09
+
+All 33 scenarios were audited and re-recorded from unchanged integration `1bdf42176cc04d9878b125a705a3ddec496ea7e0`. The change is oracle normalization only; production behavior, prices, callers, effects and their order are unchanged. This precedes the separate main #501/#504 behavior re-recording requested by the lead.
+
+Aliases follow first appearance in the ordered capture, never provider generation or lexical ID order. The audit covers memory stores/versions, vaults, environments, agents, sessions, skills, files, resources, tool uses and events, including offline fixture prefixes. Responses, pagination cursors, URL paths, deduplication keys, encoded SSE data and turn-control JSON share the same aliases. Caller/model fields, literal text and configured names stay exact. Encoded JSON changes only ID string tokens; whitespace, escapes, numeric encodings and timestamps remain byte-exact.
+
+Verified session fingerprints are recomputed from the normalized effective configuration. An incorrect stored digest fails capture; changing model, skills, tools, repository or memory permissions remains visible. Provider IDs and derived fingerprints cannot choose database row order. Additive-column values remain literal and excluded from legacy comparison as documented in the README.
+
+Changed recordings (all changes are provider aliases or verified derived digests):
+
+`approval_card`, `billing_replay`, `blocked_balance`, `blocked_cap`, `cancel_mid_stream`, `ceiling`, `cli_session_get`, `cold_discord`, `cold_slack`, `dead_session`, `dm_delivery`, `dm_turn`, `env_mount_failure`, `handoff_continuation`, `handoff_full`, `handoff_history`, `handoff_transcript`, `mcp_cancel_turn`, `mcp_continue_turn`, `mcp_degraded`, `mcp_start_turn`, `plain_discord`, `plain_slack`, `plain_turn`, `rate_limit`, `reconnect`, `timer`, `tool_use`, `wake_continuation`.
+
+The other four recordings are byte-identical. Scalar/shape audit found no dropped fields, array size changes, changed non-string values or changed meaningful caller/name/type/price/error fields. Every recorded snapshot digest verifies against its normalized inputs. Remaining prefix-shaped values are only the literal resource/deletion type tags and the `<session_state>` markup tag; they are tags, not IDs. No raw provider handle remains in the audited values or encoded structured JSON.
+
+Regression coverage checks distinct handle references, first-appearance numbering, generation-order reversal, database row ordering, exact encoded JSON, protected caller/text/model values, configuration sensitivity and invalid stored fingerprints. Ten `cold_discord` replays with two workers deliberately consume 0–9 unrelated provider-ID tokens before fixture setup; their raw memory-store IDs must all differ while every replay matches the same golden and all 33 files remain unchanged. Machine-readable audit and replay evidence accompany the READY inbox report.

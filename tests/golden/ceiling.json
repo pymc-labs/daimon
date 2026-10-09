@@ -6,7 +6,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/sess_ceiling/events/stream",
+        "path": "/v1/sessions/<id:1>/events/stream",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -47,7 +47,7 @@
           ]
         },
         "method": "POST",
-        "path": "/v1/sessions/sess_ceiling/events",
+        "path": "/v1/sessions/<id:1>/events",
         "protocol_headers": [
           [
             "anthropic-beta",

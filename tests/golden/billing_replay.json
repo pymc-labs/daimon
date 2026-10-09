@@ -5,8 +5,8 @@
       {
         "channel_id": null,
         "delta_usd": "-0.017500",
-        "id": "<id:10>",
-        "idempotency_key": "turn:sess_1:sevt_mre_1",
+        "id": "<id:11>",
+        "idempotency_key": "turn:<id:1>:<id:2>",
         "occurred_at": "<time:epoch-24278400s>",
         "payment_event_id": null,
         "payment_intent": null,
@@ -16,8 +16,8 @@
       {
         "channel_id": null,
         "delta_usd": "-0.017500",
-        "id": "<id:11>",
-        "idempotency_key": "turn:sess_1:sevt_mre_2",
+        "id": "<id:12>",
+        "idempotency_key": "turn:<id:1>:<id:6>",
         "occurred_at": "<time:epoch-24278400s>",
         "payment_event_id": null,
         "payment_intent": null,
@@ -32,10 +32,10 @@
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "channel_id": null,
-        "event_id": "<id:5>",
-        "id": "<id:7>",
+        "event_id": "<id:2>",
+        "id": "<id:9>",
         "input_tokens": 1000,
-        "managed_session_id": "<id:8>",
+        "managed_session_id": "<id:1>",
         "model": "claude-opus-4-7",
         "occurred_at": "<time:epoch+0s>",
         "output_tokens": 500,
@@ -47,9 +47,9 @@
         "cache_read_input_tokens": 0,
         "channel_id": null,
         "event_id": "<id:6>",
-        "id": "<id:9>",
+        "id": "<id:10>",
         "input_tokens": 1000,
-        "managed_session_id": "<id:8>",
+        "managed_session_id": "<id:1>",
         "model": "claude-opus-4-7",
         "occurred_at": "<time:epoch+0s>",
         "output_tokens": 500,
@@ -64,7 +64,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/sess_1/events/stream",
+        "path": "/v1/sessions/<id:1>/events/stream",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -105,7 +105,7 @@
           ]
         },
         "method": "POST",
-        "path": "/v1/sessions/sess_1/events",
+        "path": "/v1/sessions/<id:1>/events",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -140,9 +140,9 @@
       "payload": {
         "args": [
           {
-            "id": "sevt_mre_1",
+            "id": "<id:2>",
             "is_error": false,
-            "model_request_start_id": "<id:1>",
+            "model_request_start_id": "<id:3>",
             "model_usage": {
               "cache_creation_input_tokens": 0,
               "cache_read_input_tokens": 0,
@@ -164,7 +164,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/sess_1",
+        "path": "/v1/sessions/<id:1>",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -187,7 +187,7 @@
         "body": {
           "agent": {
             "description": null,
-            "id": "agent_fake",
+            "id": "<id:4>",
             "mcp_servers": [],
             "model": {
               "id": "claude-sonnet-4-6",
@@ -204,8 +204,8 @@
           "archived_at": null,
           "created_at": "<time:epoch-24278400s>",
           "deployment_id": null,
-          "environment_id": "<id:2>",
-          "id": "sess_1",
+          "environment_id": "<id:5>",
+          "id": "<id:1>",
           "metadata": {},
           "outcome_evaluations": [],
           "resources": [],
@@ -233,7 +233,7 @@
       "payload": {
         "body": null,
         "method": "GET",
-        "path": "/v1/sessions/sess_1/events",
+        "path": "/v1/sessions/<id:1>/events",
         "protocol_headers": [
           [
             "anthropic-beta",
@@ -256,21 +256,7 @@
         "body": {
           "data": [
             {
-              "id": "sevt_mre_1",
-              "is_error": false,
-              "model_request_start_id": "<id:1>",
-              "model_usage": {
-                "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": 0,
-                "input_tokens": 1000,
-                "output_tokens": 500,
-                "speed": null
-              },
-              "processed_at": "<time:epoch-24278400s>",
-              "type": "span.model_request_end"
-            },
-            {
-              "id": "sevt_mre_2",
+              "id": "<id:2>",
               "is_error": false,
               "model_request_start_id": "<id:3>",
               "model_usage": {
@@ -284,7 +270,21 @@
               "type": "span.model_request_end"
             },
             {
-              "id": "sevt_idle",
+              "id": "<id:6>",
+              "is_error": false,
+              "model_request_start_id": "<id:7>",
+              "model_usage": {
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "speed": null
+              },
+              "processed_at": "<time:epoch-24278400s>",
+              "type": "span.model_request_end"
+            },
+            {
+              "id": "<id:8>",
               "processed_at": "<time:epoch-24278400s>",
               "stop_reason": {
                 "type": "end_turn"
@@ -309,8 +309,8 @@
             "rate_limit_until": null,
             "retrying_error": null,
             "seen_event_ids": [
-              "<id:4>",
-              "<id:5>",
+              "<id:8>",
+              "<id:2>",
               "<id:6>"
             ],
             "stop_reason": {
@@ -343,8 +343,8 @@
             "rate_limit_until": null,
             "retrying_error": null,
             "seen_event_ids": [
-              "<id:4>",
-              "<id:5>",
+              "<id:8>",
+              "<id:2>",
               "<id:6>"
             ],
             "stop_reason": {

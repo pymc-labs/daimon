@@ -12,16 +12,23 @@ import base64
 import dataclasses
 import inspect
 import json
+import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
 from typing import cast
+from urllib.parse import parse_qsl, unquote_plus, urlsplit
 from uuid import UUID
 
 from daimon.core._models import Base
+from daimon.core.session_snapshot import (
+    SessionSnapshot,
+    fingerprint_identity,
+    fingerprint_mutable,
+)
 from daimon.testing.ma_transport import Json, RecordedRequest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import MetaData, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -218,8 +225,36 @@ IDENTITY_FIELDS = frozenset(
         "guild",
         "channel",
         "team",
+        "tenant_id",
+        "account_id",
+        "principal_id",
+        "authorization_id",
+        "platform_user_id",
+        "requester_account_id",
+        "requester_external_user_id",
+        "channel_id",
+        "thread_id",
+        "parent_channel_id",
+        "model_id",
+        "model_ids",
     }
 )
+
+# Provider handles, including the prefixes used by the offline SDK fixtures.
+# Match only explicit ID fields and provider URL paths, never arbitrary text.
+PROVIDER_ID = re.compile(
+    r"(?<![\w-])(?:memstore|memver|session|agent|sesn|sess|skill|file|"
+    r"vault|vlt|env|sevt|evt|outc|res|mem|ag|ses|toolu|tu|e|m|s)_[A-Za-z0-9_-]+(?![\w-])"
+)
+PROVIDER_ID_FIELDS = frozenset({"id", "first_id", "last_id", "agent"})
+PROVIDER_ROUTE_FIELDS = frozenset({"path", "url", "idempotency_key"})
+SSE_DATA = re.compile(r"(?m)^(data: ?)([^\r\n]+)")
+TURN_CONTROLS = re.compile(r"(<turn_controls>\r?\n)([^\r\n]+)")
+JSON_STRING = re.compile(r'"(?:\\.|[^"\\])*"')
+
+
+def _provider_id_field(field: str) -> bool:
+    return field in PROVIDER_ID_FIELDS or field in ID_FIELDS or field.endswith(("_id", "_ids"))
 
 
 def database_metadata() -> MetaData:
@@ -286,6 +321,176 @@ class Normalizer:
         self.ids: dict[str, str] = {}
         self.epoch = epoch
         self.runtime_ids = set(runtime_ids)
+        self.provider_ids: set[str] = set()
+        self._normalizing = False
+
+    def _collect_providers(self, value: Json, *, field: str, identity: bool) -> None:
+        identity = identity or field in IDENTITY_FIELDS
+        if identity:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                self._collect_providers(item, field=key, identity=identity)
+        elif isinstance(value, list):
+            if field == "query" and self._query_pairs(value):
+                for pair in cast(list[list[Json]], value):
+                    self._collect_providers(pair[1], field=cast(str, pair[0]), identity=identity)
+                return
+            for item in value:
+                self._collect_providers(item, field=field, identity=identity)
+        elif isinstance(value, str):
+            if _provider_id_field(field) and PROVIDER_ID.fullmatch(value):
+                self.provider_ids.add(value)
+            elif field in {"path", "url"} and "/v1/" in value:
+                # Collection names and query parameter names are not handles.
+                parsed = urlsplit(value)
+                segments = parsed.path.strip("/").split("/")
+                self.provider_ids.update(
+                    segment for segment in segments[2:] if PROVIDER_ID.fullmatch(segment)
+                )
+                for name, item in parse_qsl(parsed.query, keep_blank_values=True):
+                    self._collect_providers(item, field=name, identity=identity)
+            for _, payload in self._json_fragments(value, field=field):
+                self._collect_providers(payload, field="", identity=False)
+
+    @staticmethod
+    def _json_fragments(value: str, *, field: str) -> list[tuple[re.Match[str], Json]]:
+        pattern = (
+            SSE_DATA
+            if field == "body" and value.startswith(("event:", "data:"))
+            else TURN_CONTROLS
+            if field == "text"
+            else None
+        )
+        if pattern is None:
+            return []
+        result: list[tuple[re.Match[str], Json]] = []
+        for match in pattern.finditer(value):
+            try:
+                payload = cast(Json, json.loads(match.group(2)))
+            except json.JSONDecodeError:
+                continue
+            result.append((match, payload))
+        return result
+
+    def _embedded_ids(self, value: Json, *, field: str = "", identity: bool = False) -> Json:
+        identity = identity or field in IDENTITY_FIELDS
+        if isinstance(value, dict):
+            normalized = {
+                key: self._embedded_ids(item, field=key, identity=identity)
+                for key, item in value.items()
+            }
+            self._error_message(value, normalized, field=field, identity=identity)
+            return normalized
+        if isinstance(value, list):
+            return [self._embedded_ids(item, field=field, identity=identity) for item in value]
+        if isinstance(value, str) and not identity:
+            return self._runtime_string(value, field=field, table="")
+        return value
+
+    def _encoded_json_ids(self, raw: str, payload: Json) -> str:
+        normalized = self._embedded_ids(payload)
+
+        def strings(original: Json, updated: Json) -> list[tuple[str, str]]:
+            if isinstance(original, dict):
+                assert isinstance(updated, dict)
+                return [
+                    pair
+                    for key, value in original.items()
+                    for pair in [(key, key), *strings(value, updated[key])]
+                ]
+            if isinstance(original, list):
+                assert isinstance(updated, list)
+                return [
+                    pair
+                    for value, replacement in zip(original, updated, strict=True)
+                    for pair in strings(value, replacement)
+                ]
+            if isinstance(original, str):
+                assert isinstance(updated, str)
+                return [(original, updated)]
+            return []
+
+        pieces: list[str] = []
+        offset = 0
+        for match, (original, updated) in zip(
+            JSON_STRING.finditer(raw), strings(payload, normalized), strict=True
+        ):
+            assert json.loads(match.group()) == original
+            pieces.append(raw[offset : match.start()])
+            pieces.append(match.group() if original == updated else json.dumps(updated))
+            offset = match.end()
+        pieces.append(raw[offset:])
+        return "".join(pieces)
+
+    def _identifier(self, value: str) -> str:
+        return self.ids.setdefault(value, f"<id:{len(self.ids) + 1}>")
+
+    @staticmethod
+    def _query_pairs(value: list[Json]) -> bool:
+        return all(
+            isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str) for pair in value
+        )
+
+    def _provider_references(self, value: str) -> str:
+        return PROVIDER_ID.sub(
+            lambda match: (
+                self._identifier(match.group())
+                if match.group() in self.provider_ids
+                else match.group()
+            ),
+            value,
+        )
+
+    def _route_references(self, value: str) -> str:
+        path, separator, query = value.partition("?")
+        namespace = path.find("/v1/")
+        collection_end = path.find("/", namespace + 4) if namespace >= 0 else -1
+        if namespace < 0:
+            path = self._provider_references(path)
+        elif collection_end >= 0:
+            path = path[: collection_end + 1] + self._provider_references(
+                path[collection_end + 1 :]
+            )
+        if not separator:
+            return path
+        pairs: list[str] = []
+        for pair in query.split("&"):
+            name, equals, encoded = pair.partition("=")
+            field = unquote_plus(name).removesuffix("[]")
+            original = unquote_plus(encoded)
+            updated = (
+                original
+                if field in IDENTITY_FIELDS
+                else self._runtime_string(original, field=field, table="")
+            )
+            pairs.append(name + equals + (encoded if original == updated else updated))
+        return path + separator + "&".join(pairs)
+
+    def _error_message(
+        self, original: dict[str, Json], normalized: dict[str, Json], *, field: str, identity: bool
+    ) -> None:
+        message = original.get("message")
+        if (
+            not identity
+            and (field == "error" or "error_kind" in original)
+            and isinstance(message, str)
+        ):
+            normalized["message"] = self._provider_references(message)
+
+    def _runtime_string(self, value: str, *, field: str, table: str) -> str:
+        if (
+            field in ID_FIELDS
+            or (field == "id" and value in self.runtime_ids)
+            or (_provider_id_field(field) and value in self.provider_ids)
+            or (field == "idempotency_key" and table == "task_continuations")
+        ):
+            return self._identifier(value)
+        if field in {"path", "url"}:
+            return self._route_references(value)
+        if field in PROVIDER_ROUTE_FIELDS:
+            return self._provider_references(value)
+        return value
 
     def normalize(
         self,
@@ -295,6 +500,26 @@ class Normalizer:
         identity: bool = False,
         anchor: datetime | None = None,
         table: str = "",
+    ) -> Json:
+        if not self._normalizing:
+            self._collect_providers(value, field=field, identity=identity)
+            self._normalizing = True
+            try:
+                return self._normalize(
+                    value, field=field, identity=identity, anchor=anchor, table=table
+                )
+            finally:
+                self._normalizing = False
+        return self._normalize(value, field=field, identity=identity, anchor=anchor, table=table)
+
+    def _normalize(
+        self,
+        value: Json,
+        *,
+        field: str,
+        identity: bool,
+        anchor: datetime | None,
+        table: str,
     ) -> Json:
         identity = identity or field in IDENTITY_FIELDS
         if isinstance(value, dict):
@@ -306,7 +531,7 @@ class Normalizer:
                 ),
                 anchor,
             )
-            return {
+            normalized: dict[str, Json] = {
                 key: self.normalize(
                     item,
                     field=key,
@@ -316,7 +541,24 @@ class Normalizer:
                 )
                 for key, item in value.items()
             }
+            self._error_message(value, normalized, field=field, identity=identity)
+            self._fingerprints(value, normalized)
+            return normalized
         if isinstance(value, list):
+            if field == "query" and self._query_pairs(value):
+                return [
+                    [
+                        pair[0],
+                        self.normalize(
+                            pair[1],
+                            field=cast(str, pair[0]),
+                            identity=identity,
+                            anchor=anchor,
+                            table=table,
+                        ),
+                    ]
+                    for pair in cast(list[list[Json]], value)
+                ]
             return [
                 self.normalize(item, field=field, identity=identity, anchor=anchor, table=table)
                 for item in value
@@ -341,13 +583,44 @@ class Normalizer:
                 if not seconds:
                     seconds = Decimal(0)
                 return f"<time:anchor{seconds:+f}s>"
-            if (
-                field in ID_FIELDS
-                or (field == "id" and value in self.runtime_ids)
-                or (field == "idempotency_key" and table == "task_continuations")
-            ):
-                return self.ids.setdefault(value, f"<id:{len(self.ids) + 1}>")
+            fragments = self._json_fragments(value, field=field)
+            if fragments:
+                pieces: list[str] = []
+                offset = 0
+                for match, payload in fragments:
+                    pieces.append(value[offset : match.start(2)])
+                    # Only identifiers change inside encoded wire/prompt JSON;
+                    # timestamps, text and all other payload values stay exact.
+                    pieces.append(self._encoded_json_ids(match.group(2), payload))
+                    offset = match.end(2)
+                pieces.append(value[offset:])
+                return "".join(pieces)
+            return self._runtime_string(value, field=field, table=table)
         return value
+
+    @staticmethod
+    def _fingerprints(original: dict[str, Json], normalized: dict[str, Json]) -> None:
+        config = original.get("effective_config")
+        if not isinstance(config, dict):
+            return
+        try:
+            snapshot = SessionSnapshot.model_validate(config)
+        except ValidationError:
+            # Partial/fake snapshots have no derivation we can verify.
+            return
+        normalized_snapshot = SessionSnapshot.model_validate(normalized["effective_config"])
+        for name, fingerprint in (
+            ("identity_fingerprint", fingerprint_identity),
+            ("mutable_fingerprint", fingerprint_mutable),
+        ):
+            actual = original.get(name)
+            if actual is None:
+                continue
+            if actual != fingerprint(snapshot):
+                raise ValueError(f"Captured {name} does not match effective_config")
+            # Preserve configuration/hash sensitivity while making the digest
+            # use the same provider aliases as its recorded input snapshot.
+            normalized[name] = fingerprint(normalized_snapshot)
 
 
 def _timestamp(value: Json) -> datetime | None:
@@ -362,10 +635,27 @@ def _timestamp(value: Json) -> datetime | None:
 
 def _semantic_key(value: Json, *, runtime_fields: frozenset[str] = frozenset({"id"})) -> Json:
     if isinstance(value, dict):
+        derived: frozenset[str] = frozenset()
+        config = value.get("effective_config")
+        if isinstance(config, dict):
+            try:
+                SessionSnapshot.model_validate(config)
+            except ValidationError:
+                pass
+            else:
+                # Its literal configuration remains in the key. The digest
+                # additionally encodes opaque provider handles, so cannot sort.
+                derived = frozenset({"identity_fingerprint", "mutable_fingerprint"})
         return {
             key: _semantic_key(item, runtime_fields=runtime_fields)
             for key, item in value.items()
-            if key not in ID_FIELDS | TIME_FIELDS | runtime_fields
+            if key not in ID_FIELDS | TIME_FIELDS | runtime_fields | derived
+            and not (
+                key not in IDENTITY_FIELDS
+                and _provider_id_field(key)
+                and isinstance(item, str)
+                and PROVIDER_ID.fullmatch(item)
+            )
         }
     if isinstance(value, list):
         return [_semantic_key(item, runtime_fields=runtime_fields) for item in value]
