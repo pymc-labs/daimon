@@ -8,6 +8,7 @@ from typing import Any, Final
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, encode_panel_metadata
 from daimon.adapters.slack.modal_limits import finish_modal
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI
 from daimon.core.github_panel import GrantsPanel, RepoChoice, suggested_repo
 from daimon.core.stores.github_connect import CLIENT_AGENT_MESSAGE
 
@@ -136,7 +137,9 @@ def build_view(
             actions.append(
                 _button(
                     ACTION_CONNECT_MORE,
-                    "Connect more repos" if panel.repos else "Connect GitHub",
+                    "Connect more repos"
+                    if panel.repos
+                    else f"{CONNECT_GITHUB_EMOJI} Connect GitHub",
                 )
             )
         actions.append(_button(ACTION_BACK, "◀ Back"))

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+CONNECT_GITHUB_EMOJI = "🔗"
+
 
 def connect_button_blocks(url: str, line: str) -> list[dict[str, Any]]:
     """One readable line and a URL button, with no link in fallback text."""
@@ -15,7 +17,11 @@ def connect_button_blocks(url: str, line: str) -> list[dict[str, Any]]:
                 {
                     "type": "button",
                     "action_id": "github_link__open",
-                    "text": {"type": "plain_text", "text": "Connect GitHub"},
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"{CONNECT_GITHUB_EMOJI} Connect GitHub",
+                        "emoji": True,
+                    },
                     "url": url,
                 }
             ],

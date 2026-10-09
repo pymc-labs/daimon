@@ -19,7 +19,7 @@ from daimon.adapters.mcp.tools.setup_target import (
     resolve_setup_agent,
 )
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
-from daimon.core.github_connect_cards import connect_button_blocks
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, connect_button_blocks
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
@@ -61,6 +61,7 @@ async def _post_discord_connect_card(
     view.add_item(
         discord.ui.Button(
             label="Connect GitHub",
+            emoji=CONNECT_GITHUB_EMOJI,
             style=discord.ButtonStyle.primary,
             custom_id=f"gh_connect:{requester_id}:{intent_id.hex}",
         )

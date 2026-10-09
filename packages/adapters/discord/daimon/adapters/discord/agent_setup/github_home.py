@@ -15,6 +15,7 @@ from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI
 from daimon.core.github_panel import (
     CONNECT_COPY,
     connect_link,
@@ -35,7 +36,9 @@ import discord
 
 def connect_button(url: str) -> discord.ui.Button[discord.ui.View]:
     """The shared Discord link button for private GitHub connection URLs."""
-    return discord.ui.Button(label="Connect GitHub", style=discord.ButtonStyle.link, url=url)
+    return discord.ui.Button(
+        label="Connect GitHub", emoji=CONNECT_GITHUB_EMOJI, style=discord.ButtonStyle.link, url=url
+    )
 
 
 def connect_button_view(url: str, *, timeout: float | None = None) -> discord.ui.View:
@@ -113,6 +116,7 @@ class GitHubHomeView(PanelViewBase):
         elif state.is_admin:
             connect: discord.ui.Button[GitHubHomeView] = discord.ui.Button(
                 label="Connect more repos" if connected_count else "Connect GitHub",
+                emoji=CONNECT_GITHUB_EMOJI if not connected_count else None,
                 style=discord.ButtonStyle.primary,
             )
             connect.callback = self._on_connect  # type: ignore[method-assign]

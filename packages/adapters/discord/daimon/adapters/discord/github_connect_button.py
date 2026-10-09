@@ -11,6 +11,7 @@ import structlog
 from daimon.adapters.discord.agent_setup.github_home import connect_button_view
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import is_member_guild_admin
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.github_connect import bind_discord_connect_click
@@ -30,6 +31,7 @@ class GitHubConnectButton(
     def __init__(self, *, requester_id: str, intent_id: uuid.UUID) -> None:
         button: discord.ui.Button[discord.ui.View] = discord.ui.Button(
             label="Connect GitHub",
+            emoji=CONNECT_GITHUB_EMOJI,
             style=discord.ButtonStyle.primary,
             custom_id=f"gh_connect:{requester_id}:{intent_id.hex}",
         )

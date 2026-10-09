@@ -15,6 +15,7 @@ from daimon.adapters.discord.agent_setup.github_repos import GitHubReposView
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI
 from daimon.core.github_panel import (
     GrantsPanel,
     RepoChoice,
@@ -118,6 +119,7 @@ class GitHubAddReposView(PanelViewBase):
             if state.is_admin:
                 connect: discord.ui.Button[GitHubAddReposView] = discord.ui.Button(
                     label="Connect more repos" if panel.repos else "Connect GitHub",
+                    emoji=CONNECT_GITHUB_EMOJI if not panel.repos else None,
                     style=(
                         discord.ButtonStyle.secondary
                         if panel.repos

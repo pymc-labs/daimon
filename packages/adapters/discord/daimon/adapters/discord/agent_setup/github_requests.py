@@ -11,6 +11,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.stores.github_access import list_authorized_repos
@@ -64,7 +65,9 @@ async def update_requester_card(
         if view is not None and link_url:
             view.add_item(
                 discord.ui.Button(
-                    label="Connect GitHub", custom_id=f"github_request:{request.id}:link"
+                    label="Connect GitHub",
+                    emoji=CONNECT_GITHUB_EMOJI,
+                    custom_id=f"github_request:{request.id}:link",
                 )
             )
         if view is not None and can_cancel:

@@ -13,6 +13,7 @@ from daimon.adapters.slack.agent_setup.github_link import send_link
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.github_request_cards import slack_mrkdwn_escape
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -124,7 +125,11 @@ async def _replace_modal(
                         "type": "button",
                         "action_id": "github_request__link",
                         "url": url,
-                        "text": {"type": "plain_text", "text": "Connect GitHub"},
+                        "text": {
+                            "type": "plain_text",
+                            "text": f"{CONNECT_GITHUB_EMOJI} Connect GitHub",
+                            "emoji": True,
+                        },
                     }
                 ],
             }

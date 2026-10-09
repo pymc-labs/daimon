@@ -70,6 +70,7 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
     assert "https://" not in text
     item = kwargs["view"].children[0]
     assert item.custom_id == f"gh_connect:456:{uuid.UUID(int=1).hex}"
+    assert item.emoji.name == "🔗"
     assert item.url is None
 
     slack_client = SimpleNamespace(chat_postEphemeral=AsyncMock(), conversations_open=AsyncMock())
@@ -90,6 +91,11 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
     assert (sent["channel"], sent["thread_ts"], sent["user"]) == ("C1", "123.456", "U1")
     assert "https://" not in sent["text"]
     assert sent["blocks"][1]["elements"][0]["url"] == "https://mcp.test/private-link"
+    assert sent["blocks"][1]["elements"][0]["text"] == {
+        "type": "plain_text",
+        "text": "🔗 Connect GitHub",
+        "emoji": True,
+    }
 
 
 @pytest.mark.asyncio

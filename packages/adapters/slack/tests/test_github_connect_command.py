@@ -78,7 +78,7 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
     assert kwargs["channel"] == "C1" and kwargs["user"] == "U1"
     assert "https://" not in kwargs["text"]
     button = kwargs["blocks"][1]["elements"][0]
-    assert button["text"]["text"] == "Connect GitHub"
+    assert button["text"] == {"type": "plain_text", "text": "🔗 Connect GitHub", "emoji": True}
     assert button["url"] == "https://mcp.test/oauth/github/connect/private-token"
     assert audit.await_args.kwargs["reason"] == "admin link minted"
     assert audit.await_args.kwargs["platform"] == "slack"

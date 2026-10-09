@@ -44,6 +44,7 @@ from daimon.core.channel_environments import (
     environment_option_value,
 )
 from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleStatus
+from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
@@ -177,7 +178,11 @@ def build_github_home_view(
             {
                 "type": "button",
                 "action_id": "github_link__open",
-                "text": {"type": "plain_text", "text": "Connect GitHub"},
+                "text": {
+                    "type": "plain_text",
+                    "text": f"{CONNECT_GITHUB_EMOJI} Connect GitHub",
+                    "emoji": True,
+                },
                 "url": pending_url,
             },
             _button(action_id=ACTION_GITHUB_START, label="Start over"),
@@ -199,7 +204,9 @@ def build_github_home_view(
         ]
     else:
         summary = "Connect repos here, then choose which agents can use them."
-        actions = [_button(action_id=ACTION_GITHUB_START, label="Connect GitHub")]
+        actions = [
+            _button(action_id=ACTION_GITHUB_START, label=f"{CONNECT_GITHUB_EMOJI} Connect GitHub")
+        ]
     actions.append(_button(action_id=ACTION_GITHUB_BACK, label="◀ Back"))
     status = f"Linked as @{linked_login}" if linked_login else "GitHub isn't linked."
     fields = [{"type": "mrkdwn", "text": f"*Personal link*\n{status}"}]

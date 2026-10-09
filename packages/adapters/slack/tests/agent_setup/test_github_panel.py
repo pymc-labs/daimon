@@ -132,7 +132,9 @@ async def test_slack_connect_link_uses_ephemeral_actions() -> None:
     assert "https://example.test/link" not in posted["text"]
     assert [block["type"] for block in posted["blocks"]] == ["section", "actions"]
     actions = next(block for block in posted["blocks"] if block["type"] == "actions")
-    assert [button["text"]["text"] for button in actions["elements"]] == ["Connect GitHub"]
+    assert [button["text"] for button in actions["elements"]] == [
+        {"type": "plain_text", "text": "🔗 Connect GitHub", "emoji": True}
+    ]
     assert actions["elements"][0]["url"] == "https://example.test/link"
 
 
@@ -291,6 +293,14 @@ def test_slack_member_github_home_shows_only_personal_link() -> None:
         is_admin=True,
     )
     assert "Connect GitHub" in str(admin["blocks"])
+    connect = next(
+        element
+        for block in admin["blocks"]
+        if block["type"] == "actions"
+        for element in block["elements"]
+        if element["action_id"] == "agent_setup__github_start"
+    )
+    assert connect["text"] == {"type": "plain_text", "text": "🔗 Connect GitHub", "emoji": True}
 
 
 @pytest.mark.asyncio
@@ -369,7 +379,7 @@ def test_slack_add_repos_keeps_selection_on_one_screen() -> None:
         for element in block["elements"]
         if element["type"] == "button"
     ]
-    assert "Connect GitHub" in empty_actions
+    assert "🔗 Connect GitHub" in empty_actions
     assert "Add repos" not in empty_actions
     saved_key = build_add_view(
         PanelMetadata(team_id="T", channel_id="C", view="github_add", agent_name="helper"),
