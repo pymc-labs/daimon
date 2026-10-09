@@ -113,3 +113,24 @@ for consistency; only prior durable acknowledgement or a new matching native
 observation supports acknowledged recovery. Already-durable processed receipts
 remain valid. The reference's `reconcile_send` reads its retained upstream log,
 records that observation, and returns no receipt for a key never sent.
+
+## Adapter-declared pending fixtures
+
+Driver factories can declare gaps with `Adapter(driver, store, transport,
+pending={"C09": PendingReason(PendingKind.CAPABILITY_UNAVAILABLE,
+"provider exposes no native vault API")})`. Import `PendingReason` and
+`PendingKind` from `mux.conformance`. Kinds are `capability_unavailable`,
+`live_key_required` and `adapter_dependency`; the detail must be a nonempty,
+adapter-authored explanation, not a provider exception message. Pin each
+declaration in the driver's matrix tests. The map is snapshotted and immutable;
+invalid fixture IDs or untyped reasons are refused. Declarations defer only
+their named fixture before its arrangement/port calls. All 18 result IDs remain
+visible in registry runs. Other fixtures still exercise the actual driver;
+undeclared `UnsupportedCapability` exceptions remain failures.
+
+`Result.pending_reason` retains the typed declaration alongside readable
+evidence. Existing host-pending reasons remain unchanged. A PENDING result never
+certifies, and a typed pending reason cannot accompany PASS. Use
+`await run_fixture("Cxx", adapter)` for a single probe with the same policy.
+A live-key reason is an explicit adapter declaration, never automatic credential
+discovery. This runner API has no recorder or live-budget dependency.

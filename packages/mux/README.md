@@ -25,6 +25,9 @@ Install a driver's SDK with its extra: `daimon-mux[anthropic]`,
 The full description is [docs/mux.md](../../docs/mux.md). Tests:
 `uv run pytest packages/mux`.
 
+Conformance adapters can declare individual fixtures PENDING with typed capability,
+live-key or dependency reasons. Declarations remain visible and never certify.
+
 The Anthropic skills version extension also supports workspace-key downloads by
 native version ID, omitting the skills beta header on that request. The ordinary
 pinned-version port and generic recovery download keep their existing SDK requests. Both paths enforce the same
