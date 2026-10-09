@@ -597,9 +597,30 @@ public raw handles, null usage incorrectly converted to zero, queued ambiguous
 sends, premature occupancy release, unconditional admission, supported migration,
 and ignored transport faults. C10's admission faults are a documented no-op:
 the real profile statically refuses the required memory store before any writes.
-C08 and C11 await driver update/inline-bundle ports; the provider documents those
-capabilities. C04 awaits ambiguous accepted-POST reconciliation, rather than a
+C08 awaits the next-turn update port. The resource layer implements inline
+bundles; C11 awaits a conformance bridge for interaction-time deployment. The
+provider documents both capabilities. C04 awaits ambiguous accepted-POST reconciliation, rather than a
 host journal bridge. C05's durable saved-item/SSE-gap proof remains deferred.
+
+Gemini resource ports emulate a scoped skill catalogue and host artifact uploads.
+Skill bundles require a root `SKILL.md`, canonical relative paths and UTF-8
+contents, with at most 256 files and 2 MiB total. Agents use explicit immutable
+version pins; publishing changes future pins only. UTF-8 uploaded files mount
+as inline environment sources. Binary uploads are downloadable from host storage,
+but binary inline mounts are refused. Conflicting source targets are rejected.
+
+Workspace artifact discovery downloads the current environment's binary tar
+snapshot through the Files API. Its roster includes workspace files and inputs;
+the host selects which files to deliver. Pagination keeps a stable discovered roster;
+downloads fetch a fresh snapshot and require the original file digest. Missing
+workspace snapshots expose `ContinuityLost`; changed or missing files fail visibly.
+Historical per-turn snapshots, native vaults and workspace-file deletion are
+unsupported. Snapshot parsing accepts plain tar or gzip-compressed tar, bounds decompression
+before parsing metadata, and limits archive/expanded data to 64 MiB, each file
+to 16 MiB and members to 2048, and rejects traversal, links and duplicate paths.
+The SDK buffers network bytes before these parser limits apply. Host uploads
+also have a 16 MiB limit. This resource support requires injected transactional
+host storage and does not enable a new default backend or production host wiring.
 
 ## OpenAI driver core
 

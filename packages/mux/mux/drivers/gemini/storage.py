@@ -13,8 +13,17 @@ from typing import Protocol
 
 from mux.contracts.events import Event
 from mux.contracts.ids import ModelRef, Scope
-from mux.contracts.receipts import SendReceipt
-from mux.contracts.resources import Agent, Environment, Session, SessionSpec
+from mux.contracts.receipts import DeletionReceipt, SendReceipt
+from mux.contracts.resources import (
+    Agent,
+    Artifact,
+    Environment,
+    Session,
+    SessionSpec,
+    Skill,
+    SkillUpload,
+    SkillVersion,
+)
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini.transport import Object
 
@@ -39,10 +48,34 @@ class SessionRecord:
 
 
 @dataclass
+class SkillRecord:
+    owner: tuple[str, str]
+    account_scope_id: str
+    skill: Skill
+    bundles: dict[str, SkillUpload] = field(default_factory=dict[str, SkillUpload])
+    versions: dict[str, SkillVersion] = field(default_factory=dict[str, SkillVersion])
+
+
+@dataclass
+class ArtifactRecord:
+    artifact: Artifact
+    digest: str
+    body: bytes | None = None
+
+
+@dataclass
 class Records:
     agents: dict[str, Agent] = field(default_factory=lambda: {})
     environments: dict[str, Environment] = field(default_factory=lambda: {})
     sessions: dict[str, SessionRecord] = field(default_factory=lambda: {})
+    skills: dict[str, SkillRecord] = field(default_factory=dict[str, SkillRecord])
+    artifacts: dict[str, ArtifactRecord] = field(default_factory=dict[str, ArtifactRecord])
+    artifact_pages: dict[str, tuple[str, str | None, str, tuple[str, ...]]] = field(
+        default_factory=dict[str, tuple[str, str | None, str, tuple[str, ...]]]
+    )
+    deletions: dict[tuple[str, str, str], tuple[str, str, DeletionReceipt]] = field(
+        default_factory=dict[tuple[str, str, str], tuple[str, str, DeletionReceipt]]
+    )
     sends: dict[tuple[str, str, str], tuple[str, str, SendReceipt]] = field(
         default_factory=lambda: {}
     )

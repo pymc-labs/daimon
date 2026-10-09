@@ -35,6 +35,17 @@ class FakeTransport:
         self.streams: dict[str, list[Object]] = {}
         self.cancelled: list[str] = []
         self.stream_closed = False
+        self.snapshots: dict[str, bytes | ProviderError] = {}
+        self.snapshot_reads: list[str] = []
+
+    async def download_snapshot(self, environment_id: str) -> bytes:
+        self.snapshot_reads.append(environment_id)
+        response = self.snapshots.get(environment_id)
+        if response is None:
+            raise AssertionError("unscripted workspace snapshot read")
+        if isinstance(response, ProviderError):
+            raise response
+        return response
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
         self.requests.append(deepcopy(dict(request)))

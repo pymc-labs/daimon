@@ -40,6 +40,7 @@ from mux.contracts.resources import (
     SessionSpec,
     UpdatePlan,
 )
+from mux.drivers.gemini.bundles import inline_files, skill_sources, target_path, validate_targets
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
 from mux.drivers.gemini.storage import Records, SessionRecord, Storage, owner
 from mux.drivers.gemini.transport import (
@@ -129,6 +130,11 @@ class Base:
         return record
 
     def _creation(self, records: Records, scope: Scope, key: str, digest: str) -> str | None:
+        deleted = records.deletions.get((*owner(scope), key))
+        if deleted is not None:
+            if deleted[0] != scope.principal_id:
+                raise ScopeViolation(key, "operation belongs to another principal")
+            raise OperationConflict(key)
         prior = records.creations.get((*owner(scope), key))
         if prior is None:
             return None
@@ -267,6 +273,7 @@ class GeminiAgents(Base):
             }
         )
         async with self._storage.transaction() as records:
+            skill_sources(records, scope, self._account, spec.skills)
             id_ = self._creation(records, scope, key, digest)
             if id_ is not None:
                 return records.agents[id_]
@@ -322,8 +329,8 @@ class GeminiAgents(Base):
 def compile_agent(spec: AgentSpec) -> Object:
     if spec.model.provider != "gemini" or not spec.model.id or spec.model.options:
         refuse("model")
-    if spec.skills or spec.extensions:
-        refuse("skills_bundle", "agent_extensions")
+    if spec.extensions:
+        refuse("agent_extensions")
     result: Object = {
         "agent": BASE_AGENT,
         "agent_config": {"type": "antigravity", "model": spec.model.id},
@@ -362,7 +369,6 @@ def compile_agent(spec: AgentSpec) -> Object:
 
 class GeminiEnvironments(Base):
     async def create(self, scope: Scope, spec: EnvironmentSpec, *, key: str) -> Environment:
-        compile_environment(spec)
         digest = request_digest(
             {
                 "kind": "environment",
@@ -371,6 +377,9 @@ class GeminiEnvironments(Base):
             }
         )
         async with self._storage.transaction() as records:
+            compile_environment(
+                spec, files=inline_files(records, scope, self._account, spec.sources)
+            )
             id_ = self._creation(records, scope, key, digest)
             if id_ is not None:
                 return records.environments[id_]
@@ -429,19 +438,26 @@ class GeminiEnvironments(Base):
         refuse("environment_delete")
 
 
-def compile_environment(spec: EnvironmentSpec) -> Object:
+def compile_environment(spec: EnvironmentSpec, *, files: dict[str, str] | None = None) -> Object:
     if spec.execution != "hosted" or spec.network or spec.packages or spec.native_config:
         refuse("environment_configuration")
     sources: list[JsonValue] = []
     for source in spec.sources or ():
+        target = target_path(source.target_path)
+        if source.kind == "file" and source.artifact is not None and files is not None:
+            sources.append(
+                {"type": "inline", "target": target, "content": files[source.artifact.id]}
+            )
+            continue
         if source.kind != "repository" or source.credential_ref or source.artifact or source.ref:
             refuse("workspace_source")
         obj: Object = {
             "type": "repository",
             "source": source.repository_url,
-            "target": source.target_path,
+            "target": target,
         }
         sources.append(obj)
+    validate_targets(sources)
     return {"type": "remote", "sources": sources}
 
 
@@ -485,7 +501,18 @@ class GeminiSessions(Base):
                 env = records.environments.get(spec.environment.id)
                 if env is None or env.ref != spec.environment:
                     raise ScopeViolation(spec.environment.id, "no owned inline environment")
-                environment = compile_environment(env.spec)
+                environment = compile_environment(
+                    env.spec, files=inline_files(records, scope, self._account, env.spec.sources)
+                )
+            mounted = skill_sources(records, scope, self._account, agent.spec.skills)
+            if mounted:
+                configuration = object_value(environment)
+                sources = configuration.get("sources", [])
+                if not isinstance(sources, list):
+                    raise ValueError("expected inline environment sources")
+                validate_targets([*sources, *mounted])
+                configuration["sources"] = [*sources, *mounted]
+                environment = configuration
             request["environment"] = environment
             id_ = str(uuid4())
             session = Session(
