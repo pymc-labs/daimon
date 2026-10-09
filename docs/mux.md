@@ -25,6 +25,7 @@ are written against.
 | `mux.contracts.extensions` | `ExtensionRef`, `ExtensionConfig` and the declared namespaces |
 | `mux.contracts.ports` | the port protocols |
 | `mux.errors` | the error taxonomy |
+| `mux.state` | the `StateStore` protocol, the pure operation, lease, journal and usage rules, and a restartable in-memory store |
 | `mux.profiles` | the declared profiles and `get_profile` |
 | `mux.drivers` | one subpackage per provider (empty so far) |
 
@@ -136,6 +137,38 @@ Asking for a namespace the profile does not offer raises
 `UnsupportedCapability`, and asking for another version raises
 `ExtensionVersionError`. There is no raw client attribute on any port.
 
+## State
+
+`mux.state.store.StateStore` is the durable state a host keeps for the
+library. Each method is one atomic transaction, and every decision it makes
+comes from a pure function in `mux.state`, so every store implementation
+decides the same way. Time is passed in; nothing reads a clock.
+
+| Record | Unique on | Rule |
+| --- | --- | --- |
+| config revision | (channel, local) | Immutable. The same number with different content raises `ConfigRevisionConflict`. |
+| binding | (thread, generation) | Compare-and-swap on generation (0 = unbound); the loser raises `BindingConflict`. A rebind keeps the binding `id`. `bind_new_thread` returns the winner of a race. |
+| operation | (tenant, account, key) | Persisted as `pending` before any I/O, marked `sent` before the request goes out. The same key and request digest returns the existing record; a different digest raises `OperationConflict`. Moves follow `operations.TRANSITIONS`. |
+| lease | thread | One active root turn. Each acquisition gets a higher fence; a write carrying a lease that is no longer active raises `StaleFence`. Taking over an expired lease sets `took_over`. |
+| journal | (session, sequence) and (session, source key, revision) | An append, its projection and the stream cursor commit together; an entry already journaled is dropped. Preview events are kept but never change the projection. |
+| usage | (binding, observation, revision) | A higher revision writes one outbox row of signed deltas; an equal or lower one is ignored. |
+| accounting outbox | (binding, observation, revision) | `mark_outbox_applied` is true once per row. |
+
+After a crash, `operations.recovery` says what a successor does with an
+operation it finds: send a `pending` one, reconcile a `sent` or
+`outcome_unknown` one, observe an `accepted` one. A lost lease never means
+the request was not sent.
+
+Usage revisions follow the null-is-not-zero rule: a count the provider did
+not report leaves the accounted value alone and its delta is `None`. An
+observation of 100, then 120, then 110 output tokens yields deltas of 100,
++20 and -10, and replaying any of them yields nothing.
+
+`mux.state.memory.MemoryStateStore` keeps its committed state in a
+`MemoryStateData` that outlives the store, so `restart()` simulates a
+process restart, and a `crash` plan raises `SimulatedCrash` just before or
+just after a named method commits.
+
 ## Events
 
 `Event` is one journal entry: an id, the session, a local `sequence`, a
@@ -185,7 +218,7 @@ Import-linter contracts in the root `pyproject.toml` hold the boundaries:
 | Contract | Forbids |
 | --- | --- |
 | Mux must not import daimon | `mux` → `daimon` |
-| Mux contracts and profiles import no provider SDK or driver | `mux.contracts`, `mux.profiles`, `mux.errors` → `anthropic`, `openai`, `google`, `mux.drivers` |
+| Mux contracts and profiles import no provider SDK or driver | `mux.contracts`, `mux.profiles`, `mux.errors`, `mux.state` → `anthropic`, `openai`, `google`, `mux.drivers` |
 | Only mux.drivers.anthropic imports the anthropic SDK | `mux` → `anthropic`, except from `mux.drivers.anthropic` |
 | Only mux.drivers.openai imports the openai SDK | `mux` → `openai`, except from `mux.drivers.openai` |
 | Only mux.drivers.gemini imports the google.genai SDK | `mux` → `google`, except from `mux.drivers.gemini` |
