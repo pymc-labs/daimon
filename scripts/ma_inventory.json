@@ -1,5 +1,5 @@
 {
-  "files_scanned": 1982,
+  "files_scanned": 1987,
   "parse_errors": [],
   "calls": [
     {
@@ -1659,65 +1659,6 @@
       "response_access": []
     },
     {
-      "file": "packages/core/daimon/core/session_preparation.py",
-      "line": 253,
-      "end": 253,
-      "scope": "_destination_may_carry",
-      "category": "production",
-      "resource": "sessions.retrieve",
-      "call": "deps.anthropic.beta.sessions.retrieve(row.ma_session_id)",
-      "request_keys": [],
-      "response_access": [
-        "previous.metadata"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/session_preparation.py",
-      "line": 317,
-      "end": 317,
-      "scope": "_heal_lineage",
-      "category": "production",
-      "resource": "sessions.archive",
-      "call": "deps.anthropic.beta.sessions.archive(predecessor.ma_session_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/session_preparation.py",
-      "line": 437,
-      "end": 437,
-      "scope": "_run_replacement",
-      "category": "production",
-      "resource": "sessions.archive",
-      "call": "deps.anthropic.beta.sessions.archive(row.ma_session_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/session_preparation.py",
-      "line": 762,
-      "end": 762,
-      "scope": "_prepare_session_for_turn_locked",
-      "category": "production",
-      "resource": "sessions.retrieve",
-      "call": "deps.anthropic.beta.sessions.retrieve(row.ma_session_id)",
-      "request_keys": [],
-      "response_access": [
-        "observed.status"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/session_preparation_stages.py",
-      "line": 225,
-      "end": 225,
-      "scope": "recorded_snapshot",
-      "category": "production",
-      "resource": "sessions.retrieve",
-      "call": "anthropic.beta.sessions.retrieve(existing.ma_session_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
       "file": "packages/core/daimon/core/session_seal.py",
       "line": 135,
       "end": 135,
@@ -1788,41 +1729,6 @@
       "category": "production",
       "resource": "sessions.update",
       "call": "anthropic.beta.sessions.update(session_id, agent=_agent_update(tools, servers))",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/sessions.py",
-      "line": 726,
-      "end": 731,
-      "scope": "create_isolated_session",
-      "category": "production",
-      "resource": "sessions.create",
-      "call": "anthropic.beta.sessions.create(agent=agent.id, environment_id=environment.id, metadata=metadata if metadata else omit, resources=resources)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/sessions.py",
-      "line": 607,
-      "end": 619,
-      "scope": "create_session",
-      "category": "production",
-      "resource": "sessions.create",
-      "call": "anthropic.beta.sessions.create(agent=agent_argument, environment_id=environment.id, metadata=metadata if metadata else omit, vault_ids=[caller_vault_id, vault_id] if caller_vault_id is not None and vault_id is not None else [vault_id] if vault_id is not None else omit, resources=resources if resources else omit)",
-      "request_keys": [],
-      "response_access": [
-        "created.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/sessions.py",
-      "line": 662,
-      "end": 662,
-      "scope": "create_session",
-      "category": "production",
-      "resource": "sessions.archive",
-      "call": "anthropic.beta.sessions.archive(created.id)",
       "request_keys": [],
       "response_access": []
     },
@@ -5130,6 +5036,43 @@
       ]
     },
     {
+      "file": "packages/core/tests/test_session_port_requests.py",
+      "line": 139,
+      "end": 141,
+      "scope": "test_repository_tokens_stay_opaque_until_the_single_wire_request",
+      "category": "test",
+      "resource": "sessions.create",
+      "call": "legacy.beta.sessions.create(agent='ag_parity', environment_id='env_parity', resources=resources)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_session_port_requests.py",
+      "line": 40,
+      "end": 45,
+      "scope": "test_session_create_matches_legacy_wire_request",
+      "category": "test",
+      "resource": "sessions.create",
+      "call": "old_client.beta.sessions.create(agent=agent.id, environment_id=environment.id, metadata=metadata if metadata else omit, resources=resources)",
+      "request_keys": [],
+      "response_access": [
+        "old.model_dump"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_session_port_requests.py",
+      "line": 55,
+      "end": 61,
+      "scope": "test_session_create_matches_legacy_wire_request",
+      "category": "test",
+      "resource": "sessions.create",
+      "call": "old_client.beta.sessions.create(agent=agent.id, environment_id=environment.id, metadata=metadata if metadata else omit, vault_ids=omit, resources=resources if resources else omit)",
+      "request_keys": [],
+      "response_access": [
+        "old.model_dump"
+      ]
+    },
+    {
       "file": "packages/core/tests/test_session_preparation.py",
       "line": 915,
       "end": 917,
@@ -5954,6 +5897,50 @@
       "response_access": []
     },
     {
+      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
+      "line": 331,
+      "end": 331,
+      "scope": "list",
+      "category": "production",
+      "resource": "sessions.list",
+      "call": "self._client.beta.sessions.list(**kwargs)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
+      "line": 296,
+      "end": 296,
+      "scope": "send",
+      "category": "production",
+      "resource": "sessions.create",
+      "call": "self._client.beta.sessions.create(**cast(SessionCreateParams, kwargs))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
+      "line": 303,
+      "end": 303,
+      "scope": "create",
+      "category": "production",
+      "resource": "sessions.create",
+      "call": "self._client.beta.sessions.create(**cast(SessionCreateParams, payload))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
+      "line": 310,
+      "end": 310,
+      "scope": "retrieve",
+      "category": "production",
+      "resource": "sessions.retrieve",
+      "call": "self._client.beta.sessions.retrieve(ref.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
       "line": 138,
       "end": 140,
@@ -6157,6 +6144,17 @@
       "response_access": [
         "first.iter_pages"
       ]
+    },
+    {
+      "file": "packages/mux/tests/test_anthropic_sessions_lifecycle.py",
+      "line": 176,
+      "end": 176,
+      "scope": "test_create_preserves_override_tool_key_order_in_request_bytes",
+      "category": "test",
+      "resource": "sessions.create",
+      "call": "original.beta.sessions.create(agent=cast(Agent, agent), environment_id='env_1')",
+      "request_keys": [],
+      "response_access": []
     },
     {
       "file": "packages/testing/daimon/testing/mark_disposable.py",
@@ -12088,6 +12086,34 @@
       "category": "production"
     },
     {
+      "file": "packages/core/daimon/core/session_ports_compat.py",
+      "line": 14,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/session_ports_compat.py",
+      "line": 15,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsSession"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/session_ports_compat.py",
+      "line": 16,
+      "module": "anthropic.types.beta.session_create_params",
+      "names": [
+        "Agent",
+        "Resource"
+      ],
+      "category": "production"
+    },
+    {
       "file": "packages/core/daimon/core/session_preparation_stages.py",
       "line": 22,
       "module": "anthropic",
@@ -12287,8 +12313,7 @@
       "line": 19,
       "module": "anthropic",
       "names": [
-        "AsyncAnthropic",
-        "omit"
+        "AsyncAnthropic"
       ],
       "category": "production"
     },
@@ -14376,6 +14401,24 @@
       "category": "test"
     },
     {
+      "file": "packages/core/tests/test_session_port_requests.py",
+      "line": 9,
+      "module": "anthropic",
+      "names": [
+        "omit"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/test_session_port_requests.py",
+      "line": 105,
+      "module": "anthropic.types.beta.session_create_params",
+      "names": [
+        "Resource"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/core/tests/test_session_preparation.py",
       "line": 25,
       "module": "anthropic",
@@ -15866,6 +15909,42 @@
       "category": "production"
     },
     {
+      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
+      "line": 8,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
+      "line": 9,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsSession"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
+      "line": 10,
+      "module": "anthropic.types.beta.session_create_params",
+      "names": [
+        "SessionCreateParams"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
+      "line": 11,
+      "module": "anthropic.types.beta.session_list_params",
+      "names": [
+        "SessionListParams"
+      ],
+      "category": "production"
+    },
+    {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
       "line": 9,
       "module": "anthropic",
@@ -15942,6 +16021,24 @@
         "BetaManagedAgentsAgentMCPToolResultEvent",
         "BetaManagedAgentsAgentToolResultEvent",
         "BetaManagedAgentsUserCustomToolResultEvent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/mux/tests/test_anthropic_sessions_lifecycle.py",
+      "line": 9,
+      "module": "anthropic",
+      "names": [
+        "NotFoundError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/mux/tests/test_anthropic_sessions_lifecycle.py",
+      "line": 174,
+      "module": "anthropic.types.beta.session_create_params",
+      "names": [
+        "Agent"
       ],
       "category": "test"
     },

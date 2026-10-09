@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve original credential JSON key order and redact alternate quote-escaped secret echoes; verify `.env` upload filename, media type and bytes at the host call site.
 
 - Advertise closed session create, resource-mount and update configuration namespaces for backend admission.
+- Route session creation and preparation through neutral lifecycle ports, preserving
+  native request bytes, response fields, recovery ordering and SDK exception types.
 
 - Preserve explicit null environment descriptions on native create requests and
   resolve and redact all repository tokens in session resource lists together.

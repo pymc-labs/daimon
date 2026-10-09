@@ -56,6 +56,11 @@ from daimon.core.session_compat import (
 )
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import lock_session_mutation
+from daimon.core.session_ports_compat import (
+    archive_session_record,
+    retrieve_session_record,
+    session_scope,
+)
 from daimon.core.session_preparation_gate import pool_headroom
 from daimon.core.session_preparation_stages import (
     FreshSessionFactory,
@@ -250,7 +255,15 @@ async def _destination_may_carry(
     that can't be read is never carried.
     """
     try:
-        previous = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
+        previous = await retrieve_session_record(
+            deps.anthropic,
+            row.ma_session_id,
+            scope=session_scope(
+                tenant_id=row.tenant_id,
+                account_id=row.account_id,
+                call_site="session_preparation:retrieve",
+            ),
+        )
     except anthropic_pkg.APIError as error:
         log.warning(
             "session_preparation.handoff_source_unreadable",
@@ -314,7 +327,15 @@ async def _heal_lineage(deps: TurnDeps, session: AsyncSession, *, row: ThreadSes
     )
     await lock_session_mutation(session, predecessor.ma_session_id, check=False)
     with contextlib.suppress(anthropic_pkg.NotFoundError):
-        await deps.anthropic.beta.sessions.archive(predecessor.ma_session_id)
+        await archive_session_record(
+            deps.anthropic,
+            predecessor.ma_session_id,
+            scope=session_scope(
+                tenant_id=predecessor.tenant_id,
+                account_id=predecessor.account_id,
+                call_site="session_preparation:heal_lineage",
+            ),
+        )
     async with deps.sessionmaker.begin() as closing:
         await lock_access_policy(closing, tenant_id=row.tenant_id)
         await mark_superseded(closing, id=row.predecessor_id, replaced_by_id=row.id)
@@ -434,7 +455,15 @@ async def _run_replacement(
             session, id=preparation.id, stage="created", now=now, new_mapping_id=fresh.mapping_id
         )
     with contextlib.suppress(anthropic_pkg.NotFoundError):
-        await deps.anthropic.beta.sessions.archive(row.ma_session_id)
+        await archive_session_record(
+            deps.anthropic,
+            row.ma_session_id,
+            scope=session_scope(
+                tenant_id=row.tenant_id,
+                account_id=row.account_id,
+                call_site="session_preparation:replacement",
+            ),
+        )
     async with deps.sessionmaker() as session, session.begin():
         await lock_access_policy(session, tenant_id=row.tenant_id)
         await _close_out(session, row=row, new_mapping_id=fresh.mapping_id, fresh_start=fresh_start)
@@ -759,7 +788,15 @@ async def _prepare_session_for_turn_locked(
             observed = None
             if source_exists:
                 try:
-                    observed = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
+                    observed = await retrieve_session_record(
+                        deps.anthropic,
+                        row.ma_session_id,
+                        scope=session_scope(
+                            tenant_id=row.tenant_id,
+                            account_id=row.account_id,
+                            call_site="session_preparation:retrieve",
+                        ),
+                    )
                 except anthropic_pkg.NotFoundError:
                     pass
                 except anthropic_pkg.APIError as error:

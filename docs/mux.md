@@ -465,3 +465,23 @@ header/body injection flags and OAuth scope/resource fields. Error redaction
 covers both quote-escaping styles and their nested SDK repr/JSON forms. The
 `.env` upload retains its `.env` filename, `text/plain` media type and exact
 assembled bytes.
+### Session creation and preparation
+
+Daimon's session creation, isolated creation, preparation and recovery now call
+the neutral Sessions port. The Anthropic lifecycle driver accepts closed
+`anthropic.session_create@1` and `anthropic.session_resource_create@1` configs.
+It retains native agent overrides, tool ordering, omitted versus empty resources
+and vault IDs; repository tokens remain host secret references until the write.
+Tenant and resource authorization runs before I/O, and tenant tags on returned
+records are checked. Native list uses the SDK terminal-page rule. Archive delegates
+to the existing session administration driver.
+
+The optional Session native snapshot supports a temporary host codec that retains
+SDK response extras, fields-set semantics and exception types. Host preparation
+policy, billing checkpoints, recovery order and first feedback remain unchanged.
+Tenant-aware creation also forwards its scope through vault bootstrap, credential
+mirroring and rollback; vault discovery retains its existing exact-name inventory
+check. Tenantless established creation uses a named legacy host capability.
+Update planning and workspace export/restore are separate follow-on changes;
+unsupported lifecycle methods fail explicitly. The driver keeps no operation cache
+and makes no request during construction.

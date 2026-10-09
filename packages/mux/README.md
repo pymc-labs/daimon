@@ -64,3 +64,8 @@ Native provenance can retain an opaque JSON `record` for the temporary host
 compatibility edge, including native error retry timestamps and permission
 details. It never contains an SDK object and survives JSON and pickle round
 trips. Neutral reducers consume the normalized payload.
+Session lifecycle ports now create, retrieve and list native sessions, with archive
+delegated to session administration. Closed `anthropic.session_create@1` and
+`anthropic.session_resource_create@1` configs preserve omitted and explicit empty
+fields, agent overrides and mount ordering. Session specs carry extensions and
+records carry an opaque optional native snapshot for the temporary host codec.
