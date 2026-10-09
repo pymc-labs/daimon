@@ -17,8 +17,8 @@ from daimon.core.turn.state import ContentBlock, ToolUseBlock
 MAX_TOOL_LINES = 6
 DRAFT_MAX_CHARS = 300
 _LABEL_MAX_CHARS = 48
-# Em spaces: chat clients collapse runs of plain spaces but keep these.
-SUMMARY_GAP = "\u2003\u2003"
+# The finished card's one line sets its fields apart with a middle dot.
+SUMMARY_SEP = " · "
 
 _DONE_ICON = "✔️"
 _FAILED_ICON = "🚫"
@@ -71,21 +71,35 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h {minutes}m"
 
 
-def format_summary(
-    *, agent_name: str | None, elapsed_seconds: float, cost: str | None, left: str | None
-) -> str:
-    """The finished card's one line: ``Ada  12s  $0.042 used  $41.20 left``.
+def format_tokens(n: int) -> str:
+    """Humanize a token count: <1000 verbatim, else one-decimal k with trailing
+    ``.0`` stripped (``320`` -> ``"320"``, ``1500`` -> ``"1.5k"``, ``12000`` -> ``"12k"``)."""
+    if n < 1000:
+        return str(n)
+    return f"{n / 1000:.1f}".rstrip("0").rstrip(".") + "k"
 
-    Fields are set apart by space alone, never a dot or a bar; a missing one
-    drops out with its gap.
+
+def format_summary(
+    *,
+    agent_name: str | None,
+    elapsed_seconds: float,
+    tokens_in: int,
+    tokens_out: int,
+    cost: str | None,
+    left: str | None,
+) -> str:
+    """The finished card's one line: ``daimon · 16s · 22.5k in / 669 out · $0.017 · $43.08 left``.
+
+    A missing name, cost or money left drops out with its separator.
     """
     fields = [
         agent_name or None,
-        format_duration(elapsed_seconds),
-        f"{cost} used" if cost is not None else None,
+        f"{max(0, int(elapsed_seconds))}s",
+        f"{format_tokens(tokens_in)} in / {format_tokens(tokens_out)} out",
+        cost,
         left,
     ]
-    return SUMMARY_GAP.join(field for field in fields if field)
+    return SUMMARY_SEP.join(field for field in fields if field)
 
 
 def format_headline(

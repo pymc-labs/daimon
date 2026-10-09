@@ -18,7 +18,7 @@
                 ]),
               ),
             ]),
-            'footer': 'Atlas\u2003\u200315s\u2003\u2003$0.003 used',
+            'footer': 'Atlas · 15s · 500 in / 80 out · $0.003',
             'title': 'Something went wrong.',
           }),
         ]),
@@ -71,7 +71,7 @@
             'description': None,
             'fields': list([
             ]),
-            'footer': 'Atlas\u2003\u200311s\u2003\u2003$0.008 used',
+            'footer': 'Atlas · 11s · 1.5k in / 320 out · $0.008',
             'title': None,
           }),
         ]),

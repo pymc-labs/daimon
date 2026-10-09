@@ -24,16 +24,16 @@
   EmbedData(phase=<TurnPhase.TOOL_RUNNING: 'tool_running'>, title='Working on it…', description='', color=3447003, footer='42s', details='`🖋️ Running a command`', notice=None)
 # ---
 # name: test_embed_render_snapshot[terminal_done_no_cost]
-  EmbedData(phase=<TurnPhase.DONE: 'done'>, title='', description='', color=5763719, footer='Atlas\u2003\u200342s', details=None, notice=None)
+  EmbedData(phase=<TurnPhase.DONE: 'done'>, title='', description='', color=5763719, footer='Atlas · 42s · 1.5k in / 320 out', details=None, notice=None)
 # ---
 # name: test_embed_render_snapshot[terminal_done_with_cost]
-  EmbedData(phase=<TurnPhase.DONE: 'done'>, title='', description='', color=5763719, footer='Atlas\u2003\u200342s\u2003\u2003$0.04 used', details=None, notice=None)
+  EmbedData(phase=<TurnPhase.DONE: 'done'>, title='', description='', color=5763719, footer='Atlas · 42s · 1.5k in / 320 out · $0.04', details=None, notice=None)
 # ---
 # name: test_embed_render_snapshot[terminal_error_no_trail]
-  EmbedData(phase=<TurnPhase.ERROR: 'error'>, title='Something went wrong.', description='Mention me to try again.', color=15548997, footer='Atlas\u2003\u200342s', details=None, notice=None)
+  EmbedData(phase=<TurnPhase.ERROR: 'error'>, title='Something went wrong.', description='Mention me to try again.', color=15548997, footer='Atlas · 42s · 0 in / 0 out', details=None, notice=None)
 # ---
 # name: test_embed_render_snapshot[terminal_error_with_reason]
-  EmbedData(phase=<TurnPhase.ERROR: 'error'>, title='Something went wrong.', description='Mention me to try again.', color=15548997, footer='Atlas\u2003\u200342s', details=None, notice=None)
+  EmbedData(phase=<TurnPhase.ERROR: 'error'>, title='Something went wrong.', description='Mention me to try again.', color=15548997, footer='Atlas · 42s · 100 in / 50 out', details=None, notice=None)
 # ---
 # name: test_embed_render_snapshot[thinking_no_now]
   EmbedData(phase=<TurnPhase.THINKING: 'thinking'>, title='Working on it…', description='', color=3447003, footer=None, details=None, notice=None)

@@ -123,7 +123,7 @@ def to_blocks(
         - actions  : Cancel button  (action_id="cancel_turn", style="danger")
 
     Terminal (DONE / ERROR):
-        - context  : one line with name, time, cost and money left
+        - context  : one line with name, time, tokens, cost and money left
                      ERROR adds a separate notice section when available
         No actions block (cancel button removed on terminal).
     """
@@ -133,6 +133,8 @@ def to_blocks(
         summary = format_summary(
             agent_name=None if state.header_customized else state.agent_name,
             elapsed_seconds=elapsed,
+            tokens_in=state.usage_in,
+            tokens_out=state.usage_out,
             cost=state.cost_str,
             left=state.balance_str,
         )

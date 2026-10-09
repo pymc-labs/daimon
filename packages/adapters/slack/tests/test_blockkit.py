@@ -35,6 +35,8 @@ def _make_state(
     tool_lines: tuple[str, ...] = (),
     agent_name: str = "test-agent",
     started_at: float = 0.0,
+    usage_in: int = 0,
+    usage_out: int = 0,
     cost_str: str | None = None,
     text_preview: str | None = None,
 ) -> State:
@@ -43,6 +45,8 @@ def _make_state(
         tool_lines=tool_lines,
         agent_name=agent_name,
         started_at=started_at,
+        usage_in=usage_in,
+        usage_out=usage_out,
         cost_str=cost_str,
         text_preview=text_preview,
     )
@@ -208,6 +212,8 @@ class TestToBlocks:
                 phase=TurnPhase.DONE,
                 agent_name="Atlas",
                 started_at=0.0,
+                usage_in=1500,
+                usage_out=320,
                 cost_str="$0.04",
             ),
             balance_str="$12.50 left",
@@ -217,26 +223,23 @@ class TestToBlocks:
         assert context_blocks, "DONE state must produce a context block"
         assert len(context_blocks) == 1, "one summary line, no separate name or Details block"
         summary_text = context_blocks[0]["elements"][0]["text"]
-        assert (
-            summary_text == "Atlas\u2003\u200312s\u2003\u2003$0.04 used\u2003\u2003$12.50 left"
-        ), "one line, fields set apart by em spaces, no dot and no tokens"
+        assert summary_text == "Atlas · 12s · 1.5k in / 320 out · $0.04 · $12.50 left"
         customized = to_blocks(replace(state, header_customized=True), now=12.0)
         assert (
-            customized[-1]["elements"][0]["text"]
-            == "12s\u2003\u2003$0.04 used\u2003\u2003$12.50 left"
+            customized[-1]["elements"][0]["text"] == "12s · 1.5k in / 320 out · $0.04 · $12.50 left"
         ), "a customized header already names the agent"
 
     def test_done_with_visible_answer_is_one_summary_line(self) -> None:
         state = _make_state(phase=TurnPhase.DONE, agent_name="Atlas", started_at=0.0)
         blocks = to_blocks(state, now=12.0, answer_visible=True)
         assert [block["type"] for block in blocks] == ["context"]
-        assert blocks[0]["elements"][0]["text"] == "Atlas\u2003\u200312s"
+        assert blocks[0]["elements"][0]["text"] == "Atlas · 12s · 0 in / 0 out"
 
         customized = to_blocks(
             replace(state, header_customized=True), now=12.0, answer_visible=True
         )
         assert [block["type"] for block in customized] == ["context"]
-        assert customized[0]["elements"][0]["text"] == "12s"
+        assert customized[0]["elements"][0]["text"] == "12s · 0 in / 0 out"
 
     def test_error_state_summary_context_has_cross_emoji_and_reason(self) -> None:
         """ERROR state's summary context block carries the cross emoji + the reason."""
@@ -248,7 +251,7 @@ class TestToBlocks:
         context_blocks = _find_blocks_by_type(blocks, "context")
         assert context_blocks, "ERROR state must produce a context block"
         summary_text = context_blocks[-1]["elements"][0]["text"]
-        assert summary_text == "Atlas\u2003\u20035s"
+        assert summary_text == "Atlas · 5s · 0 in / 0 out"
         assert blocks[0]["text"]["text"] == "Something went wrong."
 
     def test_error_uses_notice_next_step_once(self) -> None:
@@ -274,8 +277,7 @@ class TestToBlocks:
         assert sections[1]["text"]["text"] == "Mention me to try again."
         assert "Model usage limit reached." in sections[2]["text"]["text"]
         assert "`rid: test`" in sections[2]["text"]["text"]
-        assert "$0.05 used" in blocks[-1]["elements"][0]["text"]
-        assert blocks[-1]["elements"][0]["text"].endswith("$9.95")
+        assert blocks[-1]["elements"][0]["text"].endswith(" · $0.05 · $9.95")
 
     def test_no_block_contains_color_key(self) -> None:
         """No block dict anywhere must contain a 'color' key."""

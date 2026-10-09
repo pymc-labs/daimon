@@ -37,7 +37,7 @@ from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
-from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
+from daimon.core.turn.status_lines import SUMMARY_SEP as SEP
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1092,7 +1092,7 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     await lc.on_sse_event(_thinking_event())
     await lc.on_render(TurnState())
     await lc.on_terminal_success(_make_success_state())
-    assert _terminal_footer(edits).endswith(f"{GAP}$12.50 left")
+    assert _terminal_footer(edits).endswith(f"{SEP}$12.50 left")
 
     async with db_session_factory() as s, s.begin():
         await set_funding_mode(s, tenant_id=tenant.id, funding_mode="operator_funded")
@@ -1329,8 +1329,7 @@ class TestTurnSummaryFooter:
         )
         state = dataclasses.replace(state, content=[TextBlock(kind="text", text="hi")])
         await lc.on_terminal_success(state)
-        assert f"{GAP}$" in _terminal_footer(edits)
-        assert _terminal_footer(edits).endswith(" used")
+        assert f"{SEP}$" in _terminal_footer(edits)
 
     async def test_unpriced_model_omits_cost(self) -> None:
         lc, _sends, edits = _make_lifecycle(model_id="unknown-model")
@@ -1347,7 +1346,26 @@ class TestTurnSummaryFooter:
             ),
         )
         await lc.on_terminal_failure(state, Exception("boom"))
-        assert "used" not in _terminal_footer(edits)
+        assert "$" not in _terminal_footer(edits)
+        assert _terminal_footer(edits).endswith(f"{SEP}1k in / 200 out")
+
+    async def test_merged_input_count_in_footer(self) -> None:
+        lc, _sends, edits = _make_lifecycle(model_id="claude-sonnet-4-6")
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+        state = apply(
+            TurnState(),
+            _span_usage_event(
+                event_id="u1",
+                input_tokens=1000,
+                cache_creation_input_tokens=500,
+                cache_read_input_tokens=2000,
+                output_tokens=300,
+            ),
+        )
+        await lc.on_terminal_failure(state, Exception("boom"))
+        # merged_in = 1000 + 500 + 2000 = 3500 -> "3.5k"; out = 300
+        assert f"{SEP}3.5k in / 300 out{SEP}" in _terminal_footer(edits)
 
     async def test_footer_cost_equals_billing_ledger_with_cache_reads(self) -> None:
         # The whole point: footer cost == cost_of for the same 4 cache-split ints.
@@ -1378,7 +1396,7 @@ class TestTurnSummaryFooter:
         )
         expected = format_cost(ledger_cost)
         assert expected is not None
-        assert f"{GAP}{expected} used" in _terminal_footer(edits), (
+        assert _terminal_footer(edits).endswith(f"{SEP}{expected}"), (
             f"footer cost must equal the billing-ledger cost {expected} to the cent"
         )
 
@@ -1841,9 +1859,9 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
         await lc.on_render(TurnState())
         await lc.on_terminal_success(_make_success_state())
         footers[channel] = _terminal_footer(edits)
-    assert footers["C1"].endswith(f"{GAP}$3.75 left"), "the budget's remainder"
+    assert footers["C1"].endswith(f"{SEP}$3.75 of channel budget left"), "the budget's remainder"
     for channel in ("C2", "C3", None):
-        assert footers[channel].endswith(f"{GAP}$11.25 left"), (
+        assert footers[channel].endswith(f"{SEP}$11.25 left"), (
             f"{channel}: an inactive or missing budget shows the tenant balance"
         )
 
@@ -1864,7 +1882,7 @@ async def test_answer_keeps_the_channel_budget_footer_on_the_visible_message(
     await lc.post_initial()
     await lc.on_terminal_success(_make_success_state())
 
-    assert _terminal_footer(edits).endswith(f"{GAP}$25.00 left")
+    assert _terminal_footer(edits).endswith(f"{SEP}$25.00 of channel budget left")
     final_edit = edits[-1][1]
     assert final_edit["content"] == "Hello response"
     assert "embed" not in final_edit, "editing the answer must retain the terminal embed"

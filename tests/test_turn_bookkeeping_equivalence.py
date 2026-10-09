@@ -76,6 +76,8 @@ def test_card_transitions_match_base(adapter, state_name, phase, label):
         text_preview="previous",
         agent_name="research",
         started_at=1.0,
+        usage_in=1600,
+        usage_out=320,
         cost_str="$0.02",
         balance_str="$4.00 left",
         notice="Try again.",

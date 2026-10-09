@@ -173,7 +173,7 @@
     dict({
       'elements': list([
         dict({
-          'text': 'Atlas\u2003\u200342s',
+          'text': 'Atlas · 42s · 1.5k in / 320 out',
           'type': 'mrkdwn',
         }),
       ]),
@@ -196,7 +196,7 @@
     dict({
       'elements': list([
         dict({
-          'text': 'Atlas\u2003\u200342s\u2003\u2003$0.04 used',
+          'text': 'Atlas · 42s · 1.5k in / 320 out · $0.04',
           'type': 'mrkdwn',
         }),
       ]),
@@ -226,7 +226,7 @@
     dict({
       'elements': list([
         dict({
-          'text': 'Atlas\u2003\u200312s',
+          'text': 'Atlas · 12s · 100 in / 50 out',
           'type': 'mrkdwn',
         }),
       ]),

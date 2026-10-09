@@ -338,14 +338,15 @@ class DiscordTurnLifecycle:
         # else: within debounce window — skip
 
     def _apply_usage(self, state: TurnState) -> None:
-        """Price the turn's accumulated token totals onto the embed state before a
-        terminal flush.
+        """Fold the turn's accumulated token totals + priced cost onto the
+        embed state before a terminal flush.
 
         Reconstructs a per-turn ``BetaManagedAgentsSpanModelUsage`` from the four
         cache-split totals and prices it through the same ``cost_of`` the billing
-        ledger uses, so the footer cost matches the ledger to the cent. An unpriced
-        model yields ``cost_of`` -> None -> ``cost_str`` None -> the footer omits
-        the cost.
+        ledger uses, so the footer cost matches the ledger to the cent. The
+        displayed input count stays merged (input + cache_creation + cache_read);
+        only the cost math is stage-split, inside ``cost_of``. An unpriced model
+        yields ``cost_of`` -> None -> ``cost_str`` None -> the footer omits the cost.
         """
         t = state.usage_totals
         usage = BetaManagedAgentsSpanModelUsage(
@@ -356,7 +357,13 @@ class DiscordTurnLifecycle:
             speed="standard",
         )
         cost = cost_of(usage, MODEL_PRICING.get(self._model_id))
-        self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
+        merged_in = t.input_tokens + t.cache_creation_input_tokens + t.cache_read_input_tokens
+        self._state = dataclasses.replace(
+            self._state,
+            usage_in=merged_in,
+            usage_out=t.output_tokens,
+            cost_str=format_cost(cost),
+        )
 
     async def _flush_terminal(self) -> None:
         """Unconditionally flush terminal state as a single collapsed embed,

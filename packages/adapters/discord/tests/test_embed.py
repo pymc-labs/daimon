@@ -26,12 +26,16 @@ def _make_state(
     phase: TurnPhase = TurnPhase.THINKING,
     agent_name: str = "test-agent",
     started_at: float = 0.0,
+    usage_in: int = 0,
+    usage_out: int = 0,
     cost_str: str | None = None,
 ) -> EmbedState:
     return EmbedState(
         phase=phase,
         agent_name=agent_name,
         started_at=started_at,
+        usage_in=usage_in,
+        usage_out=usage_out,
         cost_str=cost_str,
     )
 
@@ -50,13 +54,15 @@ def test_max_length_error_notice_keeps_the_summary_line() -> None:
         _make_state(phase=TurnPhase.ERROR, cost_str="$0.05"),
         notice=notice,
         balance_str="$9.95",
+        usage_in=1200,
+        usage_out=300,
     )
     embed = build_discord_embed(to_embed_data(state, now=12.0))
 
     assert embed.description == "Add credit."
     assert embed.fields[0].value == notice.replace("**Next:** Add credit.\n", "")
     assert len(embed.fields) == 1, "the numbers ride the footer, not a Details field"
-    assert embed.footer.text == "test-agent\u2003\u200312s\u2003\u2003$0.05 used\u2003\u2003$9.95"
+    assert embed.footer.text == "test-agent · 12s · 1.2k in / 300 out · $0.05 · $9.95"
 
 
 def test_empty_notice_next_step_keeps_retry_text_and_metrics() -> None:
@@ -71,8 +77,7 @@ def test_empty_notice_next_step_keeps_retry_text_and_metrics() -> None:
     assert "Model usage limit reached." in embed.fields[0].value
     assert "`rid: test`" in embed.fields[0].value
     assert embed.footer.text is not None
-    assert "$0.05 used" in embed.footer.text
-    assert embed.footer.text.endswith("$9.95")
+    assert embed.footer.text.endswith(" · $0.05 · $9.95")
 
 
 def test_a_long_agent_name_gives_way_so_the_footer_fits() -> None:
@@ -84,9 +89,7 @@ def test_a_long_agent_name_gives_way_so_the_footer_fits() -> None:
 
     assert embed.footer.text is not None
     assert len(embed.footer.text) == 2048, "Discord rejects a footer over 2,048 characters"
-    assert embed.footer.text.endswith(
-        "…\u2003\u200312s\u2003\u2003$0.042 used\u2003\u2003$41.20 left"
-    )
+    assert embed.footer.text.endswith("… · 12s · 0 in / 0 out · $0.042 · $41.20 left")
 
 
 class TestUpdate:
@@ -185,12 +188,12 @@ class TestToEmbedData:
     def test_footer_set_on_done(self) -> None:
         state = _make_state(phase=TurnPhase.DONE, agent_name="my-agent", started_at=100.0)
         data = to_embed_data(state, now=105.0)
-        assert data.footer == "my-agent\u2003\u20035s"
+        assert data.footer == "my-agent · 5s · 0 in / 0 out"
 
     def test_footer_set_on_error(self) -> None:
         state = _make_state(phase=TurnPhase.ERROR, agent_name="my-agent", started_at=0.0)
         data = to_embed_data(state, now=12.0)
-        assert data.footer == "my-agent\u2003\u200312s"
+        assert data.footer == "my-agent · 12s · 0 in / 0 out"
 
     def test_footer_format_with_cost(self) -> None:
         state = dataclasses.replace(
@@ -198,14 +201,15 @@ class TestToEmbedData:
                 phase=TurnPhase.DONE,
                 agent_name="Atlas",
                 started_at=0.0,
+                usage_in=1500,
+                usage_out=320,
                 cost_str="$0.04",
             ),
             balance_str="$12.50 left",
         )
         data = to_embed_data(state, now=12.0)
-        assert data.footer == "Atlas\u2003\u200312s\u2003\u2003$0.04 used\u2003\u2003$12.50 left", (
-            "one line, fields set apart by em spaces, no dot and no tokens"
-        )
+        # Centered dot U+00B7
+        assert data.footer == "Atlas · 12s · 1.5k in / 320 out · $0.04 · $12.50 left"
         assert data.details is None, "no Details field on a finished card"
 
     def test_footer_omits_cost_when_unpriced(self) -> None:
@@ -213,10 +217,12 @@ class TestToEmbedData:
             phase=TurnPhase.DONE,
             agent_name="Atlas",
             started_at=0.0,
+            usage_in=1500,
+            usage_out=320,
             cost_str=None,
         )
         data = to_embed_data(state, now=12.0)
-        assert data.footer == "Atlas\u2003\u200312s", "an unpriced turn drops the cost and its gap"
+        assert data.footer == "Atlas · 12s · 1.5k in / 320 out", "an unpriced turn drops the cost"
 
     def test_done_collapses_to_footer_only_no_checkmark(self) -> None:
         done = to_embed_data(
@@ -227,14 +233,14 @@ class TestToEmbedData:
         assert done.footer is not None and "✅" not in done.footer, (
             "the one-line summary lives in the footer; success path has no checkmark"
         )
-        assert done.footer == "Atlas\u2003\u20033s"
+        assert done.footer == "Atlas · 3s · 0 in / 0 out"
         assert done.details is None
 
     def test_error_collapses_to_footer_with_cross_and_reason(self) -> None:
         error = to_embed_data(_make_state(phase=TurnPhase.ERROR), now=3.0)
         assert error.title == "Something went wrong."
         assert error.description == "Mention me to try again."
-        assert error.footer == "test-agent\u2003\u20033s"
+        assert error.footer == "test-agent · 3s · 0 in / 0 out"
         assert error.details is None
 
     def test_error_footer_renders_reason_and_summary(self) -> None:
@@ -242,14 +248,20 @@ class TestToEmbedData:
             phase=TurnPhase.ERROR,
             agent_name="Atlas",
             started_at=0.0,
+            usage_in=100,
+            usage_out=50,
             cost_str=None,
         )
         data = to_embed_data(dataclasses.replace(state, error_reason="rate limited"), now=3.0)
-        assert data.footer == "Atlas\u2003\u20033s"
+        assert data.footer == "Atlas · 3s · 100 in / 50 out"
 
-    def test_update_carries_cost_forward(self) -> None:
-        state = _make_state(phase=TurnPhase.THINKING, cost_str="$0.04")
+    def test_update_carries_usage_fields_forward(self) -> None:
+        state = _make_state(
+            phase=TurnPhase.THINKING, usage_in=1500, usage_out=320, cost_str="$0.04"
+        )
         next_state = update(state, EmbedEvent(kind="done"))
+        assert next_state.usage_in == 1500, "update carries usage_in forward"
+        assert next_state.usage_out == 320, "update carries usage_out forward"
         assert next_state.cost_str == "$0.04", "update carries cost_str forward"
 
     def test_terminal_phases_have_no_title(self) -> None:

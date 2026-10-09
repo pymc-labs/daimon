@@ -8,6 +8,7 @@ Discord markup and the phase colors. No discord or anthropic imports.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 
 from daimon.adapters.discord.theme import (
@@ -32,7 +33,7 @@ from daimon.core.turn.card_state import (
 )
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.status_lines import (
-    SUMMARY_GAP,
+    SUMMARY_SEP,
     format_duration,
     format_headline,
     format_summary,
@@ -95,7 +96,7 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
     """Render EmbedState into an EmbedData output shape.
 
     now: current monotonic time (pass time.monotonic() from caller).
-    Terminal phases put name, time, cost and money left on one footer line.
+    Terminal phases put name, time, tokens, cost and money left on one footer line.
     """
     color = _PHASE_COLOR[state.phase]
 
@@ -103,17 +104,20 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         # Terminal turns drop the activity trail. The coloured edge signals
         # outcome; the footer carries the numbers on one quiet line.
         elapsed = now - state.started_at if now is not None else 0
-        numbers = format_summary(
-            agent_name=None, elapsed_seconds=elapsed, cost=state.cost_str, left=state.balance_str
+        summary = functools.partial(
+            format_summary,
+            elapsed_seconds=elapsed,
+            tokens_in=state.usage_in,
+            tokens_out=state.usage_out,
+            cost=state.cost_str,
+            left=state.balance_str,
         )
         # The name gives way so the numbers always fit the footer.
-        room = _FOOTER_MAX_CHARS - len(numbers) - len(SUMMARY_GAP)
+        room = _FOOTER_MAX_CHARS - len(summary(agent_name=None)) - len(SUMMARY_SEP)
         name = state.agent_name
         if len(name) > room:
             name = name[: room - 1] + "…"
-        footer = format_summary(
-            agent_name=name, elapsed_seconds=elapsed, cost=state.cost_str, left=state.balance_str
-        )
+        footer = summary(agent_name=name)
         description = ""
         title = ""
         notice_text: str | None = None

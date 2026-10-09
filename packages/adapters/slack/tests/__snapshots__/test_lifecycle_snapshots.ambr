@@ -116,7 +116,7 @@
           dict({
             'elements': list([
               dict({
-                'text': 'Atlas\u2003\u200312s\u2003\u2003$0.003 used',
+                'text': 'Atlas · 12s · 500 in / 80 out · $0.003',
                 'type': 'mrkdwn',
               }),
             ]),
@@ -237,7 +237,7 @@
           dict({
             'elements': list([
               dict({
-                'text': 'Atlas\u2003\u200316s\u2003\u2003$0.008 used',
+                'text': 'Atlas · 16s · 1.5k in / 320 out · $0.008',
                 'type': 'mrkdwn',
               }),
             ]),
