@@ -134,3 +134,54 @@ certifies, and a typed pending reason cannot accompany PASS. Use
 `await run_fixture("Cxx", adapter)` for a single probe with the same policy.
 A live-key reason is an explicit adapter declaration, never automatic credential
 discovery. This runner API has no recorder or live-budget dependency.
+
+## Standalone manual probe budget
+
+`mux.conformance.budget` exposes `BudgetGuard`, `ProbePlan`, `TokenLimits`,
+`TokenUsage`, `SpendReceipt`, `BudgetRefused` and `BudgetLedgerError`. The module
+imports no recorder or SDK and performs no provider I/O. A caller needs separate
+lead authorization for live work. `live-budget.example.json` has empty model
+maps; unknown models refuse admission. Supply reviewed USD-per-million input,
+cached-input, cache-write and output rates that bound every billable operation,
+and enforce the declared token limits across setup, retries and cleanup.
+Unpriced tool/storage fees need separate accounting.
+
+Use the same configured absolute `ledger_path` for every provider/process. The
+lead initializes it once with `BudgetGuard.initialize(config_path, spend_path)`;
+existing or partial state is never reset. Retain `spend.md`, its checkpoint and
+its stable sequence lock together. Missing, empty, malformed, symlinked or
+inconsistent state, copied paths and paired ledger/checkpoint rollbacks refuse
+admission. Reservations are appended and fsynced under a file lock before any
+billable I/O, with a provider-total checkpoint and independently retained sequence
+marker. Interrupted updates fail closed and require lead reconciliation.
+
+```python
+from pathlib import Path
+from mux.conformance.budget import BudgetGuard, ProbePlan, TokenLimits, TokenUsage
+
+guard = BudgetGuard(Path("reviewed-budget.json"), Path("/absolute/sprint/lanes/N9-qa/spend.md"))
+plan = ProbePlan(provider="openai", model="reviewed-exact-model", fixture_id="C16",
+                 limits=TokenLimits(input_tokens=2000, output_tokens=500))
+reservation = guard.reserve(plan)  # Before all billable I/O, including setup.
+# An independently authorized caller invokes the provider and measures usage.
+# receipt = guard.settle(reservation, status="completed", limits=plan.limits,
+#                        usage=TokenUsage(input_tokens=..., output_tokens=...))
+# On exceptions/cancellation: settle with status="failed"/"cancelled", no usage.
+```
+
+Exactly 80% is admitted; greater prospective provider or total spend is refused.
+Completed measured usage releases only known savings. Unknown totals, failures,
+cancellations and crashes retain the worst-case reservation. Cached/write inputs
+are inclusive subsets; unknown buckets use the highest input rate. Partial usage
+can still establish an overrun, which is conservatively charged and blocks even
+zero-cost future runs for that provider. Each reservation settles once. Opening
+spend cannot be reduced by changing config; removed providers still count toward
+the total. Metadata is restricted to identifiers and conservatively audited for
+raw/encoded credentials before writing receipts.
+
+Config and all three state files are trusted operator state: deliberately
+initializing another ledger or restoring the ledger/checkpoint/lock together is
+outside this local guard's boundary. Initialization is an operator convention,
+not authentication. Never delete state to retry. The lead reconciles corrupted
+state and actual provider spend; the guard has no automatic reset or repair.
+Recording, provider adapters and live certification are separate features.

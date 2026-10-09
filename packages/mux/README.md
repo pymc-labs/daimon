@@ -28,6 +28,11 @@ The full description is [docs/mux.md](../../docs/mux.md). Tests:
 Conformance adapters can declare individual fixtures PENDING with typed capability,
 live-key or dependency reasons. Declarations remain visible and never certify.
 
+`mux.conformance.budget.BudgetGuard` provides standalone `reserve`/`settle` spend
+receipts for authorized manual probes. It requires an explicitly initialized,
+pinned ledger with checkpoint and retained sequence lock, and refuses past 80%
+of provider/total caps. It imports no recorder or provider SDK.
+
 The Anthropic skills version extension also supports workspace-key downloads by
 native version ID, omitting the skills beta header on that request. The ordinary
 pinned-version port and generic recovery download keep their existing SDK requests. Both paths enforce the same

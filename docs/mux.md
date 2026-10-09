@@ -609,6 +609,14 @@ responses. Grant edits that can rotate tokens in place keep that path.
 Adapters can declare individual fixtures PENDING with a typed capability,
 live-key or dependency reason. The declaration remains visible and blocks
 certification; undeclared capability errors still fail their probes.
+
+### Manual probe budgets
+
+`mux.conformance.budget` reserves worst-case spend before provider work and
+persists admission and settlement receipts. Runs exceeding 80% of a configured
+provider line or total cap are refused. Missing, altered or rolled-back ledger
+state also refuses admission. An authorized caller supplies reviewed pricing
+and enforces token limits; the guard itself makes no provider calls.
 The native `anthropic.session_walk@1` extension exposes `SessionWalk.walk(scope)`
 as an async iterator of neutral sessions with opaque native snapshots. It sends
 no list filters and follows the SDK paginator exactly. Workspace-wide billing
