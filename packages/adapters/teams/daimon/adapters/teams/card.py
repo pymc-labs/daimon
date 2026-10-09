@@ -4,10 +4,10 @@ The status card says what Discord's and Slack's say, in the words of
 `daimon.core.turn.status_lines`: a Thinking or Working headline with the
 elapsed time, the turn's tool lines, the latest draft, and a Cancel button.
 The answer replaces the card as plain markdown messages: a card TextBlock
-renders no code blocks, a message does. Its last message, and a tool-only
-turn's ✅ Done, carry Teams' 👍/👎 (`rated`, answered by `feedback`). When
-support is on, an Ask a human button follows in a one-button card of its own:
-Teams refuses an edit carrying both text and a card.
+renders no code blocks, a message does. A card follows it with the
+summary line, Ask a human's button when support is on, and Teams' 👍/👎
+(`rated`, answered by `feedback`): Teams refuses an edit carrying both text
+and a card. A tool-only or failed turn's notice card carries them itself.
 """
 
 from __future__ import annotations
@@ -139,14 +139,23 @@ def termination_text(notice: TerminationNotice) -> str:
     return fit_notice(["\n\n".join(lines)], tail=tail, limit=TEAMS_LIMIT)
 
 
-def notice_card(text: str, *, actions: Sequence[Action] = ()) -> MessageActivityInput:
+def _summary_line(summary: str) -> TextBlock:
+    return TextBlock(text=summary, is_subtle=True, size="Small", wrap=True)
+
+
+def notice_card(
+    text: str, *, actions: Sequence[Action] = (), summary: str | None = None
+) -> MessageActivityInput:
     """A terminal card: bailouts, failures, restarts; `actions` are its buttons, if any.
 
+    `summary` is a finished turn's line (`format_summary`), quiet under the text.
     Clipped as Slack clips its notices; the fallback repeats it, so it gets less.
     """
     body = fit_notice([text], tail=None, limit=TEAMS_LIMIT)
     fallback = fit_notice([text], tail=None, limit=_FALLBACK_MAX_CHARS)
     elements: list[CardElement] = [TextBlock(text=body, wrap=True)]
+    if summary:
+        elements.append(_summary_line(summary))
     if actions:
         elements.append(ActionSet(actions=list(actions)))
     return _card(elements, fallback=fallback)
@@ -166,25 +175,24 @@ def rated(message: MessageActivityInput) -> MessageActivityInput:
     return message.add_feedback("custom")
 
 
-def ask_human_card() -> MessageActivityInput:
-    """Ask a human's button, posted just below the answer's last message.
+def controls_card(summary: str, *, ask_human: bool) -> MessageActivityInput:
+    """Posted just below the answer: its summary line, Ask a human, and 👍/👎.
 
-    A click names this message (`replyToId`), so a request links to it, the
-    answer's next message, and is made once per answer.
+    A click names this message (`replyToId`), so a vote or request links to
+    it, the answer's next message, and a request is made once per answer.
     """
-    return _card([ActionSet(actions=[ask_human_action()])], fallback=ASK_HUMAN)
+    body: list[CardElement] = [_summary_line(summary)]
+    if ask_human:
+        body.append(ActionSet(actions=[ask_human_action()]))
+    return rated(_card(body, fallback=summary))
 
 
-def answer_message(
-    text: str, *, is_last: bool, mention: Account | None = None
-) -> MessageActivityInput:
-    """One chunk of the answer, text only; the last carries the feedback buttons.
-
-    A completion ping leads with `mention` (an AAD object id is enough).
-    """
+def answer_message(text: str, *, mention: Account | None = None) -> MessageActivityInput:
+    """One chunk of the answer, text only. A completion ping leads with
+    `mention` (an AAD object id is enough)."""
     message = MessageActivityInput(text=text, text_format="markdown").add_ai_generated()
     if mention is not None:
         tag = f"<at>{(mention.name or 'you').replace('<', '').replace('>', '')}</at>"
         message.text = f"{tag}\n\n{text}"
         message.add_entity(MentionEntity(mentioned=mention, text=tag))
-    return rated(message) if is_last else message
+    return message

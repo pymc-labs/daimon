@@ -533,7 +533,10 @@ async def test_an_unprompted_turn_posts_only_its_answer(
     ):
         await teams._participate(_unprompted_reply(), TENANT)
 
-    assert [a.text for a in sender.activities] == ["Thursday, per the release notes."]
+    answer, controls = sender.activities
+    assert answer.text == "Thursday, per the release notes." and not controls.text, (
+        "and its controls"
+    )
     assert 'unprompted="true"' in turns[0]["user_message"], "the agent knows nobody asked"
     assert await _open_intents(db_session_factory) == [], "no card, so no intent"
 

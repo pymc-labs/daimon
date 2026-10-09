@@ -148,11 +148,12 @@ its budget window against the budget's limit; see
 [channel budgets](#channel-budgets). A DM moved with `/dm` counts toward the
 channel it came from. A turn with no channel (an older DM, an MCP turn from
 a key not minted in a channel) and a channel with no budget are never gated.
-On Discord and Slack, a finished turn ends with one summary line: the agent,
+On Discord, Slack and Teams, a finished turn ends with one summary line: the agent,
 the turn's time, what it was debited (its model cost times `markup`) and the
 money left, for example
 `Ada  12s  $0.042 used  $41.20 left`, under the turn's last message: the last
-chunk of a long answer or, on Discord, a file posted after it. Em spaces set
+chunk of a long answer, on Discord a file posted after it, and on Teams a card
+below the answer beside 👍/👎 (or a tool-only or failed turn's card). Em spaces set
 the fields apart. The
 money left is the active channel budget's remainder; a channel without an
 active budget shows the tenant's prepaid balance when one exists. An unpriced
@@ -536,7 +537,7 @@ active budget (a DM: its source channel's) it shows instead what that budget
 has left, for either funding mode. The answer replaces
 the card (unless a completion ping posts it fresh), so the summary stays only
 above a pinged answer or on a turn with none; answers themselves carry no
-usage line on any platform. Teams cards show no summary.
+usage line on any platform. Teams uses the summary line above instead.
 
 ## What you can see
 
